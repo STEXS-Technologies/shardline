@@ -34,9 +34,9 @@ flowchart TD
     direction TD
     Client[Client]
     Router[Frontend router]
-    Frontends["**Frontend set**<br/>Xet frontend<br/>Future frontends"]
-    Core["**Shared server core**<br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>Lifecycle and operator flows"]
-    Adapters["**Adapters**<br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>Provider adapters"]
+    Frontends["<b>Frontend set</b><br/>Xet frontend<br/>Future frontends"]
+    Core["<b>Shared server core</b><br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>Lifecycle and operator flows"]
+    Adapters["<b>Adapters</b><br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>Provider adapters"]
   end
 
   Client --> Router
@@ -183,9 +183,9 @@ flowchart TD
   subgraph Canvas[ ]
     direction TD
     Workspace[Workspace]
-    Surface["**Protocol and runtime surface**<br/>crates/cli<br/>crates/server<br/>crates/protocol"]
-    Data["**CAS and persistence**<br/>crates/cas<br/>crates/storage<br/>crates/index<br/>crates/cache"]
-    Integration["**External integration**<br/>crates/vcs"]
+    Surface["<b>Protocol and runtime surface</b><br/>crates/cli<br/>crates/server<br/>crates/protocol"]
+    Data["<b>CAS and persistence</b><br/>crates/cas<br/>crates/storage<br/>crates/index<br/>crates/cache"]
+    Integration["<b>External integration</b><br/>crates/vcs"]
   end
 
   Workspace --> Surface

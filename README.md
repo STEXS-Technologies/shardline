@@ -81,9 +81,9 @@ flowchart TD
     Client[Client]
     Provider[Optional Git provider]
     Router[Frontend router]
-    Frontends["**Frontend set**<br/>Xet frontend<br/>Future frontends"]
-    Core["**Shared server core**<br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>GC and operator flows"]
-    Adapters["**Adapters**<br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>VCS and provider adapters"]
+    Frontends["<b>Frontend set</b><br/>Xet frontend<br/>Future frontends"]
+    Core["<b>Shared server core</b><br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>GC and operator flows"]
+    Adapters["<b>Adapters</b><br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>VCS and provider adapters"]
   end
 
   Client --> Router
