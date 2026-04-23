@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{StreamExt, stream};
-use shardline_protocol::{ByteRange, RepositoryScope, ShardlineHash, parse_http_byte_range};
+use shardline_protocol::{ByteRange, RepositoryScope, parse_http_byte_range};
 use tokio::sync::OwnedSemaphorePermit;
 
 use super::{AppState, MAX_BATCH_RECONSTRUCTION_FILE_IDS, MAX_BATCH_RECONSTRUCTION_QUERY_BYTES};
@@ -17,9 +17,9 @@ use crate::{
     ServerError,
     download_stream::ServerByteStream,
     model::{FileReconstructionResponse, FileReconstructionV2Response},
-    reconstruction::reconstruction_v2_from_v1,
     reconstruction_cache::ReconstructionCacheService,
     transfer_limiter::TransferLimiter,
+    xet_adapter::{reconstruction_v2_from_v1, validate_hash_path},
 };
 
 struct TransferByteStreamState {
@@ -207,29 +207,6 @@ pub(super) fn parse_required_xorb_transfer_range(
     Ok(range)
 }
 
-pub(super) fn validate_xorb_prefix(prefix: &str) -> Result<(), ServerError> {
-    if prefix != "default" {
-        return Err(ServerError::InvalidXorbPrefix);
-    }
-
-    Ok(())
-}
-
-pub(super) fn validate_xet_hash_path(value: &str) -> Result<(), ServerError> {
-    ShardlineHash::parse_api_hex(value)?;
-    Ok(())
-}
-
-pub(super) fn validate_optional_content_hash(
-    content_hash: Option<&str>,
-) -> Result<(), ServerError> {
-    if let Some(content_hash) = content_hash {
-        validate_xet_hash_path(content_hash)?;
-    }
-
-    Ok(())
-}
-
 pub(super) fn parse_batch_reconstruction_file_ids(uri: &Uri) -> Result<Vec<String>, ServerError> {
     let Some(query) = uri.query() else {
         return Ok(Vec::new());
@@ -252,7 +229,7 @@ pub(super) fn parse_batch_reconstruction_query(query: &str) -> Result<Vec<String
         if key != "file_id" {
             continue;
         }
-        ShardlineHash::parse_api_hex(value)?;
+        validate_hash_path(value)?;
         if !seen.insert(value) {
             continue;
         }

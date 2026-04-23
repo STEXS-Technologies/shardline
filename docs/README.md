@@ -1,46 +1,36 @@
 # Shardline Docs
 
-Shardline is an open, self-hostable backend for the Xet protocol.
+Shardline is an open, self-hostable content-addressed storage backend with
+Xet-compatible protocol support.
 
-These docs describe how Shardline stores content-addressed data, coordinates Xet uploads
-and downloads, verifies protocol objects, and runs in self-hosted deployments.
+Use this index to find the shortest path for your task. If you are new to the project,
+start with deployment, then read the protocol or operator docs that match your use case.
 
-The default deployment model is a single process.
-When traffic grows, the same `shardline serve` binary can be split into `api` and
-`transfer` roles without changing the external protocol surface.
+## Start Here
 
-## Scope
-
-Shardline covers:
-- Xet protocol compatibility
-- CAS coordinator behavior
-- xorb and shard validation requirements
-- reconstruction and range-download behavior
-- storage adapter contracts
-- metadata/index storage requirements
-- GitHub, Gitea, GitLab, and other VCS integration boundaries
-- Docker and self-hosted deployment expectations
-
-Shardline does not cover:
-- unrelated application-domain semantics
-- product-specific ownership rules unless they are explicitly part of an integration
-  profile
-
-## Documentation
-
-Setup and deployment:
-- [Deployment](DEPLOYMENT.md), including
-  [Providerless Direct Xet Backend](DEPLOYMENT.md#providerless-direct-xet-backend)
-- [Provider Setup Guide](PROVIDER_QUICKSTART.md)
-- [Client Configuration](CLIENT_CONFIGURATION.md)
-- [CLI](CLI.md)
+- [Deployment](DEPLOYMENT.md)
+- [Operations](OPERATIONS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Compatibility Status](COMPATIBILITY_STATUS.md)
-- [Protocol Conformance](PROTOCOL_CONFORMANCE.md)
+- [CLI](CLI.md)
+
+## Setup And Rollout
+
+- [Provider Setup Guide](PROVIDER_QUICKSTART.md)
+- [Client Configuration](CLIENT_CONFIGURATION.md)
+- [Repository Bootstrap](REPOSITORY_BOOTSTRAP.md)
+- [Providerless Direct Xet Backend](DEPLOYMENT.md#providerless-direct-xet-backend)
+
+## Runtime And Contracts
+
+- [Xet Protocol Conformance](PROTOCOL_CONFORMANCE.md)
 - [Storage Adapters](STORAGE_ADAPTERS.md)
 - [Cache Adapters](CACHE_ADAPTERS.md)
 - [Provider Adapters](PROVIDER_ADAPTERS.md)
-- [Repository Bootstrap](REPOSITORY_BOOTSTRAP.md)
+- [Security and Invariants](SECURITY_AND_INVARIANTS.md)
+
+## Operator Workflows
+
 - [Database Migrations](DATABASE_MIGRATIONS.md)
 - [Fsck](FSCK.md)
 - [Lifecycle Repair](LIFECYCLE_REPAIR.md)
@@ -48,10 +38,10 @@ Setup and deployment:
 - [Garbage Collection](GARBAGE_COLLECTION.md)
 - [Backup Manifest](BACKUP.md)
 - [Storage Migration](STORAGE_MIGRATION.md)
-- [Performance](PERFORMANCE.md)
-- [Profiling](PROFILING.md)
-- [Security and Invariants](SECURITY_AND_INVARIANTS.md)
-- [Operations](OPERATIONS.md)
 - [systemd](SYSTEMD.md)
 - [Kubernetes Manifests](k8s/README.md)
-- [Providerless local bootstrap is built into `shardline serve` and `shardline providerless setup`](DEPLOYMENT.md#providerless-direct-xet-backend)
+
+## Performance And Profiling
+
+- [Performance](PERFORMANCE.md)
+- [Profiling](PROFILING.md)

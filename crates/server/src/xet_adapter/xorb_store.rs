@@ -12,8 +12,9 @@ use crate::{
     local_backend::chunk_hash,
     object_store::{ServerObjectStore, read_full_object},
     validation::validate_content_hash,
-    xorb_visit::map_xorb_visit_error,
 };
+
+use super::map_xorb_visit_error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StoredXorbUpload {

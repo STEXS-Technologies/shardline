@@ -17,6 +17,8 @@ pub struct ReadyResponse {
     pub status: String,
     /// Selected runtime role.
     pub server_role: String,
+    /// Enabled runtime protocol frontends.
+    pub server_frontends: Vec<String>,
     /// Selected metadata backend.
     pub metadata_backend: String,
     /// Selected immutable object-storage backend.

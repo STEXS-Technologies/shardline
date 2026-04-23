@@ -33,7 +33,7 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, FileRecord, IndexStore,
     IndexStoreFuture, ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError,
     ReconstructionTerm, RecordStore, RecordStoreFuture, RepositoryRecordScope, RetentionHold,
-    RetentionHoldError, WebhookDelivery, WebhookDeliveryError, XorbId,
+    RetentionHoldError, StoredObjectId, WebhookDelivery, WebhookDeliveryError, XorbId,
     provider::parse_repository_provider,
     record_key::record_key as shared_record_key,
     record_key::{
@@ -187,23 +187,32 @@ impl LocalIndexStore {
         Ok(())
     }
 
-    /// Persists xorb presence metadata.
+    /// Persists stored-object presence metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalIndexStoreError`] when the object marker cannot be written.
+    pub fn insert_object(&self, object_id: &StoredObjectId) -> Result<(), LocalIndexStoreError> {
+        let connection = self.open_connection()?;
+        connection.execute(
+            "INSERT INTO shardline_stored_objects (object_hash, registered_at_unix_seconds)
+             VALUES (?1, ?2)
+             ON CONFLICT (object_hash) DO NOTHING",
+            params![
+                object_id.hash().api_hex_string(),
+                u64_to_i64(unix_now_seconds_lossy())?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Persists Xet xorb presence metadata.
     ///
     /// # Errors
     ///
     /// Returns [`LocalIndexStoreError`] when the xorb marker cannot be written.
     pub fn insert_xorb(&self, xorb_id: &XorbId) -> Result<(), LocalIndexStoreError> {
-        let connection = self.open_connection()?;
-        connection.execute(
-            "INSERT INTO shardline_xorbs (xorb_hash, registered_at_unix_seconds)
-             VALUES (?1, ?2)
-             ON CONFLICT (xorb_hash) DO NOTHING",
-            params![
-                xorb_id.hash().api_hex_string(),
-                u64_to_i64(unix_now_seconds_lossy())?
-            ],
-        )?;
-        Ok(())
+        self.insert_object(xorb_id)
     }
 
     /// Persists a chunk-hash to retained-shard mapping.
@@ -264,13 +273,13 @@ impl IndexStore for LocalIndexStore {
         Ok(changed > 0)
     }
 
-    fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error> {
+    fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
         let connection = self.open_connection()?;
         let exists = connection.query_row(
             "SELECT EXISTS(
-                SELECT 1 FROM shardline_xorbs WHERE xorb_hash = ?1
-             )",
-            params![xorb_id.hash().api_hex_string()],
+                SELECT 1 FROM shardline_stored_objects WHERE object_hash = ?1
+            )",
+            params![object_id.hash().api_hex_string()],
             |row| row.get::<_, i64>(0),
         )?;
         Ok(exists != 0)
@@ -741,11 +750,11 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move { IndexStore::delete_reconstruction(self, file_id) })
     }
 
-    fn contains_xorb<'operation>(
+    fn contains_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-        Box::pin(async move { IndexStore::contains_xorb(self, xorb_id) })
+        Box::pin(async move { IndexStore::contains_object(self, object_id) })
     }
 
     fn dedupe_shard_mapping<'operation>(
@@ -773,11 +782,11 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move { IndexStore::visit_dedupe_shard_mappings(self, visitor) })
     }
 
-    fn insert_xorb<'operation>(
+    fn insert_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
-        Box::pin(async move { LocalIndexStore::insert_xorb(self, xorb_id) })
+        Box::pin(async move { LocalIndexStore::insert_object(self, object_id) })
     }
 
     fn upsert_dedupe_shard_mapping<'operation>(
@@ -1367,7 +1376,7 @@ impl FileReconstructionRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReconstructionTermRecord {
-    xorb_hash: String,
+    object_hash: String,
     chunk_start: u32,
     chunk_end_exclusive: u32,
     unpacked_length: u64,
@@ -1376,7 +1385,7 @@ struct ReconstructionTermRecord {
 impl ReconstructionTermRecord {
     fn from_domain(term: &ReconstructionTerm) -> Self {
         Self {
-            xorb_hash: term.xorb_id().hash().api_hex_string(),
+            object_hash: term.object_id().hash().api_hex_string(),
             chunk_start: term.chunk_range().start(),
             chunk_end_exclusive: term.chunk_range().end_exclusive(),
             unpacked_length: term.unpacked_length(),
@@ -1384,10 +1393,10 @@ impl ReconstructionTermRecord {
     }
 
     fn into_domain(self) -> Result<ReconstructionTerm, LocalIndexStoreError> {
-        let hash = ShardlineHash::parse_api_hex(&self.xorb_hash)?;
+        let hash = ShardlineHash::parse_api_hex(&self.object_hash)?;
         let range = ChunkRange::new(self.chunk_start, self.chunk_end_exclusive)?;
         Ok(ReconstructionTerm::new(
-            XorbId::new(hash),
+            StoredObjectId::new(hash),
             range,
             self.unpacked_length,
         ))
@@ -1403,7 +1412,7 @@ struct LegacyQuarantineCandidateRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct XorbPresenceRecord {
+struct StoredObjectPresenceRecord {
     hash: String,
 }
 
@@ -1572,7 +1581,7 @@ fn local_metadata_has_rows(connection: &Connection) -> Result<bool, LocalIndexSt
     let tables = [
         "shardline_file_records",
         "shardline_file_reconstructions",
-        "shardline_xorbs",
+        "shardline_stored_objects",
         "shardline_dedupe_shards",
         "shardline_quarantine_candidates",
         "shardline_retention_holds",
@@ -1684,7 +1693,7 @@ fn import_legacy_xorbs(
             MAX_CONTROL_PLANE_METADATA_BYTES,
             invalid_metadata_path_error,
         )?;
-        let record = from_slice::<XorbPresenceRecord>(&bytes)?;
+        let record = from_slice::<StoredObjectPresenceRecord>(&bytes)?;
         let path_hash = path
             .file_stem()
             .and_then(OsStr::to_str)
@@ -1696,9 +1705,9 @@ fn import_legacy_xorbs(
             )));
         }
         transaction.execute(
-            "INSERT INTO shardline_xorbs (xorb_hash, registered_at_unix_seconds)
+            "INSERT INTO shardline_stored_objects (object_hash, registered_at_unix_seconds)
              VALUES (?1, ?2)
-             ON CONFLICT (xorb_hash) DO NOTHING",
+             ON CONFLICT (object_hash) DO NOTHING",
             params![record.hash, u64_to_i64(file_modified_since_epoch(&path)?)?],
         )?;
     }
@@ -2608,7 +2617,7 @@ mod tests {
         DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
         LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS,
         LegacyQuarantineCandidateRecord, LocalIndexStore, LocalIndexStoreError, LocalRecordKind,
-        LocalRecordStore, XorbPresenceRecord, legacy_record_path,
+        LocalRecordStore, StoredObjectPresenceRecord, legacy_record_path,
     };
     use crate::{
         DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore,
@@ -3247,7 +3256,7 @@ mod tests {
                 .join("gc")
                 .join("xorbs")
                 .join(format!("{xorb_hash}.json")),
-            &XorbPresenceRecord {
+            &StoredObjectPresenceRecord {
                 hash: xorb_hash.clone(),
             },
         )?;

@@ -31,8 +31,9 @@ use crate::{
     local_backend::{chunk_hash, content_hash},
     object_store::{ServerObjectStore, read_full_object},
     validation::validate_content_hash,
-    xorb_store::xorb_object_key,
 };
+
+use super::xorb_object_key;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedShardUpload {

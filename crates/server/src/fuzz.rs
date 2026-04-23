@@ -11,9 +11,10 @@ use crate::{
         classify_quarantine_repair_action, classify_retention_hold_repair_action,
         classify_webhook_delivery_repair_action,
     },
-    reconstruction::{build_reconstruction_response, reconstruction_v2_from_v1},
-    shard_store::retained_shard_chunk_hashes,
-    xorb_store::normalize_serialized_xorb,
+    xet_adapter::{
+        build_reconstruction_response, build_xorb_transfer_url, normalize_serialized_xorb,
+        reconstruction_v2_from_v1, retained_shard_chunk_hashes,
+    },
 };
 
 /// Summary of a normalized and validated xorb payload used by fuzz targets.
@@ -122,7 +123,6 @@ pub fn fuzz_reconstruction_response_summary(
     requested_range: Option<ByteRange>,
 ) -> Result<FuzzReconstructionResponseSummary, ServerError> {
     let response = build_reconstruction_response(public_base_url, record, requested_range)?;
-    let trimmed_base_url = public_base_url.trim_end_matches('/');
     ensure_reconstruction_response_invariant(
         response.terms.len() <= record.chunks.len(),
         InvalidReconstructionResponseError::TermCountExceededRecordChunkCount,
@@ -158,7 +158,7 @@ pub fn fuzz_reconstruction_response_summary(
         )?;
         for fetch_entry in fetch_entries {
             ensure_reconstruction_response_invariant(
-                fetch_entry.url == format!("{trimmed_base_url}/transfer/xorb/default/{hash}"),
+                fetch_entry.url == build_xorb_transfer_url(public_base_url, hash),
                 InvalidReconstructionResponseError::FetchUrlHashMismatch,
             )?;
             ensure_reconstruction_response_invariant(
@@ -211,7 +211,7 @@ pub fn fuzz_reconstruction_response_summary(
             .ok_or(ServerError::Overflow)?;
         for entry in entries {
             ensure_reconstruction_response_invariant(
-                entry.url == format!("{trimmed_base_url}/transfer/xorb/default/{hash}"),
+                entry.url == build_xorb_transfer_url(public_base_url, hash),
                 InvalidReconstructionResponseError::FetchUrlHashMismatch,
             )?;
             ensure_reconstruction_response_invariant(

@@ -41,6 +41,7 @@ async fn api_role_serves_control_plane_routes_only() {
     };
 
     assert_eq!(ready.server_role, "api");
+    assert_eq!(ready.server_frontends, vec!["xet".to_owned()]);
     assert_eq!(ready.cache_backend, "memory");
     assert_eq!(recon_status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(chunk_status, StatusCode::NOT_FOUND);
@@ -56,6 +57,7 @@ async fn transfer_role_serves_transfer_routes_only() {
     };
 
     assert_eq!(ready.server_role, "transfer");
+    assert_eq!(ready.server_frontends, vec!["xet".to_owned()]);
     assert_eq!(ready.object_backend, "local");
     assert_eq!(ready.cache_backend, "disabled");
     assert_eq!(recon_status, StatusCode::NOT_FOUND);

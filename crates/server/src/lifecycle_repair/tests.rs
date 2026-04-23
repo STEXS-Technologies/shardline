@@ -26,7 +26,7 @@ use super::{
     run_lifecycle_repair_with_stores_at_time, run_local_lifecycle_repair,
 };
 use crate::{
-    LocalBackend, apply_database_migrations, chunk_store::chunk_object_key,
+    LocalBackend, ServerFrontend, apply_database_migrations, chunk_store::chunk_object_key,
     object_store::ServerObjectStore, record_store::LocalRecordStore,
     test_invariant_error::ServerTestInvariantError,
 };
@@ -278,6 +278,7 @@ async fn exercise_lifecycle_repair_webhook_delivery_boundaries_are_deterministic
         &record_store,
         &index_store,
         &object_store,
+        &[ServerFrontend::Xet],
         LifecycleRepairOptions::default(),
         now_unix_seconds,
     )
@@ -392,6 +393,7 @@ async fn exercise_lifecycle_repair_reconciles_postgres_index_adapter() -> Result
         &record_store,
         &index_store,
         &object_store,
+        &[ServerFrontend::Xet],
         LifecycleRepairOptions::default(),
     )
     .await?;
@@ -474,6 +476,7 @@ async fn exercise_lifecycle_repair_reconciles_memory_index_adapter() -> Result<(
         &record_store,
         &index_store,
         &object_store,
+        &[ServerFrontend::Xet],
         LifecycleRepairOptions::default(),
     )
     .await?;

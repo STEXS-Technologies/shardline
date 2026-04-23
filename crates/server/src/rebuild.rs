@@ -23,7 +23,7 @@ use crate::{
     overflow::checked_increment,
     postgres_backend::connect_postgres_metadata_pool,
     record_store::LocalRecordStore,
-    shard_store::retained_shard_chunk_hashes,
+    xet_adapter::retained_shard_chunk_hashes,
 };
 use candidates::{VersionCandidate, collect_candidate};
 

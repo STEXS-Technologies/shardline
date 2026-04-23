@@ -5,7 +5,7 @@ use shardline_storage::ObjectKey;
 
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, ProviderRepositoryState, QuarantineCandidate,
-    RetentionHold, WebhookDelivery, XorbId,
+    RetentionHold, StoredObjectId, WebhookDelivery, XorbId,
 };
 
 /// Boxed asynchronous index-store operation.
@@ -38,12 +38,21 @@ pub trait IndexStore {
     /// Returns the adapter error when persistence fails.
     fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error>;
 
-    /// Returns whether a xorb is registered.
+    /// Returns whether a stored object is registered.
     ///
     /// # Errors
     ///
     /// Returns the adapter error when the index lookup fails.
-    fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error>;
+    fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error>;
+
+    /// Backward-compatible Xet alias for [`Self::contains_object`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter error when the index lookup fails.
+    fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error> {
+        self.contains_object(xorb_id)
+    }
 
     /// Loads the retained shard mapping for one chunk hash.
     ///
@@ -328,17 +337,33 @@ pub trait AsyncIndexStore {
         file_id: &'operation FileId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
 
-    /// Returns whether a xorb is registered.
+    /// Returns whether a stored object is registered.
+    fn contains_object<'operation>(
+        &'operation self,
+        object_id: &'operation StoredObjectId,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+
+    /// Backward-compatible Xet alias for [`Self::contains_object`].
     fn contains_xorb<'operation>(
         &'operation self,
         xorb_id: &'operation XorbId,
-    ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        self.contains_object(xorb_id)
+    }
 
-    /// Inserts xorb presence metadata.
+    /// Inserts stored-object presence metadata.
+    fn insert_object<'operation>(
+        &'operation self,
+        object_id: &'operation StoredObjectId,
+    ) -> IndexStoreFuture<'operation, (), Self::Error>;
+
+    /// Backward-compatible Xet alias for [`Self::insert_object`].
     fn insert_xorb<'operation>(
         &'operation self,
         xorb_id: &'operation XorbId,
-    ) -> IndexStoreFuture<'operation, (), Self::Error>;
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        self.insert_object(xorb_id)
+    }
 
     /// Loads the retained shard mapping for one chunk hash.
     fn dedupe_shard_mapping<'operation>(

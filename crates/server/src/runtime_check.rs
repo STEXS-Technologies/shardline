@@ -10,6 +10,8 @@ pub struct ConfigCheckReport {
     pub status: String,
     /// Selected runtime role.
     pub server_role: String,
+    /// Enabled runtime protocol frontends.
+    pub server_frontends: Vec<String>,
     /// Selected metadata backend.
     pub metadata_backend: String,
     /// Selected immutable object-storage backend.
@@ -46,6 +48,11 @@ pub async fn run_config_check(config: ServerConfig) -> Result<ConfigCheckReport,
     Ok(ConfigCheckReport {
         status: "ok".to_owned(),
         server_role: config.server_role().as_str().to_owned(),
+        server_frontends: config
+            .server_frontends()
+            .iter()
+            .map(|frontend| frontend.as_str().to_owned())
+            .collect(),
         metadata_backend: backend.backend_name().to_owned(),
         object_backend: backend.object_backend_name().to_owned(),
         cache_backend: reconstruction_cache.backend_name().to_owned(),
@@ -91,6 +98,7 @@ mod tests {
         };
         assert_eq!(report.status, "ok");
         assert_eq!(report.server_role, "all");
+        assert_eq!(report.server_frontends, vec!["xet".to_owned()]);
         assert_eq!(report.metadata_backend, "local");
         assert_eq!(report.object_backend, "local");
         assert_eq!(report.cache_backend, "memory");
@@ -125,6 +133,7 @@ mod tests {
             return;
         };
         assert_eq!(report.server_role, "transfer");
+        assert_eq!(report.server_frontends, vec!["xet".to_owned()]);
         assert_eq!(report.cache_backend, "disabled");
         assert!(report.auth_enabled);
         assert!(!report.provider_tokens_enabled);

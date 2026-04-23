@@ -23,8 +23,10 @@ RUN apt-get update \
     && chown -R shardline:shardline /var/lib/shardline
 
 COPY --from=builder /tmp/shardline /usr/local/bin/shardline
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
-USER shardline
+USER root
 ENV SHARDLINE_BIND_ADDR=0.0.0.0:8080
 ENV SHARDLINE_PUBLIC_BASE_URL=http://127.0.0.1:8080
 ENV SHARDLINE_ROOT_DIR=/var/lib/shardline
@@ -35,5 +37,5 @@ VOLUME ["/var/lib/shardline"]
 STOPSIGNAL SIGINT
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 CMD ["shardline", "health", "--server", "http://127.0.0.1:8080"]
 
-ENTRYPOINT ["shardline"]
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["serve"]

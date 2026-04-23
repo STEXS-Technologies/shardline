@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 
-//! Protocol-facing types shared by Shardline clients, storage adapters, and the
+//! Xet protocol-facing types shared by Shardline clients, storage adapters, and the
 //! HTTP server.
 //!
 //! This crate keeps the wire-level contracts small and explicit:

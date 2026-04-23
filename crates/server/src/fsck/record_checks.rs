@@ -19,8 +19,7 @@ use crate::{
     overflow::{checked_add, checked_increment},
     record_store::parse_stored_file_record_bytes,
     validation::{validate_content_hash, validate_identifier},
-    xorb_store::xorb_object_key,
-    xorb_visit::map_xorb_visit_error,
+    xet_adapter::{map_xorb_visit_error, xorb_object_key},
 };
 
 pub(super) async fn scan_record_tree<RecordAdapter>(

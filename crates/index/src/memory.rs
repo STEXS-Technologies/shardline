@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, FileRecord, IndexStore,
     IndexStoreFuture, ProviderRepositoryState, QuarantineCandidate, RecordStore, RecordStoreFuture,
-    RepositoryRecordScope, RetentionHold, StoredRecord, WebhookDelivery, XorbId,
+    RepositoryRecordScope, RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId,
 };
 
 /// In-memory implementation of [`IndexStore`].
@@ -44,14 +44,23 @@ impl MemoryIndexStore {
         Ok(())
     }
 
-    /// Persists xorb presence metadata in memory.
+    /// Persists stored-object presence metadata in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryIndexStoreError`] when the in-memory state lock is poisoned.
+    pub fn insert_object(&self, object_id: &StoredObjectId) -> Result<(), MemoryIndexStoreError> {
+        self.lock_state()?.xorbs.insert(*object_id);
+        Ok(())
+    }
+
+    /// Persists Xet xorb presence metadata in memory.
     ///
     /// # Errors
     ///
     /// Returns [`MemoryIndexStoreError`] when the in-memory state lock is poisoned.
     pub fn insert_xorb(&self, xorb_id: &XorbId) -> Result<(), MemoryIndexStoreError> {
-        self.lock_state()?.xorbs.insert(*xorb_id);
-        Ok(())
+        self.insert_object(xorb_id)
     }
 
     /// Persists a chunk-hash to retained-shard mapping in memory.
@@ -135,8 +144,8 @@ impl IndexStore for MemoryIndexStore {
         Ok(self.lock_state()?.reconstructions.remove(file_id).is_some())
     }
 
-    fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error> {
-        Ok(self.lock_state()?.xorbs.contains(xorb_id))
+    fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
+        Ok(self.lock_state()?.xorbs.contains(object_id))
     }
 
     fn dedupe_shard_mapping(
@@ -384,18 +393,18 @@ impl AsyncIndexStore for MemoryIndexStore {
         Box::pin(async move { IndexStore::delete_reconstruction(self, file_id) })
     }
 
-    fn contains_xorb<'operation>(
+    fn contains_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-        Box::pin(async move { IndexStore::contains_xorb(self, xorb_id) })
+        Box::pin(async move { IndexStore::contains_object(self, object_id) })
     }
 
-    fn insert_xorb<'operation>(
+    fn insert_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
-        Box::pin(async move { self.insert_xorb(xorb_id) })
+        Box::pin(async move { self.insert_object(object_id) })
     }
 
     fn dedupe_shard_mapping<'operation>(

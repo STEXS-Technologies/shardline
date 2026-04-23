@@ -12,6 +12,8 @@ use crate::{
     },
 };
 
+use super::build_xorb_transfer_url;
+
 pub(crate) fn build_reconstruction_response(
     public_base_url: &str,
     record: &FileRecord,
@@ -46,8 +48,6 @@ pub(crate) fn build_reconstruction_response(
     let mut first_term = true;
     let mut terms = Vec::with_capacity(record.chunks.len());
     let mut fetch_info = BTreeMap::new();
-    let xorb_url_prefix = xorb_url_prefix(public_base_url);
-
     for chunk in &record.chunks {
         let Some(chunk_end_inclusive) = chunk
             .offset
@@ -67,7 +67,6 @@ pub(crate) fn build_reconstruction_response(
             first_term = false;
         }
 
-        let xorb_url = xorb_url(&xorb_url_prefix, &chunk.hash);
         terms.push(ReconstructionTerm {
             hash: chunk.hash.clone(),
             unpacked_length: chunk.length,
@@ -86,7 +85,7 @@ pub(crate) fn build_reconstruction_response(
                 start: chunk.range_start,
                 end: chunk.range_end,
             },
-            url: xorb_url,
+            url: build_xorb_transfer_url(public_base_url, &chunk.hash),
             url_range: ReconstructionUrlRange {
                 start: chunk.packed_start,
                 end: byte_end,
@@ -152,20 +151,6 @@ pub(crate) fn build_batch_reconstruction_response(
     }
 
     BatchReconstructionResponse { files, fetch_info }
-}
-
-fn xorb_url_prefix(public_base_url: &str) -> String {
-    format!(
-        "{}/transfer/xorb/default/",
-        public_base_url.trim_end_matches('/')
-    )
-}
-
-fn xorb_url(xorb_url_prefix: &str, hash_hex: &str) -> String {
-    let mut url = String::with_capacity(xorb_url_prefix.len().saturating_add(hash_hex.len()));
-    url.push_str(xorb_url_prefix);
-    url.push_str(hash_hex);
-    url
 }
 
 #[cfg(test)]

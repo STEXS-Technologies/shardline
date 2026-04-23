@@ -4,7 +4,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind
 use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     DEFAULT_LOCAL_GC_RETENTION_SECONDS, DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS,
-    DatabaseMigrationCommand, ObjectStorageAdapter, ServerRole,
+    DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
 };
 use thiserror::Error;
 
@@ -54,6 +54,8 @@ pub enum CliCommand {
     Serve {
         /// Optional role override for the current process.
         role: Option<ServerRole>,
+        /// Optional protocol frontend override for the current process.
+        frontends: Option<Vec<ServerFrontend>>,
     },
     /// Validate configuration.
     ConfigCheck,
@@ -249,7 +251,11 @@ impl fmt::Debug for CliCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ProviderlessSetup => formatter.write_str("ProviderlessSetup"),
-            Self::Serve { role } => formatter.debug_struct("Serve").field("role", role).finish(),
+            Self::Serve { role, frontends } => formatter
+                .debug_struct("Serve")
+                .field("role", role)
+                .field("frontends", frontends)
+                .finish(),
             Self::ConfigCheck => formatter.write_str("ConfigCheck"),
             Self::DbMigrate {
                 database_url,
@@ -516,12 +522,15 @@ enum ProviderlessSubcommand {
 #[derive(Debug, Args)]
 #[command(
     about = "Run the Shardline server.",
-    long_about = "Start the Shardline process for single-node deployments or for one split-role process.\n\nThe active environment still supplies the adapter and provider wiring. `--role` only selects which server surface this process exposes."
+    long_about = "Start the Shardline process for single-node deployments or for one split-role process.\n\nThe active environment still supplies the adapter and provider wiring. `--role` only selects which server surface this process exposes. `--frontend` selects which protocol frontends this process serves."
 )]
 struct ServeArgs {
     /// Pin the process to `all`, `api`, or `transfer`.
     #[arg(long, value_enum)]
     role: Option<CliServerRole>,
+    /// Enable one or more protocol frontends. Repeat the flag or pass a comma-separated list.
+    #[arg(long = "frontend", value_enum, value_delimiter = ',', action = clap::ArgAction::Append, num_args = 1..)]
+    frontends: Vec<CliServerFrontend>,
 }
 
 #[derive(Debug, Args)]
@@ -1018,6 +1027,12 @@ enum CliServerRole {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliServerFrontend {
+    /// Serve the Xet-compatible CAS frontend.
+    Xet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliTokenScope {
     /// Allow read-only access.
     Read,
@@ -1146,6 +1161,13 @@ impl TryFrom<CliDefinition> for CliCommand {
             },
             CliDefinitionCommand::Serve(args) => Ok(Self::Serve {
                 role: args.role.map(Into::into),
+                frontends: if args.frontends.is_empty() {
+                    None
+                } else {
+                    Some(deduplicated_cli_frontends(
+                        args.frontends.into_iter().map(Into::into),
+                    ))
+                },
             }),
             CliDefinitionCommand::Config(args) => match args.command {
                 ConfigSubcommand::Check => Ok(Self::ConfigCheck),
@@ -1309,6 +1331,14 @@ impl From<CliServerRole> for ServerRole {
     }
 }
 
+impl From<CliServerFrontend> for ServerFrontend {
+    fn from(value: CliServerFrontend) -> Self {
+        match value {
+            CliServerFrontend::Xet => Self::Xet,
+        }
+    }
+}
+
 impl From<CliTokenScope> for TokenScope {
     fn from(value: CliTokenScope) -> Self {
         match value {
@@ -1345,6 +1375,18 @@ fn parse_positive_usize(value: &str) -> Result<NonZeroUsize, String> {
     NonZeroUsize::new(parsed).ok_or_else(|| "value must be a positive integer".to_owned())
 }
 
+fn deduplicated_cli_frontends(
+    frontends: impl IntoIterator<Item = ServerFrontend>,
+) -> Vec<ServerFrontend> {
+    let mut deduplicated = Vec::new();
+    for frontend in frontends {
+        if !deduplicated.contains(&frontend) {
+            deduplicated.push(frontend);
+        }
+    }
+    deduplicated
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1353,7 +1395,7 @@ mod tests {
     use shardline_protocol::{RepositoryProvider, TokenScope};
     use shardline_server::{
         DEFAULT_LOCAL_GC_RETENTION_SECONDS, DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS,
-        DatabaseMigrationCommand, ObjectStorageAdapter, ServerRole,
+        DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
     };
 
     use super::{BenchMode, CliCommand, CompletionShell};
@@ -1449,7 +1491,10 @@ mod tests {
         );
         assert_eq!(
             CliCommand::parse(serve),
-            Ok(CliCommand::Serve { role: None })
+            Ok(CliCommand::Serve {
+                role: None,
+                frontends: None,
+            })
         );
         assert_eq!(
             CliCommand::parse(bench),
@@ -1482,6 +1527,25 @@ mod tests {
             CliCommand::parse(args),
             Ok(CliCommand::Serve {
                 role: Some(ServerRole::Transfer),
+                frontends: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_serve_with_frontends() {
+        let args = vec![
+            "shardline".to_owned(),
+            "serve".to_owned(),
+            "--frontend".to_owned(),
+            "xet,xet".to_owned(),
+        ];
+
+        assert_eq!(
+            CliCommand::parse(args),
+            Ok(CliCommand::Serve {
+                role: None,
+                frontends: Some(vec![ServerFrontend::Xet]),
             })
         );
     }

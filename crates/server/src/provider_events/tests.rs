@@ -31,7 +31,7 @@ use crate::{
     object_store::ServerObjectStore,
     record_store::LocalRecordStore,
     test_invariant_error::ServerTestInvariantError,
-    xorb_store::{normalize_serialized_xorb, store_uploaded_xorb, xorb_object_key},
+    xet_adapter::{normalize_serialized_xorb, store_uploaded_xorb, xorb_object_key},
 };
 
 async fn local_latest_record_exists(
@@ -1296,18 +1296,18 @@ impl AsyncIndexStore for FailFirstRetentionHoldIndexStore {
         Box::pin(async move { AsyncIndexStore::delete_reconstruction(&self.inner, file_id).await })
     }
 
-    fn contains_xorb<'operation>(
+    fn contains_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation XorbId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-        Box::pin(async move { AsyncIndexStore::contains_xorb(&self.inner, xorb_id).await })
+        Box::pin(async move { AsyncIndexStore::contains_object(&self.inner, object_id).await })
     }
 
-    fn insert_xorb<'operation>(
+    fn insert_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation XorbId,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
-        Box::pin(async move { AsyncIndexStore::insert_xorb(&self.inner, xorb_id).await })
+        Box::pin(async move { AsyncIndexStore::insert_object(&self.inner, object_id).await })
     }
 
     fn dedupe_shard_mapping<'operation>(

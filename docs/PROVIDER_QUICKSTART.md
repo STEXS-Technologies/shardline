@@ -3,16 +3,11 @@
 This is the shortest documented path to a provider-backed Shardline deployment with an
 existing GitHub, GitLab, or Gitea repository and stock `git-lfs` plus `git-xet`.
 
-It is not a one-command setup.
-You still need to create the provider catalog, wire the provider-facing bridge, and
-configure webhook delivery explicitly.
+It is still a real setup process: you need a provider catalog, a provider-facing bridge,
+and explicit webhook delivery.
 
-The goal is not to teach a new workflow.
 The goal is to keep normal Git usage and swap the large-object backend underneath it.
-
-This guide is explicit about what Shardline does and what it does not do.
-The provider catalog JSON is not abstract metadata that floats somewhere in the system.
-It is a real file that you create and point the server at with
+The provider catalog is a real file that you create and point the server at with
 `SHARDLINE_PROVIDER_CONFIG_FILE`.
 
 ## What You Need
@@ -28,12 +23,7 @@ Before touching the repository, have these ready:
   - forward provider webhook deliveries to Shardline
   - keep the repository's Git LFS URL pointing at the normal forge-facing endpoint
 
-Shardline is the CAS backend.
-Your existing forge stays the forge.
-
-Shardline does not replace GitHub, GitLab, or Gitea.
-It does not automatically sit in front of the forge by itself.
-
+Shardline is the CAS backend. Your existing forge stays the forge.
 That means there are two distinct setup layers:
 
 1. Shardline itself:

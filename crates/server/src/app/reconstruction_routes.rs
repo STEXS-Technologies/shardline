@@ -10,8 +10,11 @@ use serde::Deserialize;
 use shardline_protocol::TokenScope;
 
 use crate::{
-    ServerError, model::BatchReconstructionResponse,
-    reconstruction::build_batch_reconstruction_response,
+    ServerError,
+    model::BatchReconstructionResponse,
+    xet_adapter::{
+        build_batch_reconstruction_response, validate_hash_path, validate_optional_content_hash,
+    },
 };
 
 use super::{
@@ -19,7 +22,6 @@ use super::{
     reconstruction_helpers::{
         load_reconstruction_response, load_reconstruction_v2_response,
         parse_batch_reconstruction_file_ids, parse_reconstruction_request_range,
-        validate_optional_content_hash, validate_xet_hash_path,
     },
     scope_from_auth,
 };
@@ -36,7 +38,7 @@ pub(super) async fn reconstruction(
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
-    validate_xet_hash_path(&file_id)?;
+    validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
     let requested_range = parse_reconstruction_request_range(
         &state,
@@ -65,7 +67,7 @@ pub(super) async fn reconstruction_v2(
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
-    validate_xet_hash_path(&file_id)?;
+    validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
     let requested_range = parse_reconstruction_request_range(
         &state,
