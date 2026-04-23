@@ -66,7 +66,9 @@ fn validate_existing_directory_component(path: &Path) -> Result<(), DirectoryPat
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{File, create_dir_all};
+    use std::fs::File;
+    #[cfg(unix)]
+    use std::fs::create_dir_all;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
