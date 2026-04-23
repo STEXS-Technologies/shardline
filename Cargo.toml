@@ -5,9 +5,9 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/shardline/shardline"
-homepage = "https://github.com/shardline/shardline"
-documentation = "https://github.com/shardline/shardline/tree/main/docs"
+repository = "https://github.com/STEXS-Technologies/shardline"
+homepage = "https://github.com/STEXS-Technologies/shardline"
+documentation = "https://docs.rs/shardline"
 
 [workspace.dependencies]
 async-trait = "0.1"
