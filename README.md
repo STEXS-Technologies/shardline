@@ -10,15 +10,15 @@ Shardline is an open, self-hostable content-addressed storage backend with
 Xet-compatible protocol support.
 
 It accepts immutable object uploads, verifies protocol objects, plans
-reconstructions, serves range-aware downloads, and can run either as a direct,
-providerless Xet-compatible backend or with GitHub, GitLab, Gitea, or generic Git forge
-integration without baking provider-specific behavior into the CAS core.
+reconstructions, and serves range-aware downloads. You can run it directly as a
+providerless Xet backend or pair it with GitHub, GitLab, Gitea, or a generic Git
+provider without baking provider-specific behavior into the CAS core.
 
 The default implemented frontend is the Xet protocol.
 `shardline serve` now accepts an explicit frontend set through `--frontend` or
 `SHARDLINE_SERVER_FRONTENDS`, with `xet` enabled by default.
 The core storage, indexing, and reconstruction boundaries stay separate from Xet-specific
-protocol handling so additional CAS frontends can be added without rewriting the engine.
+protocol handling so future frontends can be added without rewriting the engine.
 
 For small deployments, `shardline serve` runs the control plane and transfer plane in
 one process. Larger deployments can split the same binary into `api` and `transfer`
@@ -37,13 +37,8 @@ protocol surface.
 
 ## Getting Started
 
-Shardline is not a one-command quick-start project.
-
-Even the local profile requires you to choose and validate storage, metadata, and
-token-signing. Provider bootstrap and webhook configuration are optional and only apply
-to provider-backed flows.
-Read the deployment and operator docs first, then choose the deployment profile that
-matches your environment.
+Shardline is not a one-command quick-start project. Even the local profile still needs
+storage, metadata, and token-signing configured correctly.
 
 Start here:
 
@@ -152,31 +147,9 @@ Start with [Deployment](docs/DEPLOYMENT.md), then use
 
 ## Production Readiness
 
-Shardline is released as `1.0.0` with an explicitly scoped compatibility contract.
-
-What is already in place:
-
-- documented local, small-production, and scaled-production deployment profiles
-- production Kubernetes manifests for split API and transfer roles
-- permanent regression coverage for security-sensitive storage, protocol, and operator
-  boundaries
-- fuzz targets for protocol parsing, lifecycle repair, storage boundaries, CLI parsing,
-  and local filesystem race conditions
-- end-to-end coverage for native Xet flows and provider-mediated workflows
-- operator commands for config checks, migrations, fsck, repair, GC, rebuild, backup,
-  and storage migration
-
-What is intentionally not claimed yet:
-
-- full drop-in Xet backend coverage across every possible Git workflow and deployment
-  matrix
-- non-Unix parity; shardline crates now compile on non-Unix targets, but local
-  filesystem hardening is still strongest on Unix and only has compile coverage on
-  Windows so far
-- crates.io availability before the first ordered release publishes the internal crate
-  graph
-
-Read these before a production rollout:
+Shardline is released as `1.0.0`, but the compatibility claim is still scoped to the
+validated Xet and operator surface documented in this repo. Before a production rollout,
+read:
 
 - [Deployment](docs/DEPLOYMENT.md)
 - [Operations](docs/OPERATIONS.md)
@@ -199,13 +172,14 @@ Read these before a production rollout:
 ## Documentation
 
 - [Docs Index](docs/README.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Operations](docs/OPERATIONS.md)
+- [Provider Setup Guide](docs/PROVIDER_QUICKSTART.md)
+- [Client Configuration](docs/CLIENT_CONFIGURATION.md)
 - [Contributing](CONTRIBUTING.md)
 - [CLI](docs/CLI.md)
 - [Protocol Conformance](docs/PROTOCOL_CONFORMANCE.md)
 - [Compatibility Status](docs/COMPATIBILITY_STATUS.md)
-- [Deployment](docs/DEPLOYMENT.md)
-- [Operations](docs/OPERATIONS.md)
-- [Provider Setup Guide](docs/PROVIDER_QUICKSTART.md)
 - [Performance](docs/PERFORMANCE.md)
 
 ## License

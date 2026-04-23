@@ -8,15 +8,14 @@ high-availability layout, GC suspension during incident response, and operator r
 see [Operations](OPERATIONS.md).
 For single-node Linux service templates, see [systemd](SYSTEMD.md).
 
-## Deployment Profiles
-
-## Frontend Selection
+## Runtime Shape
 
 `shardline serve` accepts an explicit frontend set through repeated `--frontend` flags or
 `SHARDLINE_SERVER_FRONTENDS=xet,...`.
-Today the implemented/default runtime frontend is `xet`.
-The `--role api` and `--role transfer` flags only split one selected frontend set across
-processes for scaling; they do not choose different protocols by themselves.
+The default frontend is `xet`. `--role api` and `--role transfer` only split that
+frontend set across processes for scaling; they do not choose different protocols.
+
+## Deployment Profiles
 
 ### Local Single-Node
 
