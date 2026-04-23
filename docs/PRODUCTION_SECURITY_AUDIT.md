@@ -34,14 +34,14 @@ Findings converted into permanent regressions:
 - Non-Unix shardline builds now fail at compile time until equivalent anchored
   filesystem hardening exists.
 
-Supply-chain note: `cargo deny --manifest-path ../../Cargo.toml check` passed.
-`cargo audit --file ../../Cargo.lock` reported RUSTSEC-2023-0071 for `rsa` through the
+Supply-chain note: root-level `cargo deny check` and `cargo audit` are enforced by
+`cargo make ci-full`.
+The historical 2026-04-21 audit reported RUSTSEC-2023-0071 for `rsa` through the
 workspace lockfile's `sqlx-mysql` package.
 Cargo's resolved tree disagreed with that lockfile-level report:
-`cargo tree --manifest-path ../../Cargo.toml --target all -i rsa` and
-`cargo tree --manifest-path ../../Cargo.toml --target all -i sqlx-mysql` printed no
-resolved Shardline path, and Shardline's direct `sqlx` uses disable default features and
-enables only Postgres.
+`cargo tree --target all -i rsa` and `cargo tree --target all -i sqlx-mysql` printed no
+resolved Shardline path, and Shardline's direct `sqlx` dependency disables default
+features and enables only Postgres.
 The same audit reported unmaintained `derivative` through Shardline server dev-only
 `xet-client`/`xet-data` test dependencies.
 No production Shardline dependency change was available from the audit output inside
