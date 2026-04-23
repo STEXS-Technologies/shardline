@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](../../rust-toolchain.toml)
 [![Deployment](https://img.shields.io/badge/deployment-docker%20%7C%20kubernetes-blue)](docs/DEPLOYMENT.md)
 [![Status](https://img.shields.io/badge/status-production--hardened%20alpha-1f6feb)](docs/COMPATIBILITY_STATUS.md)
-[![Platform](https://img.shields.io/badge/platform-unix%20%2F%20linux-critical)](docs/PRODUCTION_SECURITY_AUDIT.md)
+[![Platform](https://img.shields.io/badge/platform-unix%20%2F%20linux-critical)](docs/SECURITY_AND_INVARIANTS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
 Shardline is an open, self-hostable backend for the Xet CAS protocol.
@@ -126,7 +126,8 @@ What is already in place:
 
 - documented local, small-production, and scaled-production deployment profiles
 - production Kubernetes manifests for split API and transfer roles
-- a production security audit with permanent regression follow-through
+- permanent regression coverage for security-sensitive storage, protocol, and operator
+  boundaries
 - fuzz targets for protocol parsing, lifecycle repair, storage boundaries, CLI parsing,
   and local filesystem race conditions
 - end-to-end coverage for native Xet flows and provider-mediated workflows
@@ -139,13 +140,13 @@ What is intentionally not claimed yet:
   matrix
 - non-Unix support; shardline crates fail to build on non-Unix targets until equivalent
   local filesystem hardening exists
-- crates.io publication readiness; manifests still keep `publish = false`
+- crates.io availability before the first ordered release publishes the internal crate
+  graph
 
 Read these before a production rollout:
 
 - [Deployment](docs/DEPLOYMENT.md)
 - [Operations](docs/OPERATIONS.md)
-- [Production Security Audit](docs/PRODUCTION_SECURITY_AUDIT.md)
 - [Compatibility Status](docs/COMPATIBILITY_STATUS.md)
 - [Security and Invariants](docs/SECURITY_AND_INVARIANTS.md)
 

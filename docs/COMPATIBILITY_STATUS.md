@@ -59,8 +59,8 @@ and deployment matrix.
   forge-specific workflow, deployment topology, and client-version matrix.
 - Shardline documentation intentionally scopes the public contract to the Xet-facing
   protocol and operator surface it currently implements.
-- Shardline crates remain source-release artifacts inside this repository and still keep
-  `publish = false`.
+- The first crates.io release must publish the internal crate graph in dependency order
+  before publishing the `shardline` CLI crate.
 
 ## Ongoing Ratchets
 
