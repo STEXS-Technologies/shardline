@@ -25,10 +25,6 @@ one process. Larger deployments can split the same binary into `api` and `transf
 roles. `--role` only changes deployment topology; the enabled frontend set controls the
 protocol surface.
 
-Shardline now compiles on non-Unix targets as well. Local filesystem hardening remains
-strongest on Unix, and the current non-Unix claim is compile compatibility rather than
-full runtime parity.
-
 ## Why Shardline
 
 - self-hostable CAS backend with Xet-compatible protocol support
