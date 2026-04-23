@@ -124,7 +124,8 @@ Start with [Deployment](docs/DEPLOYMENT.md), then use
 
 ## Production Readiness
 
-Shardline is released as `1.0.0` with an explicitly scoped compatibility contract.
+Shardline is released as `1.0.0` and should be treated as a full drop-in Xet backend
+for the validated workflows in [Compatibility Status](docs/COMPATIBILITY_STATUS.md).
 
 What is already in place:
 
@@ -134,14 +135,16 @@ What is already in place:
   boundaries
 - fuzz targets for protocol parsing, lifecycle repair, storage boundaries, CLI parsing,
   and local filesystem race conditions
-- end-to-end coverage for native Xet flows and provider-mediated workflows
+- end-to-end coverage for native Xet and stock `git` + `git-lfs` + `git-xet` workflows,
+  including push, clone, fetch, pull, sparse checkout, and historical checkout
+- provider-mediated native Xet and Git LFS bridge flows across GitHub, GitLab, Gitea,
+  and generic adapters
 - operator commands for config checks, migrations, fsck, repair, GC, rebuild, backup,
   and storage migration
 
-What is intentionally not claimed yet:
+What is intentionally outside that claim:
 
-- full drop-in Xet backend coverage across every possible Git workflow and deployment
-  matrix
+- arbitrary untested client-version, forge-specific, and deployment combinations
 - non-Unix parity; shardline crates now compile on non-Unix targets, but local
   filesystem hardening is still strongest on Unix and only has compile coverage on
   Windows so far
