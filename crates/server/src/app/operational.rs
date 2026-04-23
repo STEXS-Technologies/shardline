@@ -15,14 +15,16 @@ use shardline_protocol::TokenScope;
 
 use crate::{
     HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
-    auth::authorize_static_bearer_token, model::ReadyResponse, upload_ingest::RequestBodyReader,
+    auth::authorize_static_bearer_token,
+    model::ReadyResponse,
+    upload_ingest::RequestBodyReader,
+    xet_adapter::{validate_hash_path, validate_xorb_transfer_namespace},
 };
 
 use super::{
     AppState, authorize,
     reconstruction_helpers::{
         byte_range_stream_response, full_byte_stream_response, parse_required_xorb_transfer_range,
-        validate_xet_hash_path, validate_xorb_prefix,
     },
     scope_from_auth,
 };
@@ -40,6 +42,12 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
             Json(ReadyResponse {
                 status: "ok".to_owned(),
                 server_role: state.role.as_str().to_owned(),
+                server_frontends: state
+                    .config
+                    .server_frontends()
+                    .iter()
+                    .map(|frontend| frontend.as_str().to_owned())
+                    .collect(),
                 metadata_backend: state.backend.backend_name().to_owned(),
                 object_backend: state.backend.object_backend_name().to_owned(),
                 cache_backend: state.reconstruction_cache.backend_name().to_owned(),
@@ -60,7 +68,7 @@ pub(super) async fn read_chunk(
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
-    validate_xet_hash_path(&hash)?;
+    validate_hash_path(&hash)?;
     let _dedupe_shard_length = state.backend.dedupe_shard_length(&hash).await?;
     if let Some(auth) = auth.as_ref() {
         let reachable = state
@@ -86,7 +94,7 @@ pub(super) async fn upload_xorb(
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
     authorize(&state, &headers, TokenScope::Write)?;
-    validate_xet_hash_path(&hash)?;
+    validate_hash_path(&hash)?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     Ok(Json(state.backend.upload_xorb_stream(&hash, body).await?))
 }
@@ -97,7 +105,7 @@ pub(super) async fn head_xorb(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
-    validate_xet_hash_path(&hash)?;
+    validate_hash_path(&hash)?;
     let total_length = state.backend.xorb_length(&hash).await?;
     if let Some(auth) = auth.as_ref() {
         let reachable = state
@@ -117,8 +125,8 @@ pub(super) async fn read_xorb_transfer(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
-    validate_xorb_prefix(&prefix)?;
-    validate_xet_hash_path(&hash)?;
+    validate_xorb_transfer_namespace(&prefix)?;
+    validate_hash_path(&hash)?;
     let total_length = state.backend.xorb_length(&hash).await?;
     if let Some(auth) = auth.as_ref() {
         let reachable = state
@@ -182,6 +190,13 @@ pub(super) async fn metrics(
     let auth_enabled = state.auth.is_some();
     let provider_tokens_enabled = state.provider_tokens.is_some();
     let metrics_auth_enabled = state.config.metrics_token().is_some();
+    let frontend_labels = state
+        .config
+        .server_frontends()
+        .iter()
+        .map(|frontend| frontend.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     let body = format!(
         concat!(
             "# HELP shardline_up Whether the Shardline process is serving requests.\n",
@@ -189,7 +204,7 @@ pub(super) async fn metrics(
             "shardline_up 1\n",
             "# HELP shardline_server_info Static Shardline runtime information.\n",
             "# TYPE shardline_server_info gauge\n",
-            "shardline_server_info{{role=\"{}\",metadata_backend=\"{}\",object_backend=\"{}\",cache_backend=\"{}\"}} 1\n",
+            "shardline_server_info{{role=\"{}\",frontends=\"{}\",metadata_backend=\"{}\",object_backend=\"{}\",cache_backend=\"{}\"}} 1\n",
             "# HELP shardline_auth_enabled Whether served routes require bearer authentication.\n",
             "# TYPE shardline_auth_enabled gauge\n",
             "shardline_auth_enabled {}\n",
@@ -213,6 +228,7 @@ pub(super) async fn metrics(
             "shardline_transfer_max_in_flight_chunks {}\n"
         ),
         state.role.as_str(),
+        frontend_labels,
         state.backend.backend_name(),
         state.backend.object_backend_name(),
         state.reconstruction_cache.backend_name(),

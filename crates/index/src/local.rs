@@ -24,7 +24,8 @@ use crate::local_fs::{write_file_atomically, write_new_file};
 use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, IndexStore, IndexStoreFuture,
     ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError, ReconstructionTerm,
-    RetentionHold, RetentionHoldError, WebhookDelivery, WebhookDeliveryError, XorbId,
+    RetentionHold, RetentionHoldError, StoredObjectId, WebhookDelivery, WebhookDeliveryError,
+    XorbId,
     provider::parse_repository_provider,
 };
 const MAX_CONTROL_PLANE_METADATA_BYTES: u64 = 1_048_576;
@@ -91,19 +92,28 @@ impl LocalIndexStore {
         write_json_atomically(&self.root, &self.reconstruction_path(file_id), &record)
     }
 
-    /// Persists xorb presence metadata.
+    /// Persists stored-object presence metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalIndexStoreError`] when the object marker cannot be written.
+    pub fn insert_object(&self, object_id: &StoredObjectId) -> Result<(), LocalIndexStoreError> {
+        write_json_atomically(
+            &self.root,
+            &self.xorb_path(object_id),
+            &StoredObjectPresenceRecord {
+                hash: object_id.hash().api_hex_string(),
+            },
+        )
+    }
+
+    /// Persists Xet xorb presence metadata.
     ///
     /// # Errors
     ///
     /// Returns [`LocalIndexStoreError`] when the xorb marker cannot be written.
     pub fn insert_xorb(&self, xorb_id: &XorbId) -> Result<(), LocalIndexStoreError> {
-        write_json_atomically(
-            &self.root,
-            &self.xorb_path(xorb_id),
-            &XorbPresenceRecord {
-                hash: xorb_id.hash().api_hex_string(),
-            },
-        )
+        self.insert_object(xorb_id)
     }
 
     /// Persists a chunk-hash to retained-shard mapping.
@@ -158,9 +168,9 @@ impl LocalIndexStore {
             .join(format!("{}.json", file_id.hash().api_hex_string()))
     }
 
-    fn xorb_path(&self, xorb_id: &XorbId) -> PathBuf {
+    fn xorb_path(&self, object_id: &StoredObjectId) -> PathBuf {
         self.xorbs_dir()
-            .join(format!("{}.json", xorb_id.hash().api_hex_string()))
+            .join(format!("{}.json", object_id.hash().api_hex_string()))
     }
 
     fn dedupe_shard_path(&self, chunk_hash: ShardlineHash) -> PathBuf {
@@ -260,8 +270,8 @@ impl IndexStore for LocalIndexStore {
         }
     }
 
-    fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error> {
-        let path = self.xorb_path(xorb_id);
+    fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
+        let path = self.xorb_path(object_id);
         ensure_parent_directory_path_components_are_not_symlinked(&path)?;
         match fs::symlink_metadata(path) {
             Ok(metadata) => {
@@ -581,18 +591,18 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move { IndexStore::delete_reconstruction(self, file_id) })
     }
 
-    fn contains_xorb<'operation>(
+    fn contains_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-        Box::pin(async move { IndexStore::contains_xorb(self, xorb_id) })
+        Box::pin(async move { IndexStore::contains_object(self, object_id) })
     }
 
-    fn insert_xorb<'operation>(
+    fn insert_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
-        Box::pin(async move { self.insert_xorb(xorb_id) })
+        Box::pin(async move { self.insert_object(object_id) })
     }
 
     fn dedupe_shard_mapping<'operation>(
@@ -835,7 +845,7 @@ impl FileReconstructionRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReconstructionTermRecord {
-    xorb_hash: String,
+    object_hash: String,
     chunk_start: u32,
     chunk_end_exclusive: u32,
     unpacked_length: u64,
@@ -844,7 +854,7 @@ struct ReconstructionTermRecord {
 impl ReconstructionTermRecord {
     fn from_domain(term: &ReconstructionTerm) -> Self {
         Self {
-            xorb_hash: term.xorb_id().hash().api_hex_string(),
+            object_hash: term.object_id().hash().api_hex_string(),
             chunk_start: term.chunk_range().start(),
             chunk_end_exclusive: term.chunk_range().end_exclusive(),
             unpacked_length: term.unpacked_length(),
@@ -852,10 +862,10 @@ impl ReconstructionTermRecord {
     }
 
     fn into_domain(self) -> Result<ReconstructionTerm, LocalIndexStoreError> {
-        let hash = ShardlineHash::parse_api_hex(&self.xorb_hash)?;
+        let hash = ShardlineHash::parse_api_hex(&self.object_hash)?;
         let range = ChunkRange::new(self.chunk_start, self.chunk_end_exclusive)?;
         Ok(ReconstructionTerm::new(
-            XorbId::new(hash),
+            StoredObjectId::new(hash),
             range,
             self.unpacked_length,
         ))
@@ -1019,7 +1029,7 @@ struct LegacyQuarantineCandidateRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct XorbPresenceRecord {
+struct StoredObjectPresenceRecord {
     hash: String,
 }
 
@@ -1728,7 +1738,7 @@ mod tests {
         assert!(created.is_ok());
         let written = fs::write(
             path,
-            r#"{"terms":[{"xorb_hash":"0404040404040404040404040404040404040404040404040404040404040404","chunk_start":2,"chunk_end_exclusive":2,"unpacked_length":5}]}"#,
+            r#"{"terms":[{"object_hash":"0404040404040404040404040404040404040404040404040404040404040404","chunk_start":2,"chunk_end_exclusive":2,"unpacked_length":5}]}"#,
         );
         assert!(written.is_ok());
 

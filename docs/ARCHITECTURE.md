@@ -1,8 +1,11 @@
 # Architecture
 
-Shardline is an open, self-hostable backend for the Xet protocol.
-It acts as a Content Addressable Storage coordinator: clients upload xorbs and shards,
-the server verifies and indexes them, and clients later request file reconstruction
+Shardline is an open, self-hostable content-addressed storage backend with
+Xet-compatible protocol support.
+It uses a protocol-neutral CAS coordinator with explicit frontend adapters.
+The runtime hosts an explicit frontend set.
+Today, the implemented frontend in that set is the Xet protocol: clients upload xorbs and shards, the
+server verifies and indexes them, and clients later request file reconstruction
 metadata to download only the byte ranges they need.
 
 ## Goals
@@ -25,38 +28,46 @@ metadata to download only the byte ranges they need.
 
 ## Component Model
 
-```text
-client
-  |
-  | Xet CAS API
-  v
-server
-  |
-  +-- protocol handlers
-  +-- auth and scope checks
-  +-- xorb validator
-  +-- shard validator
-  +-- reconstruction planner
-  +-- reconstruction cache
-  +-- dedupe index
-  +-- transfer URL issuer
-  |
-  +-- index store
-  |     +-- file_id -> reconstruction terms
-  |     +-- chunk_hash -> xorb hash and chunk range
-  |     +-- xorb_hash -> object location and chunk metadata
-  |     +-- shard hash -> registration state
-  |
-  +-- object store
-        +-- xorb bytes
-        +-- shard bytes, if retained
+```mermaid
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Client[Client]
+    Router[Frontend router]
+    Frontends["<b>Frontend set</b><br/>Xet frontend<br/>Future frontends"]
+    Core["<b>Shared server core</b><br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>Lifecycle and operator flows"]
+    Adapters["<b>Adapters</b><br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>Provider adapters"]
+  end
+
+  Client --> Router
+  Router --> Frontends
+  Frontends --> Core
+  Core --> Adapters
+
+  classDef neutral fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef frontend fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  classDef core fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  classDef adapter fill:#efe3f8,stroke:#b89bd6,color:#1f2937;
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  class Client neutral;
+  class Router,Frontends frontend;
+  class Core core;
+  class Adapters adapter;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
+
+Read it as:
+
+- the router selects one enabled frontend
+- the shared core handles authorization, coordination, reconstruction, and operator
+  workflows
+- adapters provide the durable storage, metadata, cache, and provider boundaries
 
 ## Persistence Model
 
 Shardline needs three persistence categories:
 
-- **Object storage**: immutable xorb and shard bytes.
+- **Object storage**: immutable object bytes and retained container bytes.
 - **Index storage**: metadata needed for reconstruction, deduplication, authorization,
   garbage collection, and integrity checks.
 - **Record storage**: durable file-version records and derived latest-file records for
@@ -71,9 +82,9 @@ Postgres-compatible adapters provide the durable production metadata path.
 
 The stores must be updated with explicit ordering:
 
-1. Xorb bytes are validated.
-2. Xorb bytes are written idempotently.
-3. Shards are validated against existing xorbs.
+1. Protocol object bytes are validated.
+2. Immutable object bytes are written idempotently.
+3. Container metadata is validated against existing stored objects.
 4. Index rows are committed atomically.
 5. File reconstructions become visible after the index commit succeeds.
 
@@ -84,7 +95,7 @@ back to durable metadata and repairs the cache lazily.
 
 ## Public API Surface
 
-The core server exposes the Xet-compatible CAS API:
+The current production server exposes the Xet-compatible CAS API:
 
 - `GET /v1/reconstructions/{file_id}`
 - `GET /v1/chunks/default/{hash}`
@@ -101,6 +112,11 @@ range-enforced transfer endpoint:
 
 - `GET /transfer/xorb/{prefix}/{hash}`
 
+The Xet-specific route constants, hash/path validation, transfer URL construction,
+reconstruction shaping, and protocol-object ingest flow are intentionally isolated
+inside the server's `xet_adapter` layer rather than spread through generic backend and
+routing code.
+
 The transfer endpoint is an implementation detail.
 Reconstruction responses can point to native presigned object-store URLs when an adapter
 supports them.
@@ -109,14 +125,26 @@ supports them.
 
 Shardline ships as a single CLI with subcommands:
 
-```text
-shardline serve
-shardline config check
-shardline admin token
-shardline fsck --root <path>
-shardline index rebuild --root <path>
-shardline gc --root <path> [--mark] [--sweep] [--retention-seconds <seconds>]
-shardline bench
+```mermaid
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Root[shardline]
+    Root --> Serve[serve]
+    Root --> Check[config check]
+    Root --> Admin[admin token]
+    Root --> Fsck[fsck]
+    Root --> Rebuild[index rebuild]
+    Root --> Gc[gc]
+    Root --> Bench[bench]
+  end
+
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  classDef root fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef command fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  class Root root;
+  class Serve,Check,Admin,Fsck,Rebuild,Gc,Bench command;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
 The server command is the production entrypoint.
@@ -124,10 +152,22 @@ The remaining commands support operability and correctness checks.
 
 For scaled deployments, the same command also supports explicit runtime roles:
 
-```text
-shardline serve --role all
-shardline serve --role api
-shardline serve --role transfer
+```mermaid
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Serve[shardline serve]
+    Serve --> All[--role all]
+    Serve --> Api[--role api]
+    Serve --> Transfer[--role transfer]
+  end
+
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  classDef root fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef role fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  class Serve root;
+  class All,Api,Transfer role;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
 `api` serves control-plane endpoints such as reconstruction lookup, provider-backed
@@ -138,31 +178,42 @@ xorb range transfer.
 
 ## Source Layout
 
-```text
-crates/protocol
-  Request and response types, hash parsing, range parsing, token scopes.
+```mermaid
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Workspace[Workspace]
+    Surface["<b>Protocol and runtime surface</b><br/>crates/cli<br/>crates/server<br/>crates/protocol"]
+    Data["<b>CAS and persistence</b><br/>crates/cas<br/>crates/storage<br/>crates/index<br/>crates/cache"]
+    Integration["<b>External integration</b><br/>crates/vcs"]
+  end
 
-crates/server
-  HTTP handlers, routing, middleware, transfer endpoint, shutdown.
+  Workspace --> Surface
+  Surface --> Data
+  Surface --> Integration
 
-crates/cas
-  Upload, shard registration, reconstruction planning, dedupe orchestration.
-
-crates/storage
-  Object storage traits and adapters.
-
-crates/index
-  Metadata persistence traits, file-record contracts, and adapters.
-
-crates/cache
-  Reconstruction-cache traits and adapters.
-
-crates/vcs
-  GitHub, Gitea, GitLab, and generic provider integration boundaries.
-
-crates/cli
-  CLI wiring, config loading, diagnostics, admin commands.
+  classDef root fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef surface fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  classDef data fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  classDef integration fill:#efe3f8,stroke:#b89bd6,color:#1f2937;
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  class Workspace root;
+  class Surface surface;
+  class Data data;
+  class Integration integration;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
+
+Crate responsibilities:
+
+- `protocol`: Xet protocol types, hashes, ranges, tokens, and protocol validation
+- `server`: HTTP runtime, frontend hosting, migrations, repair, and GC
+- `cli`: operator entrypoint and command wiring
+- `cas`: protocol-neutral coordination and planning
+- `storage`: immutable object-storage contracts and adapters
+- `index`: metadata and record-storage contracts and adapters
+- `cache`: reconstruction-cache contracts and adapters
+- `vcs`: provider integration boundaries
 
 The crate boundaries keep protocol handling, server operation, storage, indexing, and
 provider integration independent.
@@ -177,9 +228,9 @@ should use named files directly; do not introduce `mod.rs` files.
 The server is async-first and streams large request and response bodies.
 It must not buffer full untrusted uploads or full reconstructed downloads in memory
 unless the body is already within an explicit small bound.
-Native xorb and shard uploads do not use server-side `incoming` files or shard parsing
-workspaces on the data path.
-The coordinator consumes bounded request frames, validates the Xet objects in memory
+Native Xet uploads do not use server-side `incoming` files or shard parsing workspaces
+on the data path.
+The coordinator consumes bounded request frames, validates protocol objects in memory
 under the configured request-size limit, then commits bytes through the selected
 object-storage adapter.
 

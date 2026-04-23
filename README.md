@@ -6,24 +6,28 @@
 [![Platform](https://img.shields.io/badge/platform-unix%20hardened%20%7C%20windows%20compile-0a7ea4)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
-Shardline is an open, self-hostable backend for the Xet CAS protocol.
+Shardline is an open, self-hostable content-addressed storage backend with
+Xet-compatible protocol support.
 
-It accepts xorb and shard uploads, verifies content-addressed objects, plans
-reconstructions, serves range-aware downloads, and can run either as a direct,
-providerless Xet-compatible backend or with GitHub, GitLab, Gitea, or generic Git forge
-integration without baking provider-specific behavior into the CAS core.
+It accepts immutable object uploads, verifies protocol objects, plans
+reconstructions, and serves range-aware downloads. You can run it directly as a
+providerless Xet backend or pair it with GitHub, GitLab, Gitea, or a generic Git
+provider without baking provider-specific behavior into the CAS core.
+
+The default implemented frontend is the Xet protocol.
+`shardline serve` now accepts an explicit frontend set through `--frontend` or
+`SHARDLINE_SERVER_FRONTENDS`, with `xet` enabled by default.
+The core storage, indexing, and reconstruction boundaries stay separate from Xet-specific
+protocol handling so future frontends can be added without rewriting the engine.
 
 For small deployments, `shardline serve` runs the control plane and transfer plane in
 one process. Larger deployments can split the same binary into `api` and `transfer`
-roles.
-
-Shardline now compiles on non-Unix targets as well. Local filesystem hardening remains
-strongest on Unix, and the current non-Unix claim is compile compatibility rather than
-full runtime parity.
+roles. `--role` only changes deployment topology; the enabled frontend set controls the
+protocol surface.
 
 ## Why Shardline
 
-- self-hostable Xet-compatible CAS backend
+- self-hostable CAS backend with Xet-compatible protocol support
 - production-oriented operator surface: health checks, migrations, fsck, repair, backup,
   storage migration, retention holds, and garbage collection
 - storage and metadata adapters kept behind explicit boundaries
@@ -33,13 +37,8 @@ full runtime parity.
 
 ## Getting Started
 
-Shardline is not a one-command quick-start project.
-
-Even the local profile requires you to choose and validate storage, metadata, and
-token-signing. Provider bootstrap and webhook configuration are optional and only apply
-to provider-backed flows.
-Read the deployment and operator docs first, then choose the deployment profile that
-matches your environment.
+Shardline is not a one-command quick-start project. Even the local profile still needs
+storage, metadata, and token-signing configured correctly.
 
 Start here:
 
@@ -67,41 +66,65 @@ workflows, continue with:
 ## Architecture
 
 ```mermaid
-flowchart LR
-  Client[Xet client or Git workflow] -->|reconstructions, shard registration| API[Shardline API role]
-  Client -->|xorbs, chunks, ranged transfer| Transfer[Shardline transfer role]
-  Provider[Optional GitHub / GitLab / Gitea / Generic forge] -->|token bootstrap + webhooks| API
-  API --> Index[(Postgres-compatible metadata)]
-  API --> Cache[(Redis-compatible cache)]
-  API --> Object[(S3-compatible or local object store)]
-  Transfer --> Object
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Client[Client]
+    Provider[Optional Git provider]
+    Router[Frontend router]
+    Frontends["<b>Frontend set</b><br/>Xet frontend<br/>Future frontends"]
+    Core["<b>Shared server core</b><br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>GC and operator flows"]
+    Adapters["<b>Adapters</b><br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>VCS and provider adapters"]
+  end
+
+  Client --> Router
+  Provider --> Core
+  Router --> Frontends
+  Frontends --> Core
+  Core --> Adapters
+
+  classDef neutral fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef frontend fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  classDef core fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  classDef adapter fill:#efe3f8,stroke:#b89bd6,color:#1f2937;
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  class Client,Provider neutral;
+  class Router,Frontends frontend;
+  class Core core;
+  class Adapters adapter;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant A as Shardline API
-  participant T as Shardline Transfer
-  participant O as Object Store
-  participant I as Index Store
-
-  C->>A: Request scoped token or reconstruction plan
-  A->>I: Validate repository scope and metadata
-  A-->>C: Reconstruction response with authorized fetch info
-  C->>T: Upload xorb or fetch range
-  T->>O: Read or write immutable object bytes
-  C->>A: Register shard metadata
-  A->>I: Commit validated reconstruction state
-```
+- The router enables one or more frontends.
+- Optional Git providers interact through the server/core path for token issuance and webhooks.
+- The shared core stays protocol-neutral where possible.
+- Storage, metadata, cache, and provider logic stay behind adapter boundaries.
 
 ## Deployment Profiles
 
 ```mermaid
 flowchart TD
-  Local[Local single-node] --> LocalStore[Local object storage + local metadata]
-  Small[Production small] --> SmallStore[S3-compatible objects + Postgres metadata]
-  Scaled[Production scaled] --> Split[Separate api and transfer deployments]
-  Split --> Shared[(Shared S3, Postgres, Redis cache)]
+  subgraph Canvas[ ]
+    direction TD
+    Profiles[Deployment profiles]
+    Profiles --> Local[Local single-node]
+    Profiles --> Small[Production small]
+    Profiles --> Scaled[Production scaled]
+
+    Local --> LocalStore[Local object storage and local metadata]
+    Small --> SmallStore[S3-compatible objects and Postgres metadata]
+    Scaled --> Split[Separate api and transfer deployments]
+    Split --> Shared[(Shared S3, Postgres, Redis cache)]
+  end
+
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  classDef root fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef profile fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  classDef target fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  class Profiles root;
+  class Local,Small,Scaled,Split profile;
+  class LocalStore,SmallStore,Shared target;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
 - Local single-node: `docker compose -f docker-compose.yml up --build`
@@ -124,34 +147,8 @@ Start with [Deployment](docs/DEPLOYMENT.md), then use
 
 ## Production Readiness
 
-Shardline is released as `1.0.0` and should be treated as a full drop-in Xet backend
-for the validated workflows in [Compatibility Status](docs/COMPATIBILITY_STATUS.md).
-
-What is already in place:
-
-- documented local, small-production, and scaled-production deployment profiles
-- production Kubernetes manifests for split API and transfer roles
-- permanent regression coverage for security-sensitive storage, protocol, and operator
-  boundaries
-- fuzz targets for protocol parsing, lifecycle repair, storage boundaries, CLI parsing,
-  and local filesystem race conditions
-- end-to-end coverage for native Xet and stock `git` + `git-lfs` + `git-xet` workflows,
-  including push, clone, fetch, pull, sparse checkout, and historical checkout
-- provider-mediated native Xet and Git LFS bridge flows across GitHub, GitLab, Gitea,
-  and generic adapters
-- operator commands for config checks, migrations, fsck, repair, GC, rebuild, backup,
-  and storage migration
-
-What is intentionally outside that claim:
-
-- arbitrary untested client-version, forge-specific, and deployment combinations
-- non-Unix parity; shardline crates now compile on non-Unix targets, but local
-  filesystem hardening is still strongest on Unix and only has compile coverage on
-  Windows so far
-- crates.io availability before the first ordered release publishes the internal crate
-  graph
-
-Read these before a production rollout:
+Shardline is released as `1.0.0` for the validated Xet workflows and operator surface
+documented in this repo. Before a production rollout, read:
 
 - [Deployment](docs/DEPLOYMENT.md)
 - [Operations](docs/OPERATIONS.md)
@@ -162,11 +159,11 @@ Read these before a production rollout:
 
 | Crate | Purpose |
 | --- | --- |
-| `protocol` | Hash parsing, byte-range handling, secret wrappers, and token types |
+| `protocol` | Xet protocol types, hash parsing, byte-range handling, and token types |
 | `cache` | Reconstruction-cache traits and adapters |
 | `storage` | Immutable object-storage contracts and adapters |
 | `index` | Reconstruction and deduplication metadata contracts and adapters |
-| `cas` | CAS coordinator composition |
+| `cas` | Protocol-neutral CAS coordinator domain and composition |
 | `vcs` | Provider adapters and authorization boundaries |
 | `server` | HTTP routes, runtime wiring, migrations, fsck, GC, repair, and rollout logic |
 | `cli` | `shardline` operator binary |
@@ -174,13 +171,14 @@ Read these before a production rollout:
 ## Documentation
 
 - [Docs Index](docs/README.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Operations](docs/OPERATIONS.md)
+- [Provider Setup Guide](docs/PROVIDER_QUICKSTART.md)
+- [Client Configuration](docs/CLIENT_CONFIGURATION.md)
 - [Contributing](CONTRIBUTING.md)
 - [CLI](docs/CLI.md)
 - [Protocol Conformance](docs/PROTOCOL_CONFORMANCE.md)
 - [Compatibility Status](docs/COMPATIBILITY_STATUS.md)
-- [Deployment](docs/DEPLOYMENT.md)
-- [Operations](docs/OPERATIONS.md)
-- [Provider Setup Guide](docs/PROVIDER_QUICKSTART.md)
 - [Performance](docs/PERFORMANCE.md)
 
 ## License

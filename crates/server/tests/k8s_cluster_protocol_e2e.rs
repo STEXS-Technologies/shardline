@@ -693,7 +693,7 @@ async fn metadata_inventory(pool: &PgPool) -> Result<MetadataInventory, TestErro
         )
         .fetch_one(pool)
         .await?,
-        xorbs: query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_xorbs")
+        xorbs: query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_stored_objects")
             .fetch_one(pool)
             .await?,
         dedupe_shards: query_scalar::<_, i64>("SELECT COUNT(*) FROM shardline_dedupe_shards")

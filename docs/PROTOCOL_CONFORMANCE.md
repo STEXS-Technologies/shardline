@@ -1,10 +1,10 @@
-# Protocol Conformance
+# Xet Protocol Conformance
 
 Shardline targets the public Xet protocol as a strict compatibility goal, not as a loose
 inspiration.
 
-Current releases should treat this document as the required contract, not as a statement
-that every listed requirement is already complete.
+This document is intentionally Xet-specific.
+It describes the current frontend contract, not the protocol-neutral CAS core.
 
 Implementation status is tracked in [Compatibility Status](COMPATIBILITY_STATUS.md).
 

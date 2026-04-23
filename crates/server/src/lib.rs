@@ -52,13 +52,12 @@ mod postgres_backend;
 mod provider;
 mod provider_events;
 mod rebuild;
-mod reconstruction;
 mod reconstruction_cache;
 mod record_store;
 mod repository_scope_path;
 mod runtime_check;
+mod server_frontend;
 mod server_role;
-mod shard_store;
 mod storage_migration;
 #[cfg(test)]
 mod test_fixtures;
@@ -67,8 +66,7 @@ mod test_invariant_error;
 mod transfer_limiter;
 mod upload_ingest;
 mod validation;
-mod xorb_store;
-mod xorb_visit;
+mod xet_adapter;
 
 pub use app::{router, serve, serve_with_listener};
 pub use backend::BenchmarkBackend;
@@ -124,6 +122,7 @@ pub use reconstruction_cache::{
     ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache,
 };
 pub use runtime_check::{ConfigCheckReport, run_config_check};
+pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
 pub use storage_migration::{
     StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport,

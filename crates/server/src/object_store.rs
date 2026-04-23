@@ -2,22 +2,22 @@
 use std::sync::{LazyLock, Mutex};
 use std::{
     fs::File,
-    io::{Cursor, ErrorKind, Read},
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
 };
 
-use shardline_index::{FileChunkRecord, FileRecord, FileRecordInvariantError};
-use shardline_protocol::{
-    ByteRange, ShardlineHash, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+use shardline_index::{
+    FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout,
 };
+use shardline_protocol::ByteRange;
 use shardline_storage::{
     DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
     ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore, S3ObjectStoreConfig,
 };
 
 use crate::{
-    InvalidSerializedShardError, ObjectStorageAdapter, ServerConfig, ServerError,
-    chunk_store::chunk_object_key, xorb_store::xorb_object_key, xorb_visit::map_xorb_visit_error,
+    ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, chunk_store::chunk_object_key,
+    server_frontend::append_referenced_term_bytes,
 };
 
 #[cfg(test)]
@@ -236,14 +236,18 @@ pub(crate) fn reconstruct_local_file_bytes(
 
 pub(crate) fn reconstruct_file_record_bytes(
     object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
     record: &FileRecord,
 ) -> Result<Vec<u8>, ServerError> {
     let capacity = usize::try_from(record.total_bytes)?;
-    if record.chunk_size == 0 {
-        return reconstruct_native_xet_file_bytes(object_store, record, capacity);
+    match record.storage_layout() {
+        FileRecordStorageLayout::ReferencedObjectTerms => {
+            reconstruct_referenced_object_file_bytes(object_store, frontends, record, capacity)
+        }
+        FileRecordStorageLayout::StoredChunks => {
+            reconstruct_chunk_file_bytes(object_store, &record.chunks, capacity)
+        }
     }
-
-    reconstruct_chunk_file_bytes(object_store, &record.chunks, capacity)
 }
 
 fn reconstruct_chunk_file_bytes(
@@ -268,8 +272,9 @@ fn reconstruct_chunk_file_bytes(
     Ok(output)
 }
 
-fn reconstruct_native_xet_file_bytes(
+fn reconstruct_referenced_object_file_bytes(
     object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
     record: &FileRecord,
     capacity: usize,
 ) -> Result<Vec<u8>, ServerError> {
@@ -281,7 +286,7 @@ fn reconstruct_native_xet_file_bytes(
                 FileRecordInvariantError::NonContiguousChunkOffsets,
             ));
         }
-        append_native_xet_term(object_store, term, &mut output)?;
+        append_referenced_term_bytes(frontends, object_store, term, &mut output)?;
         let term_end = term
             .offset
             .checked_add(term.length)
@@ -295,40 +300,6 @@ fn reconstruct_native_xet_file_bytes(
     }
 
     Ok(output)
-}
-
-fn append_native_xet_term(
-    object_store: &ServerObjectStore,
-    term: &FileChunkRecord,
-    output: &mut Vec<u8>,
-) -> Result<(), ServerError> {
-    if term.range_end <= term.range_start {
-        return Err(InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange.into());
-    }
-
-    let xorb_key = xorb_object_key(&term.hash)?;
-    let Some(metadata) = object_store.metadata(&xorb_key)? else {
-        return Err(ServerError::MissingReferencedXorb);
-    };
-    let xorb_bytes = read_full_object(object_store, &xorb_key, metadata.length())?;
-    let expected_hash = ShardlineHash::parse_api_hex(&term.hash)?;
-    let mut reader = Cursor::new(xorb_bytes);
-    let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
-    let range_start = usize::try_from(term.range_start)?;
-    let range_end = usize::try_from(term.range_end)?;
-    if range_end > validated.chunks().len() {
-        return Err(InvalidSerializedShardError::NativeXetTermRangeExceededXorbChunkCount.into());
-    }
-
-    let mut chunk_index = 0_usize;
-    try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded_chunk| {
-        if chunk_index >= range_start && chunk_index < range_end {
-            output.extend_from_slice(decoded_chunk.data());
-        }
-        chunk_index = chunk_index.checked_add(1).ok_or(ServerError::Overflow)?;
-        Ok::<(), ServerError>(())
-    })
-    .map_err(map_xorb_visit_error)
 }
 
 fn read_open_local_object(path: &Path, file: File, length: u64) -> Result<Vec<u8>, ServerError> {

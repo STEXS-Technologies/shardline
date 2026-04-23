@@ -1,11 +1,11 @@
 use shardline_protocol::ChunkRange;
 
-use crate::XorbId;
+use crate::StoredObjectId;
 
 /// A term in a file reconstruction recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconstructionTerm {
-    xorb_id: XorbId,
+    object_id: StoredObjectId,
     chunk_range: ChunkRange,
     unpacked_length: u64,
 }
@@ -13,18 +13,28 @@ pub struct ReconstructionTerm {
 impl ReconstructionTerm {
     /// Creates a reconstruction term.
     #[must_use]
-    pub const fn new(xorb_id: XorbId, chunk_range: ChunkRange, unpacked_length: u64) -> Self {
+    pub const fn new(
+        object_id: StoredObjectId,
+        chunk_range: ChunkRange,
+        unpacked_length: u64,
+    ) -> Self {
         Self {
-            xorb_id,
+            object_id,
             chunk_range,
             unpacked_length,
         }
     }
 
-    /// Returns the xorb referenced by this term.
+    /// Returns the stored object referenced by this term.
     #[must_use]
-    pub const fn xorb_id(&self) -> XorbId {
-        self.xorb_id
+    pub const fn object_id(&self) -> StoredObjectId {
+        self.object_id
+    }
+
+    /// Returns the Xet xorb referenced by this term.
+    #[must_use]
+    pub const fn xorb_id(&self) -> StoredObjectId {
+        self.object_id
     }
 
     /// Returns the end-exclusive chunk range referenced by this term.
@@ -65,7 +75,7 @@ mod tests {
     use shardline_protocol::{ChunkRange, ShardlineHash};
 
     use super::{FileReconstruction, ReconstructionTerm};
-    use crate::XorbId;
+    use crate::{StoredObjectId, XorbId};
 
     #[test]
     fn reconstruction_preserves_term_order() {
@@ -100,6 +110,7 @@ mod tests {
         };
         let term = ReconstructionTerm::new(xorb_id, range, 512);
 
+        assert_eq!(term.object_id(), StoredObjectId::new(hash));
         assert_eq!(term.xorb_id(), xorb_id);
         assert_eq!(term.chunk_range(), range);
         assert_eq!(term.unpacked_length(), 512);

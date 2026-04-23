@@ -36,13 +36,24 @@ async fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Ok(CliCommand::Serve { role }) => match load_runtime_server_config(None) {
+        Ok(CliCommand::Serve { role, frontends }) => match load_runtime_server_config(None) {
             Ok(config) => {
-                let config = if let Some(role) = role {
+                let mut config = if let Some(role) = role {
                     config.with_server_role(role)
                 } else {
                     config
                 };
+                if let Some(frontends) = frontends {
+                    match config.with_server_frontends(frontends) {
+                        Ok(updated) => {
+                            config = updated;
+                        }
+                        Err(error) => {
+                            print_error_chain(&error);
+                            return ExitCode::from(2);
+                        }
+                    }
+                }
                 match serve(config).await {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(error) => {
@@ -60,6 +71,7 @@ async fn main() -> ExitCode {
             Ok(report) => {
                 println!("status: {}", report.status);
                 println!("server_role: {}", report.server_role);
+                println!("server_frontends: {}", report.server_frontends.join(","));
                 println!("metadata_backend: {}", report.metadata_backend);
                 println!("object_backend: {}", report.object_backend);
                 println!("cache_backend: {}", report.cache_backend);

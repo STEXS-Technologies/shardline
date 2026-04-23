@@ -21,6 +21,7 @@ use crate::{
     overflow::checked_add,
     postgres_backend::connect_postgres_metadata_pool,
     record_store::LocalRecordStore,
+    server_frontend::ServerFrontend,
 };
 use quarantine::{
     read_active_retention_hold_object_keys, read_quarantine_entries, reconcile_quarantine_entries,
@@ -217,7 +218,14 @@ pub async fn run_local_gc_diagnostics(
     let object_store = ServerObjectStore::local(root.join("chunks"))?;
     let index_store = LocalIndexStore::open(root.clone());
     let record_store = LocalRecordStore::open(root);
-    run_gc_with_stores(&record_store, &index_store, &object_store, options).await
+    run_gc_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        &[ServerFrontend::Xet],
+        options,
+    )
+    .await
 }
 
 /// Runs garbage collection against the configured metadata backend and local chunk storage.
@@ -248,18 +256,33 @@ pub async fn run_gc_diagnostics(
         let pool = connect_postgres_metadata_pool(index_postgres_url, 4)?;
         let index_store = PostgresIndexStore::new(pool.clone());
         let record_store = PostgresRecordStore::new(pool);
-        return run_gc_with_stores(&record_store, &index_store, &object_store, options).await;
+        return run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            config.server_frontends(),
+            options,
+        )
+        .await;
     }
 
     let index_store = LocalIndexStore::open(config.root_dir().to_path_buf());
     let record_store = LocalRecordStore::open(config.root_dir().to_path_buf());
-    run_gc_with_stores(&record_store, &index_store, &object_store, options).await
+    run_gc_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        config.server_frontends(),
+        options,
+    )
+    .await
 }
 
 async fn run_gc_with_stores<RecordAdapter, IndexAdapter>(
     record_store: &RecordAdapter,
     index_store: &IndexAdapter,
     object_store: &ServerObjectStore,
+    frontends: &[ServerFrontend],
     options: LocalGcOptions,
 ) -> Result<LocalGcDiagnostics, ServerError>
 where
@@ -271,8 +294,14 @@ where
     let mut reachability = ReachabilityAccumulator::default();
     let now_unix_seconds = unix_now_seconds_lossy();
 
-    collect_referenced_object_keys(record_store, index_store, object_store, &mut reachability)
-        .await?;
+    collect_referenced_object_keys(
+        record_store,
+        index_store,
+        object_store,
+        frontends,
+        &mut reachability,
+    )
+    .await?;
     validate_gc_index_integrity(index_store, object_store, now_unix_seconds).await?;
 
     let prune_expired_retention_holds = options.mark || options.sweep;
@@ -282,8 +311,11 @@ where
         prune_expired_retention_holds,
     )
     .await?;
-    let mut orphan_objects =
-        scan_orphan_objects(object_store, &reachability.referenced_object_keys)?;
+    let mut orphan_objects = scan_orphan_objects(
+        object_store,
+        frontends,
+        &reachability.referenced_object_keys,
+    )?;
     orphan_objects
         .retain(|object_key, _orphan| !active_retention_hold_object_keys.contains(object_key));
     let orphan_chunk_bytes = orphan_objects
@@ -332,6 +364,7 @@ where
     report.active_quarantine_candidates = u64::try_from(quarantine_entries.len())?;
     Ok(build_gc_diagnostics(
         report,
+        frontends,
         &orphan_objects,
         &quarantine_entries,
         now_unix_seconds,
@@ -450,13 +483,14 @@ fn quarantine_record_path(root: &Path, hash: &str) -> PathBuf {
 
 fn build_gc_diagnostics(
     report: LocalGcReport,
+    frontends: &[ServerFrontend],
     orphan_objects: &HashMap<String, OrphanObject>,
     quarantine_entries: &HashMap<String, QuarantineCandidate>,
     now_unix_seconds: u64,
 ) -> LocalGcDiagnostics {
     let mut retention_report = quarantine_entries
         .values()
-        .map(|candidate| retention_report_entry(candidate, now_unix_seconds))
+        .map(|candidate| retention_report_entry(candidate, frontends, now_unix_seconds))
         .collect::<Vec<_>>();
     retention_report.sort_by(|left, right| {
         left.delete_after_unix_seconds
@@ -481,13 +515,14 @@ fn build_gc_diagnostics(
 
 fn retention_report_entry(
     candidate: &QuarantineCandidate,
+    frontends: &[ServerFrontend],
     now_unix_seconds: u64,
 ) -> GcRetentionReportEntry {
     let seconds_until_delete = candidate
         .delete_after_unix_seconds()
         .saturating_sub(now_unix_seconds);
     GcRetentionReportEntry {
-        hash: managed_object_hash_or_object_key(candidate.object_key()),
+        hash: managed_object_hash_or_object_key(candidate.object_key(), frontends),
         object_key: candidate.object_key().as_str().to_owned(),
         observed_length: candidate.observed_length(),
         first_seen_unreachable_at_unix_seconds: candidate.first_seen_unreachable_at_unix_seconds(),

@@ -28,16 +28,16 @@ pub struct FileChunkRecord {
     pub offset: u64,
     /// Chunk byte length.
     pub length: u64,
-    /// Start chunk index inside the referenced xorb.
+    /// Start member index inside the referenced protocol object.
     #[serde(default)]
     pub range_start: u32,
-    /// End-exclusive chunk index inside the referenced xorb.
+    /// End-exclusive member index inside the referenced protocol object.
     #[serde(default = "default_range_end")]
     pub range_end: u32,
-    /// Inclusive start byte for the serialized xorb range that covers this term.
+    /// Inclusive start byte for the serialized protocol object range that covers this term.
     #[serde(default)]
     pub packed_start: u64,
-    /// Exclusive end byte for the serialized xorb range that covers this term.
+    /// Exclusive end byte for the serialized protocol object range that covers this term.
     #[serde(default = "default_packed_end")]
     pub packed_end: u64,
 }
@@ -59,12 +59,21 @@ pub struct FileRecord {
     pub content_hash: String,
     /// Total logical byte length of the reconstructed file.
     pub total_bytes: u64,
-    /// Chunk size used for this upload. Shard-backed records may use zero.
+    /// Chunk size used for this upload. Protocol-object term records may use zero.
     pub chunk_size: u64,
     /// Optional repository namespace for provider-backed storage.
     pub repository_scope: Option<RepositoryScope>,
     /// Ordered chunks needed to reconstruct the file.
     pub chunks: Vec<FileChunkRecord>,
+}
+
+/// File-record reconstruction storage layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileRecordStorageLayout {
+    /// The file reconstructs directly from stored chunk objects.
+    StoredChunks,
+    /// The file reconstructs from protocol-owned object terms.
+    ReferencedObjectTerms,
 }
 
 /// Repository identity used to scope record traversal across all revisions.
@@ -116,6 +125,16 @@ impl RepositoryRecordScope {
 }
 
 impl FileRecord {
+    /// Returns the storage layout encoded by this record.
+    #[must_use]
+    pub const fn storage_layout(&self) -> FileRecordStorageLayout {
+        if self.chunk_size == 0 {
+            return FileRecordStorageLayout::ReferencedObjectTerms;
+        }
+
+        FileRecordStorageLayout::StoredChunks
+    }
+
     /// Validates the invariants required to build a deterministic reconstruction plan.
     ///
     /// # Errors
@@ -170,7 +189,7 @@ pub enum FileRecordInvariantError {
     /// A chunk range was empty or inverted.
     #[error("file record chunk range must be non-empty and ordered")]
     InvalidChunkRange,
-    /// A packed xorb byte range was empty or inverted.
+    /// A packed protocol-object byte range was empty or inverted.
     #[error("file record packed byte range must be non-empty and ordered")]
     InvalidPackedRange,
     /// Logical chunk lengths overflowed the supported integer range.

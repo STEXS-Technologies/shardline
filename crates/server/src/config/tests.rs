@@ -22,7 +22,7 @@ use super::{
     default_upload_max_in_flight_chunks, env, optional_s3_secret_from_sources,
 };
 use crate::{
-    ServerRole,
+    ServerFrontend, ServerRole,
     reconstruction_cache::{
         DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES, DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
         ReconstructionCacheAdapter,
@@ -60,6 +60,7 @@ fn server_config_keeps_bind_address_and_public_url() {
 
     assert_eq!(config.bind_addr(), bind_addr);
     assert_eq!(config.server_role(), ServerRole::All);
+    assert_eq!(config.server_frontends(), &[ServerFrontend::Xet]);
     assert_eq!(config.public_base_url(), "https://assets.example.test");
     assert_eq!(config.root_dir(), &root_dir);
     assert_eq!(
@@ -278,6 +279,24 @@ fn server_config_allows_role_override() {
     .with_server_role(ServerRole::Transfer);
 
     assert_eq!(config.server_role(), ServerRole::Transfer);
+}
+
+#[test]
+fn server_config_allows_frontend_override_and_deduplicates() {
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+    let config = ServerConfig::new(
+        bind_addr,
+        "https://assets.example.test".to_owned(),
+        PathBuf::from("/tmp/shardline"),
+        NonZeroUsize::MIN,
+    )
+    .with_server_frontends([ServerFrontend::Xet, ServerFrontend::Xet]);
+
+    assert!(config.is_ok());
+    let Ok(config) = config else {
+        return;
+    };
+    assert_eq!(config.server_frontends(), &[ServerFrontend::Xet]);
 }
 
 #[test]

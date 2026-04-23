@@ -22,7 +22,7 @@ use crate::{
     overflow::checked_increment,
     postgres_backend::connect_postgres_metadata_pool,
     record_store::LocalRecordStore,
-    shard_store::retained_shard_chunk_hashes,
+    xet_adapter::retained_shard_chunk_hashes,
 };
 use lifecycle_checks::inspect_lifecycle_metadata;
 use record_checks::scan_record_tree;
@@ -802,9 +802,9 @@ where
         }
 
         for term in reconstruction.terms() {
-            let xorb_id = term.xorb_id();
+            let object_id = term.object_id();
             if !index_store
-                .contains_xorb(&xorb_id)
+                .contains_object(&object_id)
                 .await
                 .map_err(Into::into)?
             {
@@ -813,7 +813,7 @@ where
                     FsckIssueKind::MissingReconstructionXorb,
                     file_id_hex.clone(),
                     FsckIssueDetail::MissingReconstructionXorb {
-                        xorb_hash: xorb_id.hash().api_hex_string(),
+                        xorb_hash: object_id.hash().api_hex_string(),
                     },
                 )?;
             }

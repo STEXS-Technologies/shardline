@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use shardline_index::{
     FileId, FileReconstruction, IndexStore, LocalIndexStore, LocalRecordStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RecordStore, RetentionHold,
-    WebhookDelivery, XorbId,
+    StoredObjectId, WebhookDelivery,
 };
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::ObjectKey;
@@ -17,9 +17,9 @@ use crate::{
     chunk_store::chunk_object_key,
     clock::unix_now_seconds_checked,
     local_backend::chunk_hash,
-    shard_store::shard_object_key,
     test_fixtures::{shard_hash_hex, single_chunk_xorb, single_file_shard, xet_hash_hex},
     upload_ingest::RequestBodyReader,
+    xet_adapter::shard_object_key,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -721,14 +721,14 @@ async fn fsck_reports_reconstruction_with_missing_xorb_marker() {
     };
     let store = LocalIndexStore::open(storage.path().to_path_buf());
     let file_id = FileId::new(ShardlineHash::from_bytes([41; 32]));
-    let xorb_id = XorbId::new(ShardlineHash::from_bytes([42; 32]));
+    let object_id = StoredObjectId::new(ShardlineHash::from_bytes([42; 32]));
     let range = ChunkRange::new(0, 1);
     assert!(range.is_ok());
     let Ok(range) = range else {
         return;
     };
     let reconstruction =
-        FileReconstruction::new(vec![ReconstructionTerm::new(xorb_id, range, 512)]);
+        FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 512)]);
     let inserted = store.insert_reconstruction(&file_id, &reconstruction);
     assert!(inserted.is_ok());
 

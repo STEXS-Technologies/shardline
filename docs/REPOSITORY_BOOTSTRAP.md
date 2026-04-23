@@ -1,6 +1,6 @@
 # Repository Bootstrap
 
-This guide bootstraps a provider-backed repository against Shardline without changing
+This guide bootstraps one provider-backed repository against Shardline without changing
 the normal Git workflow.
 
 If you want the minimal setup sequence first, start with
@@ -8,12 +8,12 @@ If you want the minimal setup sequence first, start with
 For a direct providerless backend without a forge connector, start with
 [Providerless Direct Xet Backend](DEPLOYMENT.md#providerless-direct-xet-backend).
 
-The only required decisions are:
+You only need to decide:
 
 - which repository scope the connector will mint tokens for
 - which native Xet client or filter process will speak to the CAS
 
-## 1. Prepare the Shardline Deployment
+## 1. Prepare Shardline
 
 Start with:
 
@@ -22,7 +22,7 @@ Start with:
 - a provider catalog that includes the repository
 - a trusted provider-side service that can call `POST /v1/providers/{provider}/tokens`
 
-## 2. Register the Repository in the Provider Catalog
+## 2. Register The Repository
 
 Each repository entry defines:
 
@@ -55,11 +55,11 @@ Example entry:
 }
 ```
 
-## 3. Decide the Client Path
+## 3. Decide The Client Path
 
 Use the native Xet path when the client already supports the Xet CAS protocol.
 
-## 4. Configure the Repository
+## 4. Configure The Repository
 
 ### Native Xet Path
 
@@ -86,7 +86,7 @@ Content-Type: application/json
 
 The response token must be repository-scoped and short-lived.
 
-## 6. Verify Upload and Download
+## 6. Verify Upload And Download
 
 For native Xet clients:
 
