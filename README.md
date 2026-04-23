@@ -138,8 +138,9 @@ What is intentionally not claimed yet:
 
 - full drop-in Xet backend coverage across every possible Git workflow and deployment
   matrix
-- non-Unix support; shardline crates fail to build on non-Unix targets until equivalent
-  local filesystem hardening exists
+- non-Unix parity; shardline crates now compile on non-Unix targets, but local
+  filesystem hardening is still strongest on Unix and only has compile coverage on
+  Windows so far
 - crates.io availability before the first ordered release publishes the internal crate
   graph
 

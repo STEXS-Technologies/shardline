@@ -59,6 +59,9 @@ and deployment matrix.
   forge-specific workflow, deployment topology, and client-version matrix.
 - Shardline documentation intentionally scopes the public contract to the Xet-facing
   protocol and operator surface it currently implements.
+- Shardline now compiles on non-Unix targets, but local filesystem hardening still uses
+  the strongest anchored-path model on Unix and does not yet claim runtime parity across
+  Windows or other non-Unix hosts.
 - The first crates.io release must publish the internal crate graph in dependency order
   before publishing the `shardline` CLI crate.
 

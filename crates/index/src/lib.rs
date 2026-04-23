@@ -27,11 +27,6 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#[cfg(not(unix))]
-compile_error!(
-    "shardline-index requires Unix anchored filesystem semantics; non-Unix builds are unsupported until equivalent TOCTOU hardening exists"
-);
-
 mod dedupe;
 mod ids;
 mod lifecycle;
