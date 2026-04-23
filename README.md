@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](../../rust-toolchain.toml)
 [![Deployment](https://img.shields.io/badge/deployment-docker%20%7C%20kubernetes-blue)](docs/DEPLOYMENT.md)
-[![Status](https://img.shields.io/badge/status-production--hardened%20alpha-1f6feb)](docs/COMPATIBILITY_STATUS.md)
+[![Status](https://img.shields.io/badge/status-stable%201.0.0-1f6feb)](docs/COMPATIBILITY_STATUS.md)
 [![Platform](https://img.shields.io/badge/platform-unix%20%2F%20linux-critical)](docs/SECURITY_AND_INVARIANTS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
@@ -120,7 +120,7 @@ Start with [Deployment](docs/DEPLOYMENT.md), then use
 
 ## Production Readiness
 
-Shardline is best described today as a production-hardened alpha.
+Shardline is released as `1.0.0` with an explicitly scoped compatibility contract.
 
 What is already in place:
 
@@ -166,6 +166,7 @@ Read these before a production rollout:
 ## Documentation
 
 - [Docs Index](docs/README.md)
+- [Contributing](CONTRIBUTING.md)
 - [CLI](docs/CLI.md)
 - [Protocol Conformance](docs/PROTOCOL_CONFORMANCE.md)
 - [Compatibility Status](docs/COMPATIBILITY_STATUS.md)
