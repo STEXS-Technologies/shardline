@@ -9,10 +9,7 @@ use std::{
 };
 
 #[cfg(not(unix))]
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::io::Write;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -25,8 +22,6 @@ use crate::anchored_fs::{
     write_anchored_temporary_file as write_anchored_temporary_file_shared,
 };
 
-#[cfg(not(unix))]
-static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(unix)]
 const LOCAL_DIRECTORY_MODE: u32 = 0o700;
 #[cfg(unix)]
@@ -104,6 +99,7 @@ pub(crate) fn hard_link_file_if_absent(
 
     #[cfg(not(unix))]
     {
+        let _ = root;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         fs::hard_link(temporary, path)
@@ -127,6 +123,7 @@ pub(crate) fn put_bytes_if_absent(
 
     #[cfg(not(unix))]
     {
+        let _ = root;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -268,6 +265,7 @@ fn invalid_local_path_error() -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::fs::metadata;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

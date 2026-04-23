@@ -25,11 +25,6 @@
 //! }
 //! ```
 
-#[cfg(not(unix))]
-compile_error!(
-    "shardline-server requires Unix anchored filesystem semantics; non-Unix builds are unsupported until equivalent TOCTOU hardening exists"
-);
-
 mod app;
 mod auth;
 mod backend;

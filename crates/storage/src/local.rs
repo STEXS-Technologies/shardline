@@ -624,16 +624,20 @@ fn remove_empty_ancestors(path: &Path, root: &Path) -> Result<(), LocalObjectSto
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::{fs, io::ErrorKind as IoErrorKind, path::PathBuf};
+    #[cfg(unix)]
+    use std::{io::ErrorKind as IoErrorKind, path::PathBuf};
 
     use shardline_protocol::ByteRange;
 
     use super::{LocalObjectStore, LocalObjectStoreError};
+    #[cfg(unix)]
+    use crate::local_fs::set_before_local_write_hook;
     use crate::{
         DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore,
-        PutOutcome, local_fs::set_before_local_write_hook,
+        PutOutcome,
     };
 
     #[test]

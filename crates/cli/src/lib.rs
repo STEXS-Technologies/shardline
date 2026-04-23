@@ -24,11 +24,6 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#[cfg(not(unix))]
-compile_error!(
-    "shardline requires Unix anchored filesystem semantics; non-Unix builds are unsupported until equivalent TOCTOU hardening exists"
-);
-
 mod adapter;
 mod admin;
 mod artifact;

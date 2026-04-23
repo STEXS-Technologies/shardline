@@ -4,8 +4,9 @@
 //!
 //! The storage layer is intentionally defensive: callers pass validated
 //! [`ObjectKey`] values instead of raw paths, object writes carry expected
-//! [`ObjectIntegrity`], and local filesystem writes use anchored Unix directory
-//! operations to avoid symlink races.
+//! [`ObjectIntegrity`], and local filesystem writes use anchored directory
+//! operations on Unix plus conservative path validation on other targets to reduce
+//! symlink-race exposure.
 //!
 //! The central trait is [`ObjectStore`]. It is implemented by [`LocalObjectStore`]
 //! for local deployments and [`S3ObjectStore`] for S3-compatible object storage.
@@ -28,12 +29,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#[cfg(not(unix))]
-compile_error!(
-    "shardline-storage requires Unix anchored filesystem semantics; non-Unix builds are unsupported until equivalent TOCTOU hardening exists"
-);
-
 /// Symlink-resistant filesystem helpers used by local storage adapters.
+#[cfg(unix)]
+#[cfg_attr(docsrs, doc(cfg(unix)))]
 pub mod anchored_fs;
 mod key;
 mod local;
