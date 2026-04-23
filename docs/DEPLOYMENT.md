@@ -10,6 +10,13 @@ For single-node Linux service templates, see [systemd](SYSTEMD.md).
 
 ## Deployment Profiles
 
+## Frontend Selection
+
+`shardline serve` currently runs the Xet frontend.
+There is no `--frontend` selector yet because Xet is the only runtime frontend today.
+The `--role api` and `--role transfer` flags only split the same Xet-compatible surface
+across processes for scaling; they do not enable different protocols.
+
 ### Local Single-Node
 
 Use this profile for development and small private installs.

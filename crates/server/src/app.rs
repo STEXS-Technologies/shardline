@@ -26,6 +26,7 @@ use crate::{
     reconstruction_cache::ReconstructionCacheService,
     server_role::ServerRole,
     transfer_limiter::TransferLimiter,
+    xet_adapter::{XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE},
 };
 use operational::{
     head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready, stats, upload_shard,
@@ -145,14 +146,8 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 post(handle_provider_webhook)
                     .layer(DefaultBodyLimit::max(provider_webhook_body_limit)),
             )
-            .route(
-                "/api/{provider}/{owner}/{repo}/xet-read-token/{rev}",
-                get(issue_xet_read_token),
-            )
-            .route(
-                "/api/{provider}/{owner}/{repo}/xet-write-token/{rev}",
-                get(issue_xet_write_token),
-            )
+            .route(XET_READ_TOKEN_ROUTE, get(issue_xet_read_token))
+            .route(XET_WRITE_TOKEN_ROUTE, get(issue_xet_write_token))
             .route("/reconstructions", get(batch_reconstruction))
             .route("/v1/reconstructions", get(batch_reconstruction))
             .route("/v1/reconstructions/{file_id}", get(reconstruction))
@@ -169,7 +164,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 "/v1/xorbs/default/{hash}",
                 head(head_xorb).post(upload_xorb),
             )
-            .route("/transfer/xorb/{prefix}/{hash}", get(read_xorb_transfer));
+            .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer));
     }
 
     Ok(app

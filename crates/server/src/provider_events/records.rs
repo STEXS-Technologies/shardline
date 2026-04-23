@@ -11,7 +11,7 @@ use crate::{
     object_store::ServerObjectStore,
     record_store::parse_stored_file_record_bytes,
     repository_scope_path::provider_directory,
-    xorb_store::{visit_stored_xorb_chunk_hashes, xorb_object_key},
+    xet_adapter::{visit_stored_xorb_chunk_hashes, xorb_object_key},
 };
 
 pub(super) async fn ensure_absent_or_matching_record<RecordAdapter>(

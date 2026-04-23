@@ -9,9 +9,9 @@ use crate::{
     object_store::ServerObjectStore,
     overflow::checked_increment,
     record_store::parse_stored_file_record_bytes,
-    shard_store::shard_hash_from_object_key_if_present,
-    xorb_store::{
-        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
+    xet_adapter::{
+        shard_hash_from_object_key_if_present, visit_stored_xorb_chunk_hashes,
+        xorb_hash_from_object_key_if_present, xorb_object_key,
     },
 };
 

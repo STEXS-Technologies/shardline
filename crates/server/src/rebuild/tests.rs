@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use serde_json::{from_slice, to_vec};
 use shardline_index::{
     FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore, LocalIndexStore,
-    ReconstructionTerm, RecordStore, XorbId,
+    ReconstructionTerm, RecordStore, StoredObjectId,
 };
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
 use tokio::{fs, time::sleep};
@@ -223,13 +223,14 @@ async fn index_rebuild_prunes_stale_reconstruction_rows() {
     };
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
     let stale_file_id = FileId::new(ShardlineHash::from_bytes([31; 32]));
-    let xorb_id = XorbId::new(ShardlineHash::from_bytes([32; 32]));
+    let object_id = StoredObjectId::new(ShardlineHash::from_bytes([32; 32]));
     let range = ChunkRange::new(0, 1);
     assert!(range.is_ok());
     let Ok(range) = range else {
         return;
     };
-    let reconstruction = FileReconstruction::new(vec![ReconstructionTerm::new(xorb_id, range, 16)]);
+    let reconstruction =
+        FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 16)]);
     let inserted = index_store.insert_reconstruction(&stale_file_id, &reconstruction);
     assert!(inserted.is_ok());
 
@@ -268,13 +269,14 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
     };
     let written = RecordStore::write_version_record(&record_store, &record).await;
     assert!(written.is_ok());
-    let xorb_id = XorbId::new(ShardlineHash::from_bytes([35; 32]));
+    let object_id = StoredObjectId::new(ShardlineHash::from_bytes([35; 32]));
     let range = ChunkRange::new(0, 1);
     assert!(range.is_ok());
     let Ok(range) = range else {
         return;
     };
-    let reconstruction = FileReconstruction::new(vec![ReconstructionTerm::new(xorb_id, range, 16)]);
+    let reconstruction =
+        FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 16)]);
     let inserted = index_store.insert_reconstruction(&file_id, &reconstruction);
     assert!(inserted.is_ok());
 

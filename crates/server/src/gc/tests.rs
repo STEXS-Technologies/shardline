@@ -25,11 +25,10 @@ use crate::{
     LocalBackend, ServerError, ShardMetadataLimits,
     chunk_store::chunk_object_key,
     local_backend::chunk_hash,
-    shard_store::shard_object_key,
     test_fixtures::{shard_hash_hex, single_chunk_xorb, single_file_shard},
     test_invariant_error::ServerTestInvariantError,
     upload_ingest::RequestBodyReader,
-    xorb_store::xorb_object_key,
+    xet_adapter::{shard_object_key, xorb_object_key},
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

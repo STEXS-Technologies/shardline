@@ -12,7 +12,7 @@ use crate::{
     overflow::checked_increment,
     postgres_backend::connect_postgres_metadata_pool,
     record_store::{LocalRecordStore, parse_stored_file_record_bytes},
-    xorb_store::{visit_stored_xorb_chunk_hashes, xorb_object_key},
+    xet_adapter::{visit_stored_xorb_chunk_hashes, xorb_object_key},
 };
 
 /// Default retention for processed webhook delivery claims before repair prunes them.

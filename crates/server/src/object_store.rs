@@ -17,7 +17,8 @@ use shardline_storage::{
 
 use crate::{
     InvalidSerializedShardError, ObjectStorageAdapter, ServerConfig, ServerError,
-    chunk_store::chunk_object_key, xorb_store::xorb_object_key, xorb_visit::map_xorb_visit_error,
+    chunk_store::chunk_object_key,
+    xet_adapter::{map_xorb_visit_error, xorb_object_key},
 };
 
 #[cfg(test)]

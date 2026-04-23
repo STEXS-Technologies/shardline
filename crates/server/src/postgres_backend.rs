@@ -21,12 +21,13 @@ use crate::{
     },
     object_store::{ServerObjectStore, read_full_object, reconstruct_file_record_bytes},
     overflow::{checked_add, checked_increment},
-    reconstruction::build_reconstruction_response,
     record_store::parse_stored_file_record_bytes,
-    shard_store::{dedupe_shard_mapping, parse_uploaded_shard, resolve_dedupe_shard_object},
-    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes},
+    upload_ingest::{FileUploadIngestor, RequestBodyReader},
     validation::{ensure_directory, validate_content_hash, validate_identifier},
-    xorb_store::{store_uploaded_xorb, xorb_object_key},
+    xet_adapter::{
+        build_reconstruction_response, register_uploaded_shard_stream, resolve_dedupe_shard_object,
+        store_uploaded_xorb_stream, xorb_object_key,
+    },
 };
 
 /// Server backend that keeps file metadata in Postgres and object bytes in the selected store.
@@ -229,15 +230,10 @@ impl PostgresBackend {
     pub(crate) async fn upload_xorb_stream(
         &self,
         expected_hash: &str,
-        mut body: RequestBodyReader,
+        body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let object_store = self.object_store();
-        let stored = store_uploaded_xorb(&object_store, expected_hash, &uploaded_body)?;
-
-        Ok(XorbUploadResponse {
-            was_inserted: stored.was_inserted,
-        })
+        store_uploaded_xorb_stream(&object_store, expected_hash, body).await
     }
 
     /// Stores a bounded native Xet shard and indexes the contained file reconstructions.
@@ -248,30 +244,25 @@ impl PostgresBackend {
     /// validation, or metadata persistence fails.
     pub(crate) async fn upload_shard_stream(
         &self,
-        mut body: RequestBodyReader,
+        body: RequestBodyReader,
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
-        let uploaded_body = read_body_to_bytes(&mut body).await?;
+        let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        let parsed = parse_uploaded_shard(
+        register_uploaded_shard_stream(
             &object_store,
-            &uploaded_body,
+            body,
             repository_scope,
             shard_metadata_limits,
-        )?;
-        let mut dedupe_mappings = Vec::with_capacity(parsed.dedupe_chunk_hashes.len());
-        for chunk_hash_hex in &parsed.dedupe_chunk_hashes {
-            let mapping = dedupe_shard_mapping(chunk_hash_hex, &parsed.shard_key)?;
-            dedupe_mappings.push(mapping);
-        }
-        self.record_store
-            .commit_native_shard_metadata(&parsed.records, &dedupe_mappings)
-            .await?;
-
-        Ok(ShardUploadResponse {
-            result: parsed.result,
-        })
+            move |records, mappings| async move {
+                record_store
+                    .commit_native_shard_metadata(&records, &mappings)
+                    .await?;
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Loads reconstruction metadata for a file.
@@ -602,7 +593,7 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
 const REQUIRED_METADATA_TABLES: [&str; 6] = [
     "shardline_file_records",
     "shardline_file_reconstructions",
-    "shardline_xorbs",
+    "shardline_stored_objects",
     "shardline_dedupe_shards",
     "shardline_quarantine_candidates",
     "shardline_retention_holds",

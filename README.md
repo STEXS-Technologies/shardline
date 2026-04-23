@@ -6,16 +6,23 @@
 [![Platform](https://img.shields.io/badge/platform-unix%20hardened%20%7C%20windows%20compile-0a7ea4)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
-Shardline is an open, self-hostable backend for the Xet CAS protocol.
+Shardline is an open, self-hostable content-addressed storage backend with
+Xet-compatible protocol support.
 
-It accepts xorb and shard uploads, verifies content-addressed objects, plans
+It accepts immutable object uploads, verifies protocol objects, plans
 reconstructions, serves range-aware downloads, and can run either as a direct,
 providerless Xet-compatible backend or with GitHub, GitLab, Gitea, or generic Git forge
 integration without baking provider-specific behavior into the CAS core.
 
+The first production frontend Shardline supports is Xet.
+Today, `shardline serve` exposes that Xet frontend by default, and there is not yet a
+`--frontend` selector because no second runtime frontend has landed.
+The core storage, indexing, and reconstruction boundaries stay separate from Xet-specific
+protocol handling so additional CAS frontends can be added without rewriting the engine.
+
 For small deployments, `shardline serve` runs the control plane and transfer plane in
 one process. Larger deployments can split the same binary into `api` and `transfer`
-roles.
+roles. `--role` only changes deployment topology; it does not switch protocol frontends.
 
 Shardline now compiles on non-Unix targets as well. Local filesystem hardening remains
 strongest on Unix, and the current non-Unix claim is compile compatibility rather than
@@ -23,7 +30,7 @@ full runtime parity.
 
 ## Why Shardline
 
-- self-hostable Xet-compatible CAS backend
+- self-hostable CAS backend with Xet-compatible protocol support
 - production-oriented operator surface: health checks, migrations, fsck, repair, backup,
   storage migration, retention holds, and garbage collection
 - storage and metadata adapters kept behind explicit boundaries
@@ -159,11 +166,11 @@ Read these before a production rollout:
 
 | Crate | Purpose |
 | --- | --- |
-| `protocol` | Hash parsing, byte-range handling, secret wrappers, and token types |
+| `protocol` | Xet protocol types, hash parsing, byte-range handling, and token types |
 | `cache` | Reconstruction-cache traits and adapters |
 | `storage` | Immutable object-storage contracts and adapters |
 | `index` | Reconstruction and deduplication metadata contracts and adapters |
-| `cas` | CAS coordinator composition |
+| `cas` | Protocol-neutral CAS coordinator domain and composition |
 | `vcs` | Provider adapters and authorization boundaries |
 | `server` | HTTP routes, runtime wiring, migrations, fsck, GC, repair, and rollout logic |
 | `cli` | `shardline` operator binary |

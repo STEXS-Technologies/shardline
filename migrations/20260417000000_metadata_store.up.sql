@@ -4,8 +4,8 @@ CREATE TABLE IF NOT EXISTS shardline_file_reconstructions (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS shardline_xorbs (
-    xorb_hash TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS shardline_stored_objects (
+    object_hash TEXT PRIMARY KEY,
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

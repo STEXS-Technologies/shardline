@@ -22,11 +22,12 @@ use crate::{
     },
     object_store::{ServerObjectStore, read_full_object, reconstruct_file_record_bytes},
     overflow::{checked_add, checked_increment},
-    reconstruction::build_reconstruction_response,
-    shard_store::{dedupe_shard_mapping, parse_uploaded_shard, resolve_dedupe_shard_object},
-    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes},
+    upload_ingest::{FileUploadIngestor, RequestBodyReader},
     validation::{ensure_directory, validate_identifier},
-    xorb_store::{store_uploaded_xorb, xorb_object_key},
+    xet_adapter::{
+        build_reconstruction_response, register_uploaded_shard_stream, resolve_dedupe_shard_object,
+        store_uploaded_xorb_stream, xorb_object_key,
+    },
 };
 use records::{read_record, repository_references_xorb};
 
@@ -223,15 +224,10 @@ impl LocalBackend {
     pub(crate) async fn upload_xorb_stream(
         &self,
         expected_hash: &str,
-        mut body: RequestBodyReader,
+        body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let object_store = self.object_store();
-        let stored = store_uploaded_xorb(&object_store, expected_hash, &uploaded_body)?;
-
-        Ok(XorbUploadResponse {
-            was_inserted: stored.was_inserted,
-        })
+        store_uploaded_xorb_stream(&object_store, expected_hash, body).await
     }
 
     /// Stores a bounded native Xet shard and indexes the contained file reconstructions.
@@ -242,31 +238,25 @@ impl LocalBackend {
     /// validation, or metadata persistence fails.
     pub(crate) async fn upload_shard_stream(
         &self,
-        mut body: RequestBodyReader,
+        body: RequestBodyReader,
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
-        let uploaded_body = read_body_to_bytes(&mut body).await?;
+        let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        let parsed = parse_uploaded_shard(
+        register_uploaded_shard_stream(
             &object_store,
-            &uploaded_body,
+            body,
             repository_scope,
             shard_metadata_limits,
-        )?;
-
-        let mappings = parsed
-            .dedupe_chunk_hashes
-            .iter()
-            .map(|chunk_hash_hex| dedupe_shard_mapping(chunk_hash_hex, &parsed.shard_key))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.record_store
-            .commit_native_shard_metadata(&parsed.records, &mappings)
-            .await?;
-
-        Ok(ShardUploadResponse {
-            result: parsed.result,
-        })
+            move |records, mappings| async move {
+                record_store
+                    .commit_native_shard_metadata(&records, &mappings)
+                    .await?;
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Loads reconstruction metadata for a file.

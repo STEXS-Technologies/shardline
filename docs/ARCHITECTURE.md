@@ -1,8 +1,10 @@
 # Architecture
 
-Shardline is an open, self-hostable backend for the Xet protocol.
-It acts as a Content Addressable Storage coordinator: clients upload xorbs and shards,
-the server verifies and indexes them, and clients later request file reconstruction
+Shardline is an open, self-hostable content-addressed storage backend with
+Xet-compatible protocol support.
+It uses a protocol-neutral CAS coordinator with explicit frontend adapters.
+Today, the production frontend is Xet: clients upload xorbs and shards, the
+server verifies and indexes them, and clients later request file reconstruction
 metadata to download only the byte ranges they need.
 
 ## Goals
@@ -28,35 +30,35 @@ metadata to download only the byte ranges they need.
 ```text
 client
   |
-  | Xet CAS API
+  | Xet frontend today
   v
 server
   |
-  +-- protocol handlers
+  +-- protocol adapters
   +-- auth and scope checks
-  +-- xorb validator
-  +-- shard validator
-  +-- reconstruction planner
+  +-- Xet xorb validator
+  +-- Xet shard validator
+  +-- CAS reconstruction planner
   +-- reconstruction cache
   +-- dedupe index
   +-- transfer URL issuer
   |
   +-- index store
   |     +-- file_id -> reconstruction terms
-  |     +-- chunk_hash -> xorb hash and chunk range
-  |     +-- xorb_hash -> object location and chunk metadata
-  |     +-- shard hash -> registration state
+  |     +-- chunk_hash -> stored object hash and chunk range
+  |     +-- object_hash -> object location and chunk metadata
+  |     +-- retained container hash -> registration state
   |
   +-- object store
-        +-- xorb bytes
-        +-- shard bytes, if retained
+        +-- immutable object bytes
+        +-- retained container bytes, if configured
 ```
 
 ## Persistence Model
 
 Shardline needs three persistence categories:
 
-- **Object storage**: immutable xorb and shard bytes.
+- **Object storage**: immutable object bytes and retained container bytes.
 - **Index storage**: metadata needed for reconstruction, deduplication, authorization,
   garbage collection, and integrity checks.
 - **Record storage**: durable file-version records and derived latest-file records for
@@ -71,9 +73,9 @@ Postgres-compatible adapters provide the durable production metadata path.
 
 The stores must be updated with explicit ordering:
 
-1. Xorb bytes are validated.
-2. Xorb bytes are written idempotently.
-3. Shards are validated against existing xorbs.
+1. Protocol object bytes are validated.
+2. Immutable object bytes are written idempotently.
+3. Container metadata is validated against existing stored objects.
 4. Index rows are committed atomically.
 5. File reconstructions become visible after the index commit succeeds.
 
@@ -84,7 +86,7 @@ back to durable metadata and repairs the cache lazily.
 
 ## Public API Surface
 
-The core server exposes the Xet-compatible CAS API:
+The current production server exposes the Xet-compatible CAS API:
 
 - `GET /v1/reconstructions/{file_id}`
 - `GET /v1/chunks/default/{hash}`
@@ -100,6 +102,11 @@ For storage adapters that cannot issue native presigned URLs, the server also ex
 range-enforced transfer endpoint:
 
 - `GET /transfer/xorb/{prefix}/{hash}`
+
+The Xet-specific route constants, hash/path validation, transfer URL construction,
+reconstruction shaping, and protocol-object ingest flow are intentionally isolated
+inside the server's `xet_adapter` layer rather than spread through generic backend and
+routing code.
 
 The transfer endpoint is an implementation detail.
 Reconstruction responses can point to native presigned object-store URLs when an adapter
@@ -140,13 +147,13 @@ xorb range transfer.
 
 ```text
 crates/protocol
-  Request and response types, hash parsing, range parsing, token scopes.
+  Xet protocol types, hash parsing, range parsing, token scopes, xorb validation.
 
 crates/server
-  HTTP handlers, routing, middleware, transfer endpoint, shutdown.
+  HTTP handlers, generic runtime orchestration, and Xet adapter hosting.
 
 crates/cas
-  Upload, shard registration, reconstruction planning, dedupe orchestration.
+  Protocol-neutral CAS domain, reconstruction planning, dedupe orchestration.
 
 crates/storage
   Object storage traits and adapters.
@@ -177,9 +184,9 @@ should use named files directly; do not introduce `mod.rs` files.
 The server is async-first and streams large request and response bodies.
 It must not buffer full untrusted uploads or full reconstructed downloads in memory
 unless the body is already within an explicit small bound.
-Native xorb and shard uploads do not use server-side `incoming` files or shard parsing
-workspaces on the data path.
-The coordinator consumes bounded request frames, validates the Xet objects in memory
+Native Xet uploads do not use server-side `incoming` files or shard parsing workspaces
+on the data path.
+The coordinator consumes bounded request frames, validates protocol objects in memory
 under the configured request-size limit, then commits bytes through the selected
 object-storage adapter.
 

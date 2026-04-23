@@ -13,8 +13,7 @@ use crate::{
     local_backend::chunk_hash,
     object_store::{ServerObjectStore, read_full_object},
     overflow::checked_add,
-    shard_store::shard_hash_from_object_key_if_present,
-    xorb_store::xorb_hash_from_object_key_if_present,
+    xet_adapter::{shard_hash_from_object_key_if_present, xorb_hash_from_object_key_if_present},
 };
 
 /// Object-storage endpoint used by storage migration.

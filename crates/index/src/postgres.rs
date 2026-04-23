@@ -17,7 +17,7 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, FileRecord, IndexStoreFuture,
     ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError, ReconstructionTerm,
     RecordStore, RecordStoreFuture, RepositoryRecordScope, RetentionHold, RetentionHoldError,
-    StoredRecord, WebhookDelivery, WebhookDeliveryError, XorbId,
+    StoredObjectId, StoredRecord, WebhookDelivery, WebhookDeliveryError,
     provider::parse_repository_provider,
     record_key::record_key as shared_record_key,
     record_key::{
@@ -117,17 +117,17 @@ impl AsyncIndexStore for PostgresIndexStore {
         })
     }
 
-    fn contains_xorb<'operation>(
+    fn contains_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let exists = query_scalar::<_, bool>(
                 "SELECT EXISTS(
-                    SELECT 1 FROM shardline_xorbs WHERE xorb_hash = $1
+                    SELECT 1 FROM shardline_stored_objects WHERE object_hash = $1
                  )",
             )
-            .bind(xorb_id.hash().api_hex_string())
+            .bind(object_id.hash().api_hex_string())
             .fetch_one(&self.pool)
             .await?;
             Ok(exists)
@@ -201,17 +201,17 @@ impl AsyncIndexStore for PostgresIndexStore {
         })
     }
 
-    fn insert_xorb<'operation>(
+    fn insert_object<'operation>(
         &'operation self,
-        xorb_id: &'operation XorbId,
+        object_id: &'operation StoredObjectId,
     ) -> IndexStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
             query(
-                "INSERT INTO shardline_xorbs (xorb_hash)
+                "INSERT INTO shardline_stored_objects (object_hash)
                  VALUES ($1)
-                 ON CONFLICT (xorb_hash) DO NOTHING",
+                 ON CONFLICT (object_hash) DO NOTHING",
             )
-            .bind(xorb_id.hash().api_hex_string())
+            .bind(object_id.hash().api_hex_string())
             .execute(&self.pool)
             .await?;
             Ok(())
@@ -1394,7 +1394,7 @@ impl PostgresFileReconstructionRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PostgresReconstructionTermRecord {
-    xorb_hash: String,
+    object_hash: String,
     chunk_start: u32,
     chunk_end_exclusive: u32,
     unpacked_length: u64,
@@ -1403,7 +1403,7 @@ struct PostgresReconstructionTermRecord {
 impl PostgresReconstructionTermRecord {
     fn from_domain(term: &ReconstructionTerm) -> Self {
         Self {
-            xorb_hash: term.xorb_id().hash().api_hex_string(),
+            object_hash: term.object_id().hash().api_hex_string(),
             chunk_start: term.chunk_range().start(),
             chunk_end_exclusive: term.chunk_range().end_exclusive(),
             unpacked_length: term.unpacked_length(),
@@ -1411,10 +1411,10 @@ impl PostgresReconstructionTermRecord {
     }
 
     fn into_domain(self) -> Result<ReconstructionTerm, PostgresMetadataStoreError> {
-        let hash = ShardlineHash::parse_api_hex(&self.xorb_hash)?;
+        let hash = ShardlineHash::parse_api_hex(&self.object_hash)?;
         let range = ChunkRange::new(self.chunk_start, self.chunk_end_exclusive)?;
         Ok(ReconstructionTerm::new(
-            XorbId::new(hash),
+            StoredObjectId::new(hash),
             range,
             self.unpacked_length,
         ))

@@ -1,9 +1,13 @@
 # Shardline Docs
 
-Shardline is an open, self-hostable backend for the Xet protocol.
+Shardline is an open, self-hostable content-addressed storage backend with
+Xet-compatible protocol support.
 
-These docs describe how Shardline stores content-addressed data, coordinates Xet uploads
-and downloads, verifies protocol objects, and runs in self-hosted deployments.
+These docs describe how Shardline stores content-addressed data, exposes the current Xet
+frontend, verifies protocol objects, and runs in self-hosted deployments.
+
+`shardline serve` currently exposes the Xet frontend by default.
+There is no runtime frontend selector yet; `--role` only splits API and transfer duties.
 
 The default deployment model is a single process.
 When traffic grows, the same `shardline serve` binary can be split into `api` and
@@ -12,9 +16,9 @@ When traffic grows, the same `shardline serve` binary can be split into `api` an
 ## Scope
 
 Shardline covers:
-- Xet protocol compatibility
 - CAS coordinator behavior
-- xorb and shard validation requirements
+- Xet protocol compatibility
+- current Xet xorb and shard validation requirements
 - reconstruction and range-download behavior
 - storage adapter contracts
 - metadata/index storage requirements
@@ -36,7 +40,7 @@ Setup and deployment:
 - [CLI](CLI.md)
 - [Architecture](ARCHITECTURE.md)
 - [Compatibility Status](COMPATIBILITY_STATUS.md)
-- [Protocol Conformance](PROTOCOL_CONFORMANCE.md)
+- [Xet Protocol Conformance](PROTOCOL_CONFORMANCE.md)
 - [Storage Adapters](STORAGE_ADAPTERS.md)
 - [Cache Adapters](CACHE_ADAPTERS.md)
 - [Provider Adapters](PROVIDER_ADAPTERS.md)
