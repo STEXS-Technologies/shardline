@@ -3,6 +3,11 @@
 Shardline targets the public Xet protocol and the operator workflows needed to run it in
 self-hosted deployments.
 
+## 1.0.0 Contract
+
+Shardline `1.0.0` should be treated as a full drop-in Xet backend for the validated
+workflows covered by this repository.
+
 ## Validated Today
 
 - native Xet upload and download flows

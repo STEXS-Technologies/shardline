@@ -147,9 +147,8 @@ Start with [Deployment](docs/DEPLOYMENT.md), then use
 
 ## Production Readiness
 
-Shardline is released as `1.0.0`, but the compatibility claim is still scoped to the
-validated Xet and operator surface documented in this repo. Before a production rollout,
-read:
+Shardline is released as `1.0.0` for the validated Xet workflows and operator surface
+documented in this repo. Before a production rollout, read:
 
 - [Deployment](docs/DEPLOYMENT.md)
 - [Operations](docs/OPERATIONS.md)
