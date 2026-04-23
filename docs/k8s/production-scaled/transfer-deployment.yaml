@@ -41,7 +41,7 @@ spec:
               app.kubernetes.io/component: transfer
       initContainers:
         - name: config-check
-          image: registry.example.com/shardline:0.1.0
+          image: registry.example.com/shardline:1.0.0
           imagePullPolicy: IfNotPresent
           command: ["shardline", "config", "check"]
           env:
@@ -83,7 +83,7 @@ spec:
             readOnlyRootFilesystem: true
       containers:
         - name: shardline
-          image: registry.example.com/shardline:0.1.0
+          image: registry.example.com/shardline:1.0.0
           imagePullPolicy: IfNotPresent
           args: ["serve", "--role", "transfer"]
           ports:

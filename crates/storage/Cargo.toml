@@ -1,6 +1,6 @@
 [package]
 name = "shardline-storage"
-version = "0.1.0"
+version = "1.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,17 +14,17 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-blake3 = "1.8.3"
-bytes = "1.10.1"
-futures-util = "0.3"
-libc = "0.2.177"
-object_store = { version = "0.13.2", default-features = false, features = ["aws"] }
-shardline-protocol = { version = "0.1.0", path = "../protocol" }
-thiserror = { version = "2.0.18", default-features = false }
-tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+blake3.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+object_store = { workspace = true, features = ["aws"] }
+shardline-protocol.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
-tempfile = "3.15"
+tempfile.workspace = true
 
 [lints]
 workspace = true

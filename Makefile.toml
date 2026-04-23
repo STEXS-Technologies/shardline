@@ -190,9 +190,9 @@ command = "cargo"
 args = ["deny", "check"]
 
 [tasks.ci]
-description = "Run the core contributor CI checks"
+description = "Run the core contributor CI checks, including dependency advisories"
 workspace = false
-dependencies = ["format-check", "clippy", "test", "verify-release-binary"]
+dependencies = ["format-check", "clippy", "test", "verify-release-binary", "audit"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"

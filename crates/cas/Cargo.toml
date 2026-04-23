@@ -1,6 +1,6 @@
 [package]
 name = "shardline-cas"
-version = "0.1.0"
+version = "1.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,14 +14,14 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-shardline-index = { version = "0.1.0", path = "../index" }
-shardline-storage = { version = "0.1.0", path = "../storage" }
+shardline-index.workspace = true
+shardline-storage.workspace = true
 
 [dev-dependencies]
-blake3 = "1.8.3"
-shardline-protocol = { version = "0.1.0", path = "../protocol" }
-tempfile = "3.15"
-thiserror = { version = "2.0.18", default-features = false }
+blake3.workspace = true
+shardline-protocol.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

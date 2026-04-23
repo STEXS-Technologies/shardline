@@ -14,16 +14,16 @@ description = "Fuzz targets for Shardline parsers, invariants, and storage bound
 cargo-fuzz = true
 
 [dependencies]
-blake3 = "1.8.2"
-libfuzzer-sys = "0.4"
-shardline = { version = "0.1.0", path = "../cli" }
-shardline-index = { version = "0.1.0", path = "../index" }
-shardline-protocol = { version = "0.1.0", path = "../protocol" }
-shardline-server = { version = "0.1.0", path = "../server" }
-shardline-storage = { version = "0.1.0", path = "../storage" }
-shardline-vcs = { version = "0.1.0", path = "../vcs" }
-tempfile = "3.15"
-xet-core-structures = "1.5.1"
+blake3.workspace = true
+libfuzzer-sys.workspace = true
+shardline.workspace = true
+shardline-index.workspace = true
+shardline-protocol.workspace = true
+shardline-server.workspace = true
+shardline-storage.workspace = true
+shardline-vcs.workspace = true
+tempfile.workspace = true
+xet-core-structures.workspace = true
 
 [[bin]]
 name = "shardline_protocol_hash"

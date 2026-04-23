@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "shardline"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "clap",
@@ -2879,7 +2879,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cache"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hex",
  "redis",
@@ -2890,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cas"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "shardline-index",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-index"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "futures-util",
  "hex",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "hex",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3007,14 +3007,14 @@ dependencies = [
 
 [[package]]
 name = "shardline-test-support"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "shardline-vcs"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hex",
  "hmac",

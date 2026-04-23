@@ -69,7 +69,7 @@ The runtime secret carries:
 The provider catalog secret carries the provider repository catalog JSON, including
 webhook secrets.
 
-The manifests use the placeholder image `registry.example.com/shardline:0.1.0`. Replace
+The manifests use the placeholder image `registry.example.com/shardline:1.0.0`. Replace
 it with the image tag you build or publish for your environment.
 
 The runtime egress policy is environment-specific and is therefore shipped as a

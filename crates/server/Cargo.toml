@@ -1,6 +1,6 @@
 [package]
 name = "shardline-server"
-version = "0.1.0"
+version = "1.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,46 +14,46 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-axum = "0.8.8"
-base64 = "0.22"
-blake3 = "1.8.3"
-bytes = "1.10.1"
-futures-util = "0.3"
-hex = "0.4"
-libc = "0.2.177"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-shardline-cache = { version = "0.1.0", path = "../cache" }
-shardline-cas = { version = "0.1.0", path = "../cas" }
-shardline-index = { version = "0.1.0", path = "../index" }
-shardline-protocol = { version = "0.1.0", path = "../protocol" }
-shardline-storage = { version = "0.1.0", path = "../storage" }
-shardline-vcs = { version = "0.1.0", path = "../vcs" }
-sha2 = "0.10"
-sqlx = { version = "0.8.6", default-features = false, features = [
+axum.workspace = true
+base64.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+libc.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+shardline-cache.workspace = true
+shardline-cas.workspace = true
+shardline-index.workspace = true
+shardline-protocol.workspace = true
+shardline-storage.workspace = true
+shardline-vcs.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = [
     "runtime-tokio",
     "tls-rustls",
     "postgres",
 ] }
-subtle = { version = "2.6", default-features = false }
-thiserror = { version = "2.0.18", default-features = false }
-tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-url = "2.5"
-xet-core-structures = "1.5.1"
-zeroize = "1.8"
+subtle.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+url.workspace = true
+xet-core-structures.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-async-trait = "0.1"
-criterion = { version = "0.5.1", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
-hmac = "0.12"
-redis = { version = "1.0.2", features = ["tokio-comp"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
-shardline-test-support = { version = "0.1.0", path = "../test_support" }
-tempfile = "3.15"
-xet-client = "1.5.1"
-xet-data = "1.5.1"
-xet-runtime = "1.5.1"
+async-trait.workspace = true
+criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
+hmac.workspace = true
+redis = { workspace = true, features = ["tokio-comp"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+rusqlite = { workspace = true, features = ["bundled"] }
+shardline-test-support.workspace = true
+tempfile.workspace = true
+xet-client.workspace = true
+xet-data.workspace = true
+xet-runtime.workspace = true
 
 [lints]
 workspace = true
