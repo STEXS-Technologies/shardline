@@ -6,7 +6,7 @@ use shardline_server::{
 };
 use thiserror::Error;
 
-use crate::{config::load_server_config, local_output::AtomicOutputFile};
+use crate::{config::load_server_config, local_output::write_output_bytes};
 
 /// Backup command runtime failure.
 #[derive(Debug, Error)]
@@ -33,8 +33,8 @@ pub async fn run_backup_manifest(
     output: &Path,
 ) -> Result<BackupManifestReport, BackupRuntimeError> {
     let config = load_server_config(root)?;
-    let mut writer = AtomicOutputFile::create(output, false)?;
-    let report = write_server_backup_manifest(config, &mut writer).await?;
-    writer.commit()?;
+    let mut manifest = Vec::new();
+    let report = write_server_backup_manifest(config, &mut manifest).await?;
+    write_output_bytes(output, &manifest, false)?;
     Ok(report)
 }
