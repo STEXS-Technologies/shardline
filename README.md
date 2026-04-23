@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](../../rust-toolchain.toml)
 [![Deployment](https://img.shields.io/badge/deployment-docker%20%7C%20kubernetes-blue)](docs/DEPLOYMENT.md)
 [![Status](https://img.shields.io/badge/status-stable%201.0.0-1f6feb)](docs/COMPATIBILITY_STATUS.md)
-[![Platform](https://img.shields.io/badge/platform-unix%20%2F%20linux-critical)](docs/SECURITY_AND_INVARIANTS.md)
+[![Platform](https://img.shields.io/badge/platform-unix%20hardened%20%7C%20windows%20compile-0a7ea4)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
 Shardline is an open, self-hostable backend for the Xet CAS protocol.
@@ -16,6 +16,10 @@ integration without baking provider-specific behavior into the CAS core.
 For small deployments, `shardline serve` runs the control plane and transfer plane in
 one process. Larger deployments can split the same binary into `api` and `transfer`
 roles.
+
+Shardline now compiles on non-Unix targets as well. Local filesystem hardening remains
+strongest on Unix, and the current non-Unix claim is compile compatibility rather than
+full runtime parity.
 
 ## Why Shardline
 
