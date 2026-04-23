@@ -12,20 +12,36 @@ For single-node Linux service templates, see [systemd](SYSTEMD.md).
 
 ## Frontend Selection
 
-`shardline serve` currently runs the Xet frontend.
-There is no `--frontend` selector yet because Xet is the only runtime frontend today.
-The `--role api` and `--role transfer` flags only split the same Xet-compatible surface
-across processes for scaling; they do not enable different protocols.
+`shardline serve` accepts an explicit frontend set through repeated `--frontend` flags or
+`SHARDLINE_SERVER_FRONTENDS=xet,...`.
+Today the implemented/default runtime frontend is `xet`.
+The `--role api` and `--role transfer` flags only split one selected frontend set across
+processes for scaling; they do not choose different protocols by themselves.
 
 ### Local Single-Node
 
 Use this profile for development and small private installs.
 
-```text
-server: shardline
-object store: local filesystem
-index and record storage: local SQLite metadata (`.shardline/data/metadata.sqlite3`)
-transfer: server-mediated
+```mermaid
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Server[server: shardline]
+    Server --> Object[object store: local filesystem]
+    Server --> Metadata[index + record storage: local SQLite metadata]
+    Server --> Transfer[transfer: server-mediated]
+  end
+
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  classDef server fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef storage fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  classDef data fill:#efe3f8,stroke:#b89bd6,color:#1f2937;
+  classDef flow fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  class Server server;
+  class Object storage;
+  class Metadata data;
+  class Transfer flow;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
 The bundled compose file starts the local profile by default:
@@ -97,22 +113,49 @@ For a direct, providerless Xet-compatible backend, follow
 
 Use this profile for self-hosted teams.
 
-```text
-server: shardline
-object store: S3-compatible
-index store: Postgres-compatible SQL
-transfer: presigned object-store URLs when supported
+```mermaid
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Server[server: shardline]
+    Server --> Object[object store: S3-compatible]
+    Server --> Index[index store: Postgres-compatible SQL]
+    Server --> Transfer[transfer: presigned object-store URLs when supported]
+  end
+
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  classDef server fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef storage fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  classDef data fill:#efe3f8,stroke:#b89bd6,color:#1f2937;
+  classDef flow fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  class Server server;
+  class Object storage;
+  class Index data;
+  class Transfer flow;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
 ### Production Scaled
 
 Use this profile when API traffic and transfer traffic need independent scaling.
 
-```text
-api servers: shardline serve --role api
-transfer servers: shardline serve --role transfer
-object store: S3-compatible or custom adapter
-index store: managed Postgres-compatible SQL
+```mermaid
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Api[api servers: shardline serve --role api]
+    Transfer[transfer servers: shardline serve --role transfer]
+    Shared[shared backend services<br/>object store: S3-compatible or custom adapter<br/>index store: managed Postgres-compatible SQL]
+    Api --> Shared
+    Transfer --> Shared
+  end
+
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  classDef role fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef shared fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  class Api,Transfer role;
+  class Shared shared;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
 The scaled role split lets API traffic and transfer traffic grow independently while

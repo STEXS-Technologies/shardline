@@ -56,6 +56,7 @@ mod reconstruction_cache;
 mod record_store;
 mod repository_scope_path;
 mod runtime_check;
+mod server_frontend;
 mod server_role;
 mod storage_migration;
 #[cfg(test)]
@@ -121,6 +122,7 @@ pub use reconstruction_cache::{
     ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache,
 };
 pub use runtime_check::{ConfigCheckReport, run_config_check};
+pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
 pub use storage_migration::{
     StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport,

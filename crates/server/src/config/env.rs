@@ -17,7 +17,10 @@ use super::{
     ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
     default_upload_max_in_flight_chunks,
 };
-use crate::{reconstruction_cache::ReconstructionCacheAdapter, server_role::ServerRole};
+use crate::{
+    reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
+    server_role::ServerRole,
+};
 
 pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfigError> {
     let bind_addr = match var("SHARDLINE_BIND_ADDR") {
@@ -29,6 +32,9 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let server_role =
         ServerRole::parse(&var("SHARDLINE_SERVER_ROLE").unwrap_or_else(|_error| "all".to_owned()))
             .map_err(|_error| ServerConfigError::InvalidServerRole)?;
+    let server_frontends = parse_server_frontends_env(
+        &var("SHARDLINE_SERVER_FRONTENDS").unwrap_or_else(|_error| "xet".to_owned()),
+    )?;
     let root_dir = var("SHARDLINE_ROOT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_error| PathBuf::from("/var/lib/shardline"));
@@ -143,6 +149,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
 
     let mut config = ServerConfig::new(bind_addr, public_base_url, root_dir, chunk_size)
         .with_server_role(server_role)
+        .with_server_frontends(server_frontends)?
         .with_object_storage(object_storage_adapter, s3_object_store_config)
         .with_max_request_body_bytes(max_request_body_bytes)
         .with_shard_metadata_limits(shard_metadata_limits)
@@ -192,6 +199,26 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     Ok(config)
 }
 
+fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {
+    let mut parsed = Vec::new();
+    for token in value.split(',').map(str::trim) {
+        if token.is_empty() {
+            continue;
+        }
+        let frontend = ServerFrontend::parse(token)
+            .map_err(|_error| ServerConfigError::InvalidServerFrontend)?;
+        if !parsed.contains(&frontend) {
+            parsed.push(frontend);
+        }
+    }
+
+    if parsed.is_empty() {
+        return Err(ServerConfigError::MissingServerFrontends);
+    }
+
+    Ok(parsed)
+}
+
 pub(super) fn optional_token_signing_key_from_sources(
     direct: Option<String>,
     file: Option<String>,
@@ -230,4 +257,33 @@ fn load_non_zero_usize_env(
         .parse::<usize>()
         .map_err(parse_error)?;
     NonZeroUsize::new(raw).ok_or_else(zero_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ServerFrontend;
+
+    use super::parse_server_frontends_env;
+
+    #[test]
+    fn parse_server_frontends_env_accepts_one_or_more_tokens() {
+        let single = parse_server_frontends_env("xet");
+        assert!(single.is_ok());
+        assert_eq!(single.ok(), Some(vec![ServerFrontend::Xet]));
+        let deduplicated = parse_server_frontends_env("xet, xet");
+        assert!(deduplicated.is_ok());
+        assert_eq!(deduplicated.ok(), Some(vec![ServerFrontend::Xet]));
+    }
+
+    #[test]
+    fn parse_server_frontends_env_rejects_invalid_or_empty_tokens() {
+        assert!(parse_server_frontends_env("").is_err());
+        let trailing_comma = parse_server_frontends_env("xet,");
+        assert!(trailing_comma.is_ok());
+        assert_eq!(trailing_comma.ok(), Some(vec![ServerFrontend::Xet]));
+        let empty_segments = parse_server_frontends_env(",xet,,");
+        assert!(empty_segments.is_ok());
+        assert_eq!(empty_segments.ok(), Some(vec![ServerFrontend::Xet]));
+        assert!(parse_server_frontends_env("lfs").is_err());
+    }
 }

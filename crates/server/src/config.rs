@@ -21,6 +21,7 @@ use crate::{
         DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES, DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
         ReconstructionCacheAdapter,
     },
+    server_frontend::ServerFrontend,
     server_role::ServerRole,
 };
 use secrets::ensure_secret_size_within_limit;
@@ -36,6 +37,7 @@ use secrets::{configure_provider_runtime_from_paths, read_secret_file_bytes};
 pub struct ServerConfig {
     bind_addr: SocketAddr,
     server_role: ServerRole,
+    server_frontends: Vec<ServerFrontend>,
     public_base_url: String,
     root_dir: PathBuf,
     object_storage_adapter: ObjectStorageAdapter,
@@ -64,6 +66,7 @@ impl fmt::Debug for ServerConfig {
             .debug_struct("ServerConfig")
             .field("bind_addr", &self.bind_addr)
             .field("server_role", &self.server_role)
+            .field("server_frontends", &self.server_frontends)
             .field("public_base_url", &self.public_base_url)
             .field("root_dir", &self.root_dir)
             .field("object_storage_adapter", &self.object_storage_adapter)
@@ -213,6 +216,7 @@ impl ServerConfig {
         Self {
             bind_addr,
             server_role: ServerRole::All,
+            server_frontends: vec![ServerFrontend::Xet],
             public_base_url,
             root_dir,
             object_storage_adapter: ObjectStorageAdapter::Local,
@@ -257,6 +261,12 @@ impl ServerConfig {
     #[must_use]
     pub const fn server_role(&self) -> ServerRole {
         self.server_role
+    }
+
+    /// Returns the enabled runtime protocol frontends.
+    #[must_use]
+    pub fn server_frontends(&self) -> &[ServerFrontend] {
+        &self.server_frontends
     }
 
     /// Returns the public base URL used in reconstruction responses.
@@ -391,6 +401,25 @@ impl ServerConfig {
     pub const fn with_server_role(mut self, server_role: ServerRole) -> Self {
         self.server_role = server_role;
         self
+    }
+
+    /// Selects the enabled runtime protocol frontends.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::MissingServerFrontends`] when the supplied
+    /// frontend list is empty after deduplication.
+    pub fn with_server_frontends(
+        mut self,
+        server_frontends: impl IntoIterator<Item = ServerFrontend>,
+    ) -> Result<Self, ServerConfigError> {
+        let server_frontends = deduplicated_server_frontends(server_frontends);
+        if server_frontends.is_empty() {
+            return Err(ServerConfigError::MissingServerFrontends);
+        }
+
+        self.server_frontends = server_frontends;
+        Ok(self)
     }
 
     /// Overrides the per-upload chunk processing window.
@@ -647,6 +676,18 @@ pub(crate) fn default_transfer_max_in_flight_chunks() -> NonZeroUsize {
     )
 }
 
+fn deduplicated_server_frontends(
+    server_frontends: impl IntoIterator<Item = ServerFrontend>,
+) -> Vec<ServerFrontend> {
+    let mut deduplicated = Vec::new();
+    for frontend in server_frontends {
+        if !deduplicated.contains(&frontend) {
+            deduplicated.push(frontend);
+        }
+    }
+    deduplicated
+}
+
 fn adaptive_default_in_flight_chunks(
     multiplier: usize,
     minimum: NonZeroUsize,
@@ -766,6 +807,12 @@ pub enum ServerConfigError {
     /// The server role token was invalid.
     #[error("invalid server role")]
     InvalidServerRole,
+    /// The server frontend token was invalid.
+    #[error("invalid server frontend")]
+    InvalidServerFrontend,
+    /// The configured server frontend set was empty.
+    #[error("at least one server frontend must be enabled")]
+    MissingServerFrontends,
     /// The object-storage adapter token was invalid.
     #[error("invalid object storage adapter")]
     InvalidObjectStorageAdapter,

@@ -42,6 +42,12 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
             Json(ReadyResponse {
                 status: "ok".to_owned(),
                 server_role: state.role.as_str().to_owned(),
+                server_frontends: state
+                    .config
+                    .server_frontends()
+                    .iter()
+                    .map(|frontend| frontend.as_str().to_owned())
+                    .collect(),
                 metadata_backend: state.backend.backend_name().to_owned(),
                 object_backend: state.backend.object_backend_name().to_owned(),
                 cache_backend: state.reconstruction_cache.backend_name().to_owned(),
@@ -184,6 +190,13 @@ pub(super) async fn metrics(
     let auth_enabled = state.auth.is_some();
     let provider_tokens_enabled = state.provider_tokens.is_some();
     let metrics_auth_enabled = state.config.metrics_token().is_some();
+    let frontend_labels = state
+        .config
+        .server_frontends()
+        .iter()
+        .map(|frontend| frontend.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     let body = format!(
         concat!(
             "# HELP shardline_up Whether the Shardline process is serving requests.\n",
@@ -191,7 +204,7 @@ pub(super) async fn metrics(
             "shardline_up 1\n",
             "# HELP shardline_server_info Static Shardline runtime information.\n",
             "# TYPE shardline_server_info gauge\n",
-            "shardline_server_info{{role=\"{}\",metadata_backend=\"{}\",object_backend=\"{}\",cache_backend=\"{}\"}} 1\n",
+            "shardline_server_info{{role=\"{}\",frontends=\"{}\",metadata_backend=\"{}\",object_backend=\"{}\",cache_backend=\"{}\"}} 1\n",
             "# HELP shardline_auth_enabled Whether served routes require bearer authentication.\n",
             "# TYPE shardline_auth_enabled gauge\n",
             "shardline_auth_enabled {}\n",
@@ -215,6 +228,7 @@ pub(super) async fn metrics(
             "shardline_transfer_max_in_flight_chunks {}\n"
         ),
         state.role.as_str(),
+        frontend_labels,
         state.backend.backend_name(),
         state.backend.object_backend_name(),
         state.reconstruction_cache.backend_name(),

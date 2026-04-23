@@ -11,7 +11,7 @@ use shardline_storage::{ObjectKey, ObjectPrefix};
 use tokio::task;
 
 use crate::{
-    ServerError, ShardMetadataLimits,
+    ServerError, ServerFrontend, ShardMetadataLimits,
     chunk_store::{chunk_hash_from_chunk_object_key_if_present, chunk_object_key},
     config::default_upload_max_in_flight_chunks,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
@@ -37,6 +37,7 @@ pub struct LocalBackend {
     public_base_url: String,
     chunk_size: NonZeroUsize,
     upload_max_in_flight_chunks: NonZeroUsize,
+    server_frontends: Vec<ServerFrontend>,
     index_store: LocalIndexStore,
     record_store: LocalRecordStore,
     object_store: ServerObjectStore,
@@ -85,12 +86,13 @@ impl LocalBackend {
         chunk_size: NonZeroUsize,
         object_store: ServerObjectStore,
     ) -> Result<Self, ServerError> {
-        Self::new_with_object_store_and_upload_parallelism(
+        Self::new_with_object_store_and_upload_parallelism_with_frontends(
             root,
             public_base_url,
             chunk_size,
             default_upload_max_in_flight_chunks(),
             object_store,
+            &[ServerFrontend::Xet],
         )
         .await
     }
@@ -102,6 +104,25 @@ impl LocalBackend {
         upload_max_in_flight_chunks: NonZeroUsize,
         object_store: ServerObjectStore,
     ) -> Result<Self, ServerError> {
+        Self::new_with_object_store_and_upload_parallelism_with_frontends(
+            root,
+            public_base_url,
+            chunk_size,
+            upload_max_in_flight_chunks,
+            object_store,
+            &[ServerFrontend::Xet],
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_object_store_and_upload_parallelism_with_frontends(
+        root: PathBuf,
+        public_base_url: String,
+        chunk_size: NonZeroUsize,
+        upload_max_in_flight_chunks: NonZeroUsize,
+        object_store: ServerObjectStore,
+        server_frontends: &[ServerFrontend],
+    ) -> Result<Self, ServerError> {
         ensure_directory_path_components_are_not_symlinked(&root)?;
         let backend = Self {
             index_store: LocalIndexStore::open(root.clone()),
@@ -109,6 +130,7 @@ impl LocalBackend {
             public_base_url,
             chunk_size,
             upload_max_in_flight_chunks,
+            server_frontends: server_frontends.to_vec(),
             object_store,
         };
         Ok(backend)
@@ -328,9 +350,12 @@ impl LocalBackend {
             .read_record(file_id, content_hash, repository_scope)
             .await?;
         let object_store = self.object_store();
-        task::spawn_blocking(move || reconstruct_file_record_bytes(&object_store, &record))
-            .await
-            .map_err(ServerError::BlockingTask)?
+        let server_frontends = self.server_frontends.clone();
+        task::spawn_blocking(move || {
+            reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 
     /// Reads a stored chunk by hash.

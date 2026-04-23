@@ -1118,6 +1118,7 @@ async fn readiness_route_reports_local_backend_for_initialized_storage() {
     };
     assert_eq!(ready.status, "ok");
     assert_eq!(ready.server_role, "all");
+    assert_eq!(ready.server_frontends, vec!["xet".to_owned()]);
     assert_eq!(ready.metadata_backend, "local");
     assert_eq!(ready.object_backend, "local");
     assert_eq!(ready.cache_backend, "memory");
@@ -1185,7 +1186,7 @@ async fn metrics_route_reports_runtime_configuration() {
     assert!(body.contains("shardline_up 1"));
     assert!(
             body.contains(
-                "shardline_server_info{role=\"api\",metadata_backend=\"local\",object_backend=\"local\",cache_backend=\"memory\"} 1"
+                "shardline_server_info{role=\"api\",frontends=\"xet\",metadata_backend=\"local\",object_backend=\"local\",cache_backend=\"memory\"} 1"
             )
         );
     assert!(body.contains("shardline_auth_enabled 1"));

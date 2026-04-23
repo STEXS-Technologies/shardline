@@ -15,14 +15,15 @@ providerless Xet-compatible backend or with GitHub, GitLab, Gitea, or generic Gi
 integration without baking provider-specific behavior into the CAS core.
 
 The first production frontend Shardline supports is Xet.
-Today, `shardline serve` exposes that Xet frontend by default, and there is not yet a
-`--frontend` selector because no second runtime frontend has landed.
+`shardline serve` now accepts an explicit frontend set through `--frontend` or
+`SHARDLINE_SERVER_FRONTENDS`, with `xet` enabled by default.
 The core storage, indexing, and reconstruction boundaries stay separate from Xet-specific
 protocol handling so additional CAS frontends can be added without rewriting the engine.
 
 For small deployments, `shardline serve` runs the control plane and transfer plane in
 one process. Larger deployments can split the same binary into `api` and `transfer`
-roles. `--role` only changes deployment topology; it does not switch protocol frontends.
+roles. `--role` only changes deployment topology; the enabled frontend set controls the
+protocol surface.
 
 Shardline now compiles on non-Unix targets as well. Local filesystem hardening remains
 strongest on Unix, and the current non-Unix claim is compile compatibility rather than
@@ -74,41 +75,65 @@ workflows, continue with:
 ## Architecture
 
 ```mermaid
-flowchart LR
-  Client[Xet client or Git workflow] -->|reconstructions, shard registration| API[Shardline API role]
-  Client -->|xorbs, chunks, ranged transfer| Transfer[Shardline transfer role]
-  Provider[Optional GitHub / GitLab / Gitea / Generic forge] -->|token bootstrap + webhooks| API
-  API --> Index[(Postgres-compatible metadata)]
-  API --> Cache[(Redis-compatible cache)]
-  API --> Object[(S3-compatible or local object store)]
-  Transfer --> Object
+flowchart TD
+  subgraph Canvas[ ]
+    direction TD
+    Client[Client]
+    Provider[Optional Git provider]
+    Router[Frontend router]
+    Frontends["**Frontend set**<br/>Xet frontend<br/>Future frontends"]
+    Core["**Shared server core**<br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>GC and operator flows"]
+    Adapters["**Adapters**<br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>VCS and provider adapters"]
+  end
+
+  Client --> Router
+  Provider --> Core
+  Router --> Frontends
+  Frontends --> Core
+  Core --> Adapters
+
+  classDef neutral fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef frontend fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  classDef core fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  classDef adapter fill:#efe3f8,stroke:#b89bd6,color:#1f2937;
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  class Client,Provider neutral;
+  class Router,Frontends frontend;
+  class Core core;
+  class Adapters adapter;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant A as Shardline API
-  participant T as Shardline Transfer
-  participant O as Object Store
-  participant I as Index Store
-
-  C->>A: Request scoped token or reconstruction plan
-  A->>I: Validate repository scope and metadata
-  A-->>C: Reconstruction response with authorized fetch info
-  C->>T: Upload xorb or fetch range
-  T->>O: Read or write immutable object bytes
-  C->>A: Register shard metadata
-  A->>I: Commit validated reconstruction state
-```
+- The router enables one or more frontends.
+- Optional Git providers interact through the server/core path for token issuance and webhooks.
+- The shared core stays protocol-neutral where possible.
+- Storage, metadata, cache, and provider logic stay behind adapter boundaries.
 
 ## Deployment Profiles
 
 ```mermaid
 flowchart TD
-  Local[Local single-node] --> LocalStore[Local object storage + local metadata]
-  Small[Production small] --> SmallStore[S3-compatible objects + Postgres metadata]
-  Scaled[Production scaled] --> Split[Separate api and transfer deployments]
-  Split --> Shared[(Shared S3, Postgres, Redis cache)]
+  subgraph Canvas[ ]
+    direction TD
+    Profiles[Deployment profiles]
+    Profiles --> Local[Local single-node]
+    Profiles --> Small[Production small]
+    Profiles --> Scaled[Production scaled]
+
+    Local --> LocalStore[Local object storage and local metadata]
+    Small --> SmallStore[S3-compatible objects and Postgres metadata]
+    Scaled --> Split[Separate api and transfer deployments]
+    Split --> Shared[(Shared S3, Postgres, Redis cache)]
+  end
+
+  style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
+  classDef root fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  classDef profile fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  classDef target fill:#dff3e4,stroke:#90c6a0,color:#1f2937;
+  class Profiles root;
+  class Local,Small,Scaled,Split profile;
+  class LocalStore,SmallStore,Shared target;
+  linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
 - Local single-node: `docker compose -f docker-compose.yml up --build`

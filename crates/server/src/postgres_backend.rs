@@ -11,7 +11,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions, query_scalar};
 use tokio::task;
 
 use crate::{
-    ServerError, ShardMetadataLimits,
+    ServerError, ServerFrontend, ShardMetadataLimits,
     chunk_store::{chunk_hash_from_chunk_object_key_if_present, chunk_object_key},
     config::default_upload_max_in_flight_chunks,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
@@ -36,6 +36,7 @@ pub struct PostgresBackend {
     public_base_url: String,
     chunk_size: NonZeroUsize,
     upload_max_in_flight_chunks: NonZeroUsize,
+    server_frontends: Vec<ServerFrontend>,
     index_store: PostgresIndexStore,
     record_store: PostgresRecordStore,
     object_store: ServerObjectStore,
@@ -72,17 +73,19 @@ impl PostgresBackend {
         index_postgres_url: &str,
         object_store: ServerObjectStore,
     ) -> Result<Self, ServerError> {
-        Self::new_with_object_store_and_upload_parallelism(
+        Self::new_with_object_store_and_upload_parallelism_with_frontends(
             root,
             public_base_url,
             chunk_size,
             default_upload_max_in_flight_chunks(),
             index_postgres_url,
             object_store,
+            &[ServerFrontend::Xet],
         )
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn new_with_object_store_and_upload_parallelism(
         _root: PathBuf,
         public_base_url: String,
@@ -91,12 +94,34 @@ impl PostgresBackend {
         index_postgres_url: &str,
         object_store: ServerObjectStore,
     ) -> Result<Self, ServerError> {
+        Self::new_with_object_store_and_upload_parallelism_with_frontends(
+            _root,
+            public_base_url,
+            chunk_size,
+            upload_max_in_flight_chunks,
+            index_postgres_url,
+            object_store,
+            &[ServerFrontend::Xet],
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_object_store_and_upload_parallelism_with_frontends(
+        _root: PathBuf,
+        public_base_url: String,
+        chunk_size: NonZeroUsize,
+        upload_max_in_flight_chunks: NonZeroUsize,
+        index_postgres_url: &str,
+        object_store: ServerObjectStore,
+        server_frontends: &[ServerFrontend],
+    ) -> Result<Self, ServerError> {
         let pool = connect_postgres_metadata_pool(index_postgres_url, 10)?;
 
         Ok(Self {
             public_base_url,
             chunk_size,
             upload_max_in_flight_chunks,
+            server_frontends: server_frontends.to_vec(),
             index_store: PostgresIndexStore::new(pool.clone()),
             record_store: PostgresRecordStore::new(pool),
             object_store,
@@ -317,9 +342,12 @@ impl PostgresBackend {
             .read_record(file_id, content_hash, repository_scope)
             .await?;
         let object_store = self.object_store();
-        task::spawn_blocking(move || reconstruct_file_record_bytes(&object_store, &record))
-            .await
-            .map_err(ServerError::BlockingTask)?
+        let server_frontends = self.server_frontends.clone();
+        task::spawn_blocking(move || {
+            reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 
     /// Reads a stored chunk by hash.

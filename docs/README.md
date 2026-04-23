@@ -6,8 +6,8 @@ Xet-compatible protocol support.
 These docs describe how Shardline stores content-addressed data, exposes the current Xet
 frontend, verifies protocol objects, and runs in self-hosted deployments.
 
-`shardline serve` currently exposes the Xet frontend by default.
-There is no runtime frontend selector yet; `--role` only splits API and transfer duties.
+`shardline serve` carries an explicit runtime frontend set.
+Today the implemented/default frontend is `xet`; `--role` only splits API and transfer duties.
 
 The default deployment model is a single process.
 When traffic grows, the same `shardline serve` binary can be split into `api` and

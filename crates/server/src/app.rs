@@ -24,6 +24,7 @@ use crate::{
     backend::ServerBackend,
     provider::ProviderTokenService,
     reconstruction_cache::ReconstructionCacheService,
+    server_frontend::ServerFrontend,
     server_role::ServerRole,
     transfer_limiter::TransferLimiter,
     xet_adapter::{XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE},
@@ -146,25 +147,10 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 post(handle_provider_webhook)
                     .layer(DefaultBodyLimit::max(provider_webhook_body_limit)),
             )
-            .route(XET_READ_TOKEN_ROUTE, get(issue_xet_read_token))
-            .route(XET_WRITE_TOKEN_ROUTE, get(issue_xet_write_token))
-            .route("/reconstructions", get(batch_reconstruction))
-            .route("/v1/reconstructions", get(batch_reconstruction))
-            .route("/v1/reconstructions/{file_id}", get(reconstruction))
-            .route("/v2/reconstructions/{file_id}", get(reconstruction_v2))
-            .route("/shards", post(upload_shard))
-            .route("/v1/shards", post(upload_shard))
             .route("/v1/stats", get(stats));
     }
-    if role.serves_transfer() {
-        app = app
-            .route("/v1/chunks/default/{hash}", get(read_chunk))
-            .route("/v1/chunks/default-merkledb/{hash}", get(read_chunk))
-            .route(
-                "/v1/xorbs/default/{hash}",
-                head(head_xorb).post(upload_xorb),
-            )
-            .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer));
+    for frontend in state.config.server_frontends() {
+        app = register_frontend_routes(app, *frontend, role);
     }
 
     Ok(app
@@ -196,6 +182,41 @@ pub async fn serve_with_listener(
     let app = router(config).await?;
     serve_http(listener, app).await?;
     Ok(())
+}
+
+fn register_frontend_routes(
+    app: Router<Arc<AppState>>,
+    frontend: ServerFrontend,
+    role: ServerRole,
+) -> Router<Arc<AppState>> {
+    match frontend {
+        ServerFrontend::Xet => register_xet_routes(app, role),
+    }
+}
+
+fn register_xet_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+    if role.serves_api() {
+        app = app
+            .route(XET_READ_TOKEN_ROUTE, get(issue_xet_read_token))
+            .route(XET_WRITE_TOKEN_ROUTE, get(issue_xet_write_token))
+            .route("/reconstructions", get(batch_reconstruction))
+            .route("/v1/reconstructions", get(batch_reconstruction))
+            .route("/v1/reconstructions/{file_id}", get(reconstruction))
+            .route("/v2/reconstructions/{file_id}", get(reconstruction_v2))
+            .route("/shards", post(upload_shard))
+            .route("/v1/shards", post(upload_shard));
+    }
+    if role.serves_transfer() {
+        app = app
+            .route("/v1/chunks/default/{hash}", get(read_chunk))
+            .route("/v1/chunks/default-merkledb/{hash}", get(read_chunk))
+            .route(
+                "/v1/xorbs/default/{hash}",
+                head(head_xorb).post(upload_xorb),
+            )
+            .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer));
+    }
+    app
 }
 
 fn authorize(

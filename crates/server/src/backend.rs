@@ -51,24 +51,27 @@ impl ServerBackend {
     pub(crate) async fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
         let object_store = object_store_from_config(config)?;
         if let Some(index_postgres_url) = config.index_postgres_url() {
-            let backend = PostgresBackend::new_with_object_store_and_upload_parallelism(
-                config.root_dir().to_path_buf(),
-                config.public_base_url().to_owned(),
-                config.chunk_size(),
-                config.upload_max_in_flight_chunks(),
-                index_postgres_url,
-                object_store,
-            )
-            .await?;
+            let backend =
+                PostgresBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+                    config.root_dir().to_path_buf(),
+                    config.public_base_url().to_owned(),
+                    config.chunk_size(),
+                    config.upload_max_in_flight_chunks(),
+                    index_postgres_url,
+                    object_store,
+                    config.server_frontends(),
+                )
+                .await?;
             return Ok(Self::Postgres(backend));
         }
 
-        let backend = LocalBackend::new_with_object_store_and_upload_parallelism(
+        let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
             config.root_dir().to_path_buf(),
             config.public_base_url().to_owned(),
             config.chunk_size(),
             config.upload_max_in_flight_chunks(),
             object_store,
+            config.server_frontends(),
         )
         .await?;
         Ok(Self::Local(backend))
