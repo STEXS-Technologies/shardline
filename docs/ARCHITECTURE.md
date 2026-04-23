@@ -4,7 +4,7 @@ Shardline is an open, self-hostable content-addressed storage backend with
 Xet-compatible protocol support.
 It uses a protocol-neutral CAS coordinator with explicit frontend adapters.
 The runtime hosts an explicit frontend set.
-Today, the production frontend in that set is Xet: clients upload xorbs and shards, the
+Today, the implemented frontend in that set is the Xet protocol: clients upload xorbs and shards, the
 server verifies and indexes them, and clients later request file reconstruction
 metadata to download only the byte ranges they need.
 

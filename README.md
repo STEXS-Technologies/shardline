@@ -14,7 +14,7 @@ reconstructions, serves range-aware downloads, and can run either as a direct,
 providerless Xet-compatible backend or with GitHub, GitLab, Gitea, or generic Git forge
 integration without baking provider-specific behavior into the CAS core.
 
-The first production frontend Shardline supports is Xet.
+The default implemented frontend is the Xet protocol.
 `shardline serve` now accepts an explicit frontend set through `--frontend` or
 `SHARDLINE_SERVER_FRONTENDS`, with `xet` enabled by default.
 The core storage, indexing, and reconstruction boundaries stay separate from Xet-specific
