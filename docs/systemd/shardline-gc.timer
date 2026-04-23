@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Shardline garbage collection on a schedule
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+Unit=shardline-gc.service
+
+[Install]
+WantedBy=timers.target

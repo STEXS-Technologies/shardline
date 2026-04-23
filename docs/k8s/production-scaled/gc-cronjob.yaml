@@ -1,0 +1,97 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shardline-gc
+spec:
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: shardline
+            app.kubernetes.io/component: gc
+        spec:
+          serviceAccountName: shardline
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: gc
+              image: registry.example.com/shardline:0.1.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - gc
+                - --mark
+                - --sweep
+                - --retention-seconds
+                - "86400"
+              env:
+                - name: SHARDLINE_SERVER_ROLE
+                  value: api
+                - name: SHARDLINE_INDEX_POSTGRES_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: shardline-runtime
+                      key: index-postgres-url
+                - name: SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: shardline-runtime
+                      key: reconstruction-cache-url
+                - name: SHARDLINE_S3_ACCESS_KEY_ID_FILE
+                  value: /run/secrets/shardline/s3-access-key-id
+                - name: SHARDLINE_S3_SECRET_ACCESS_KEY_FILE
+                  value: /run/secrets/shardline/s3-secret-access-key
+                - name: SHARDLINE_TOKEN_SIGNING_KEY_FILE
+                  value: /run/secrets/shardline/token-signing-key
+              envFrom:
+                - configMapRef:
+                    name: shardline-config
+              volumeMounts:
+                - name: root
+                  mountPath: /data/shardline
+                - name: tmp
+                  mountPath: /tmp
+                - name: runtime-secrets
+                  mountPath: /run/secrets/shardline
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 256Mi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                readOnlyRootFilesystem: true
+          volumes:
+            - name: root
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
+            - name: runtime-secrets
+              secret:
+                secretName: shardline-runtime
+                defaultMode: 0440
+                items:
+                  - key: token-signing-key
+                    path: token-signing-key
+                  - key: s3-access-key-id
+                    path: s3-access-key-id
+                  - key: s3-secret-access-key
+                    path: s3-secret-access-key

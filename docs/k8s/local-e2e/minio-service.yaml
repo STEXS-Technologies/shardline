@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: console
+      port: 9001
+      targetPort: console

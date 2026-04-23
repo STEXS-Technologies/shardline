@@ -1,0 +1,8 @@
+# Audit configuration for cargo-audit
+# https://rustsec.org/advisories/
+
+[advisories]
+# Ignore RSA Marvin Attack - we don't use MySQL (only Postgres)
+# The vulnerable rsa crate is only pulled in via sqlx-mysql which we don't use
+# Track: https://rustsec.org/advisories/RUSTSEC-2023-0071
+ignore = ["RUSTSEC-2023-0071"]

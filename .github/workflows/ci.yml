@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Run contributor CI matrix
+        run: cargo make ci
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SHARDLINE_FUZZ_TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+        with:
+          install-rust-toolchain: "false"
+          cargo-tools: cargo-make,cargo-nextest,cargo-fuzz
+
+      - name: Run bounded fuzz smoke suite
+        run: cargo make shardline-fuzz-smoke

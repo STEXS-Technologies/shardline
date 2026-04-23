@@ -1,0 +1,104 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shardline
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - cas.example.com
+      secretName: shardline-tls
+  rules:
+    - host: cas.example.com
+      http:
+        paths:
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /v1/providers
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /reconstructions
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /v1/reconstructions
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /v2/reconstructions
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /shards
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /v1/shards
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /v1/stats
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-api
+                port:
+                  name: http
+          - path: /v1/chunks
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-transfer
+                port:
+                  name: http
+          - path: /v1/xorbs
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-transfer
+                port:
+                  name: http
+          - path: /transfer/xorb
+            pathType: Prefix
+            backend:
+              service:
+                name: shardline-transfer
+                port:
+                  name: http

@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish crates, Docker images, and GitHub release assets"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CRATE_PACKAGES: >-
+        shardline-protocol
+        shardline-test-support
+        shardline-storage
+        shardline-cache
+        shardline-vcs
+        shardline-index
+        shardline-cas
+        shardline-server
+        shardline
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Verify tagged commit is on main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "FETCH_HEAD"; then
+            echo "Tag ${GITHUB_REF_NAME} points to commit ${GITHUB_SHA} which is not on origin/main"
+            exit 1
+          fi
+
+      - name: Validate publish ref
+        if: github.event_name == 'workflow_dispatch' && inputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            echo "Manual publish must be run from a release tag, not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      - name: Validate release version
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(cargo pkgid -p shardline | sed -E 's/.*@([^@]+)$/\1/')"
+          if [[ "${tag_version}" != "${package_version}" ]]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match Cargo package version ${package_version}" >&2
+            exit 1
+          fi
+
+      - name: Run contributor CI matrix
+        run: cargo make ci
+
+      - name: Build release archive
+        run: bash scripts/build-release-archive.sh x86_64-unknown-linux-gnu dist
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: shardline:release-check
+
+      - name: Smoke-test Docker image
+        run: docker run --rm shardline:release-check --help >/dev/null
+
+      - name: Publish crates.io packages
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "CARGO_REGISTRY_TOKEN secret is required to publish crates" >&2
+            exit 1
+          fi
+
+          crate_version() {
+            cargo pkgid -p "$1" | sed -E 's/.*@([^@]+)$/\1/'
+          }
+
+          crate_version_published() {
+            local crate="$1"
+            local version="$2"
+            curl --fail --silent --show-error \
+              "https://crates.io/api/v1/crates/${crate}/${version}" \
+              >/dev/null 2>&1
+          }
+
+          wait_for_crate_version() {
+            local crate="$1"
+            local version="$2"
+            for _attempt in $(seq 1 60); do
+              if crate_version_published "${crate}" "${version}"; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "Timed out waiting for ${crate} ${version} to become available on crates.io" >&2
+            return 1
+          }
+
+          for crate in ${CRATE_PACKAGES}; do
+            version="$(crate_version "${crate}")"
+            if crate_version_published "${crate}" "${version}"; then
+              echo "${crate} ${version} already exists on crates.io; skipping"
+            else
+              cargo publish --locked -p "${crate}" --token "${CARGO_REGISTRY_TOKEN}"
+            fi
+            wait_for_crate_version "${crate}" "${version}"
+          done
+
+      - name: Login to Docker Hub
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker Hub image
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/shardline:${{ github.ref_name }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/shardline:latest
+
+      - name: Publish GitHub release assets
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

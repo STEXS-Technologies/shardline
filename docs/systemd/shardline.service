@@ -1,0 +1,25 @@
+[Unit]
+Description=Shardline Xet backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shardline
+Group=shardline
+EnvironmentFile=/etc/shardline/shardline.env
+ExecStart=/usr/local/bin/shardline serve
+ExecStartPre=/usr/local/bin/shardline config check
+Restart=on-failure
+RestartSec=5
+StateDirectory=shardline
+WorkingDirectory=/var/lib/shardline
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/shardline
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

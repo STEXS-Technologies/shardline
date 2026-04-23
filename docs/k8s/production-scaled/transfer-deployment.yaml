@@ -1,0 +1,171 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardline-transfer
+spec:
+  replicas: 3
+  revisionHistoryLimit: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shardline
+      app.kubernetes.io/component: transfer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shardline
+        app.kubernetes.io/component: transfer
+    spec:
+      serviceAccountName: shardline
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shardline
+              app.kubernetes.io/component: transfer
+      initContainers:
+        - name: config-check
+          image: registry.example.com/shardline:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["shardline", "config", "check"]
+          env:
+            - name: SHARDLINE_SERVER_ROLE
+              value: transfer
+            - name: SHARDLINE_INDEX_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shardline-runtime
+                  key: index-postgres-url
+            - name: SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shardline-runtime
+                  key: reconstruction-cache-url
+            - name: SHARDLINE_S3_ACCESS_KEY_ID_FILE
+              value: /run/secrets/shardline/s3-access-key-id
+            - name: SHARDLINE_S3_SECRET_ACCESS_KEY_FILE
+              value: /run/secrets/shardline/s3-secret-access-key
+            - name: SHARDLINE_TOKEN_SIGNING_KEY_FILE
+              value: /run/secrets/shardline/token-signing-key
+            - name: SHARDLINE_METRICS_TOKEN_FILE
+              value: /run/secrets/shardline/metrics-token
+          envFrom:
+            - configMapRef:
+                name: shardline-config
+          volumeMounts:
+            - name: root
+              mountPath: /data/shardline
+            - name: tmp
+              mountPath: /tmp
+            - name: runtime-secrets
+              mountPath: /run/secrets/shardline
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      containers:
+        - name: shardline
+          image: registry.example.com/shardline:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "--role", "transfer"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SHARDLINE_SERVER_ROLE
+              value: transfer
+            - name: SHARDLINE_INDEX_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shardline-runtime
+                  key: index-postgres-url
+            - name: SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shardline-runtime
+                  key: reconstruction-cache-url
+            - name: SHARDLINE_S3_ACCESS_KEY_ID_FILE
+              value: /run/secrets/shardline/s3-access-key-id
+            - name: SHARDLINE_S3_SECRET_ACCESS_KEY_FILE
+              value: /run/secrets/shardline/s3-secret-access-key
+            - name: SHARDLINE_TOKEN_SIGNING_KEY_FILE
+              value: /run/secrets/shardline/token-signing-key
+            - name: SHARDLINE_METRICS_TOKEN_FILE
+              value: /run/secrets/shardline/metrics-token
+          envFrom:
+            - configMapRef:
+                name: shardline-config
+          volumeMounts:
+            - name: root
+              mountPath: /data/shardline
+            - name: tmp
+              mountPath: /tmp
+            - name: runtime-secrets
+              mountPath: /run/secrets/shardline
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: root
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: runtime-secrets
+          secret:
+            secretName: shardline-runtime
+            defaultMode: 0440
+            items:
+              - key: token-signing-key
+                path: token-signing-key
+              - key: metrics-token
+                path: metrics-token
+              - key: s3-access-key-id
+                path: s3-access-key-id
+              - key: s3-secret-access-key
+                path: s3-secret-access-key

@@ -1,0 +1,2 @@
+-- SQLite does not support dropping individual columns in the compatibility range we target.
+-- This down migration is intentionally a no-op.

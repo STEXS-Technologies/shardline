@@ -1,0 +1,11 @@
+[build]
+# Pin cargo-nextest to a version that's compatible with recent typed_path versions
+# Version 0.104.0 has trait ambiguity issues with typed_path trait impls
+
+[net]
+retry = 3
+
+[env]
+# rdkafka-sys/libfuzzer-sys on macOS need explicit libc++ headers.
+# On Linux this extra include path is harmless if it doesn't exist.
+CXXFLAGS = { value = "-isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1", force = false }

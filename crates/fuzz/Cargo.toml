@@ -1,0 +1,95 @@
+[package]
+name = "shardline-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+description = "Fuzz targets for Shardline parsers, invariants, and storage boundaries."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+blake3 = "1.8.2"
+libfuzzer-sys = "0.4"
+shardline = { version = "0.1.0", path = "../cli" }
+shardline-index = { version = "0.1.0", path = "../index" }
+shardline-protocol = { version = "0.1.0", path = "../protocol" }
+shardline-server = { version = "0.1.0", path = "../server" }
+shardline-storage = { version = "0.1.0", path = "../storage" }
+shardline-vcs = { version = "0.1.0", path = "../vcs" }
+tempfile = "3.15"
+xet-core-structures = "1.5.1"
+
+[[bin]]
+name = "shardline_protocol_hash"
+path = "fuzz_targets/shardline/protocol_hash.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_ranges"
+path = "fuzz_targets/shardline/protocol_ranges.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_token"
+path = "fuzz_targets/shardline/protocol_token.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_xorb"
+path = "fuzz_targets/shardline/protocol_xorb.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_shard_parse"
+path = "fuzz_targets/shardline/shard_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_reconstruction_plan"
+path = "fuzz_targets/shardline/reconstruction_plan.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_storage_key"
+path = "fuzz_targets/shardline/storage_key.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_parse"
+path = "fuzz_targets/shardline/cli_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_lifecycle_repair"
+path = "fuzz_targets/shardline/lifecycle_repair.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_vcs_refs"
+path = "fuzz_targets/shardline/vcs_refs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_local_filesystem_races"
+path = "fuzz_targets/shardline/local_filesystem_races.rs"
+test = false
+doc = false
+
+[lints]
+workspace = true

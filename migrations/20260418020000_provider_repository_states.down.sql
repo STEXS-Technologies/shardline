@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS shardline_provider_repository_states_updated_at_idx;
+
+DROP TABLE IF EXISTS shardline_provider_repository_states;

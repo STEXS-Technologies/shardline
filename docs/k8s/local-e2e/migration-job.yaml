@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shardline-migrate
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      serviceAccountName: shardline
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: shardline:e2e
+          imagePullPolicy: IfNotPresent
+          args: ["db", "migrate", "up"]
+          env:
+            - name: SHARDLINE_INDEX_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shardline-runtime
+                  key: index-postgres-url
+          envFrom:
+            - configMapRef:
+                name: shardline-config
+          volumeMounts:
+            - name: root
+              mountPath: /data/shardline
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: root
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

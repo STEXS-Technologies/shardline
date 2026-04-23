@@ -1,0 +1,17 @@
+[Unit]
+Description=Shardline garbage collection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=shardline
+Group=shardline
+EnvironmentFile=/etc/shardline/shardline.env
+ExecStart=/usr/local/bin/shardline gc --mark --sweep --retention-seconds 86400
+WorkingDirectory=/var/lib/shardline
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/shardline

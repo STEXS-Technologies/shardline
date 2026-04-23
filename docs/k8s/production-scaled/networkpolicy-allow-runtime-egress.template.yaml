@@ -1,0 +1,38 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shardline-allow-runtime-egress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 10.0.10.0/24 # replace with your Postgres network
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 10.0.20.0/24 # replace with your Redis-cache network
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - ipBlock:
+            cidr: 10.0.30.0/24 # replace with your S3-compatible object-storage network
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80

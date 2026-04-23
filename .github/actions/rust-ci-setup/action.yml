@@ -1,0 +1,63 @@
+name: Rust CI Setup
+description: Install the Rust toolchain, cache cargo artifacts, and install CI cargo tools.
+
+inputs:
+  install-rust-toolchain:
+    description: Whether to install the Rust toolchain in this action.
+    required: false
+    default: "true"
+  rust-components:
+    description: Comma-separated rustup components to install.
+    required: false
+    default: rustfmt,clippy
+  cargo-tools:
+    description: Comma-separated cargo-installable tools for CI.
+    required: false
+    default: cargo-make,cargo-nextest
+
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM and libclang (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends clang llvm-dev libclang-dev
+
+        llvm_config_bin="$(command -v llvm-config || true)"
+        if [[ -z "${llvm_config_bin}" ]]; then
+          llvm_config_bin="$(
+            compgen -c \
+              | grep -E '^llvm-config-[0-9]+$' \
+              | sort -V \
+              | tail -n 1 \
+              || true
+          )"
+        fi
+
+        if [[ -n "${llvm_config_bin}" ]]; then
+          llvm_config_path="$(command -v "${llvm_config_bin}")"
+          echo "LLVM_CONFIG_PATH=${llvm_config_path}" >> "${GITHUB_ENV}"
+          llvm_libdir="$("${llvm_config_path}" --libdir || true)"
+          if [[ -n "${llvm_libdir}" ]]; then
+            echo "LIBCLANG_PATH=${llvm_libdir}" >> "${GITHUB_ENV}"
+          fi
+        fi
+
+    - name: Install Rust toolchain
+      if: ${{ inputs.install-rust-toolchain == 'true' }}
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.rust-components }}
+
+    - name: Cache cargo artifacts
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: "shardline-shared-cache"
+
+    - name: Install cargo tools
+      uses: taiki-e/install-action@v2
+      with:
+        tool: ${{ inputs.cargo-tools }}

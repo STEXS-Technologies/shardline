@@ -1,0 +1,35 @@
+[package]
+name = "shardline-protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-protocol"
+readme = "../../README.md"
+description = "Protocol-facing hashes, ranges, secrets, and token types for Shardline."
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+hex = "0.4"
+hmac = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+subtle = { version = "2.6", default-features = false }
+thiserror = { version = "2.0.18", default-features = false }
+xet-core-structures = "1.5.1"
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", default-features = false, features = ["cargo_bench_support"] }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "protocol_core"
+harness = false

@@ -1,0 +1,38 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shardline-allow-shardline-egress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgres
+        - ipBlock:
+            cidr: 10.96.0.0/12
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: minio
+        - ipBlock:
+            cidr: 10.96.0.0/12
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: garnet
+        - ipBlock:
+            cidr: 10.96.0.0/12
+      ports:
+        - protocol: TCP
+          port: 6379

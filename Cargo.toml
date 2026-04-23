@@ -1,0 +1,107 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/shardline/shardline"
+homepage = "https://github.com/shardline/shardline"
+documentation = "https://github.com/shardline/shardline/tree/main/docs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"
+
+[profile.dev]
+debug = 2
+opt-level = 0
+overflow-checks = true
+incremental = false
+panic = "unwind"
+lto = false
+
+[workspace.lints.rust]
+rust_2024_prelude_collisions = "warn"
+rust_2024_incompatible_pat = "warn"
+rust_2024_guarded_string_incompatible_syntax = "warn"
+deprecated_safe_2024 = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+inefficient_to_string = "deny"
+todo = "deny"
+unimplemented = "deny"
+panic = "deny"
+result_large_err = "deny"
+map_err_ignore = "deny"
+unreachable = "deny"
+dbg_macro = "deny"
+ignored_unit_patterns = "deny"
+await_holding_refcell_ref = "deny"
+match_bool = "deny"
+if_same_then_else = "deny"
+needless_pass_by_value = "deny"
+borrowed_box = "deny"
+str_to_string = "deny"
+filter_map_next = "deny"
+iter_not_returning_iterator = "deny"
+needless_collect = "deny"
+wildcard_enum_match_arm = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+undocumented_unsafe_blocks = "deny"
+let_underscore_must_use = "deny"
+must_use_candidate = "deny"
+match_wild_err_arm = "deny"
+indexing_slicing = "deny"
+panic_in_result_fn = "deny"
+unwrap_in_result = "deny"
+disallowed_macros = "deny"
+missing_const_for_fn = "deny"
+implicit_clone = "deny"
+redundant_clone = "deny"
+lossy_float_literal = "deny"
+unnecessary_wraps = "deny"
+map_flatten = "deny"
+or_fun_call = "deny"
+ok_expect = "deny"
+await_holding_lock = "deny"
+mutex_atomic = "deny"
+needless_borrow = "deny"
+wildcard_dependencies = "deny"
+enum_glob_use = "deny"
+match_ref_pats = "deny"
+wrong_self_convention = "deny"
+trivially_copy_pass_by_ref = "deny"
+ptr_arg = "deny"
+needless_lifetimes = "deny"
+mutable_key_type = "deny"
+large_enum_variant = "deny"
+vec_box = "deny"
+float_cmp = "deny"
+bool_assert_comparison = "deny"
+cmp_owned = "deny"
+string_add = "deny"
+assertions_on_constants = "deny"
+useless_asref = "deny"
+shadow_unrelated = "deny"
+arithmetic_side_effects = "deny"
+float_arithmetic = "deny"
+box_collection = "deny"
+unnecessary_box_returns = "deny"
+trait_duplication_in_bounds = "deny"
+single_char_lifetime_names = "deny"
+format_push_string = "deny"
+option_if_let_else = "deny"
+manual_string_new = "deny"
+flat_map_option = "deny"

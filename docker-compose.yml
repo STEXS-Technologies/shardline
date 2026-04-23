@@ -1,0 +1,84 @@
+services:
+  shardline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shardline:local
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /var/lib/shardline/secrets
+        chmod 700 /var/lib/shardline/secrets
+        if [ ! -s /var/lib/shardline/secrets/token-signing-key ]; then
+          umask 077
+          dd if=/dev/urandom bs=32 count=1 status=none | base64 > /var/lib/shardline/secrets/token-signing-key
+        fi
+        if [ -z "$${SHARDLINE_TOKEN_SIGNING_KEY:-}" ]; then
+          unset SHARDLINE_TOKEN_SIGNING_KEY
+          export SHARDLINE_TOKEN_SIGNING_KEY_FILE=/var/lib/shardline/secrets/token-signing-key
+        fi
+        exec shardline serve
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      SHARDLINE_BIND_ADDR: 0.0.0.0:8080
+      SHARDLINE_SERVER_ROLE: all
+      SHARDLINE_PUBLIC_BASE_URL: http://127.0.0.1:18080
+      SHARDLINE_ROOT_DIR: /var/lib/shardline
+      SHARDLINE_OBJECT_STORAGE_ADAPTER: local
+      SHARDLINE_CHUNK_SIZE_BYTES: "65536"
+      SHARDLINE_MAX_SHARD_FILES: "16384"
+      SHARDLINE_MAX_SHARD_XORBS: "16384"
+      SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS: "65536"
+      SHARDLINE_MAX_SHARD_XORB_CHUNKS: "65536"
+      SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER: memory
+      SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS: "30"
+      SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES: "4096"
+      SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS: "64"
+      SHARDLINE_TOKEN_SIGNING_KEY: ${SHARDLINE_TOKEN_SIGNING_KEY:-}
+    volumes:
+      - shardline_data:/var/lib/shardline
+    healthcheck:
+      test: [ "CMD", "shardline", "health", "--server", "http://127.0.0.1:8080" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: quay.io/minio/minio:latest
+    profiles:
+      - s3
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: shardline
+      MINIO_ROOT_PASSWORD: shardline-dev-password
+    ports:
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19001:9001"
+    volumes:
+      - shardline_minio:/data
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    profiles:
+      - s3
+    depends_on:
+      - minio
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 shardline shardline-dev-password; do
+          sleep 1
+        done
+        mc mb --ignore-existing local/shardline
+
+volumes:
+  shardline_data:
+    driver: local
+  shardline_minio:
+    driver: local

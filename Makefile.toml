@@ -1,0 +1,207 @@
+[tasks.build]
+description = "Build all shardline workspace crates"
+workspace = false
+command = "cargo"
+args = ["build", "--workspace", "--all-features", "${@}"]
+dependencies = ["clean"]
+
+[tasks.format-rust]
+description = "Format Rust code using rustfmt"
+workspace = false
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.format-docs]
+description = "Format Markdown docs using flowmark"
+workspace = false
+install_crate = "flowmark"
+install_crate_args = ["--locked"]
+command = "flowmark"
+args = ["-i", "--nobackup", "-s", "-c", "docs", "README.md", "docs"]
+
+[tasks.format]
+description = "Format Rust code and Markdown docs"
+workspace = false
+dependencies = ["format-rust", "format-docs"]
+
+[tasks.format-check]
+description = "Verify code formatting with rustfmt"
+workspace = false
+command = "cargo"
+args = ["fmt", "--check", "--all"]
+
+[tasks.clean]
+description = "Remove build artifacts"
+workspace = false
+command = "cargo"
+args = ["clean", "${@}"]
+
+[tasks.bacon]
+description = "Live code checking with bacon"
+workspace = false
+install_crate = "bacon"
+command = "bacon"
+args = ["${@}", "check-all"]
+
+[tasks.audit]
+description = "Security audit for dependencies"
+workspace = false
+install_crate = "cargo-audit"
+command = "cargo"
+args = ["audit", "${@}"]
+
+[tasks.build-prod]
+description = "Build optimized release binaries"
+workspace = false
+command = "cargo"
+args = ["build", "--workspace", "--release", "--all-features", "${@}"]
+dependencies = ["clean"]
+
+[tasks.check]
+description = "Quick compilation check without building"
+workspace = false
+command = "cargo"
+args = ["check", "--workspace", "--all-targets", "--all-features", "${@}"]
+
+[tasks.test]
+description = "Run shardline tests using cargo-nextest"
+workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked"]
+command = "cargo"
+args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "${@}"]
+
+[tasks.verify-release-binary]
+description = "Build the release shardline binary and smoke-test the packaged entrypoint"
+workspace = false
+command = "bash"
+args = ["scripts/verify-release-binary.sh"]
+
+[tasks.clippy]
+description = "Run clippy with strict rules on the shardline workspace"
+workspace = false
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings", "${@}"]
+
+[tasks.udeps]
+description = "Find unused dependencies (requires nightly)"
+workspace = false
+install_crate = "cargo-udeps"
+command = "cargo"
+args = ["+nightly", "udeps"]
+
+[tasks.bloat]
+description = "Analyze binary size and bloat"
+workspace = false
+install_crate = "cargo-bloat"
+command = "cargo"
+args = ["bloat", "--release", "${@}"]
+
+[tasks.expand]
+description = "Expand macros to see generated code"
+workspace = false
+install_crate = "cargo-expand"
+command = "cargo"
+args = ["expand", "${@}"]
+
+[tasks.shardline-bench-protocol]
+description = "Run shardline protocol microbenchmarks"
+workspace = false
+command = "cargo"
+args = ["bench", "-p", "shardline-protocol", "--bench", "protocol_core", "--", "--noplot", "${@}"]
+
+[tasks.shardline-bench-local-backend]
+description = "Run shardline local-backend microbenchmarks"
+workspace = false
+command = "cargo"
+args = ["bench", "-p", "shardline-server", "--bench", "local_backend", "--", "--noplot", "${@}"]
+
+[tasks.shardline-bench-e2e]
+description = "Run the shardline deterministic end-to-end benchmark suite"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "e2e", "${@}"]
+
+[tasks.shardline-bench-ingest]
+description = "Run the shardline zero-storage ingest benchmark suite"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "e2e", "--mode", "ingest", "${@}"]
+
+[tasks.shardline-perf-e2e]
+description = "Record a perf profile for the optimized shardline end-to-end benchmark suite"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "perf-e2e", "${@}"]
+
+[tasks.shardline-perf-ingest]
+description = "Record a perf profile for the optimized shardline zero-storage ingest benchmark suite"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "perf-e2e", "--mode", "ingest", "${@}"]
+
+[tasks.shardline-perf-upload]
+description = "Record a perf profile for the shardline initial upload hot path"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "perf-e2e", "--scenario", "initial-upload", "${@}"]
+
+[tasks.shardline-perf-reconstruction]
+description = "Record a perf profile for the shardline latest reconstruction hot path"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "perf-e2e", "--scenario", "latest-download", "${@}"]
+
+[tasks.shardline-perf-range]
+description = "Record a perf profile for the shardline ranged reconstruction planning hot path"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "perf-e2e", "--scenario", "ranged-reconstruction", "${@}"]
+
+[tasks.shardline-perf-dedupe]
+description = "Record a perf profile for the shardline cross-repository dedupe upload hot path"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/perf.sh", "perf-e2e", "--scenario", "cross-repository-upload", "${@}"]
+
+[tasks.shardline-fuzz-list]
+description = "List shardline fuzz targets"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/fuzz.sh", "list"]
+
+[tasks.shardline-fuzz]
+description = "Run a shardline fuzz target from the repository root"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/fuzz.sh", "run", "${@}"]
+
+[tasks.shardline-fuzz-smoke]
+description = "Run bounded shardline fuzz passes across every shardline target"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/fuzz.sh", "smoke", "${@}"]
+
+[tasks.deny]
+description = "Check licenses and security advisories"
+workspace = false
+install_crate = "cargo-deny"
+command = "cargo"
+args = ["deny", "check"]
+
+[tasks.ci]
+description = "Run the core contributor CI checks"
+workspace = false
+dependencies = ["format-check", "clippy", "test", "verify-release-binary"]
+
+[tasks.ci-full]
+description = "Run contributor CI plus dependency policy checks"
+workspace = false
+dependencies = ["ci", "deny"]
+
+[tasks.sqlx]
+description = "Run raw SQLx CLI commands"
+workspace = false
+install_crate = "sqlx-cli"
+command = "sqlx"
+args = ["${@}"]
