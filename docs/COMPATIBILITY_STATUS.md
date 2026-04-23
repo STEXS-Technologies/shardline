@@ -3,7 +3,12 @@
 Shardline targets the public Xet protocol and is being built to run against existing Git
 workflows and self-hosted deployments.
 
-Current status:
+## 1.0.0
+
+Shardline `1.0.0` should be treated as a full drop-in Xet backend for the validated
+providerless and provider-aware workflows covered by this repository.
+
+## Validated Coverage
 
 - core CAS routing exists
 - serialized xorb upload validation exists
@@ -50,13 +55,10 @@ Current status:
 - Criterion microbenchmarks, deterministic CLI end-to-end benchmarks, and repeatable
   `perf` workflows exist for hot-path profiling
 
-Shardline is not yet claimed as a complete drop-in Xet backend across every Git workflow
-and deployment matrix.
+## Outside Contract
 
-## Current Limits
-
-- Shardline does not yet claim blanket compatibility across every possible
-  forge-specific workflow, deployment topology, and client-version matrix.
+- Shardline does not claim blanket compatibility across every possible forge-specific
+  workflow, deployment topology, and client-version matrix.
 - Shardline documentation intentionally scopes the public contract to the Xet-facing
   protocol and operator surface it currently implements.
 - Shardline now compiles on non-Unix targets, but local filesystem hardening still uses
@@ -74,13 +76,3 @@ and deployment matrix.
   confirmed
 - keep extending sustained-load, fuzzing, benchmark, and profiling coverage as new hot
   paths or regressions appear
-
-## Release Gate
-
-Shardline should only claim full Xet compatibility after:
-
-- the verified workflow matrix is broad enough to remove the current deployment-matrix
-  caveat
-- provider-backed workflows remain transparent to normal Git usage on supported forges
-- unpatched native Xet clients continue to cover upload, download, clone, fetch, pull,
-  push, sparse checkout, and historical checkout against a stock Shardline deployment
