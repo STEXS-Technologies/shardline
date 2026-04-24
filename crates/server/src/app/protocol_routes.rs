@@ -142,9 +142,10 @@ pub(super) async fn bazel_put_cas(
     if observed != hash {
         return Err(ServerError::ExpectedBodyHashMismatch);
     }
-    let _stored = state
-        .backend
-        .put_object_bytes_if_absent(&object_key, bytes)?;
+    let _stored =
+        state
+            .backend
+            .put_sha256_addressed_object_bytes_if_absent(&object_key, &hash, bytes)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -310,9 +311,10 @@ pub(super) async fn lfs_put_object(
     if observed != oid {
         return Err(ServerError::ExpectedBodyHashMismatch);
     }
-    let _stored = state
-        .backend
-        .put_object_bytes_if_absent(&object_key, bytes)?;
+    let _stored =
+        state
+            .backend
+            .put_sha256_addressed_object_bytes_if_absent(&object_key, &oid, bytes)?;
     Ok(StatusCode::OK)
 }
 
@@ -707,9 +709,11 @@ async fn oci_post_blob_upload(
                 return Err(ServerError::ExpectedBodyHashMismatch);
             }
             let object_key = oci_blob_key(repository, &digest_hex, scope)?;
-            let _stored = state
-                .backend
-                .put_object_bytes_if_absent(&object_key, bytes)?;
+            let _stored = state.backend.put_sha256_addressed_object_bytes_if_absent(
+                &object_key,
+                &digest_hex,
+                bytes,
+            )?;
             return oci_created_response(
                 &oci_blob_location(repository, &digest_hex),
                 Some(&digest_hex),
@@ -841,10 +845,12 @@ async fn oci_put_blob_upload(
     }
     let object_key = oci_blob_key(repository, &digest_hex, scope)?;
     let upload_path = upload_body_path_for_session(state.config.root_dir(), session_id)?;
-    let _stored =
-        state
-            .backend
-            .put_content_addressed_object_file(&object_key, &upload_path, &integrity)?;
+    let _stored = state.backend.put_sha256_addressed_object_file(
+        &object_key,
+        &digest_hex,
+        &upload_path,
+        &integrity,
+    )?;
     delete_upload_session(state.config.root_dir(), session_id).await?;
     oci_created_response(
         &oci_blob_location(repository, &digest_hex),
@@ -935,9 +941,11 @@ async fn oci_put_manifest(
     validate_oci_manifest_document(state, repository, scope, &media_type, &bytes).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
-    let _stored_manifest = state
-        .backend
-        .put_object_bytes_if_absent(&manifest_key, bytes)?;
+    let _stored_manifest = state.backend.put_sha256_addressed_object_bytes_if_absent(
+        &manifest_key,
+        &digest_hex,
+        bytes,
+    )?;
     let _stored_media_type = state
         .backend
         .put_object_bytes_if_absent(&media_type_key, media_type.clone().into_bytes())?;

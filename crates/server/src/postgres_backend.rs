@@ -23,6 +23,7 @@ use crate::{
     },
     object_store::{ServerObjectStore, read_full_object, reconstruct_file_record_bytes},
     overflow::{checked_add, checked_increment},
+    protocol_support::shared_sha256_object_key,
     record_store::parse_stored_file_record_bytes,
     upload_ingest::{FileUploadIngestor, RequestBodyReader},
     validation::{ensure_directory, validate_content_hash, validate_identifier},
@@ -246,6 +247,29 @@ impl PostgresBackend {
             .put_if_absent(object_key, ObjectBody::from_vec(bytes), &integrity)
     }
 
+    pub(crate) fn put_sha256_addressed_object_bytes_if_absent(
+        &self,
+        object_key: &ObjectKey,
+        digest_hex: &str,
+        bytes: Vec<u8>,
+    ) -> Result<PutOutcome, ServerError> {
+        let canonical_key = shared_sha256_object_key(digest_hex)?;
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes()),
+            u64::try_from(bytes.len())?,
+        );
+        let canonical_outcome = self.object_store().put_if_absent(
+            &canonical_key,
+            ObjectBody::from_vec(bytes),
+            &integrity,
+        )?;
+        if canonical_key == *object_key {
+            return Ok(canonical_outcome);
+        }
+        self.object_store()
+            .copy_if_absent(&canonical_key, object_key)
+    }
+
     pub(crate) fn copy_object_if_absent(
         &self,
         source: &ObjectKey,
@@ -267,14 +291,22 @@ impl PostgresBackend {
             .put_overwrite(object_key, ObjectBody::from_vec(bytes), &integrity)
     }
 
-    pub(crate) fn put_content_addressed_object_file(
+    pub(crate) fn put_sha256_addressed_object_file(
         &self,
         object_key: &ObjectKey,
+        digest_hex: &str,
         path: &std::path::Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, ServerError> {
+        let canonical_key = shared_sha256_object_key(digest_hex)?;
+        let canonical_outcome =
+            self.object_store()
+                .put_content_addressed_file(&canonical_key, path, integrity)?;
+        if canonical_key == *object_key {
+            return Ok(canonical_outcome);
+        }
         self.object_store()
-            .put_content_addressed_file(object_key, path, integrity)
+            .copy_if_absent(&canonical_key, object_key)
     }
 
     /// Stores a raw xorb body under its content hash.

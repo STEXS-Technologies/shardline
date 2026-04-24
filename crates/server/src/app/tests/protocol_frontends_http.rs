@@ -1,5 +1,7 @@
 #![allow(clippy::indexing_slicing, clippy::panic_in_result_fn)]
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     error::Error as StdError,
     fs,
@@ -17,12 +19,17 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, spawn, task::JoinHandle};
 
-use super::{bearer_token, serve_with_listener, wait_for_health};
+use super::{
+    bearer_token, serve_with_listener, single_chunk_xorb, single_file_shard, wait_for_health,
+};
 use crate::{
-    ServerConfig, ServerError, ServerFrontend,
+    FileReconstructionResponse, ServerConfig, ServerError, ServerFrontend,
+    bazel_http_adapter::{BazelCacheKind, bazel_cache_object_key},
+    lfs_adapter::lfs_object_key,
     local_backend::chunk_hash,
     object_store::ServerObjectStore,
     oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key},
+    protocol_support::shared_sha256_object_key,
 };
 use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_storage::{ObjectBody, ObjectIntegrity};
@@ -559,6 +566,165 @@ async fn lfs_frontend_batch_reports_stored_object_size() -> Result<(), Box<dyn S
     assert_eq!(download_batch.status(), StatusCode::OK);
     let download_batch = download_batch.json::<Value>().await?;
     assert_eq!(download_batch["objects"][0]["size"], bytes.len());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
+-> Result<(), Box<dyn StdError>> {
+    let runtime = start_protocol_runtime(&[
+        ServerFrontend::Xet,
+        ServerFrontend::Lfs,
+        ServerFrontend::BazelHttp,
+        ServerFrontend::Oci,
+    ])
+    .await?;
+    let client = Client::new();
+    let write_token = scoped_token(TokenScope::Write, "team", "assets")?;
+    let read_token = scoped_token(TokenScope::Read, "team", "assets")?;
+    let repository_scope = scoped_repository("team", "assets")?;
+
+    let shared_bytes = b"shared-frontends-payload";
+    let digest_hex = hex::encode(Sha256::digest(shared_bytes));
+
+    let lfs_upload = client
+        .put(format!(
+            "{}/v1/lfs/objects/{digest_hex}",
+            runtime.base_url()
+        ))
+        .bearer_auth(&write_token)
+        .body(shared_bytes.as_slice().to_vec())
+        .send()
+        .await?;
+    assert_eq!(lfs_upload.status(), StatusCode::OK);
+
+    let bazel_upload = client
+        .put(format!(
+            "{}/v1/bazel/cache/cas/{digest_hex}",
+            runtime.base_url()
+        ))
+        .bearer_auth(&write_token)
+        .body(shared_bytes.as_slice().to_vec())
+        .send()
+        .await?;
+    assert_eq!(bazel_upload.status(), StatusCode::NO_CONTENT);
+
+    let oci_upload = client
+        .post(format!(
+            "{}/v2/team/assets/blobs/uploads?digest=sha256:{digest_hex}",
+            runtime.base_url()
+        ))
+        .bearer_auth(&write_token)
+        .body(shared_bytes.as_slice().to_vec())
+        .send()
+        .await?;
+    assert_eq!(oci_upload.status(), StatusCode::CREATED);
+
+    let lfs_download = client
+        .get(format!(
+            "{}/v1/lfs/objects/{digest_hex}",
+            runtime.base_url()
+        ))
+        .bearer_auth(&read_token)
+        .send()
+        .await?;
+    assert_eq!(lfs_download.status(), StatusCode::OK);
+    assert_eq!(lfs_download.bytes().await?.as_ref(), shared_bytes);
+
+    let bazel_download = client
+        .get(format!(
+            "{}/v1/bazel/cache/cas/{digest_hex}",
+            runtime.base_url()
+        ))
+        .bearer_auth(&read_token)
+        .send()
+        .await?;
+    assert_eq!(bazel_download.status(), StatusCode::OK);
+    assert_eq!(bazel_download.bytes().await?.as_ref(), shared_bytes);
+
+    let oci_download = client
+        .get(format!(
+            "{}/v2/team/assets/blobs/sha256:{digest_hex}",
+            runtime.base_url()
+        ))
+        .bearer_auth(&read_token)
+        .send()
+        .await?;
+    assert_eq!(oci_download.status(), StatusCode::OK);
+    assert_eq!(oci_download.bytes().await?.as_ref(), shared_bytes);
+
+    let (first_xorb, first_hash) = single_chunk_xorb(b"abcd");
+    let (second_xorb, second_hash) = single_chunk_xorb(b"efgh");
+    for (xorb_body, xorb_hash) in [
+        (first_xorb, first_hash.as_str()),
+        (second_xorb, second_hash.as_str()),
+    ] {
+        let uploaded = client
+            .post(format!(
+                "{}/v1/xorbs/default/{xorb_hash}",
+                runtime.base_url()
+            ))
+            .bearer_auth(&write_token)
+            .body(xorb_body)
+            .send()
+            .await?;
+        assert!(uploaded.status().is_success());
+    }
+    let (shard_body, file_hash) =
+        single_file_shard(&[(b"abcd", &first_hash), (b"efgh", &second_hash)]);
+    let shard_upload = client
+        .post(format!("{}/v1/shards", runtime.base_url()))
+        .bearer_auth(&write_token)
+        .body(shard_body)
+        .send()
+        .await?;
+    assert!(shard_upload.status().is_success());
+
+    let reconstruction = client
+        .get(format!(
+            "{}/v1/reconstructions/{file_hash}",
+            runtime.base_url()
+        ))
+        .bearer_auth(&read_token)
+        .send()
+        .await?;
+    assert_eq!(reconstruction.status(), StatusCode::OK);
+    let reconstruction = reconstruction.json::<FileReconstructionResponse>().await?;
+    assert_eq!(reconstruction.terms.len(), 2);
+    assert!(reconstruction.fetch_info.contains_key(&first_hash));
+    assert!(reconstruction.fetch_info.contains_key(&second_hash));
+
+    let object_store = ServerObjectStore::local(runtime.storage_path().join("chunks"))?;
+    let lfs_key = lfs_object_key(&digest_hex, Some(&repository_scope))?;
+    let bazel_key =
+        bazel_cache_object_key(BazelCacheKind::Cas, &digest_hex, Some(&repository_scope))?;
+    let oci_key = oci_blob_key("team/assets", &digest_hex, Some(&repository_scope))?;
+    let shared_key = shared_sha256_object_key(&digest_hex)?;
+    let lfs_path = object_store
+        .local_path_for_key(&lfs_key)
+        .ok_or("expected local object path for lfs object")?;
+    let bazel_path = object_store
+        .local_path_for_key(&bazel_key)
+        .ok_or("expected local object path for bazel object")?;
+    let oci_path = object_store
+        .local_path_for_key(&oci_key)
+        .ok_or("expected local object path for oci object")?;
+    let shared_path = object_store
+        .local_path_for_key(&shared_key)
+        .ok_or("expected local object path for shared object")?;
+
+    #[cfg(unix)]
+    {
+        let lfs_metadata = fs::metadata(&lfs_path)?;
+        let bazel_metadata = fs::metadata(&bazel_path)?;
+        let oci_metadata = fs::metadata(&oci_path)?;
+        let shared_metadata = fs::metadata(&shared_path)?;
+        assert_eq!(lfs_metadata.ino(), bazel_metadata.ino());
+        assert_eq!(lfs_metadata.ino(), oci_metadata.ino());
+        assert_eq!(lfs_metadata.ino(), shared_metadata.ino());
+        assert!(shared_metadata.nlink() >= 4);
+    }
 
     Ok(())
 }

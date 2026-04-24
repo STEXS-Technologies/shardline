@@ -262,6 +262,22 @@ impl ServerBackend {
         }
     }
 
+    pub(crate) fn put_sha256_addressed_object_bytes_if_absent(
+        &self,
+        object_key: &ObjectKey,
+        digest_hex: &str,
+        bytes: Vec<u8>,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
+            }
+            Self::Postgres(backend) => {
+                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
+            }
+        }
+    }
+
     pub(crate) fn copy_object_if_absent(
         &self,
         source: &ObjectKey,
@@ -284,18 +300,19 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) fn put_content_addressed_object_file(
+    pub(crate) fn put_sha256_addressed_object_file(
         &self,
         object_key: &ObjectKey,
+        digest_hex: &str,
         path: &std::path::Path,
         integrity: &shardline_storage::ObjectIntegrity,
     ) -> Result<PutOutcome, ServerError> {
         match self {
             Self::Local(backend) => {
-                backend.put_content_addressed_object_file(object_key, path, integrity)
+                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
             }
             Self::Postgres(backend) => {
-                backend.put_content_addressed_object_file(object_key, path, integrity)
+                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
             }
         }
     }

@@ -41,6 +41,11 @@ pub(crate) fn object_key(value: &str) -> Result<ObjectKey, ServerError> {
     ObjectKey::parse(value).map_err(|_error| ServerError::InvalidContentHash)
 }
 
+pub(crate) fn shared_sha256_object_key(digest_hex: &str) -> Result<ObjectKey, ServerError> {
+    validate_content_hash(digest_hex)?;
+    object_key(&format!("protocols/shared/sha256/{digest_hex}"))
+}
+
 pub(crate) fn validate_oci_repository_name(value: &str) -> Result<(), ServerError> {
     if value.is_empty() || value.starts_with('/') || value.ends_with('/') || value.contains('\\') {
         return Err(ServerError::InvalidRepositoryName);
@@ -120,8 +125,9 @@ pub(crate) fn validate_upload_session_id(value: &str) -> Result<(), ServerError>
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_UPLOAD_SESSION_ID_BYTES, parse_sha256_digest, validate_oci_repository_name,
-        validate_oci_repository_scope, validate_oci_tag, validate_upload_session_id,
+        MAX_UPLOAD_SESSION_ID_BYTES, parse_sha256_digest, shared_sha256_object_key,
+        validate_oci_repository_name, validate_oci_repository_scope, validate_oci_tag,
+        validate_upload_session_id,
     };
     use crate::ServerError;
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
@@ -211,5 +217,20 @@ mod tests {
             validate_oci_repository_scope("other/assets", Some(&scope)),
             Err(ServerError::NotFound)
         ));
+    }
+
+    #[test]
+    fn shared_sha256_key_uses_stable_shared_namespace() {
+        let key = shared_sha256_object_key(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        assert!(key.is_ok());
+        let Ok(key) = key else {
+            return;
+        };
+        assert_eq!(
+            key.as_str(),
+            "protocols/shared/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
     }
 }
