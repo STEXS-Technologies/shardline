@@ -1,6 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
+    sync::Arc,
     time::Duration,
 };
 
@@ -9,8 +10,9 @@ use reqwest::{
     Client, StatusCode,
     header::{CONTENT_TYPE, RANGE},
 };
+use shardline_index::xet_hash_hex_string;
 use shardline_protocol::{RepositoryProvider, TokenScope};
-use tokio::{net::TcpListener, spawn, time::timeout};
+use tokio::{net::TcpListener, spawn, sync::Semaphore, time::timeout};
 
 use super::{
     AppState, STREAM_READ_BUFFER_BYTES, acquire_chunk_transfer_permit, bearer_token, chunk_hash,
@@ -21,8 +23,8 @@ use super::{
 };
 use crate::{
     FileReconstructionResponse, LocalBackend, ReadyResponse, ServerConfig, ServerRole,
-    XorbUploadResponse, backend::ServerBackend, reconstruction_cache::ReconstructionCacheService,
-    transfer_limiter::TransferLimiter,
+    XorbUploadResponse, app::ProtocolMetrics, backend::ServerBackend,
+    reconstruction_cache::ReconstructionCacheService, transfer_limiter::TransferLimiter,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -934,6 +936,8 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
         provider_tokens: None,
         reconstruction_cache,
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::MIN),
+        oci_registry_token_limiter: Arc::new(Semaphore::new(1)),
+        protocol_metrics: ProtocolMetrics::default(),
     };
 
     let first = acquire_chunk_transfer_permit(&state, &hash).await;
@@ -1192,6 +1196,11 @@ async fn metrics_route_reports_runtime_configuration() {
     assert!(body.contains("shardline_auth_enabled 1"));
     assert!(body.contains("shardline_provider_tokens_enabled 0"));
     assert!(body.contains("shardline_metrics_auth_enabled 0"));
+    assert!(body.contains("shardline_oci_registry_token_ttl_seconds 300"));
+    assert!(body.contains("shardline_oci_registry_token_max_in_flight_requests 64"));
+    assert!(body.contains("shardline_oci_registry_token_requests_total 0"));
+    assert!(body.contains("shardline_oci_registry_token_rate_limited_total 0"));
+    assert!(body.contains("shardline_oci_registry_token_active_requests 0"));
 
     server.abort();
 }
@@ -1424,7 +1433,7 @@ async fn write_routes_reject_read_only_tokens() {
     let response = Client::new()
         .post(format!(
             "{base_url}/v1/xorbs/default/{}",
-            chunk_hash(b"aaaa").api_hex_string()
+            xet_hash_hex_string(chunk_hash(b"aaaa"))
         ))
         .bearer_auth(token)
         .body("aaaa".as_bytes().to_vec())

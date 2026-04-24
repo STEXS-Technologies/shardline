@@ -7,6 +7,7 @@ use std::{num::NonZeroUsize, path::PathBuf};
 
 use axum::body::Bytes;
 use shardline_protocol::{ByteRange, RepositoryScope};
+use shardline_storage::{DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix, PutOutcome};
 #[cfg(test)]
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
@@ -247,6 +248,146 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.object_backend_name(),
             Self::Postgres(backend) => backend.object_backend_name(),
+        }
+    }
+
+    pub(crate) fn put_object_bytes_if_absent(
+        &self,
+        object_key: &ObjectKey,
+        bytes: Vec<u8>,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => backend.put_object_bytes_if_absent(object_key, bytes),
+            Self::Postgres(backend) => backend.put_object_bytes_if_absent(object_key, bytes),
+        }
+    }
+
+    pub(crate) fn put_sha256_addressed_object_bytes_if_absent(
+        &self,
+        object_key: &ObjectKey,
+        digest_hex: &str,
+        bytes: Vec<u8>,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
+            }
+            Self::Postgres(backend) => {
+                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
+            }
+        }
+    }
+
+    pub(crate) fn copy_object_if_absent(
+        &self,
+        source: &ObjectKey,
+        destination: &ObjectKey,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => backend.copy_object_if_absent(source, destination),
+            Self::Postgres(backend) => backend.copy_object_if_absent(source, destination),
+        }
+    }
+
+    pub(crate) fn put_object_bytes_overwrite(
+        &self,
+        object_key: &ObjectKey,
+        bytes: Vec<u8>,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => backend.put_object_bytes_overwrite(object_key, bytes),
+            Self::Postgres(backend) => backend.put_object_bytes_overwrite(object_key, bytes),
+        }
+    }
+
+    pub(crate) fn put_sha256_addressed_object_file(
+        &self,
+        object_key: &ObjectKey,
+        digest_hex: &str,
+        path: &std::path::Path,
+        integrity: &shardline_storage::ObjectIntegrity,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
+            }
+            Self::Postgres(backend) => {
+                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
+            }
+        }
+    }
+
+    pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
+        match self {
+            Self::Local(backend) => backend.object_length(object_key).await,
+            Self::Postgres(backend) => backend.object_length(object_key).await,
+        }
+    }
+
+    pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
+        match self {
+            Self::Local(backend) => backend.read_object(object_key).await,
+            Self::Postgres(backend) => backend.read_object(object_key).await,
+        }
+    }
+
+    pub(crate) async fn read_object_stream(
+        &self,
+        object_key: &ObjectKey,
+        total_length: u64,
+        range: Option<ByteRange>,
+    ) -> Result<ServerByteStream, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend
+                    .read_object_stream(object_key, total_length, range)
+                    .await
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .read_object_stream(object_key, total_length, range)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) fn visit_object_prefix<Visitor>(
+        &self,
+        prefix: &ObjectPrefix,
+        visitor: Visitor,
+    ) -> Result<(), ServerError>
+    where
+        Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
+    {
+        match self {
+            Self::Local(backend) => backend.visit_object_prefix(prefix, visitor),
+            Self::Postgres(backend) => backend.visit_object_prefix(prefix, visitor),
+        }
+    }
+
+    pub(crate) fn list_object_flat_namespace_page(
+        &self,
+        prefix: &ObjectPrefix,
+        start_after: Option<&ObjectKey>,
+        limit: usize,
+    ) -> Result<Vec<ObjectMetadata>, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                backend.list_object_flat_namespace_page(prefix, start_after, limit)
+            }
+            Self::Postgres(backend) => {
+                backend.list_object_flat_namespace_page(prefix, start_after, limit)
+            }
+        }
+    }
+
+    pub(crate) async fn delete_object_if_present(
+        &self,
+        object_key: &ObjectKey,
+    ) -> Result<DeleteOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => backend.delete_object_if_present(object_key).await,
+            Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
         }
     }
 }

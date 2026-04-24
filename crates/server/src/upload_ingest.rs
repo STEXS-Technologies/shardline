@@ -647,6 +647,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use axum::body::Bytes;
+    use shardline_index::xet_hash_hex_string;
 
     use super::FileUploadIngestor;
     use crate::{
@@ -841,8 +842,8 @@ mod tests {
         assert_eq!(response.inserted_chunks, 0);
         assert_eq!(response.reused_chunks, 2);
         assert_eq!(response.stored_bytes, 0);
-        let first_chunk = chunk_hash(b"abcd").api_hex_string();
-        let second_chunk = chunk_hash(b"efgh").api_hex_string();
+        let first_chunk = xet_hash_hex_string(chunk_hash(b"abcd"));
+        let second_chunk = xet_hash_hex_string(chunk_hash(b"efgh"));
         let first_key = chunk_object_key(&first_chunk);
         let second_key = chunk_object_key(&second_chunk);
         assert!(first_key.is_ok());

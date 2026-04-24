@@ -40,6 +40,7 @@ mod record_key;
 mod store;
 #[cfg(test)]
 mod test_invariant_error;
+mod xet_hash;
 
 pub use dedupe::DedupeShardMapping;
 pub use ids::{FileId, StoredObjectId, XorbId};
@@ -63,3 +64,4 @@ pub use record::{
     RecordStoreFuture, RepositoryRecordScope, StoredRecord,
 };
 pub use store::{AsyncIndexStore, IndexStore, IndexStoreFuture};
+pub use xet_hash::{parse_xet_hash_hex, xet_hash_hex_string};

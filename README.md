@@ -7,18 +7,19 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
 Shardline is an open, self-hostable content-addressed storage backend with
-Xet-compatible protocol support.
+pluggable protocol frontends.
 
 It accepts immutable object uploads, verifies protocol objects, plans
 reconstructions, and serves range-aware downloads. You can run it directly as a
-providerless Xet backend or pair it with GitHub, GitLab, Gitea, or a generic Git
+providerless CAS backend or pair it with GitHub, GitLab, Gitea, or a generic Git
 provider without baking provider-specific behavior into the CAS core.
 
-The default implemented frontend is the Xet protocol.
+Validated frontends in this repository today are Xet, Git LFS, Bazel HTTP remote
+cache, and OCI Distribution.
 `shardline serve` now accepts an explicit frontend set through `--frontend` or
 `SHARDLINE_SERVER_FRONTENDS`, with `xet` enabled by default.
-The core storage, indexing, and reconstruction boundaries stay separate from Xet-specific
-protocol handling so future frontends can be added without rewriting the engine.
+The core storage, indexing, and reconstruction boundaries stay separate from
+frontend-specific protocol handling.
 
 For small deployments, `shardline serve` runs the control plane and transfer plane in
 one process. Larger deployments can split the same binary into `api` and `transfer`
@@ -27,7 +28,7 @@ protocol surface.
 
 ## Why Shardline
 
-- self-hostable CAS backend with Xet-compatible protocol support
+- self-hostable CAS backend with explicit protocol frontends
 - production-oriented operator surface: health checks, migrations, fsck, repair, backup,
   storage migration, retention holds, and garbage collection
 - storage and metadata adapters kept behind explicit boundaries
@@ -47,7 +48,7 @@ Start here:
 - [CLI](docs/CLI.md)
 - [Database Migrations](docs/DATABASE_MIGRATIONS.md)
 
-For a direct, providerless Xet-compatible backend:
+For the current providerless Xet-compatible backend:
 
 - deploy the local SQLite + filesystem profile or Postgres + S3 profile
 - from a source checkout, run `shardline serve`; it bootstraps `.shardline/`
@@ -72,7 +73,7 @@ flowchart TD
     Client[Client]
     Provider[Optional Git provider]
     Router[Frontend router]
-    Frontends["<b>Frontend set</b><br/>Xet frontend<br/>Future frontends"]
+    Frontends["<b>Frontend set</b><br/>Xet<br/>Git LFS<br/>Bazel HTTP cache<br/>OCI Distribution"]
     Core["<b>Shared server core</b><br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>GC and operator flows"]
     Adapters["<b>Adapters</b><br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>VCS and provider adapters"]
   end
@@ -139,7 +140,7 @@ flowchart TD
 All three profiles can run providerless.
 Provider integration is optional and only needed when a forge or bridge service must
 mint scoped CAS tokens on behalf of users.
-The exact validated local providerless steps are in
+The exact validated local providerless Xet steps are in
 [Providerless Direct Xet Backend](docs/DEPLOYMENT.md#providerless-direct-xet-backend).
 
 Start with [Deployment](docs/DEPLOYMENT.md), then use
@@ -147,8 +148,8 @@ Start with [Deployment](docs/DEPLOYMENT.md), then use
 
 ## Production Readiness
 
-Shardline is released as `1.0.0` for the validated Xet workflows and operator surface
-documented in this repo. Before a production rollout, read:
+Shardline is released as `1.0.0` for the protocol and operator surface documented in
+this repo. Before a production rollout, read:
 
 - [Deployment](docs/DEPLOYMENT.md)
 - [Operations](docs/OPERATIONS.md)
@@ -159,7 +160,7 @@ documented in this repo. Before a production rollout, read:
 
 | Crate | Purpose |
 | --- | --- |
-| `protocol` | Xet protocol types, hash parsing, byte-range handling, and token types |
+| `protocol` | Shared protocol-facing types, hash and byte-range parsing, scoped token types, and small security/time/text helpers |
 | `cache` | Reconstruction-cache traits and adapters |
 | `storage` | Immutable object-storage contracts and adapters |
 | `index` | Reconstruction and deduplication metadata contracts and adapters |
@@ -177,6 +178,7 @@ documented in this repo. Before a production rollout, read:
 - [Client Configuration](docs/CLIENT_CONFIGURATION.md)
 - [Contributing](CONTRIBUTING.md)
 - [CLI](docs/CLI.md)
+- [Protocol Frontends](docs/PROTOCOLS.md)
 - [Protocol Conformance](docs/PROTOCOL_CONFORMANCE.md)
 - [Compatibility Status](docs/COMPATIBILITY_STATUS.md)
 - [Performance](docs/PERFORMANCE.md)

@@ -1,7 +1,7 @@
 # Shardline Docs
 
 Shardline is an open, self-hostable content-addressed storage backend with
-Xet-compatible protocol support.
+pluggable protocol frontends.
 
 Use this index to find the shortest path for your task. If you are new to the project,
 start with deployment, then read the protocol or operator docs that match your use case.
@@ -23,6 +23,7 @@ start with deployment, then read the protocol or operator docs that match your u
 
 ## Runtime And Contracts
 
+- [Protocol Frontends](PROTOCOLS.md)
 - [Xet Protocol Conformance](PROTOCOL_CONFORMANCE.md)
 - [Storage Adapters](STORAGE_ADAPTERS.md)
 - [Cache Adapters](CACHE_ADAPTERS.md)

@@ -6,11 +6,11 @@ use shardline_protocol::{
     TokenScope, TokenSigner,
 };
 
-const HASH_HEX: &str = "07060504030201000f0e0d0c0b0a090817161514131211101f1e1d1c1b1a1918";
+const HASH_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 fn protocol_benchmarks(criterion: &mut Criterion) {
     let hash = must(
-        ShardlineHash::parse_api_hex(HASH_HEX),
+        ShardlineHash::parse_hex(HASH_HEX),
         "benchmark hash fixture should parse",
     );
     let repository = must(
@@ -42,16 +42,16 @@ fn protocol_benchmarks(criterion: &mut Criterion) {
     );
 
     let mut group = criterion.benchmark_group("shardline_protocol");
-    group.bench_function("hash_parse_api_hex", |bench| {
+    group.bench_function("hash_parse_hex", |bench| {
         bench.iter(|| {
             must(
-                ShardlineHash::parse_api_hex(black_box(HASH_HEX)),
+                ShardlineHash::parse_hex(black_box(HASH_HEX)),
                 "hash parse failed",
             )
         });
     });
-    group.bench_function("hash_api_hex_string", |bench| {
-        bench.iter(|| black_box(hash).api_hex_string());
+    group.bench_function("hash_hex_string", |bench| {
+        bench.iter(|| black_box(hash).hex_string());
     });
     group.bench_function("byte_range_new_and_len", |bench| {
         bench.iter(|| {

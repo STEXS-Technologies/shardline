@@ -1,7 +1,7 @@
 use std::{io::Cursor, path::PathBuf};
 
 use serde::Serialize;
-use shardline_protocol::{ShardlineHash, validate_serialized_xorb};
+use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, PutOutcome, S3ObjectStoreConfig,
 };
@@ -13,7 +13,10 @@ use crate::{
     local_backend::chunk_hash,
     object_store::{ServerObjectStore, read_full_object},
     overflow::checked_add,
-    xet_adapter::{shard_hash_from_object_key_if_present, xorb_hash_from_object_key_if_present},
+    xet_adapter::{
+        shard_hash_from_object_key_if_present, validate_serialized_xorb,
+        xorb_hash_from_object_key_if_present,
+    },
 };
 
 /// Object-storage endpoint used by storage migration.
@@ -163,12 +166,12 @@ fn validate_source_object_matches_content_addressed_key(
     bytes: &[u8],
 ) -> Result<(), ServerError> {
     if let Some(expected_hash) = chunk_hash_from_chunk_object_key_if_present(key)? {
-        let observed_hash = chunk_hash(bytes).api_hex_string();
+        let observed_hash = xet_hash_hex_string(chunk_hash(bytes));
         ensure_observed_hash_matches_key(key, expected_hash, &observed_hash)?;
     }
 
     if let Some(expected_hash) = xorb_hash_from_object_key_if_present(key)? {
-        let expected_hash = ShardlineHash::parse_api_hex(expected_hash)?;
+        let expected_hash = parse_xet_hash_hex(expected_hash)?;
         let mut cursor = Cursor::new(bytes);
         validate_serialized_xorb(&mut cursor, expected_hash)?;
     }

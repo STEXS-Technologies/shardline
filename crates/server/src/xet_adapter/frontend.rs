@@ -1,4 +1,4 @@
-use shardline_protocol::ShardlineHash;
+use shardline_index::parse_xet_hash_hex;
 
 use crate::ServerError;
 
@@ -9,7 +9,7 @@ pub(crate) const XET_WRITE_TOKEN_ROUTE: &str =
     "/api/{provider}/{owner}/{repo}/xet-write-token/{rev}";
 
 pub(crate) fn validate_hash_path(value: &str) -> Result<(), ServerError> {
-    ShardlineHash::parse_api_hex(value)?;
+    parse_xet_hash_hex(value)?;
     Ok(())
 }
 

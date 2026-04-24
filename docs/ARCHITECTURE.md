@@ -1,15 +1,18 @@
 # Architecture
 
 Shardline is an open, self-hostable content-addressed storage backend with
-Xet-compatible protocol support.
+pluggable protocol frontends.
 It uses a protocol-neutral CAS coordinator with explicit frontend adapters.
 The runtime hosts an explicit frontend set.
-Today, the implemented frontend in that set is the Xet protocol: clients upload xorbs and shards, the
-server verifies and indexes them, and clients later request file reconstruction
-metadata to download only the byte ranges they need.
+Validated frontends in this repository today are Xet, Git LFS, Bazel HTTP remote
+cache, and OCI Distribution.
+They share the same storage, metadata, authorization, lifecycle, and operator
+surface while keeping protocol-specific request shaping and object handling in
+dedicated adapters.
 
 ## Goals
 
+- Speak one or more practical CAS-facing protocols behind a shared backend.
 - Speak the public Xet CAS API closely enough for existing Xet-compatible clients.
 - Reduce repeated upload and storage costs through chunk-level deduplication.
 - Support local and cloud object storage through explicit adapter contracts.
@@ -34,7 +37,7 @@ flowchart TD
     direction TD
     Client[Client]
     Router[Frontend router]
-    Frontends["<b>Frontend set</b><br/>Xet frontend<br/>Future frontends"]
+    Frontends["<b>Frontend set</b><br/>Xet<br/>Git LFS<br/>Bazel HTTP cache<br/>OCI Distribution"]
     Core["<b>Shared server core</b><br/>Auth and scope checks<br/>CAS coordinator<br/>Reconstruction planner<br/>Lifecycle and operator flows"]
     Adapters["<b>Adapters</b><br/>Index and record store<br/>Object store<br/>Reconstruction cache<br/>Provider adapters"]
   end
@@ -58,7 +61,7 @@ flowchart TD
 
 Read it as:
 
-- the router selects one enabled frontend
+- the router selects among the enabled frontends for each request
 - the shared core handles authorization, coordination, reconstruction, and operator
   workflows
 - adapters provide the durable storage, metadata, cache, and provider boundaries
@@ -95,20 +98,33 @@ back to durable metadata and repairs the cache lazily.
 
 ## Public API Surface
 
-The current production server exposes the Xet-compatible CAS API:
+The current production server exposes multiple protocol route families:
 
-- `GET /v1/reconstructions/{file_id}`
-- `GET /v1/chunks/default/{hash}`
-- `POST /v1/xorbs/default/{hash}`
-- `POST /v1/shards`
+- Xet:
+  `GET /v1/reconstructions/{file_id}`,
+  `GET /v1/chunks/default/{hash}`,
+  `POST /v1/xorbs/default/{hash}`,
+  `POST /v1/shards`
+- Git LFS:
+  `POST /v1/lfs/objects/batch`,
+  `GET|HEAD|PUT /v1/lfs/objects/{oid}`
+- Bazel HTTP remote cache:
+  `GET|PUT /v1/bazel/cache/ac/{hash}`,
+  `GET|PUT /v1/bazel/cache/cas/{hash}`
+- OCI Distribution:
+  `GET /v2/`,
+  blob upload and download routes,
+  manifest `PUT|GET|HEAD|DELETE`,
+  `GET /v2/{repository}/tags/list`,
+  `GET /v2/token`
 
 When provider-backed token issuance is enabled, the server also exposes:
 
 - `POST /v1/providers/{provider}/tokens`
 - `POST /v1/providers/{provider}/webhooks`
 
-For storage adapters that cannot issue native presigned URLs, the server also exposes a
-range-enforced transfer endpoint:
+For storage adapters that cannot issue native presigned URLs, the Xet frontend also
+exposes a range-enforced transfer endpoint:
 
 - `GET /transfer/xorb/{prefix}/{hash}`
 
@@ -116,6 +132,13 @@ The Xet-specific route constants, hash/path validation, transfer URL constructio
 reconstruction shaping, and protocol-object ingest flow are intentionally isolated
 inside the server's `xet_adapter` layer rather than spread through generic backend and
 routing code.
+
+Other frontends follow the same pattern:
+
+- protocol-specific route registration at the HTTP edge
+- protocol-specific object-key and request-shape logic inside a dedicated adapter
+- shared authorization, object storage, metadata, cache, fsck, repair, and GC
+  services in the core
 
 The transfer endpoint is an implementation detail.
 Reconstruction responses can point to native presigned object-store URLs when an adapter
@@ -170,10 +193,12 @@ flowchart TD
   linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
-`api` serves control-plane endpoints such as reconstruction lookup, provider-backed
-token issuance, and shard registration.
-`transfer` serves the large request and response paths: chunk download, xorb upload, and
-xorb range transfer.
+`api` serves control-plane and metadata-oriented endpoints such as reconstruction
+lookup, provider-backed token issuance, webhook handling, LFS batch negotiation,
+and OCI tag, manifest, and token-service routes.
+`transfer` serves the large request and response paths such as chunk download,
+protocol object upload, blob transfer, cache object transfer, and Xet xorb range
+transfer.
 `all` keeps the single-node behavior and serves both route sets from one process.
 
 ## Source Layout
@@ -206,7 +231,8 @@ flowchart TD
 
 Crate responsibilities:
 
-- `protocol`: Xet protocol types, hashes, ranges, tokens, and protocol validation
+- `protocol`: shared protocol types, generic hashes, ranges, tokens, and small
+  security/time/text helpers
 - `server`: HTTP runtime, frontend hosting, migrations, repair, and GC
 - `cli`: operator entrypoint and command wiring
 - `cas`: protocol-neutral coordination and planning
@@ -228,22 +254,24 @@ should use named files directly; do not introduce `mod.rs` files.
 The server is async-first and streams large request and response bodies.
 It must not buffer full untrusted uploads or full reconstructed downloads in memory
 unless the body is already within an explicit small bound.
-Native Xet uploads do not use server-side `incoming` files or shard parsing workspaces
-on the data path.
-The coordinator consumes bounded request frames, validates protocol objects in memory
-under the configured request-size limit, then commits bytes through the selected
-object-storage adapter.
+The coordinator consumes bounded request frames, validates protocol objects under the
+configured request-size limits, then commits bytes through the selected object-storage
+adapter.
 
 Expected concurrency behavior:
 
-- native xorb and shard upload bodies are capped before Xet validation
-- native shard metadata sections are counted and bounded before per-section records are
+- frontend-specific upload bodies are capped before validation and commit
+- Xet shard metadata sections are counted and bounded before per-section records are
   materialized
+- Git LFS and Bazel HTTP object paths validate digest shape before storage access
+- OCI upload sessions, tag listing, token issuance, and manifest writes are bounded
+  by explicit limits before they reach durable state
 - object writes are idempotent by content hash
-- shard registration uses a transaction in the index store
+- protocol metadata registration uses transactional metadata updates where the
+  frontend requires it
 - reconstruction planning is read-heavy and avoids coarse locks
-- transfer responses stream reconstruction chunks and support range reads and
-  backpressure
+- transfer responses and registry/blob reads stream bytes and support range reads
+  and backpressure
 - local transfer reads use bounded async file buffers after metadata and authorization
   validation
 

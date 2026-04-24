@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use shardline_index::{AsyncIndexStore, FileRecordStorageLayout, RecordStore, StoredRecord};
+use shardline_index::{
+    AsyncIndexStore, FileRecordStorageLayout, RecordStore, StoredRecord, xet_hash_hex_string,
+};
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore};
 
 use crate::{
@@ -56,7 +58,7 @@ where
 
     index_store
         .visit_dedupe_shard_mappings(|mapping| {
-            let chunk_hash_hex = mapping.chunk_hash().api_hex_string();
+            let chunk_hash_hex = xet_hash_hex_string(mapping.chunk_hash());
             if reachability
                 .live_dedupe_chunk_hashes
                 .contains(&chunk_hash_hex)

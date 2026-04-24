@@ -142,6 +142,23 @@ pub(crate) fn put_bytes_if_absent(
     }
 }
 
+pub(crate) fn write_bytes_atomically(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        write_bytes_atomically_unix(root, path, bytes)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        let parent = path.parent().ok_or_else(invalid_local_path_error)?;
+        fs::create_dir_all(parent)?;
+        let temporary = write_temporary_file(path, bytes)?;
+        fs::rename(temporary, path)?;
+        Ok(())
+    }
+}
+
 #[cfg(unix)]
 fn hard_link_file_if_absent_unix(root: &Path, path: &Path, temporary: &Path) -> io::Result<()> {
     let anchored = open_anchored_target(root, path)?;
@@ -205,6 +222,27 @@ fn put_bytes_if_absent_unix(
 }
 
 #[cfg(unix)]
+fn write_bytes_atomically_unix(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let anchored = open_anchored_target(root, path)?;
+    run_before_local_write_hook(&anchored.logical_path());
+    let final_path = anchored.final_path();
+    let temporary =
+        write_anchored_temporary_file_shared(&anchored, bytes, anchored_path_options().file_mode)?;
+    match fs::rename(&temporary, &final_path) {
+        Ok(()) => {}
+        Err(error) => {
+            remove_if_present(&temporary)?;
+            return Err(error);
+        }
+    }
+    if let Err(error) = ensure_parent_path_matches_anchor(&anchored) {
+        remove_if_present(&final_path)?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn open_anchored_target(root: &Path, path: &Path) -> io::Result<AnchoredTarget> {
     open_anchored_target_shared(
         root,
@@ -236,6 +274,27 @@ fn open_existing_regular_file(path: &Path) -> io::Result<File> {
         ));
     }
     Ok(file)
+}
+
+#[cfg(not(unix))]
+fn write_temporary_file(path: &Path, bytes: &[u8]) -> io::Result<std::path::PathBuf> {
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+    {
+        Ok(mut file) => {
+            file.write_all(bytes)?;
+            file.flush()?;
+            Ok(temporary)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            fs::remove_file(&temporary)?;
+            write_temporary_file(path, bytes)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(unix)]

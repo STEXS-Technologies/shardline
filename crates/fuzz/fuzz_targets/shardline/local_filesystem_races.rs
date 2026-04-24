@@ -13,6 +13,7 @@ use std::{
 
 use libfuzzer_sys::fuzz_target;
 use shardline::write_output_bytes;
+use shardline_index::xet_hash_hex_string;
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
@@ -71,7 +72,7 @@ fn exercise_local_object_write(body: &[u8]) {
         return;
     };
     let hash = ShardlineHash::from_bytes(*blake3::hash(body).as_bytes());
-    let key_text = format!("aa/{}", hash.api_hex_string());
+    let key_text = format!("aa/{}", xet_hash_hex_string(hash));
     let key = ObjectKey::parse(&key_text);
     assert!(key.is_ok());
     let Ok(key) = key else {
@@ -88,7 +89,7 @@ fn exercise_local_object_write(body: &[u8]) {
     stop.store(true, Ordering::SeqCst);
     let _joined = mutator.join();
 
-    assert_no_escape(outside.path(), hash.api_hex_string().as_str());
+    assert_no_escape(outside.path(), xet_hash_hex_string(hash).as_str());
     if put_result.is_ok() {
         assert_file_is_either_absent_or_expected(store.path_for_key(&key).as_path(), body);
     }

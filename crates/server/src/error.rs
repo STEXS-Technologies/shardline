@@ -2,7 +2,7 @@ use std::{io::Error as IoError, num::TryFromIntError};
 
 use axum::{
     Error as AxumError, Json,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -12,12 +12,14 @@ use shardline_index::{
     FileRecordInvariantError, LocalIndexStoreError, MemoryIndexStoreError, MemoryRecordStoreError,
     PostgresMetadataStoreError, QuarantineCandidateError, RetentionHoldError, WebhookDeliveryError,
 };
-use shardline_protocol::{HashParseError, HttpRangeParseError, TokenCodecError, XorbParseError};
+use shardline_protocol::{HashParseError, HttpRangeParseError, TokenCodecError};
 use shardline_storage::{LocalObjectStoreError, ObjectPrefixError, S3ObjectStoreError};
 use thiserror::Error;
 use tokio::task::JoinError;
 
-use crate::{config::ServerConfigError, provider::ProviderServiceError};
+use crate::{
+    config::ServerConfigError, provider::ProviderServiceError, xet_adapter::XorbParseError,
+};
 
 /// Lifecycle metadata consistency failure.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -350,6 +352,30 @@ pub enum ServerError {
     /// The uploaded body did not match the expected SHA-256 identifier.
     #[error("uploaded body hash did not match the expected sha256")]
     ExpectedBodyHashMismatch,
+    /// A digest string was malformed.
+    #[error("digest must use sha256:<64 lowercase hex> format")]
+    InvalidDigest,
+    /// A repository name or namespace path was malformed.
+    #[error("repository name was invalid")]
+    InvalidRepositoryName,
+    /// A manifest reference or tag was malformed.
+    #[error("manifest reference was invalid")]
+    InvalidManifestReference,
+    /// The requested representation does not match any accepted media type.
+    #[error("requested representation was not acceptable")]
+    NotAcceptable,
+    /// The request requires a protocol-specific authentication challenge.
+    #[error("authorization challenge required")]
+    UnauthorizedChallenge(String),
+    /// An upload session identifier was malformed.
+    #[error("upload session identifier was invalid")]
+    InvalidUploadSession,
+    /// Too many OCI upload sessions are currently active.
+    #[error("too many active oci upload sessions")]
+    TooManyUploadSessions,
+    /// Too many OCI registry token exchanges are currently active.
+    #[error("too many active oci registry token requests")]
+    TooManyRegistryTokenRequests,
     /// Redis reconstruction cache was selected without a URL.
     #[error("redis reconstruction cache requires a redis url")]
     MissingReconstructionCacheRedisUrl,
@@ -387,9 +413,15 @@ impl ServerError {
         match self {
             Self::InvalidFileId
             | Self::InvalidContentHash
+            | Self::InvalidDigest
+            | Self::InvalidRepositoryName
+            | Self::InvalidManifestReference
+            | Self::InvalidUploadSession
             | Self::InvalidXorbPrefix
             | Self::HashParse(_)
             | Self::ObjectPrefix(_) => StatusCode::BAD_REQUEST,
+            Self::NotAcceptable => StatusCode::NOT_ACCEPTABLE,
+            Self::UnauthorizedChallenge(_) => StatusCode::UNAUTHORIZED,
             Self::InvalidRangeHeader => StatusCode::BAD_REQUEST,
             Self::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::XorbHashMismatch
@@ -420,6 +452,9 @@ impl ServerError {
             | Self::ProviderDenied => StatusCode::FORBIDDEN,
             Self::InvalidProviderTokenRequest | Self::InvalidProviderWebhookPayload => {
                 StatusCode::BAD_REQUEST
+            }
+            Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
+                StatusCode::TOO_MANY_REQUESTS
             }
             Self::TransferLimiterClosed => StatusCode::SERVICE_UNAVAILABLE,
             Self::Io(_)
@@ -455,10 +490,32 @@ impl ServerError {
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        let should_attach_default_challenge = matches!(
+            self,
+            Self::MissingAuthorization | Self::InvalidAuthorizationHeader | Self::InvalidToken(_)
+        );
+        let custom_challenge = if let Self::UnauthorizedChallenge(custom_header) = &self {
+            Some(custom_header.as_str())
+        } else {
+            None
+        };
         let body = ErrorBody {
             error: self.to_string(),
         };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Some(custom_header) = custom_challenge {
+            if let Ok(header_value) = HeaderValue::from_str(custom_header) {
+                response
+                    .headers_mut()
+                    .insert(WWW_AUTHENTICATE, header_value);
+            }
+        } else if should_attach_default_challenge {
+            response.headers_mut().insert(
+                WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer realm=\"shardline\""),
+            );
+        }
+        response
     }
 }
 

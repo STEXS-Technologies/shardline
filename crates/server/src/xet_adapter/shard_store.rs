@@ -5,10 +5,10 @@ use std::{
 };
 
 use axum::body::Bytes;
-use shardline_index::{AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileRecord};
-use shardline_protocol::{
-    RepositoryScope, ShardlineHash, ValidatedXorbChunk, validate_serialized_xorb,
+use shardline_index::{
+    AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileRecord, parse_xet_hash_hex,
 };
+use shardline_protocol::RepositoryScope;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome};
 use xet_core_structures::{
     merklehash::{MerkleHash, compute_data_hash},
@@ -33,7 +33,7 @@ use crate::{
     validation::validate_content_hash,
 };
 
-use super::xorb_object_key;
+use super::{ValidatedXorbChunk, validate_serialized_xorb, xorb_object_key};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedShardUpload {
@@ -82,7 +82,7 @@ where
     IndexAdapter: AsyncIndexStore,
     IndexAdapter::Error: Into<ServerError>,
 {
-    let chunk_hash = ShardlineHash::parse_api_hex(chunk_hash_hex)?;
+    let chunk_hash = parse_xet_hash_hex(chunk_hash_hex)?;
     let Some(mapping) = index_store
         .dedupe_shard_mapping(&chunk_hash)
         .await
@@ -488,7 +488,7 @@ fn load_xorb_range_info(
         return Err(ServerError::MissingReferencedXorb);
     };
     let bytes = read_full_object(object_store, &key, metadata.length())?;
-    let expected_hash = ShardlineHash::parse_api_hex(hash_hex)?;
+    let expected_hash = parse_xet_hash_hex(hash_hex)?;
     let mut reader = Cursor::new(bytes);
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let packed_chunk_ends = validated
@@ -503,7 +503,7 @@ pub(crate) fn dedupe_shard_mapping(
     chunk_hash_hex: &str,
     shard_key: &ObjectKey,
 ) -> Result<DedupeShardMapping, ServerError> {
-    let chunk_hash = ShardlineHash::parse_api_hex(chunk_hash_hex)?;
+    let chunk_hash = parse_xet_hash_hex(chunk_hash_hex)?;
     Ok(DedupeShardMapping::new(chunk_hash, shard_key.clone()))
 }
 

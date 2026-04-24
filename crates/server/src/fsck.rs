@@ -9,7 +9,7 @@ mod record_checks;
 
 use shardline_index::{
     AsyncIndexStore, FileRecord, FileRecordInvariantError, LocalIndexStore, PostgresIndexStore,
-    PostgresRecordStore,
+    PostgresRecordStore, xet_hash_hex_string,
 };
 use shardline_storage::ObjectKey;
 use thiserror::Error;
@@ -702,7 +702,7 @@ where
         .visit_dedupe_shard_mappings(|mapping| {
             report.inspected_dedupe_shard_mappings =
                 checked_increment(report.inspected_dedupe_shard_mappings)?;
-            let chunk_hash_hex = mapping.chunk_hash().api_hex_string();
+            let chunk_hash_hex = xet_hash_hex_string(mapping.chunk_hash());
             let shard_location =
                 object_location_display(object_root, object_store, mapping.shard_object_key());
             let metadata = match object_store.metadata(mapping.shard_object_key())? {
@@ -777,7 +777,7 @@ where
         .map_err(Into::into)?;
     for file_id in file_ids {
         report.inspected_reconstructions = checked_increment(report.inspected_reconstructions)?;
-        let file_id_hex = file_id.hash().api_hex_string();
+        let file_id_hex = xet_hash_hex_string(file_id.hash());
         let Some(reconstruction) = index_store
             .reconstruction(&file_id)
             .await
@@ -813,7 +813,7 @@ where
                     FsckIssueKind::MissingReconstructionXorb,
                     file_id_hex.clone(),
                     FsckIssueDetail::MissingReconstructionXorb {
-                        xorb_hash: object_id.hash().api_hex_string(),
+                        xorb_hash: xet_hash_hex_string(object_id.hash()),
                     },
                 )?;
             }

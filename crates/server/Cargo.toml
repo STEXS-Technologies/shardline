@@ -19,6 +19,7 @@ base64.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 libc.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -60,4 +61,16 @@ workspace = true
 
 [[bench]]
 name = "local_backend"
+harness = false
+
+[[bench]]
+name = "oci_tags"
+harness = false
+
+[[bench]]
+name = "oci_tags_fixed"
+harness = false
+
+[[bench]]
+name = "oci_finalize_fixed"
 harness = false

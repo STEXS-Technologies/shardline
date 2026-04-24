@@ -24,7 +24,13 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
+hex.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "s3_put_file_fixed"
+harness = false
