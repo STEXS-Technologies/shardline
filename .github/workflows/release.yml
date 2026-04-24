@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -98,6 +99,14 @@ jobs:
       - name: Smoke-test Docker image
         run: docker run --rm shardline:release-check --help >/dev/null
 
+      - name: Derive GHCR image name
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        id: ghcr
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/shardline" >> "${GITHUB_OUTPUT}"
+
       - name: Publish crates.io packages
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
         env:
@@ -144,22 +153,23 @@ jobs:
             wait_for_crate_version "${crate}" "${version}"
           done
 
-      - name: Login to Docker Hub
+      - name: Login to GHCR
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker Hub image
+      - name: Build and push GHCR image
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/shardline:${{ github.ref_name }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/shardline:latest
+            ${{ steps.ghcr.outputs.image }}:${{ github.ref_name }}
+            ${{ steps.ghcr.outputs.image }}:latest
 
       - name: Publish GitHub release assets
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
