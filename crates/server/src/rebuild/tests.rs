@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use serde_json::{from_slice, to_vec};
 use shardline_index::{
     FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore, LocalIndexStore,
-    ReconstructionTerm, RecordStore, StoredObjectId,
+    ReconstructionTerm, RecordStore, StoredObjectId, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
 use tokio::{fs, time::sleep};
@@ -126,12 +126,12 @@ async fn index_rebuild_reaches_a_fixed_point_on_second_run() {
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let record = FileRecord {
         file_id: "asset.bin".to_owned(),
-        content_hash: ShardlineHash::from_bytes([71; 32]).api_hex_string(),
+        content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([71; 32])),
         total_bytes: 4,
         chunk_size: 4,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
-            hash: ShardlineHash::from_bytes([72; 32]).api_hex_string(),
+            hash: xet_hash_hex_string(ShardlineHash::from_bytes([72; 32])),
             offset: 0,
             length: 4,
             range_start: 0,
@@ -260,8 +260,8 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
     let file_hash = ShardlineHash::from_bytes([33; 32]);
     let file_id = FileId::new(file_hash);
     let record = FileRecord {
-        file_id: file_hash.api_hex_string(),
-        content_hash: ShardlineHash::from_bytes([34; 32]).api_hex_string(),
+        file_id: xet_hash_hex_string(file_hash),
+        content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([34; 32])),
         total_bytes: 0,
         chunk_size: 0,
         repository_scope: None,
@@ -602,7 +602,7 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     assert!(uploaded_shard.is_ok());
 
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
-    let chunk_hash = ShardlineHash::parse_api_hex(&xorb_hash);
+    let chunk_hash = parse_xet_hash_hex(&xorb_hash);
     assert!(chunk_hash.is_ok());
     let Ok(chunk_hash) = chunk_hash else {
         return;
@@ -660,7 +660,7 @@ async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_co
     assert!(uploaded_shard.is_ok());
 
     let index_store = LocalIndexStore::open(storage.path().to_path_buf());
-    let chunk_hash = ShardlineHash::parse_api_hex(&xorb_hash);
+    let chunk_hash = parse_xet_hash_hex(&xorb_hash);
     assert!(chunk_hash.is_ok());
     let Ok(chunk_hash) = chunk_hash else {
         return;

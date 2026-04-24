@@ -91,5 +91,29 @@ path = "fuzz_targets/shardline/local_filesystem_races.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_protocol_frontends"
+path = "fuzz_targets/shardline/protocol_frontends.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_lfs"
+path = "fuzz_targets/shardline/protocol_lfs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_bazel_http"
+path = "fuzz_targets/shardline/protocol_bazel_http.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_oci"
+path = "fuzz_targets/shardline/protocol_oci.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true

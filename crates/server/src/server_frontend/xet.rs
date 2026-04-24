@@ -1,9 +1,6 @@
 use std::io::Cursor;
 
-use shardline_index::FileChunkRecord;
-use shardline_protocol::{
-    ShardlineHash, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
-};
+use shardline_index::{FileChunkRecord, parse_xet_hash_hex};
 use shardline_storage::ObjectKey;
 
 use crate::{
@@ -11,6 +8,7 @@ use crate::{
     object_store::{ServerObjectStore, read_full_object},
     xet_adapter::{
         map_xorb_visit_error, shard_hash_from_object_key_if_present,
+        try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
         visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
     },
 };
@@ -72,7 +70,7 @@ pub(super) fn append_referenced_term_bytes(
         return Err(ServerError::MissingReferencedXorb);
     };
     let xorb_bytes = read_full_object(object_store, &xorb_key, metadata.length())?;
-    let expected_hash = ShardlineHash::parse_api_hex(&term.hash)?;
+    let expected_hash = parse_xet_hash_hex(&term.hash)?;
     let mut reader = Cursor::new(xorb_bytes);
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let range_start = usize::try_from(term.range_start)?;

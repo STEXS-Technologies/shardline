@@ -30,14 +30,13 @@ use serde_json::{Value, from_slice, json, to_vec};
 use sha2::{Digest, Sha256};
 use shardline_index::{
     FileChunkRecord, FileRecord, LocalRecordStore, RecordStore, RepositoryRecordScope,
+    parse_xet_hash_hex,
 };
-use shardline_protocol::{
-    RepositoryProvider, ShardlineHash, TokenScope, try_for_each_serialized_xorb_chunk,
-    validate_serialized_xorb,
-};
+use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     FileReconstructionResponse, ProviderTokenIssueRequest, ProviderTokenIssueResponse,
-    ServerConfig, ServerStatsResponse, serve_with_listener,
+    ServerConfig, ServerStatsResponse, serve_with_listener, try_for_each_serialized_xorb_chunk,
+    validate_serialized_xorb,
 };
 use support::ServerE2eInvariantError;
 use tokio::{net::TcpListener, spawn, task::spawn_blocking, time::sleep};
@@ -1245,7 +1244,7 @@ async fn append_record_term_through_cas(
     output: &mut Vec<u8>,
 ) -> Result<(), TestError> {
     let xorb_bytes = read_full_xorb_through_cas(state, token, &term.hash).await?;
-    let expected_hash = ShardlineHash::parse_api_hex(&term.hash)?;
+    let expected_hash = parse_xet_hash_hex(&term.hash)?;
     let mut reader = Cursor::new(xorb_bytes);
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let range_start = usize::try_from(term.range_start)?;

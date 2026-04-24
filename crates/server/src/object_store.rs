@@ -126,6 +126,19 @@ impl ServerObjectStore {
         }
     }
 
+    pub(crate) fn put_overwrite(
+        &self,
+        key: &ObjectKey,
+        body: ObjectBody<'_>,
+        integrity: &ObjectIntegrity,
+    ) -> Result<(), ServerError> {
+        match self {
+            Self::Local(store) => Ok(store.put_overwrite(key, body, integrity)?),
+            Self::S3(store) => Ok(store.put_overwrite(key, body, integrity)?),
+            Self::Blackhole => Ok(()),
+        }
+    }
+
     pub(crate) fn read_range(
         &self,
         key: &ObjectKey,
@@ -161,11 +174,57 @@ impl ServerObjectStore {
         }
     }
 
+    pub(crate) fn list_flat_namespace_page(
+        &self,
+        prefix: &ObjectPrefix,
+        start_after: Option<&ObjectKey>,
+        limit: usize,
+    ) -> Result<Vec<ObjectMetadata>, ServerError> {
+        match self {
+            Self::Local(store) => Ok(store.list_flat_namespace_page(prefix, start_after, limit)?),
+            Self::S3(store) => Ok(store.list_flat_namespace_page(prefix, start_after, limit)?),
+            Self::Blackhole => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) fn local_path_for_key(&self, key: &ObjectKey) -> Option<PathBuf> {
         match self {
             Self::Local(store) => Some(store.path_for_key(key)),
             Self::S3(_store) => None,
             Self::Blackhole => None,
+        }
+    }
+
+    pub(crate) fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, ServerError> {
+        match self {
+            Self::Local(store) => Ok(store.delete_if_present(key)?),
+            Self::S3(store) => Ok(store.delete_if_present(key)?),
+            Self::Blackhole => Ok(DeleteOutcome::NotFound),
+        }
+    }
+
+    pub(crate) fn copy_if_absent(
+        &self,
+        source: &ObjectKey,
+        destination: &ObjectKey,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(store) => Ok(store.copy_object_if_absent(source, destination)?),
+            Self::S3(store) => Ok(store.copy_object_if_absent(source, destination)?),
+            Self::Blackhole => Err(ServerError::NotFound),
+        }
+    }
+
+    pub(crate) fn put_content_addressed_file(
+        &self,
+        key: &ObjectKey,
+        path: &Path,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(store) => Ok(store.put_temporary_file_if_absent(key, path, integrity)?),
+            Self::S3(store) => Ok(store.put_content_addressed_file(key, path, integrity)?),
+            Self::Blackhole => Ok(PutOutcome::Inserted),
         }
     }
 

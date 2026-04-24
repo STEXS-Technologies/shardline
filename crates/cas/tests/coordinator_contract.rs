@@ -8,7 +8,7 @@ use shardline_cas::{CasCoordinator, CasLimits};
 use shardline_index::{
     DedupeShardMapping, FileId, FileReconstruction, IndexStore, LocalIndexStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RetentionHold,
-    StoredObjectId, WebhookDelivery,
+    StoredObjectId, WebhookDelivery, xet_hash_hex_string,
 };
 use shardline_protocol::{ByteRange, ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::{
@@ -167,9 +167,7 @@ impl IndexStore for MemoryIndexStore {
             .copied()
             .collect::<Vec<_>>();
         file_ids.sort_by(|left, right| {
-            left.hash()
-                .api_hex_string()
-                .cmp(&right.hash().api_hex_string())
+            xet_hash_hex_string(left.hash()).cmp(&xet_hash_hex_string(right.hash()))
         });
         Ok(file_ids)
     }
@@ -197,9 +195,7 @@ impl IndexStore for MemoryIndexStore {
             .cloned()
             .collect::<Vec<_>>();
         mappings.sort_by(|left, right| {
-            left.chunk_hash()
-                .api_hex_string()
-                .cmp(&right.chunk_hash().api_hex_string())
+            xet_hash_hex_string(left.chunk_hash()).cmp(&xet_hash_hex_string(right.chunk_hash()))
         });
         Ok(mappings)
     }

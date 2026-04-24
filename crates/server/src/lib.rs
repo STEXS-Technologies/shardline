@@ -29,6 +29,7 @@ mod app;
 mod auth;
 mod backend;
 mod backup;
+mod bazel_http_adapter;
 mod chunk_store;
 mod clock;
 mod config;
@@ -39,16 +40,18 @@ mod fsck;
 mod fuzz;
 mod gc;
 mod ingest_bench;
+mod lfs_adapter;
 mod lifecycle_repair;
 mod local_backend;
-#[cfg(test)]
 mod local_fs;
 mod local_path;
 mod model;
 mod object_store;
+mod oci_adapter;
 mod ops_record_store;
 mod overflow;
 mod postgres_backend;
+mod protocol_support;
 mod provider;
 mod provider_events;
 mod rebuild;
@@ -86,8 +89,11 @@ pub use fsck::{
     LocalFsckReport, ProviderRepositoryStateTimestampField, run_fsck, run_local_fsck,
 };
 pub use fuzz::{
-    FuzzLifecycleRepairSummary, FuzzReconstructionResponseSummary, FuzzRetainedShardSummary,
-    FuzzValidatedXorbSummary, fuzz_lifecycle_repair_summary, fuzz_normalize_and_validate_xorb,
+    FuzzBazelHttpFrontendSummary, FuzzLfsFrontendSummary, FuzzLifecycleRepairSummary,
+    FuzzOciFrontendSummary, FuzzProtocolFrontendSummary, FuzzReconstructionResponseSummary,
+    FuzzRetainedShardSummary, FuzzValidatedXorbSummary, fuzz_bazel_http_frontend_summary,
+    fuzz_lfs_frontend_summary, fuzz_lifecycle_repair_summary, fuzz_normalize_and_validate_xorb,
+    fuzz_oci_frontend_summary, fuzz_protocol_frontend_summary,
     fuzz_reconstruction_response_summary, fuzz_retained_shard_chunk_hashes,
 };
 pub use gc::{
@@ -127,4 +133,8 @@ pub use server_role::{ServerRole, ServerRoleParseError};
 pub use storage_migration::{
     StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport,
     run_storage_migration,
+};
+pub use xet_adapter::{
+    DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbParseError, XorbVisitError,
+    decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
 };

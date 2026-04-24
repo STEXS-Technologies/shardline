@@ -22,7 +22,9 @@ use reqwest::Client;
 use shardline_protocol::{
     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
 };
-use shardline_server::{ReadyResponse, ServerConfig, ServerRole, serve_with_listener};
+use shardline_server::{
+    ReadyResponse, ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
+};
 use support::ServerE2eInvariantError;
 use tokio::{net::TcpListener, spawn, time::sleep};
 use xet_client::cas_client::auth::AuthConfig;
@@ -30,6 +32,24 @@ use xet_data::processing::{
     FileDownloadSession, FileUploadSession, Sha256Policy, XetFileInfo,
     configurations::TranslatorConfig,
 };
+
+struct FrontendRoleRuntime {
+    _storage: tempfile::TempDir,
+    base_url: String,
+    server: tokio::task::JoinHandle<Result<(), ServerError>>,
+}
+
+impl FrontendRoleRuntime {
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+}
+
+impl Drop for FrontendRoleRuntime {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_role_serves_control_plane_routes_only() {
@@ -72,6 +92,20 @@ async fn split_roles_support_native_xet_through_path_routed_proxy() {
         result.is_ok(),
         "split role native xet e2e failed: {error:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_role_serves_oci_api_routes_but_not_oci_transfer_routes() {
+    let result = exercise_oci_role_surface(ServerRole::Api).await;
+    let error = result.as_ref().err().map(ToString::to_string);
+    assert!(result.is_ok(), "oci api role e2e failed: {error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transfer_role_serves_oci_transfer_routes_but_not_oci_api_routes() {
+    let result = exercise_oci_role_surface(ServerRole::Transfer).await;
+    let error = result.as_ref().err().map(ToString::to_string);
+    assert!(result.is_ok(), "oci transfer role e2e failed: {error:?}");
 }
 
 async fn exercise_role(
@@ -133,6 +167,118 @@ async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn 
     }
 
     Err(ServerE2eInvariantError::new("server did not become healthy").into())
+}
+
+async fn start_frontend_role_runtime(
+    role: ServerRole,
+    frontends: &[ServerFrontend],
+) -> Result<FrontendRoleRuntime, Box<dyn Error>> {
+    let storage = tempfile::tempdir()?;
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).ok_or("chunk size")?,
+    )
+    .with_server_role(role)
+    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_server_frontends(frontends.iter().copied())?;
+    let server = spawn(async move { serve_with_listener(config, listener).await });
+    let client = Client::new();
+    wait_for_health(&client, &base_url).await?;
+    Ok(FrontendRoleRuntime {
+        _storage: storage,
+        base_url,
+        server,
+    })
+}
+
+async fn exercise_oci_role_surface(role: ServerRole) -> Result<(), Box<dyn Error>> {
+    let runtime = start_frontend_role_runtime(role, &[ServerFrontend::Oci]).await?;
+    let client = Client::new();
+    let write_token = bearer_token(
+        "operator-1",
+        TokenScope::Write,
+        RepositoryProvider::GitHub,
+        "team",
+        "assets",
+        Some("main"),
+    )?;
+
+    match role {
+        ServerRole::Api => {
+            let root = client
+                .get(format!("{}/v2/", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(root.status(), StatusCode::OK);
+
+            let token = client
+                .get(format!(
+                    "{}/v2/token?service=shardline&scope=repository:team/assets:pull",
+                    runtime.base_url()
+                ))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(token.status(), StatusCode::OK);
+
+            let upload = client
+                .post(format!(
+                    "{}/v2/team/assets/blobs/uploads",
+                    runtime.base_url()
+                ))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(upload.status(), StatusCode::NOT_FOUND);
+        }
+        ServerRole::Transfer => {
+            let root = client
+                .get(format!("{}/v2/", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(root.status(), StatusCode::NOT_FOUND);
+
+            let token = client
+                .get(format!(
+                    "{}/v2/token?service=shardline&scope=repository:team/assets:pull",
+                    runtime.base_url()
+                ))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(token.status(), StatusCode::NOT_FOUND);
+
+            let upload = client
+                .post(format!(
+                    "{}/v2/team/assets/blobs/uploads",
+                    runtime.base_url()
+                ))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(upload.status(), StatusCode::ACCEPTED);
+
+            let manifest = client
+                .get(format!(
+                    "{}/v2/team/assets/manifests/latest",
+                    runtime.base_url()
+                ))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(manifest.status(), StatusCode::NOT_FOUND);
+        }
+        ServerRole::All => {}
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

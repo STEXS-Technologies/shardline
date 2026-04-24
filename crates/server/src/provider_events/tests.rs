@@ -8,12 +8,10 @@ use serde_json::to_vec;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord,
     IndexStore, IndexStoreFuture, LocalIndexStore, LocalIndexStoreError, ProviderRepositoryState,
-    QuarantineCandidate, RecordStore, RetentionHold, WebhookDelivery, XorbId,
+    QuarantineCandidate, RecordStore, RetentionHold, WebhookDelivery, XorbId, parse_xet_hash_hex,
+    xet_hash_hex_string,
 };
-use shardline_protocol::{
-    RepositoryProvider, RepositoryScope, ShardlineHash, try_for_each_serialized_xorb_chunk,
-    validate_serialized_xorb,
-};
+use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_storage::ObjectKey;
 use shardline_vcs::{
     ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind, RevisionRef,
@@ -31,6 +29,7 @@ use crate::{
     object_store::ServerObjectStore,
     record_store::LocalRecordStore,
     test_invariant_error::ServerTestInvariantError,
+    try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
     xet_adapter::{normalize_serialized_xorb, store_uploaded_xorb, xorb_object_key},
 };
 
@@ -431,7 +430,7 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
     let serialized =
         SerializedXorbObject::from_xorb_with_compression(raw_xorb, CompressionScheme::LZ4, false)?;
     let xorb_hash = serialized.hash.hex();
-    let expected_xorb_hash = ShardlineHash::parse_api_hex(&xorb_hash)?;
+    let expected_xorb_hash = parse_xet_hash_hex(&xorb_hash)?;
     let normalized_xorb =
         normalize_serialized_xorb(expected_xorb_hash, &serialized.serialized_data)?;
     let mut reader = Cursor::new(normalized_xorb.as_slice());
@@ -439,7 +438,7 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
     let range_end = u32::try_from(validated.chunks().len())?;
     let mut chunk_hashes = Vec::new();
     try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded_chunk| {
-        chunk_hashes.push(decoded_chunk.descriptor().hash().api_hex_string());
+        chunk_hashes.push(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
         Ok::<(), ServerError>(())
     })?;
     let upload = store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data)?;

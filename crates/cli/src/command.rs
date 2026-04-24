@@ -456,8 +456,8 @@ pub enum BenchMode {
 #[derive(Debug, Parser)]
 #[command(
     name = "shardline",
-    about = "Native Xet-compatible asset coordinator and operations CLI.",
-    long_about = "Shardline serves native Xet traffic, provider integration, storage maintenance, and operational workflows from one CLI.\n\nUse `shardline help <command>` to inspect a command in detail.",
+    about = "Content-addressed storage server and operations CLI.",
+    long_about = "Shardline serves CAS protocol frontends, provider integration, storage maintenance, and operational workflows from one CLI.\n\nThe current frontend set in this repository is Xet, Git LFS, Bazel HTTP remote cache, and OCI Distribution.\n\nUse `shardline help <command>` to inspect a command in detail.",
     after_help = CLI_AFTER_LONG_HELP,
     arg_required_else_help = true,
     next_line_help = true
@@ -1028,8 +1028,15 @@ enum CliServerRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliServerFrontend {
-    /// Serve the Xet-compatible CAS frontend.
+    /// Serve the validated Xet-compatible CAS frontend.
     Xet,
+    /// Serve the Git LFS batch and object-transfer frontend.
+    Lfs,
+    /// Serve the Bazel-compatible HTTP remote-cache frontend.
+    #[value(name = "bazel-http")]
+    BazelHttp,
+    /// Serve the OCI Distribution frontend.
+    Oci,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1335,6 +1342,9 @@ impl From<CliServerFrontend> for ServerFrontend {
     fn from(value: CliServerFrontend) -> Self {
         match value {
             CliServerFrontend::Xet => Self::Xet,
+            CliServerFrontend::Lfs => Self::Lfs,
+            CliServerFrontend::BazelHttp => Self::BazelHttp,
+            CliServerFrontend::Oci => Self::Oci,
         }
     }
 }
@@ -1546,6 +1556,28 @@ mod tests {
             Ok(CliCommand::Serve {
                 role: None,
                 frontends: Some(vec![ServerFrontend::Xet]),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_serve_with_multiple_frontends() {
+        let args = vec![
+            "shardline".to_owned(),
+            "serve".to_owned(),
+            "--frontend".to_owned(),
+            "lfs,bazel-http,oci".to_owned(),
+        ];
+
+        assert_eq!(
+            CliCommand::parse(args),
+            Ok(CliCommand::Serve {
+                role: None,
+                frontends: Some(vec![
+                    ServerFrontend::Lfs,
+                    ServerFrontend::BazelHttp,
+                    ServerFrontend::Oci,
+                ]),
             })
         );
     }

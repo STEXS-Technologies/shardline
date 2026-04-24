@@ -1,8 +1,7 @@
 use std::{io::Cursor, path::Path};
 
-use shardline_index::{FileChunkRecord, FileRecord, RecordStore, StoredRecord};
-use shardline_protocol::{
-    ShardlineHash, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+use shardline_index::{
+    FileChunkRecord, FileRecord, RecordStore, StoredRecord, parse_xet_hash_hex, xet_hash_hex_string,
 };
 
 use super::{
@@ -19,7 +18,10 @@ use crate::{
     overflow::{checked_add, checked_increment},
     record_store::parse_stored_file_record_bytes,
     validation::{validate_content_hash, validate_identifier},
-    xet_adapter::{map_xorb_visit_error, xorb_object_key},
+    xet_adapter::{
+        map_xorb_visit_error, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+        xorb_object_key,
+    },
 };
 
 pub(super) async fn scan_record_tree<RecordAdapter>(
@@ -308,7 +310,7 @@ fn inspect_chunks(
         };
 
         let chunk_bytes = read_full_object(object_store, &object_key, metadata.length())?;
-        let actual_hash = chunk_hash(&chunk_bytes).api_hex_string();
+        let actual_hash = xet_hash_hex_string(chunk_hash(&chunk_bytes));
         if actual_hash != chunk.hash {
             push_issue(
                 report,
@@ -394,7 +396,7 @@ fn inspect_native_xet_term(
     };
 
     let xorb_bytes = read_full_object(object_store, &object_key, metadata.length())?;
-    let expected_hash = ShardlineHash::parse_api_hex(&chunk.hash)?;
+    let expected_hash = parse_xet_hash_hex(&chunk.hash)?;
     let mut reader = Cursor::new(xorb_bytes);
     let validated = validate_serialized_xorb(&mut reader, expected_hash)?;
     let range_start = usize::try_from(chunk.range_start)?;
@@ -424,7 +426,7 @@ fn inspect_native_xet_term(
         let unpacked_length = u64::try_from(decoded_chunk.data().len())?;
         actual_length = checked_add(actual_length, unpacked_length)?;
 
-        let chunk_hash_hex = decoded_chunk.descriptor().hash().api_hex_string();
+        let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
         let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
         reachability
             .referenced_object_keys
@@ -448,7 +450,7 @@ fn inspect_native_xet_term(
 
         let chunk_bytes =
             read_full_object(object_store, &chunk_object_key, chunk_metadata.length())?;
-        let actual_chunk_hash = chunk_hash(&chunk_bytes).api_hex_string();
+        let actual_chunk_hash = xet_hash_hex_string(chunk_hash(&chunk_bytes));
         if actual_chunk_hash != chunk_hash_hex {
             push_issue(
                 report,

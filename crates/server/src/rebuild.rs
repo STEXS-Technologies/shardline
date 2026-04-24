@@ -9,9 +9,8 @@ mod candidates;
 use serde_json::to_vec;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileId, LocalIndexStore, PostgresIndexStore,
-    PostgresRecordStore, RecordStore,
+    PostgresRecordStore, RecordStore, parse_xet_hash_hex, xet_hash_hex_string,
 };
-use shardline_protocol::ShardlineHash;
 use shardline_storage::ObjectPrefix;
 use thiserror::Error;
 
@@ -346,9 +345,9 @@ where
     records
         .into_iter()
         .filter_map(|candidate| {
-            ShardlineHash::parse_api_hex(&candidate.record.file_id)
+            parse_xet_hash_hex(&candidate.record.file_id)
                 .ok()
-                .map(|hash| hash.api_hex_string())
+                .map(xet_hash_hex_string)
         })
         .collect::<HashSet<_>>()
 }
@@ -372,7 +371,7 @@ where
         .map_err(Into::into)?;
     for file_id in existing_file_ids {
         report.scanned_reconstructions = checked_increment(report.scanned_reconstructions)?;
-        let file_id_hex = file_id.hash().api_hex_string();
+        let file_id_hex = xet_hash_hex_string(file_id.hash());
         if desired_reconstructions.contains(&file_id_hex) {
             report.unchanged_reconstructions = checked_increment(report.unchanged_reconstructions)?;
             continue;
@@ -436,10 +435,8 @@ where
         };
 
         for chunk_hash_hex in chunk_hashes {
-            let mapping = DedupeShardMapping::new(
-                ShardlineHash::parse_api_hex(&chunk_hash_hex)?,
-                shard_key.clone(),
-            );
+            let mapping =
+                DedupeShardMapping::new(parse_xet_hash_hex(&chunk_hash_hex)?, shard_key.clone());
             match desired.get(&chunk_hash_hex) {
                 Some(existing)
                     if existing.shard_object_key().as_str()
@@ -459,7 +456,7 @@ where
     let mut existing = HashMap::new();
     index_store
         .visit_dedupe_shard_mappings(|mapping| {
-            existing.insert(mapping.chunk_hash().api_hex_string(), mapping);
+            existing.insert(xet_hash_hex_string(mapping.chunk_hash()), mapping);
             Ok::<(), ServerError>(())
         })
         .await?;
@@ -488,7 +485,7 @@ where
             continue;
         }
 
-        let chunk_hash = ShardlineHash::parse_api_hex(&chunk_hash_hex)?;
+        let chunk_hash = parse_xet_hash_hex(&chunk_hash_hex)?;
         let _deleted = index_store
             .delete_dedupe_shard_mapping(&chunk_hash)
             .await

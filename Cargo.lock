@@ -2946,7 +2946,6 @@ dependencies = [
  "sha2",
  "subtle",
  "thiserror 2.0.18",
- "xet-core-structures",
  "zeroize",
 ]
 
@@ -2961,6 +2960,7 @@ dependencies = [
  "bytes",
  "criterion",
  "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "hmac",
  "libc",
@@ -2997,8 +2997,10 @@ dependencies = [
  "blake3",
  "bytes",
  "futures-util",
+ "hex",
  "libc",
  "object_store",
+ "sha2",
  "shardline-protocol",
  "tempfile",
  "thiserror 2.0.18",

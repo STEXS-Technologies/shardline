@@ -90,6 +90,10 @@ fn server_config_keeps_bind_address_and_public_url() {
         config.reconstruction_cache_memory_max_entries(),
         DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES
     );
+    assert_eq!(config.oci_upload_session_ttl_seconds().get(), 3_600);
+    assert_eq!(config.oci_upload_max_active_sessions().get(), 1_024);
+    assert_eq!(config.oci_registry_token_ttl_seconds().get(), 300);
+    assert_eq!(config.oci_registry_token_max_in_flight_requests().get(), 64);
     assert_eq!(config.index_postgres_url(), None);
     assert_eq!(config.token_signing_key(), None);
     assert_eq!(config.metrics_token(), None);
@@ -353,6 +357,47 @@ fn server_config_can_disable_reconstruction_cache() {
     assert_eq!(
         config.reconstruction_cache_adapter(),
         ReconstructionCacheAdapter::Disabled
+    );
+}
+
+#[test]
+fn server_config_allows_oci_upload_limits_override() {
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+    let root_dir = PathBuf::from("/tmp/shardline");
+    let ttl = NonZeroU64::new(90).unwrap_or(NonZeroU64::MIN);
+    let sessions = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
+    let config = ServerConfig::new(
+        bind_addr,
+        "https://assets.example.test".to_owned(),
+        root_dir,
+        NonZeroUsize::MIN,
+    )
+    .with_oci_upload_session_ttl_seconds(ttl)
+    .with_oci_upload_max_active_sessions(sessions);
+
+    assert_eq!(config.oci_upload_session_ttl_seconds(), ttl);
+    assert_eq!(config.oci_upload_max_active_sessions(), sessions);
+}
+
+#[test]
+fn server_config_allows_oci_registry_token_limits_override() {
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+    let root_dir = PathBuf::from("/tmp/shardline");
+    let ttl = NonZeroU64::new(45).unwrap_or(NonZeroU64::MIN);
+    let in_flight = NonZeroUsize::new(7).unwrap_or(NonZeroUsize::MIN);
+    let config = ServerConfig::new(
+        bind_addr,
+        "https://assets.example.test".to_owned(),
+        root_dir,
+        NonZeroUsize::MIN,
+    )
+    .with_oci_registry_token_ttl_seconds(ttl)
+    .with_oci_registry_token_max_in_flight_requests(in_flight);
+
+    assert_eq!(config.oci_registry_token_ttl_seconds(), ttl);
+    assert_eq!(
+        config.oci_registry_token_max_in_flight_requests(),
+        in_flight
     );
 }
 

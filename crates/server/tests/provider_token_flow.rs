@@ -9,6 +9,7 @@ use std::{
 };
 
 use reqwest::{Client, StatusCode};
+use shardline_index::xet_hash_hex_string;
 use shardline_protocol::ShardlineHash;
 use shardline_server::{ServerConfig, serve_with_listener};
 use shardline_vcs::{
@@ -147,7 +148,7 @@ async fn exercise_provider_token_flow() -> Result<(), Box<dyn Error>> {
 
 fn xet_hash_hex(hash: &MerkleHash) -> String {
     let bytes: [u8; 32] = hash.as_bytes().try_into().unwrap_or([0; 32]);
-    ShardlineHash::from_bytes(bytes).api_hex_string()
+    xet_hash_hex_string(ShardlineHash::from_bytes(bytes))
 }
 
 fn single_chunk_xorb(bytes: &[u8]) -> (Vec<u8>, String) {

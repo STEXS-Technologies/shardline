@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use shardline_index::{FileChunkRecord, FileRecord};
+use shardline_index::{FileChunkRecord, FileRecord, parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::{ByteRange, ChunkRange, ShardlineHash};
 use shardline_server::fuzz_reconstruction_response_summary;
 
@@ -17,7 +17,7 @@ fuzz_target!(|data: (u64, Vec<RawChunk>)| {
         .map(
             |(hash_bytes, offset, length, range_start, range_end, packed_start, packed_end)| {
                 FileChunkRecord {
-                    hash: ShardlineHash::from_bytes(hash_bytes).api_hex_string(),
+                    hash: xet_hash_hex_string(ShardlineHash::from_bytes(hash_bytes)),
                     offset,
                     length,
                     range_start,
@@ -57,7 +57,7 @@ fuzz_target!(|data: (u64, Vec<RawChunk>)| {
         assert!(chunk.length > 0);
         assert!(chunk.range_end > chunk.range_start);
         assert!(chunk.packed_end > chunk.packed_start);
-        assert!(ShardlineHash::parse_api_hex(&chunk.hash).is_ok());
+        assert!(parse_xet_hash_hex(&chunk.hash).is_ok());
         assert!(ChunkRange::new(chunk.range_start, chunk.range_end).is_ok());
         let next_expected_offset = expected_offset.checked_add(chunk.length);
         assert!(next_expected_offset.is_some());

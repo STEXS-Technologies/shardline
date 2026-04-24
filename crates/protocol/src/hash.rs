@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const HASH_BYTE_LENGTH: usize = 32;
-const HASH_API_HEX_LENGTH: usize = 64;
-const HASH_API_GROUP_BYTES: usize = 8;
+const HASH_HEX_LENGTH: usize = 64;
 
 /// A 32-byte protocol hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,14 +23,14 @@ impl ShardlineHash {
         &self.bytes
     }
 
-    /// Parses a hash from the hexadecimal representation used by Xet CAS API paths.
+    /// Parses a hash from canonical lowercase hexadecimal text.
     ///
     /// # Errors
     ///
     /// Returns [`HashParseError`] when the string has the wrong length, contains
     /// non-lowercase hexadecimal characters, or cannot be decoded into 32 bytes.
-    pub fn parse_api_hex(value: &str) -> Result<Self, HashParseError> {
-        if value.len() != HASH_API_HEX_LENGTH {
+    pub fn parse_hex(value: &str) -> Result<Self, HashParseError> {
+        if value.len() != HASH_HEX_LENGTH {
             return Err(HashParseError::InvalidLength);
         }
 
@@ -43,24 +42,18 @@ impl ShardlineHash {
         }
 
         let decoded = hex::decode(value).map_err(|_error| HashParseError::InvalidCharacter)?;
-        let reordered = decoded
-            .chunks_exact(HASH_API_GROUP_BYTES)
-            .flat_map(|chunk| chunk.iter().rev().copied())
-            .collect::<Vec<u8>>();
-        let bytes = <[u8; HASH_BYTE_LENGTH]>::try_from(reordered)
+        let bytes = <[u8; HASH_BYTE_LENGTH]>::try_from(decoded)
             .map_err(|_error| HashParseError::InvalidLength)?;
 
         Ok(Self { bytes })
     }
 
-    /// Returns the hexadecimal representation used by Xet CAS API paths.
+    /// Returns canonical lowercase hexadecimal text.
     #[must_use]
-    pub fn api_hex_string(&self) -> String {
-        let mut encoded = Vec::with_capacity(HASH_API_HEX_LENGTH);
-        for chunk in self.bytes.chunks_exact(HASH_API_GROUP_BYTES) {
-            for byte in chunk.iter().rev() {
-                append_lower_hex_byte(&mut encoded, *byte);
-            }
+    pub fn hex_string(&self) -> String {
+        let mut encoded = Vec::with_capacity(HASH_HEX_LENGTH);
+        for byte in self.bytes {
+            append_lower_hex_byte(&mut encoded, byte);
         }
 
         String::from_utf8(encoded).unwrap_or_default()
@@ -109,23 +102,23 @@ mod tests {
     use super::{HashParseError, ShardlineHash};
 
     #[test]
-    fn api_hash_hex_uses_xet_byte_group_ordering() {
+    fn canonical_hash_hex_round_trips_raw_bytes() {
         let hash = ShardlineHash::from_bytes([
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
             24, 25, 26, 27, 28, 29, 30, 31,
         ]);
 
-        let api_hex = hash.api_hex_string();
+        let hex = hash.hex_string();
 
         assert_eq!(
-            api_hex,
-            "07060504030201000f0e0d0c0b0a090817161514131211101f1e1d1c1b1a1918"
+            hex,
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
         );
-        assert_eq!(ShardlineHash::parse_api_hex(&api_hex), Ok(hash));
+        assert_eq!(ShardlineHash::parse_hex(&hex), Ok(hash));
     }
 
     #[test]
-    fn api_hash_vectors_round_trip_each_xet_byte_group_independently() {
+    fn canonical_hash_vectors_round_trip() {
         let cases = [
             (
                 [
@@ -133,7 +126,7 @@ mod tests {
                     0xdd, 0xee, 0xff, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23,
                     0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
                 ],
-                "7766554433221100ffeeddccbbaa9988fedcba9876543210efcdab8967452301",
+                "00112233445566778899aabbccddeeff1032547698badcfe0123456789abcdef",
             ),
             (
                 [
@@ -141,37 +134,37 @@ mod tests {
                     0x22, 0x11, 0x00, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01, 0xfe, 0xdc,
                     0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
                 ],
-                "8899aabbccddeeff00112233445566770123456789abcdef1032547698badcfe",
+                "ffeeddccbbaa99887766554433221100efcdab8967452301fedcba9876543210",
             ),
         ];
 
-        for (bytes, api_hex) in cases {
+        for (bytes, hex) in cases {
             let hash = ShardlineHash::from_bytes(bytes);
 
-            assert_eq!(hash.api_hex_string(), api_hex);
-            assert_eq!(ShardlineHash::parse_api_hex(api_hex), Ok(hash));
+            assert_eq!(hash.hex_string(), hex);
+            assert_eq!(ShardlineHash::parse_hex(hex), Ok(hash));
         }
     }
 
     #[test]
-    fn api_hash_rejects_uppercase_hex() {
+    fn canonical_hash_rejects_uppercase_hex() {
         let hash = ShardlineHash::from_bytes([31; 32]);
-        let invalid = hash.api_hex_string().replacen('f', "F", 1);
-        let result = ShardlineHash::parse_api_hex(&invalid);
+        let invalid = hash.hex_string().replacen('f', "F", 1);
+        let result = ShardlineHash::parse_hex(&invalid);
 
         assert_eq!(result, Err(HashParseError::InvalidCharacter));
     }
 
     #[test]
-    fn api_hash_rejects_short_hex() {
-        let result = ShardlineHash::parse_api_hex("abc");
+    fn canonical_hash_rejects_short_hex() {
+        let result = ShardlineHash::parse_hex("abc");
 
         assert_eq!(result, Err(HashParseError::InvalidLength));
     }
 
     #[test]
-    fn api_hash_rejects_long_hex() {
-        let result = ShardlineHash::parse_api_hex(
+    fn canonical_hash_rejects_long_hex() {
+        let result = ShardlineHash::parse_hex(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
 
@@ -179,8 +172,8 @@ mod tests {
     }
 
     #[test]
-    fn api_hash_rejects_non_hex_character() {
-        let result = ShardlineHash::parse_api_hex(
+    fn canonical_hash_rejects_non_hex_character() {
+        let result = ShardlineHash::parse_hex(
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
         );
 

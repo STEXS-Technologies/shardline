@@ -1,8 +1,7 @@
 use std::{borrow::Cow, io::Cursor};
 
-use shardline_protocol::{
-    ShardlineHash, ValidatedXorb, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
-};
+use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
+use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome};
 use xet_core_structures::xorb_object::reconstruct_xorb_with_footer;
 
@@ -14,7 +13,10 @@ use crate::{
     validation::validate_content_hash,
 };
 
-use super::map_xorb_visit_error;
+use super::{
+    ValidatedXorb, map_xorb_visit_error, try_for_each_serialized_xorb_chunk,
+    validate_serialized_xorb,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StoredXorbUpload {
@@ -78,12 +80,12 @@ where
     let Some(xorb_hash_hex) = xorb_hash_from_object_key_if_present(object_key)? else {
         return Ok(());
     };
-    let expected_hash = ShardlineHash::parse_api_hex(xorb_hash_hex)?;
+    let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
     let xorb_bytes = read_full_object(object_store, object_key, metadata.length())?;
     let mut cursor = Cursor::new(xorb_bytes);
     let validated = validate_serialized_xorb(&mut cursor, expected_hash)?;
     try_for_each_serialized_xorb_chunk(&mut cursor, &validated, |decoded_chunk| {
-        visitor(decoded_chunk.descriptor().hash().api_hex_string())
+        visitor(xet_hash_hex_string(decoded_chunk.descriptor().hash()))
     })
     .map_err(map_xorb_visit_error)
 }
@@ -93,7 +95,7 @@ pub(crate) fn store_uploaded_xorb(
     expected_hash: &str,
     uploaded_bytes: &[u8],
 ) -> Result<StoredXorbUpload, ServerError> {
-    let expected_hash_value = ShardlineHash::parse_api_hex(expected_hash)?;
+    let expected_hash_value = parse_xet_hash_hex(expected_hash)?;
     let (canonical_bytes, validated) =
         canonicalize_uploaded_xorb(expected_hash_value, uploaded_bytes)?;
     let canonical_length = u64::try_from(canonical_bytes.len())?;
@@ -102,7 +104,7 @@ pub(crate) fn store_uploaded_xorb(
     let mut stored_bytes = 0_u64;
 
     try_for_each_serialized_xorb_chunk(&mut cursor, &validated, |decoded_chunk| {
-        let chunk_hash_hex = decoded_chunk.descriptor().hash().api_hex_string();
+        let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
         let chunk_length = u64::try_from(decoded_chunk.data().len())?;
         unpacked_length = unpacked_length
             .checked_add(chunk_length)
@@ -171,7 +173,7 @@ pub(crate) fn normalize_serialized_xorb(
     let mut normalized = Vec::with_capacity(bytes.len());
     let (_xorb, computed_hash) = reconstruct_xorb_with_footer(&mut normalized, bytes)
         .map_err(|_error| ServerError::InvalidSerializedXorb)?;
-    let computed_hash = ShardlineHash::parse_api_hex(&computed_hash.hex())?;
+    let computed_hash = parse_xet_hash_hex(&computed_hash.hex())?;
     if computed_hash != expected_hash {
         return Err(ServerError::XorbHashMismatch);
     }
@@ -192,14 +194,15 @@ const fn map_object_key_error(error: ObjectKeyError) -> ServerError {
 mod tests {
     use std::{borrow::Cow, io::Cursor};
 
-    use shardline_protocol::{ShardlineHash, validate_serialized_xorb};
+    use shardline_index::parse_xet_hash_hex;
+    use shardline_protocol::ShardlineHash;
     use xet_core_structures::xorb_object::{
         CompressionScheme, SerializedXorbObject,
         xorb_format_test_utils::{ChunkSize, build_raw_xorb},
     };
 
     use super::{
-        canonicalize_uploaded_xorb, normalize_serialized_xorb,
+        canonicalize_uploaded_xorb, normalize_serialized_xorb, validate_serialized_xorb,
         xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::ServerError;
@@ -214,7 +217,7 @@ mod tests {
             return;
         };
         assert!(serialized.footer_start.is_none());
-        let expected_hash = ShardlineHash::parse_api_hex(&serialized.hash.hex());
+        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
         assert!(expected_hash.is_ok());
         let Ok(expected_hash) = expected_hash else {
             return;
@@ -255,7 +258,7 @@ mod tests {
         let Ok(serialized) = serialized else {
             return;
         };
-        let expected_hash = ShardlineHash::parse_api_hex(&serialized.hash.hex());
+        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
         assert!(expected_hash.is_ok());
         let Ok(expected_hash) = expected_hash else {
             return;
@@ -284,7 +287,7 @@ mod tests {
         let Ok(serialized) = serialized else {
             return;
         };
-        let expected_hash = ShardlineHash::parse_api_hex(&serialized.hash.hex());
+        let expected_hash = parse_xet_hash_hex(&serialized.hash.hex());
         assert!(expected_hash.is_ok());
         let Ok(expected_hash) = expected_hash else {
             return;

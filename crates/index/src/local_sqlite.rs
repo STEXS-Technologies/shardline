@@ -34,12 +34,14 @@ use crate::{
     IndexStoreFuture, ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError,
     ReconstructionTerm, RecordStore, RecordStoreFuture, RepositoryRecordScope, RetentionHold,
     RetentionHoldError, StoredObjectId, WebhookDelivery, WebhookDeliveryError, XorbId,
+    parse_xet_hash_hex,
     provider::parse_repository_provider,
     record_key::record_key as shared_record_key,
     record_key::{
         repository_record_scope_key as shared_repository_record_scope_key,
         repository_scope_key as shared_repository_scope_key,
     },
+    xet_hash_hex_string,
 };
 
 const LOCAL_METADATA_DATABASE_FILE_NAME: &str = "metadata.sqlite3";
@@ -199,7 +201,7 @@ impl LocalIndexStore {
              VALUES (?1, ?2)
              ON CONFLICT (object_hash) DO NOTHING",
             params![
-                object_id.hash().api_hex_string(),
+                xet_hash_hex_string(object_id.hash()),
                 u64_to_i64(unix_now_seconds_lossy())?
             ],
         )?;
@@ -240,7 +242,7 @@ impl IndexStore for LocalIndexStore {
                 "SELECT terms
                  FROM shardline_file_reconstructions
                  WHERE file_id = ?1",
-                params![file_id.hash().api_hex_string()],
+                params![xet_hash_hex_string(file_id.hash())],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -258,7 +260,7 @@ impl IndexStore for LocalIndexStore {
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut file_ids = Vec::new();
         for row in rows {
-            let hash = ShardlineHash::parse_api_hex(&row?)?;
+            let hash = parse_xet_hash_hex(&row?)?;
             file_ids.push(FileId::new(hash));
         }
         Ok(file_ids)
@@ -268,7 +270,7 @@ impl IndexStore for LocalIndexStore {
         let connection = self.open_connection()?;
         let changed = connection.execute(
             "DELETE FROM shardline_file_reconstructions WHERE file_id = ?1",
-            params![file_id.hash().api_hex_string()],
+            params![xet_hash_hex_string(file_id.hash())],
         )?;
         Ok(changed > 0)
     }
@@ -279,7 +281,7 @@ impl IndexStore for LocalIndexStore {
             "SELECT EXISTS(
                 SELECT 1 FROM shardline_stored_objects WHERE object_hash = ?1
             )",
-            params![object_id.hash().api_hex_string()],
+            params![xet_hash_hex_string(object_id.hash())],
             |row| row.get::<_, i64>(0),
         )?;
         Ok(exists != 0)
@@ -295,7 +297,7 @@ impl IndexStore for LocalIndexStore {
                 "SELECT chunk_hash, shard_object_key
                  FROM shardline_dedupe_shards
                  WHERE chunk_hash = ?1",
-                params![chunk_hash.api_hex_string()],
+                params![xet_hash_hex_string(chunk_hash)],
                 dedupe_shard_mapping_from_row,
             )
             .optional()
@@ -331,7 +333,7 @@ impl IndexStore for LocalIndexStore {
         let connection = self.open_connection()?;
         let changed = connection.execute(
             "DELETE FROM shardline_dedupe_shards WHERE chunk_hash = ?1",
-            params![chunk_hash.api_hex_string()],
+            params![xet_hash_hex_string(chunk_hash)],
         )?;
         Ok(changed > 0)
     }
@@ -1385,7 +1387,7 @@ struct ReconstructionTermRecord {
 impl ReconstructionTermRecord {
     fn from_domain(term: &ReconstructionTerm) -> Self {
         Self {
-            object_hash: term.object_id().hash().api_hex_string(),
+            object_hash: xet_hash_hex_string(term.object_id().hash()),
             chunk_start: term.chunk_range().start(),
             chunk_end_exclusive: term.chunk_range().end_exclusive(),
             unpacked_length: term.unpacked_length(),
@@ -1393,7 +1395,7 @@ impl ReconstructionTermRecord {
     }
 
     fn into_domain(self) -> Result<ReconstructionTerm, LocalIndexStoreError> {
-        let hash = ShardlineHash::parse_api_hex(&self.object_hash)?;
+        let hash = parse_xet_hash_hex(&self.object_hash)?;
         let range = ChunkRange::new(self.chunk_start, self.chunk_end_exclusive)?;
         Ok(ReconstructionTerm::new(
             StoredObjectId::new(hash),
@@ -1424,7 +1426,7 @@ struct DedupeShardRecord {
 
 impl DedupeShardRecord {
     fn into_domain(self) -> Result<DedupeShardMapping, LocalIndexStoreError> {
-        let chunk_hash = ShardlineHash::parse_api_hex(&self.chunk_hash)?;
+        let chunk_hash = parse_xet_hash_hex(&self.chunk_hash)?;
         let shard_object_key = ObjectKey::parse(&self.shard_object_key)?;
         Ok(DedupeShardMapping::new(chunk_hash, shard_object_key))
     }
@@ -1670,7 +1672,7 @@ fn import_legacy_reconstructions(
             .file_stem()
             .and_then(OsStr::to_str)
             .ok_or_else(invalid_metadata_path_error)?;
-        let file_id = FileId::new(ShardlineHash::parse_api_hex(path_hash)?);
+        let file_id = FileId::new(parse_xet_hash_hex(path_hash)?);
         let reconstruction = parse_reconstruction_json_bytes(&bytes)?;
         upsert_reconstruction_row(
             transaction,
@@ -1955,7 +1957,7 @@ fn upsert_reconstruction_row(
             terms = excluded.terms,
             updated_at_unix_seconds = excluded.updated_at_unix_seconds",
         params![
-            file_id.hash().api_hex_string(),
+            xet_hash_hex_string(file_id.hash()),
             json,
             u64_to_i64(updated_at_unix_seconds)?,
         ],
@@ -1980,7 +1982,7 @@ fn upsert_dedupe_mapping_row(
             shard_object_key = excluded.shard_object_key,
             updated_at_unix_seconds = excluded.updated_at_unix_seconds",
         params![
-            mapping.chunk_hash().api_hex_string(),
+            xet_hash_hex_string(mapping.chunk_hash()),
             mapping.shard_object_key().as_str(),
             u64_to_i64(updated_at_unix_seconds)?,
         ],
@@ -2156,8 +2158,8 @@ fn provider_repository_state_from_row(
 }
 
 fn dedupe_shard_mapping_from_row(row: &Row<'_>) -> Result<DedupeShardMapping, SqliteError> {
-    let chunk_hash = ShardlineHash::parse_api_hex(&row.get::<_, String>("chunk_hash")?)
-        .map_err(from_sql_error)?;
+    let chunk_hash =
+        parse_xet_hash_hex(&row.get::<_, String>("chunk_hash")?).map_err(from_sql_error)?;
     let object_key =
         ObjectKey::parse(&row.get::<_, String>("shard_object_key")?).map_err(from_sql_error)?;
     Ok(DedupeShardMapping::new(chunk_hash, object_key))
@@ -2623,7 +2625,7 @@ mod tests {
         DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore,
         MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState, QuarantineCandidate,
         ReconstructionTerm, RecordStore, RetentionHold, WebhookDelivery, XorbId,
-        test_invariant_error::LocalSqliteInvariantError,
+        parse_xet_hash_hex, test_invariant_error::LocalSqliteInvariantError, xet_hash_hex_string,
     };
 
     fn sample_repository_scope() -> Result<RepositoryScope, Box<dyn Error>> {
@@ -3245,11 +3247,11 @@ mod tests {
                 .path()
                 .join("gc")
                 .join("reconstructions")
-                .join(format!("{}.json", file_id.hash().api_hex_string())),
+                .join(format!("{}.json", xet_hash_hex_string(file_id.hash()))),
             &FileReconstructionRecord::from_domain(&reconstruction),
         )?;
 
-        let xorb_hash = ShardlineHash::from_bytes([4; 32]).api_hex_string();
+        let xorb_hash = xet_hash_hex_string(ShardlineHash::from_bytes([4; 32]));
         write_json(
             &storage
                 .path()
@@ -3261,9 +3263,9 @@ mod tests {
             },
         )?;
 
-        let dedupe_chunk_hash = ShardlineHash::from_bytes([5; 32]).api_hex_string();
+        let dedupe_chunk_hash = xet_hash_hex_string(ShardlineHash::from_bytes([5; 32]));
         let dedupe_mapping = DedupeShardMapping::new(
-            ShardlineHash::parse_api_hex(&dedupe_chunk_hash)?,
+            parse_xet_hash_hex(&dedupe_chunk_hash)?,
             ObjectKey::parse("shards/aa/native.shard")?,
         );
         write_json(
@@ -3278,7 +3280,7 @@ mod tests {
             },
         )?;
 
-        let quarantine_hash = ShardlineHash::from_bytes([6; 32]).api_hex_string();
+        let quarantine_hash = xet_hash_hex_string(ShardlineHash::from_bytes([6; 32]));
         let quarantine_candidate = QuarantineCandidate::new(
             ObjectKey::parse(&format!("{}/{}", &quarantine_hash[..2], quarantine_hash))?,
             9,
@@ -3399,16 +3401,12 @@ mod tests {
                 LocalSqliteInvariantError::new("reconstruction row was not imported").into(),
             );
         }
-        if !IndexStore::contains_xorb(
-            &index_store,
-            &XorbId::new(ShardlineHash::parse_api_hex(&xorb_hash)?),
-        )? {
+        if !IndexStore::contains_xorb(&index_store, &XorbId::new(parse_xet_hash_hex(&xorb_hash)?))?
+        {
             return Err(LocalSqliteInvariantError::new("xorb marker was not imported").into());
         }
-        if IndexStore::dedupe_shard_mapping(
-            &index_store,
-            &ShardlineHash::parse_api_hex(&dedupe_chunk_hash)?,
-        )? != Some(dedupe_mapping)
+        if IndexStore::dedupe_shard_mapping(&index_store, &parse_xet_hash_hex(&dedupe_chunk_hash)?)?
+            != Some(dedupe_mapping)
         {
             return Err(LocalSqliteInvariantError::new("dedupe mapping was not imported").into());
         }
@@ -3475,12 +3473,12 @@ mod tests {
         Ok(vec![
             FileRecord {
                 file_id: "alpha.bin".to_owned(),
-                content_hash: ShardlineHash::from_bytes([11; 32]).api_hex_string(),
+                content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([11; 32])),
                 total_bytes: 4,
                 chunk_size: 4,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
-                    hash: ShardlineHash::from_bytes([21; 32]).api_hex_string(),
+                    hash: xet_hash_hex_string(ShardlineHash::from_bytes([21; 32])),
                     offset: 0,
                     length: 4,
                     range_start: 0,
@@ -3491,13 +3489,13 @@ mod tests {
             },
             FileRecord {
                 file_id: "beta.bin".to_owned(),
-                content_hash: ShardlineHash::from_bytes([12; 32]).api_hex_string(),
+                content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([12; 32])),
                 total_bytes: 8,
                 chunk_size: 4,
                 repository_scope: Some(scope_a),
                 chunks: vec![
                     FileChunkRecord {
-                        hash: ShardlineHash::from_bytes([22; 32]).api_hex_string(),
+                        hash: xet_hash_hex_string(ShardlineHash::from_bytes([22; 32])),
                         offset: 0,
                         length: 4,
                         range_start: 0,
@@ -3506,7 +3504,7 @@ mod tests {
                         packed_end: 4,
                     },
                     FileChunkRecord {
-                        hash: ShardlineHash::from_bytes([23; 32]).api_hex_string(),
+                        hash: xet_hash_hex_string(ShardlineHash::from_bytes([23; 32])),
                         offset: 4,
                         length: 4,
                         range_start: 1,
@@ -3518,12 +3516,12 @@ mod tests {
             },
             FileRecord {
                 file_id: "gamma.bin".to_owned(),
-                content_hash: ShardlineHash::from_bytes([13; 32]).api_hex_string(),
+                content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([13; 32])),
                 total_bytes: 6,
                 chunk_size: 6,
                 repository_scope: Some(scope_b),
                 chunks: vec![FileChunkRecord {
-                    hash: ShardlineHash::from_bytes([24; 32]).api_hex_string(),
+                    hash: xet_hash_hex_string(ShardlineHash::from_bytes([24; 32])),
                     offset: 0,
                     length: 6,
                     range_start: 0,
@@ -3946,7 +3944,7 @@ mod tests {
             .into_iter()
             .map(|mapping| {
                 (
-                    mapping.chunk_hash().api_hex_string(),
+                    xet_hash_hex_string(mapping.chunk_hash()),
                     mapping.shard_object_key().as_str().to_owned(),
                 )
             })

@@ -25,7 +25,7 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, IndexStore, IndexStoreFuture,
     ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError, ReconstructionTerm,
     RetentionHold, RetentionHoldError, StoredObjectId, WebhookDelivery, WebhookDeliveryError,
-    XorbId,
+    XorbId, parse_xet_hash_hex, xet_hash_hex_string,
     provider::parse_repository_provider,
 };
 const MAX_CONTROL_PLANE_METADATA_BYTES: u64 = 1_048_576;
@@ -102,7 +102,7 @@ impl LocalIndexStore {
             &self.root,
             &self.xorb_path(object_id),
             &StoredObjectPresenceRecord {
-                hash: object_id.hash().api_hex_string(),
+                hash: xet_hash_hex_string(object_id.hash()),
             },
         )
     }
@@ -129,7 +129,7 @@ impl LocalIndexStore {
             &self.root,
             &self.dedupe_shard_path(mapping.chunk_hash()),
             &DedupeShardRecord {
-                chunk_hash: mapping.chunk_hash().api_hex_string(),
+                chunk_hash: xet_hash_hex_string(mapping.chunk_hash()),
                 shard_object_key: mapping.shard_object_key().as_str().to_owned(),
             },
         )
@@ -165,16 +165,16 @@ impl LocalIndexStore {
 
     fn reconstruction_path(&self, file_id: &FileId) -> PathBuf {
         self.reconstructions_dir()
-            .join(format!("{}.json", file_id.hash().api_hex_string()))
+            .join(format!("{}.json", xet_hash_hex_string(file_id.hash())))
     }
 
     fn xorb_path(&self, object_id: &StoredObjectId) -> PathBuf {
         self.xorbs_dir()
-            .join(format!("{}.json", object_id.hash().api_hex_string()))
+            .join(format!("{}.json", xet_hash_hex_string(object_id.hash())))
     }
 
     fn dedupe_shard_path(&self, chunk_hash: ShardlineHash) -> PathBuf {
-        let hash = chunk_hash.api_hex_string();
+        let hash = xet_hash_hex_string(&chunk_hash);
         let prefix = hash.get(..2).unwrap_or_default();
         self.dedupe_shards_dir()
             .join(prefix)
@@ -248,15 +248,11 @@ impl IndexStore for LocalIndexStore {
                     HashParseError::InvalidLength,
                 ));
             };
-            let hash = ShardlineHash::parse_api_hex(stem)?;
+            let hash = parse_xet_hash_hex(stem)?;
             file_ids.push(FileId::new(hash));
         }
 
-        file_ids.sort_by(|left, right| {
-            left.hash()
-                .api_hex_string()
-                .cmp(&right.hash().api_hex_string())
-        });
+        file_ids.sort_by(|left, right| xet_hash_hex_string(left.hash()).cmp(&xet_hash_hex_string(right.hash())));
         Ok(file_ids)
     }
 
@@ -303,9 +299,7 @@ impl IndexStore for LocalIndexStore {
         };
         visit_dedupe_shard_mappings_recursive(&self.dedupe_shards_dir(), &mut visitor)?;
         collected.sort_by(|left, right| {
-            left.chunk_hash()
-                .api_hex_string()
-                .cmp(&right.chunk_hash().api_hex_string())
+            xet_hash_hex_string(left.chunk_hash()).cmp(&xet_hash_hex_string(right.chunk_hash()))
         });
         Ok(collected)
     }
@@ -854,7 +848,7 @@ struct ReconstructionTermRecord {
 impl ReconstructionTermRecord {
     fn from_domain(term: &ReconstructionTerm) -> Self {
         Self {
-            object_hash: term.object_id().hash().api_hex_string(),
+            object_hash: xet_hash_hex_string(term.object_id().hash()),
             chunk_start: term.chunk_range().start(),
             chunk_end_exclusive: term.chunk_range().end_exclusive(),
             unpacked_length: term.unpacked_length(),
@@ -862,7 +856,7 @@ impl ReconstructionTermRecord {
     }
 
     fn into_domain(self) -> Result<ReconstructionTerm, LocalIndexStoreError> {
-        let hash = ShardlineHash::parse_api_hex(&self.object_hash)?;
+        let hash = parse_xet_hash_hex(&self.object_hash)?;
         let range = ChunkRange::new(self.chunk_start, self.chunk_end_exclusive)?;
         Ok(ReconstructionTerm::new(
             StoredObjectId::new(hash),
@@ -1041,7 +1035,7 @@ struct DedupeShardRecord {
 
 impl DedupeShardRecord {
     fn into_domain(self) -> Result<DedupeShardMapping, LocalIndexStoreError> {
-        let chunk_hash = ShardlineHash::parse_api_hex(&self.chunk_hash)?;
+        let chunk_hash = parse_xet_hash_hex(&self.chunk_hash)?;
         let shard_object_key = ObjectKey::parse(&self.shard_object_key)?;
         Ok(DedupeShardMapping::new(chunk_hash, shard_object_key))
     }
@@ -1730,7 +1724,7 @@ mod tests {
         let path = store
             .root
             .join("reconstructions")
-            .join(format!("{}.json", hash.api_hex_string()));
+            .join(format!("{}.json", xet_hash_hex_string(&hash)));
         let Some(parent) = path.parent() else {
             return;
         };
@@ -1815,7 +1809,7 @@ mod tests {
         );
         let escaped = outside
             .path()
-            .join(format!("{}.json", hash.api_hex_string()));
+            .join(format!("{}.json", xet_hash_hex_string(&hash)));
         assert!(
             !escaped.exists(),
             "local index write escaped into a symlink target outside the index root"
@@ -1865,13 +1859,13 @@ mod tests {
         assert!(
             !outside
                 .path()
-                .join(format!("{}.json", hash.api_hex_string()))
+                .join(format!("{}.json", xet_hash_hex_string(&hash)))
                 .exists(),
             "local index write escaped into an attacker-controlled symlink target"
         );
         assert!(
             !moved_parent
-                .join(format!("{}.json", hash.api_hex_string()))
+                .join(format!("{}.json", xet_hash_hex_string(&hash)))
                 .exists(),
             "local index write left a committed file behind in the detached original directory"
         );
@@ -1965,7 +1959,7 @@ mod tests {
         };
 
         let hash = ShardlineHash::from_bytes([8; 32]);
-        let hash_hex = hash.api_hex_string();
+        let hash_hex = xet_hash_hex_string(&hash);
         let path = storage
             .path()
             .join("dedupe-shards")
@@ -2153,7 +2147,7 @@ mod tests {
         let path = store
             .root
             .join("reconstructions")
-            .join(format!("{}.json", hash.api_hex_string()));
+            .join(format!("{}.json", xet_hash_hex_string(&hash)));
         let file = fs::File::create(&path);
         assert!(file.is_ok());
         let Ok(file) = file else {
@@ -2190,7 +2184,7 @@ mod tests {
         let path = store
             .root
             .join("reconstructions")
-            .join(format!("{}.json", hash.api_hex_string()));
+            .join(format!("{}.json", xet_hash_hex_string(&hash)));
         let written = fs::write(&path, br#"{"terms":[]}"#);
         assert!(written.is_ok());
 

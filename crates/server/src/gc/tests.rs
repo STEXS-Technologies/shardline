@@ -11,9 +11,9 @@ use serde::Serialize;
 use serde_json::to_vec;
 use shardline_index::{
     DedupeShardMapping, IndexStore, LocalIndexStore, QuarantineCandidate, RetentionHold,
-    WebhookDelivery,
+    WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
-use shardline_protocol::{RepositoryProvider, ShardlineHash, unix_now_seconds_lossy};
+use shardline_protocol::{RepositoryProvider, unix_now_seconds_lossy};
 use shardline_storage::ObjectKey;
 use tokio::fs;
 
@@ -780,7 +780,7 @@ async fn exercise_gc_stale_dedupe_mapping_does_not_keep_retained_shard_alive()
     let shard_path =
         write_orphan_object(storage.path(), &shard_key, b"serialized retained shard").await?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
-    let chunk_hash = ShardlineHash::parse_api_hex(&chunk_hash)?;
+    let chunk_hash = parse_xet_hash_hex(&chunk_hash)?;
     let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
     index_store.upsert_dedupe_shard_mapping(&mapping)?;
 
@@ -1008,7 +1008,7 @@ async fn write_orphan_chunk(
     let hash = if hash_seed.len() == 64 && hash_seed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         hash_seed.to_owned()
     } else {
-        chunk_hash(bytes).api_hex_string()
+        xet_hash_hex_string(chunk_hash(bytes))
     };
     let path = root.join("chunks").join(&hash[..2]).join(&hash);
     let Some(parent) = path.parent() else {

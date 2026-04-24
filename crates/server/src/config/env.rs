@@ -118,6 +118,41 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     else {
         return Err(ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries);
     };
+    let raw_oci_upload_session_ttl_seconds = var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS")
+        .unwrap_or_else(|_error| "3600".to_owned())
+        .parse::<u64>()
+        .map_err(ServerConfigError::OciUploadSessionTtl)?;
+    let Some(oci_upload_session_ttl_seconds) = NonZeroU64::new(raw_oci_upload_session_ttl_seconds)
+    else {
+        return Err(ServerConfigError::ZeroOciUploadSessionTtlSeconds);
+    };
+    let raw_oci_upload_max_active_sessions = var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS")
+        .unwrap_or_else(|_error| "1024".to_owned())
+        .parse::<usize>()
+        .map_err(ServerConfigError::OciUploadMaxActiveSessions)?;
+    let Some(oci_upload_max_active_sessions) =
+        NonZeroUsize::new(raw_oci_upload_max_active_sessions)
+    else {
+        return Err(ServerConfigError::ZeroOciUploadMaxActiveSessions);
+    };
+    let raw_oci_registry_token_ttl_seconds = var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS")
+        .unwrap_or_else(|_error| "300".to_owned())
+        .parse::<u64>()
+        .map_err(ServerConfigError::OciRegistryTokenTtl)?;
+    let Some(oci_registry_token_ttl_seconds) = NonZeroU64::new(raw_oci_registry_token_ttl_seconds)
+    else {
+        return Err(ServerConfigError::ZeroOciRegistryTokenTtlSeconds);
+    };
+    let raw_oci_registry_token_max_in_flight_requests =
+        var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS")
+            .unwrap_or_else(|_error| "64".to_owned())
+            .parse::<usize>()
+            .map_err(ServerConfigError::OciRegistryTokenMaxInFlightRequests)?;
+    let Some(oci_registry_token_max_in_flight_requests) =
+        NonZeroUsize::new(raw_oci_registry_token_max_in_flight_requests)
+    else {
+        return Err(ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests);
+    };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
     let token_signing_key = optional_token_signing_key_from_sources(
@@ -155,6 +190,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_shard_metadata_limits(shard_metadata_limits)
         .with_upload_max_in_flight_chunks(upload_max_in_flight_chunks)
         .with_transfer_max_in_flight_chunks(transfer_max_in_flight_chunks)
+        .with_oci_upload_session_ttl_seconds(oci_upload_session_ttl_seconds)
+        .with_oci_upload_max_active_sessions(oci_upload_max_active_sessions)
+        .with_oci_registry_token_ttl_seconds(oci_registry_token_ttl_seconds)
+        .with_oci_registry_token_max_in_flight_requests(oci_registry_token_max_in_flight_requests)
         .with_reconstruction_cache_memory(
             reconstruction_cache_ttl_seconds,
             reconstruction_cache_memory_max_entries,
@@ -273,6 +312,17 @@ mod tests {
         let deduplicated = parse_server_frontends_env("xet, xet");
         assert!(deduplicated.is_ok());
         assert_eq!(deduplicated.ok(), Some(vec![ServerFrontend::Xet]));
+        let multiple = parse_server_frontends_env("xet,lfs,bazel-http,oci");
+        assert!(multiple.is_ok());
+        assert_eq!(
+            multiple.ok(),
+            Some(vec![
+                ServerFrontend::Xet,
+                ServerFrontend::Lfs,
+                ServerFrontend::BazelHttp,
+                ServerFrontend::Oci,
+            ])
+        );
     }
 
     #[test]
@@ -284,6 +334,6 @@ mod tests {
         let empty_segments = parse_server_frontends_env(",xet,,");
         assert!(empty_segments.is_ok());
         assert_eq!(empty_segments.ok(), Some(vec![ServerFrontend::Xet]));
-        assert!(parse_server_frontends_env("lfs").is_err());
+        assert!(parse_server_frontends_env("unknown").is_err());
     }
 }

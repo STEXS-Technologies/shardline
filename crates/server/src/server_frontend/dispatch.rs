@@ -15,6 +15,7 @@ pub(crate) fn optional_chunk_container_keys(
             ServerFrontend::Xet => {
                 xet::push_optional_chunk_container_key(&mut object_keys, chunk_hash)?
             }
+            ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {}
         }
     }
 
@@ -43,6 +44,7 @@ pub(crate) fn managed_protocol_object_identity(
                     return Ok(Some(hash));
                 }
             }
+            ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {}
         }
     }
 
@@ -69,6 +71,7 @@ where
                     );
                 }
             }
+            ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {}
         }
     }
 

@@ -187,6 +187,8 @@ mod transfer_http;
 
 mod provider_http;
 
+mod protocol_frontends_http;
+
 fn write_provider_config(root: &Path) -> Result<PathBuf, Box<dyn StdError>> {
     let path = root.join("providers.json");
     let bytes = to_vec(&json!({

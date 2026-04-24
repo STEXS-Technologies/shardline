@@ -4,14 +4,13 @@ use std::{
     num::TryFromIntError,
 };
 
+use shardline_protocol::ShardlineHash;
 use thiserror::Error;
 use xet_core_structures::{
     error::CoreError,
     merklehash::{MerkleHash, compute_data_hash},
     xorb_object::{XorbObject, deserialize_chunk},
 };
-
-use crate::ShardlineHash;
 
 /// Validated metadata for one chunk inside a serialized xorb.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,7 +448,7 @@ mod tests {
         decode_serialized_xorb_chunks, merkle_hash_to_shardline_hash,
         try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
     };
-    use crate::ShardlineHash;
+    use shardline_protocol::ShardlineHash;
 
     #[test]
     fn validate_serialized_xorb_reports_chunk_metadata_and_decodes_bytes() {
