@@ -1,3 +1,4 @@
+use shardline_index::xet_hash_hex_string;
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{ObjectKey, ObjectKeyError};
 
@@ -11,7 +12,7 @@ pub(crate) fn chunk_object_key(hash_hex: &str) -> Result<ObjectKey, ServerError>
 pub(crate) fn chunk_object_key_for_computed_hash(
     hash: ShardlineHash,
 ) -> Result<(String, ObjectKey), ServerError> {
-    let hash_hex = hash.api_hex_string();
+    let hash_hex = xet_hash_hex_string(hash);
     let object_key = chunk_object_key_from_valid_hash_hex(&hash_hex)?;
     Ok((hash_hex, object_key))
 }

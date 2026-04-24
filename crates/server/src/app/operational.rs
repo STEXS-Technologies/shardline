@@ -190,6 +190,18 @@ pub(super) async fn metrics(
     let auth_enabled = state.auth.is_some();
     let provider_tokens_enabled = state.provider_tokens.is_some();
     let metrics_auth_enabled = state.config.metrics_token().is_some();
+    let oci_registry_token_requests_total = state
+        .protocol_metrics
+        .oci_registry_token_requests_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let oci_registry_token_rate_limited_total = state
+        .protocol_metrics
+        .oci_registry_token_rate_limited_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let oci_registry_token_active_requests = state
+        .protocol_metrics
+        .oci_registry_token_active_requests
+        .load(std::sync::atomic::Ordering::Relaxed);
     let frontend_labels = state
         .config
         .server_frontends()
@@ -225,7 +237,22 @@ pub(super) async fn metrics(
             "shardline_upload_max_in_flight_chunks {}\n",
             "# HELP shardline_transfer_max_in_flight_chunks Configured transfer chunk parallelism.\n",
             "# TYPE shardline_transfer_max_in_flight_chunks gauge\n",
-            "shardline_transfer_max_in_flight_chunks {}\n"
+            "shardline_transfer_max_in_flight_chunks {}\n",
+            "# HELP shardline_oci_registry_token_ttl_seconds Configured OCI registry token TTL in seconds.\n",
+            "# TYPE shardline_oci_registry_token_ttl_seconds gauge\n",
+            "shardline_oci_registry_token_ttl_seconds {}\n",
+            "# HELP shardline_oci_registry_token_max_in_flight_requests Configured OCI registry token concurrency limit.\n",
+            "# TYPE shardline_oci_registry_token_max_in_flight_requests gauge\n",
+            "shardline_oci_registry_token_max_in_flight_requests {}\n",
+            "# HELP shardline_oci_registry_token_requests_total Total OCI registry token requests.\n",
+            "# TYPE shardline_oci_registry_token_requests_total counter\n",
+            "shardline_oci_registry_token_requests_total {}\n",
+            "# HELP shardline_oci_registry_token_rate_limited_total Total OCI registry token requests rejected by the in-flight limit.\n",
+            "# TYPE shardline_oci_registry_token_rate_limited_total counter\n",
+            "shardline_oci_registry_token_rate_limited_total {}\n",
+            "# HELP shardline_oci_registry_token_active_requests Current in-flight OCI registry token requests.\n",
+            "# TYPE shardline_oci_registry_token_active_requests gauge\n",
+            "shardline_oci_registry_token_active_requests {}\n"
         ),
         state.role.as_str(),
         frontend_labels,
@@ -239,6 +266,14 @@ pub(super) async fn metrics(
         state.config.max_request_body_bytes().get(),
         state.config.upload_max_in_flight_chunks().get(),
         state.config.transfer_max_in_flight_chunks().get(),
+        state.config.oci_registry_token_ttl_seconds().get(),
+        state
+            .config
+            .oci_registry_token_max_in_flight_requests()
+            .get(),
+        oci_registry_token_requests_total,
+        oci_registry_token_rate_limited_total,
+        oci_registry_token_active_requests,
     );
 
     Ok((

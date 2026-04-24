@@ -1,10 +1,17 @@
 mod operational;
+mod protocol_routes;
 mod provider;
 mod provider_routes;
 mod reconstruction_helpers;
 mod reconstruction_routes;
 
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use axum::{
     Router,
@@ -17,6 +24,7 @@ use shardline_protocol::{RepositoryScope, TokenScope};
 use tokio::net::TcpListener;
 #[cfg(test)]
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 
 use crate::{
     ServerConfig, ServerError,
@@ -33,6 +41,12 @@ use operational::{
     head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready, stats, upload_shard,
     upload_xorb,
 };
+use protocol_routes::{
+    bazel_get_ac, bazel_get_cas, bazel_put_ac, bazel_put_cas, lfs_batch, lfs_get_object,
+    lfs_head_object, lfs_put_object, oci_api_dispatch, oci_dispatch, oci_registry_token,
+    oci_transfer_dispatch, oci_v2_root,
+};
+pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
 #[cfg(test)]
 use provider::{
     extract_provider_subject, latest_lifecycle_signal_at, reconciled_provider_repository_state,
@@ -48,13 +62,17 @@ use reconstruction_routes::{batch_reconstruction, reconstruction, reconstruction
 
 const MAX_BATCH_RECONSTRUCTION_FILE_IDS: usize = 1024;
 const MAX_BATCH_RECONSTRUCTION_QUERY_BYTES: usize = 131_072;
+const MAX_LFS_BATCH_OBJECTS: usize = 1024;
+const MAX_OCI_MANIFEST_TAGS: usize = 128;
+const MAX_OCI_TAG_LIST_PAGE_SIZE: usize = 256;
+const MAX_PROTOCOL_QUERY_BYTES: usize = 16_384;
 const MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES: usize = 16_384;
 const MAX_PROVIDER_WEBHOOK_BODY_BYTES: usize = 1_048_576;
 const MAX_PROVIDER_NAME_BYTES: usize = 64;
 const MAX_PROVIDER_SUBJECT_BYTES: usize = 512;
 const MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES: usize = 4096;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct AppState {
     config: ServerConfig,
     role: ServerRole,
@@ -63,6 +81,49 @@ struct AppState {
     provider_tokens: Option<ProviderTokenService>,
     reconstruction_cache: ReconstructionCacheService,
     transfer_limiter: TransferLimiter,
+    oci_registry_token_limiter: Arc<Semaphore>,
+    protocol_metrics: ProtocolMetrics,
+}
+
+#[derive(Debug, Default)]
+struct ProtocolMetrics {
+    oci_registry_token_requests_total: AtomicU64,
+    oci_registry_token_rate_limited_total: AtomicU64,
+    oci_registry_token_active_requests: AtomicU64,
+}
+
+impl ProtocolMetrics {
+    fn increment_oci_registry_token_requests(&self) {
+        let _previous = self
+            .oci_registry_token_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn increment_oci_registry_token_rate_limited(&self) {
+        let _previous = self
+            .oci_registry_token_rate_limited_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn begin_oci_registry_token_request(&self) -> ActiveProtocolRequestGuard<'_> {
+        let _previous = self
+            .oci_registry_token_active_requests
+            .fetch_add(1, Ordering::Relaxed);
+        ActiveProtocolRequestGuard {
+            gauge: &self.oci_registry_token_active_requests,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ActiveProtocolRequestGuard<'metric> {
+    gauge: &'metric AtomicU64,
+}
+
+impl Drop for ActiveProtocolRequestGuard<'_> {
+    fn drop(&mut self) {
+        let _previous = self.gauge.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Builds the Shardline HTTP router.
@@ -118,6 +179,9 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     };
     let transfer_limiter =
         TransferLimiter::new(config.chunk_size(), config.transfer_max_in_flight_chunks());
+    let oci_registry_token_limiter = Arc::new(Semaphore::new(
+        config.oci_registry_token_max_in_flight_requests().get(),
+    ));
     let state = Arc::new(AppState {
         config,
         role,
@@ -126,6 +190,8 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         provider_tokens,
         reconstruction_cache,
         transfer_limiter,
+        oci_registry_token_limiter,
+        protocol_metrics: ProtocolMetrics::default(),
     });
 
     let mut app = Router::new()
@@ -191,6 +257,9 @@ fn register_frontend_routes(
 ) -> Router<Arc<AppState>> {
     match frontend {
         ServerFrontend::Xet => register_xet_routes(app, role),
+        ServerFrontend::Lfs => register_lfs_routes(app, role),
+        ServerFrontend::BazelHttp => register_bazel_routes(app, role),
+        ServerFrontend::Oci => register_oci_routes(app, role),
     }
 }
 
@@ -215,6 +284,60 @@ fn register_xet_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
                 head(head_xorb).post(upload_xorb),
             )
             .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer));
+    }
+    app
+}
+
+fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+    if role.serves_api() {
+        app = app.route("/v1/lfs/objects/batch", post(lfs_batch));
+    }
+    if role.serves_transfer() {
+        app = app.route(
+            "/v1/lfs/objects/{oid}",
+            get(lfs_get_object)
+                .head(lfs_head_object)
+                .put(lfs_put_object),
+        );
+    }
+    app
+}
+
+fn register_bazel_routes(
+    mut app: Router<Arc<AppState>>,
+    role: ServerRole,
+) -> Router<Arc<AppState>> {
+    if role.serves_transfer() {
+        app = app
+            .route(
+                "/v1/bazel/cache/ac/{hash}",
+                get(bazel_get_ac).put(bazel_put_ac),
+            )
+            .route(
+                "/v1/bazel/cache/cas/{hash}",
+                get(bazel_get_cas).put(bazel_put_cas),
+            );
+    }
+    app
+}
+
+fn register_oci_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Router<Arc<AppState>> {
+    match role {
+        ServerRole::All => {
+            app = app
+                .route("/v2/token", get(oci_registry_token))
+                .route("/v2/", get(oci_v2_root))
+                .route("/v2/{*path}", axum::routing::any(oci_dispatch));
+        }
+        ServerRole::Api => {
+            app = app
+                .route("/v2/token", get(oci_registry_token))
+                .route("/v2/", get(oci_v2_root))
+                .route("/v2/{*path}", axum::routing::any(oci_api_dispatch));
+        }
+        ServerRole::Transfer => {
+            app = app.route("/v2/{*path}", axum::routing::any(oci_transfer_dispatch));
+        }
     }
     app
 }

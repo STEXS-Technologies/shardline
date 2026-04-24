@@ -14,7 +14,10 @@ use crate::{
     DeleteOutcome, DirectoryPathError, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
     ObjectPrefix, ObjectStore, PutOutcome,
     ensure_directory_path_components_are_not_symlinked as ensure_directory_path_components_are_not_symlinked_shared,
-    local_fs::{PutBytesIfAbsentOutcome, hard_link_file_if_absent, put_bytes_if_absent},
+    local_fs::{
+        PutBytesIfAbsentOutcome, hard_link_file_if_absent, put_bytes_if_absent,
+        write_bytes_atomically,
+    },
 };
 const VERIFY_BUFFER_BYTES: usize = 256 * 1024;
 
@@ -92,6 +95,93 @@ impl LocalObjectStore {
         let path = self.key_path(key);
         ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
         link_temporary_file_if_absent(&self.root, &path, temporary, integrity, None)
+    }
+
+    /// Copies an existing object to a new key if the destination is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalObjectStoreError`] when the source is missing, the destination
+    /// conflicts with different bytes, or installation fails.
+    pub fn copy_object_if_absent(
+        &self,
+        source: &ObjectKey,
+        destination: &ObjectKey,
+    ) -> Result<PutOutcome, LocalObjectStoreError> {
+        let source_path = self.key_path(source);
+        let destination_path = self.key_path(destination);
+        let _source = open_existing_object_file(&source_path)?;
+        ensure_parent_directories_are_not_symlinked(&self.root, &destination_path)?;
+        match hard_link_file_if_absent(&self.root, &destination_path, &source_path) {
+            Ok(()) => Ok(PutOutcome::Inserted),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let existing = open_existing_object_file(&destination_path)?;
+                let source_file = open_existing_object_file(&source_path)?;
+                ensure_files_match(existing, source_file)?;
+                Ok(PutOutcome::AlreadyExists)
+            }
+            Err(error) => Err(LocalObjectStoreError::Io(error)),
+        }
+    }
+
+    /// Stores bytes at a key, replacing any existing object atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalObjectStoreError`] when integrity validation or filesystem
+    /// replacement fails.
+    pub fn put_overwrite(
+        &self,
+        key: &ObjectKey,
+        body: ObjectBody<'_>,
+        integrity: &ObjectIntegrity,
+    ) -> Result<(), LocalObjectStoreError> {
+        let bytes = body.into_bytes();
+        verify_integrity(&bytes, integrity)?;
+        let path = self.key_path(key);
+        ensure_parent_directories_are_not_symlinked(&self.root, &path)?;
+        write_bytes_atomically(&self.root, &path, &bytes).map_err(LocalObjectStoreError::Io)
+    }
+
+    /// Lists a bounded page of direct child objects under a flat namespace prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalObjectStoreError`] when the namespace path cannot be read or a
+    /// listed child cannot be represented as a validated object key.
+    pub fn list_flat_namespace_page(
+        &self,
+        prefix: &ObjectPrefix,
+        start_after: Option<&ObjectKey>,
+        limit: usize,
+    ) -> Result<Vec<ObjectMetadata>, LocalObjectStoreError> {
+        let directory = self.root.join(prefix.as_str());
+        let Some(entries) = read_dir_if_exists(&directory)? else {
+            return Ok(Vec::new());
+        };
+        let mut children = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(LocalObjectStoreError::Io)?;
+            let file_type = entry.file_type().map_err(LocalObjectStoreError::Io)?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_error| LocalObjectStoreError::InvalidStoredKey)?;
+            let key = ObjectKey::parse(&format!("{}{}", prefix.as_str(), name))
+                .map_err(|_error| LocalObjectStoreError::InvalidStoredKey)?;
+            if start_after.is_some_and(|offset| key.as_str() <= offset.as_str()) {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(entry.path()).map_err(LocalObjectStoreError::Io)?;
+            ensure_regular_file_metadata(&metadata)?;
+            children.push(ObjectMetadata::new(key, metadata.len(), None));
+        }
+        children.sort_by(|left, right| left.key().as_str().cmp(right.key().as_str()));
+        children.truncate(limit);
+        Ok(children)
     }
 
     fn key_path(&self, key: &ObjectKey) -> PathBuf {

@@ -238,6 +238,17 @@ pub struct GitLfsAuthenticateResponse {
     pub expires_in: u64,
 }
 
+/// OCI registry bearer-token exchange response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OciRegistryTokenResponse {
+    /// Bearer token returned by the registry token service.
+    pub token: String,
+    /// Duplicate bearer token field used by some clients.
+    pub access_token: String,
+    /// Relative token lifetime in seconds.
+    pub expires_in: u64,
+}
+
 /// Provider webhook handling response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderWebhookResponse {

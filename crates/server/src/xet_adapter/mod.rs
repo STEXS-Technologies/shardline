@@ -2,6 +2,7 @@ mod frontend;
 mod ingest;
 mod reconstruction;
 mod shard_store;
+mod xorb;
 mod xorb_store;
 mod xorb_visit;
 
@@ -18,6 +19,10 @@ pub(crate) use shard_store::shard_object_key;
 pub(crate) use shard_store::{
     dedupe_shard_mapping, parse_uploaded_shard, resolve_dedupe_shard_object,
     retained_shard_chunk_hashes, shard_hash_from_object_key_if_present,
+};
+pub use xorb::{
+    DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbParseError, XorbVisitError,
+    decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
 };
 pub(crate) use xorb_store::{
     normalize_serialized_xorb, store_uploaded_xorb, visit_stored_xorb_chunk_hashes,

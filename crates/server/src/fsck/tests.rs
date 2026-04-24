@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use shardline_index::{
     FileId, FileReconstruction, IndexStore, LocalIndexStore, LocalRecordStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RecordStore, RetentionHold,
-    StoredObjectId, WebhookDelivery,
+    StoredObjectId, WebhookDelivery, xet_hash_hex_string,
 };
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::ObjectKey;
@@ -262,7 +262,10 @@ async fn fsck_reports_hash_and_length_mismatch_for_corrupted_chunk_body() {
         .join(&first_chunk.hash);
     let rewritten = fs::write(&chunk_path, b"corrupted").await;
     assert!(rewritten.is_ok());
-    assert_ne!(chunk_hash(b"corrupted").api_hex_string(), first_chunk.hash);
+    assert_ne!(
+        xet_hash_hex_string(chunk_hash(b"corrupted")),
+        first_chunk.hash
+    );
 
     let report = run_local_fsck(storage.path().to_path_buf()).await;
     assert!(report.is_ok());

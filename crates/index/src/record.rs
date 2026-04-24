@@ -1,8 +1,10 @@
 use std::{future::Future, pin::Pin, time::Duration};
 
 use serde::{Deserialize, Serialize};
-use shardline_protocol::{HashParseError, RepositoryProvider, RepositoryScope, ShardlineHash};
+use shardline_protocol::{HashParseError, RepositoryProvider, RepositoryScope};
 use thiserror::Error;
+
+use crate::parse_xet_hash_hex;
 
 /// Boxed asynchronous record-store operation.
 pub type RecordStoreFuture<'operation, T, E> =
@@ -144,7 +146,7 @@ impl FileRecord {
     pub fn validate_reconstruction_plan(&self) -> Result<(), FileRecordInvariantError> {
         let mut expected_offset = 0_u64;
         for chunk in &self.chunks {
-            ShardlineHash::parse_api_hex(&chunk.hash)?;
+            parse_xet_hash_hex(&chunk.hash)?;
             if chunk.length == 0 {
                 return Err(FileRecordInvariantError::EmptyChunk);
             }

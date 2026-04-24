@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::to_writer;
 use shardline_index::{
     AsyncIndexStore, LocalIndexStore, PostgresIndexStore, PostgresRecordStore, RecordStore,
+    xet_hash_hex_string,
 };
 use shardline_storage::{ObjectMetadata, ObjectPrefix};
 
@@ -79,7 +80,7 @@ impl BackupManifestObjectEntry {
         Self {
             key: metadata.key().as_str().to_owned(),
             length: metadata.length(),
-            checksum: metadata.checksum().map(|hash| hash.api_hex_string()),
+            checksum: metadata.checksum().map(xet_hash_hex_string),
         }
     }
 }

@@ -17,13 +17,14 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, FileRecord, IndexStoreFuture,
     ProviderRepositoryState, QuarantineCandidate, QuarantineCandidateError, ReconstructionTerm,
     RecordStore, RecordStoreFuture, RepositoryRecordScope, RetentionHold, RetentionHoldError,
-    StoredObjectId, StoredRecord, WebhookDelivery, WebhookDeliveryError,
+    StoredObjectId, StoredRecord, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
     provider::parse_repository_provider,
     record_key::record_key as shared_record_key,
     record_key::{
         repository_record_scope_key as shared_repository_record_scope_key,
         repository_scope_key as shared_repository_scope_key,
     },
+    xet_hash_hex_string,
 };
 
 /// Postgres-compatible implementation of the asynchronous index-store contract.
@@ -55,7 +56,7 @@ impl AsyncIndexStore for PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, Option<FileReconstruction>, Self::Error> {
         Box::pin(async move {
             let row = query("SELECT terms FROM shardline_file_reconstructions WHERE file_id = $1")
-                .bind(file_id.hash().api_hex_string())
+                .bind(xet_hash_hex_string(file_id.hash()))
                 .fetch_optional(&self.pool)
                 .await?;
 
@@ -80,7 +81,7 @@ impl AsyncIndexStore for PostgresIndexStore {
                  ON CONFLICT (file_id)
                  DO UPDATE SET terms = EXCLUDED.terms, updated_at = now()",
             )
-            .bind(file_id.hash().api_hex_string())
+            .bind(xet_hash_hex_string(file_id.hash()))
             .bind(Json(record))
             .execute(&self.pool)
             .await?;
@@ -97,7 +98,7 @@ impl AsyncIndexStore for PostgresIndexStore {
             rows.iter()
                 .map(|row| {
                     let file_id = row.try_get::<String, _>("file_id")?;
-                    let hash = ShardlineHash::parse_api_hex(&file_id)?;
+                    let hash = parse_xet_hash_hex(&file_id)?;
                     Ok(FileId::new(hash))
                 })
                 .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()
@@ -110,7 +111,7 @@ impl AsyncIndexStore for PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let result = query("DELETE FROM shardline_file_reconstructions WHERE file_id = $1")
-                .bind(file_id.hash().api_hex_string())
+                .bind(xet_hash_hex_string(file_id.hash()))
                 .execute(&self.pool)
                 .await?;
             Ok(result.rows_affected() > 0)
@@ -127,7 +128,7 @@ impl AsyncIndexStore for PostgresIndexStore {
                     SELECT 1 FROM shardline_stored_objects WHERE object_hash = $1
                  )",
             )
-            .bind(object_id.hash().api_hex_string())
+            .bind(xet_hash_hex_string(object_id.hash()))
             .fetch_one(&self.pool)
             .await?;
             Ok(exists)
@@ -144,7 +145,7 @@ impl AsyncIndexStore for PostgresIndexStore {
                  FROM shardline_dedupe_shards
                  WHERE chunk_hash = $1",
             )
-            .bind(chunk_hash.api_hex_string())
+            .bind(xet_hash_hex_string(chunk_hash))
             .fetch_optional(&self.pool)
             .await?;
 
@@ -211,7 +212,7 @@ impl AsyncIndexStore for PostgresIndexStore {
                  VALUES ($1)
                  ON CONFLICT (object_hash) DO NOTHING",
             )
-            .bind(object_id.hash().api_hex_string())
+            .bind(xet_hash_hex_string(object_id.hash()))
             .execute(&self.pool)
             .await?;
             Ok(())
@@ -231,7 +232,7 @@ impl AsyncIndexStore for PostgresIndexStore {
                     shard_object_key = EXCLUDED.shard_object_key,
                     updated_at = now()",
             )
-            .bind(mapping.chunk_hash().api_hex_string())
+            .bind(xet_hash_hex_string(mapping.chunk_hash()))
             .bind(mapping.shard_object_key().as_str())
             .execute(&self.pool)
             .await?;
@@ -245,7 +246,7 @@ impl AsyncIndexStore for PostgresIndexStore {
     ) -> IndexStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
             let result = query("DELETE FROM shardline_dedupe_shards WHERE chunk_hash = $1")
-                .bind(chunk_hash.api_hex_string())
+                .bind(xet_hash_hex_string(chunk_hash))
                 .execute(&self.pool)
                 .await?;
             Ok(result.rows_affected() > 0)
@@ -910,7 +911,7 @@ async fn upsert_dedupe_shard_mapping_in_transaction(
             shard_object_key = EXCLUDED.shard_object_key,
             updated_at = now()",
     )
-    .bind(mapping.chunk_hash().api_hex_string())
+    .bind(xet_hash_hex_string(mapping.chunk_hash()))
     .bind(mapping.shard_object_key().as_str())
     .execute(&mut **transaction)
     .await?;
@@ -1403,7 +1404,7 @@ struct PostgresReconstructionTermRecord {
 impl PostgresReconstructionTermRecord {
     fn from_domain(term: &ReconstructionTerm) -> Self {
         Self {
-            object_hash: term.object_id().hash().api_hex_string(),
+            object_hash: xet_hash_hex_string(term.object_id().hash()),
             chunk_start: term.chunk_range().start(),
             chunk_end_exclusive: term.chunk_range().end_exclusive(),
             unpacked_length: term.unpacked_length(),
@@ -1411,7 +1412,7 @@ impl PostgresReconstructionTermRecord {
     }
 
     fn into_domain(self) -> Result<ReconstructionTerm, PostgresMetadataStoreError> {
-        let hash = ShardlineHash::parse_api_hex(&self.object_hash)?;
+        let hash = parse_xet_hash_hex(&self.object_hash)?;
         let range = ChunkRange::new(self.chunk_start, self.chunk_end_exclusive)?;
         Ok(ReconstructionTerm::new(
             StoredObjectId::new(hash),
@@ -1458,8 +1459,7 @@ fn quarantine_candidate_from_row(
 fn dedupe_shard_mapping_from_row(
     row: &PgRow,
 ) -> Result<DedupeShardMapping, PostgresMetadataStoreError> {
-    let chunk_hash =
-        ShardlineHash::parse_api_hex(row.try_get::<String, _>("chunk_hash")?.as_str())?;
+    let chunk_hash = parse_xet_hash_hex(row.try_get::<String, _>("chunk_hash")?.as_str())?;
     let shard_object_key =
         ObjectKey::parse(row.try_get::<String, _>("shard_object_key")?.as_str())?;
     Ok(DedupeShardMapping::new(chunk_hash, shard_object_key))
@@ -1606,6 +1606,7 @@ mod tests {
             repository_record_scope_key as shared_repository_record_scope_key,
             repository_scope_key as shared_repository_scope_key,
         },
+        xet_hash_hex_string,
     };
 
     #[test]
@@ -1712,7 +1713,7 @@ mod tests {
 
     fn file_record(scope: RepositoryScope, content_seed: &str) -> FileRecord {
         let hash = ShardlineHash::from_bytes([12; 32]);
-        let file_id = FileId::new(hash).hash().api_hex_string();
+        let file_id = xet_hash_hex_string(FileId::new(hash).hash());
         FileRecord {
             file_id,
             content_hash: content_seed.repeat(64),

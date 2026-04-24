@@ -50,6 +50,10 @@ pub struct ServerConfig {
     reconstruction_cache_adapter: ReconstructionCacheAdapter,
     reconstruction_cache_ttl_seconds: NonZeroU64,
     reconstruction_cache_memory_max_entries: NonZeroUsize,
+    oci_upload_session_ttl_seconds: NonZeroU64,
+    oci_upload_max_active_sessions: NonZeroUsize,
+    oci_registry_token_ttl_seconds: NonZeroU64,
+    oci_registry_token_max_in_flight_requests: NonZeroUsize,
     reconstruction_cache_redis_url: Option<SecretString>,
     index_postgres_url: Option<SecretString>,
     token_signing_key: Option<SecretBytes>,
@@ -93,6 +97,22 @@ impl fmt::Debug for ServerConfig {
             .field(
                 "reconstruction_cache_memory_max_entries",
                 &self.reconstruction_cache_memory_max_entries,
+            )
+            .field(
+                "oci_upload_session_ttl_seconds",
+                &self.oci_upload_session_ttl_seconds,
+            )
+            .field(
+                "oci_upload_max_active_sessions",
+                &self.oci_upload_max_active_sessions,
+            )
+            .field(
+                "oci_registry_token_ttl_seconds",
+                &self.oci_registry_token_ttl_seconds,
+            )
+            .field(
+                "oci_registry_token_max_in_flight_requests",
+                &self.oci_registry_token_max_in_flight_requests,
             )
             .field(
                 "reconstruction_cache_redis_url",
@@ -179,6 +199,23 @@ const DEFAULT_PARALLELISM_FALLBACK: NonZeroUsize = match NonZeroUsize::new(8) {
     Some(value) => value,
     None => NonZeroUsize::MIN,
 };
+const DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS: NonZeroU64 = match NonZeroU64::new(3_600) {
+    Some(value) => value,
+    None => NonZeroU64::MIN,
+};
+const DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS: NonZeroUsize = match NonZeroUsize::new(1_024) {
+    Some(value) => value,
+    None => NonZeroUsize::MIN,
+};
+const DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS: NonZeroU64 = match NonZeroU64::new(300) {
+    Some(value) => value,
+    None => NonZeroU64::MIN,
+};
+const DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS: NonZeroUsize = match NonZeroUsize::new(64)
+{
+    Some(value) => value,
+    None => NonZeroUsize::MIN,
+};
 
 #[cfg(test)]
 type SecretFileReadHook = Box<dyn FnOnce() + Send>;
@@ -230,6 +267,11 @@ impl ServerConfig {
             reconstruction_cache_ttl_seconds: DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
             reconstruction_cache_memory_max_entries:
                 DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES,
+            oci_upload_session_ttl_seconds: DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
+            oci_upload_max_active_sessions: DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
+            oci_registry_token_ttl_seconds: DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
+            oci_registry_token_max_in_flight_requests:
+                DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
             reconstruction_cache_redis_url: None,
             index_postgres_url: None,
             token_signing_key: None,
@@ -349,6 +391,28 @@ impl ServerConfig {
         self.reconstruction_cache_memory_max_entries
     }
 
+    /// Returns the maximum idle lifetime for OCI upload sessions.
+    #[must_use]
+    pub(crate) const fn oci_upload_session_ttl_seconds(&self) -> NonZeroU64 {
+        self.oci_upload_session_ttl_seconds
+    }
+
+    /// Returns the maximum number of live OCI upload sessions allowed per server root.
+    #[must_use]
+    pub(crate) const fn oci_upload_max_active_sessions(&self) -> NonZeroUsize {
+        self.oci_upload_max_active_sessions
+    }
+
+    #[must_use]
+    pub(crate) const fn oci_registry_token_ttl_seconds(&self) -> NonZeroU64 {
+        self.oci_registry_token_ttl_seconds
+    }
+
+    #[must_use]
+    pub(crate) const fn oci_registry_token_max_in_flight_requests(&self) -> NonZeroUsize {
+        self.oci_registry_token_max_in_flight_requests
+    }
+
     /// Returns the optional Redis URL for the reconstruction cache.
     #[must_use]
     pub(crate) fn reconstruction_cache_redis_url(&self) -> Option<&str> {
@@ -461,6 +525,44 @@ impl ServerConfig {
         self.reconstruction_cache_ttl_seconds = reconstruction_cache_ttl_seconds;
         self.reconstruction_cache_memory_max_entries = reconstruction_cache_memory_max_entries;
         self.reconstruction_cache_redis_url = None;
+        self
+    }
+
+    /// Overrides the maximum idle lifetime for OCI upload sessions.
+    #[must_use]
+    pub const fn with_oci_upload_session_ttl_seconds(
+        mut self,
+        oci_upload_session_ttl_seconds: NonZeroU64,
+    ) -> Self {
+        self.oci_upload_session_ttl_seconds = oci_upload_session_ttl_seconds;
+        self
+    }
+
+    /// Overrides the maximum number of live OCI upload sessions per server root.
+    #[must_use]
+    pub const fn with_oci_upload_max_active_sessions(
+        mut self,
+        oci_upload_max_active_sessions: NonZeroUsize,
+    ) -> Self {
+        self.oci_upload_max_active_sessions = oci_upload_max_active_sessions;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_oci_registry_token_ttl_seconds(
+        mut self,
+        oci_registry_token_ttl_seconds: NonZeroU64,
+    ) -> Self {
+        self.oci_registry_token_ttl_seconds = oci_registry_token_ttl_seconds;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_oci_registry_token_max_in_flight_requests(
+        mut self,
+        oci_registry_token_max_in_flight_requests: NonZeroUsize,
+    ) -> Self {
+        self.oci_registry_token_max_in_flight_requests = oci_registry_token_max_in_flight_requests;
         self
     }
 
@@ -919,6 +1021,30 @@ pub enum ServerConfigError {
     /// The in-memory reconstruction-cache capacity was zero.
     #[error("reconstruction cache memory max entries must be greater than zero")]
     ZeroReconstructionCacheMemoryMaxEntries,
+    /// The OCI upload-session TTL could not be parsed.
+    #[error("invalid oci upload session ttl")]
+    OciUploadSessionTtl(ParseIntError),
+    /// The OCI upload-session TTL was zero.
+    #[error("oci upload session ttl must be greater than zero")]
+    ZeroOciUploadSessionTtlSeconds,
+    /// The OCI upload live-session ceiling could not be parsed.
+    #[error("invalid oci upload max active sessions")]
+    OciUploadMaxActiveSessions(ParseIntError),
+    /// The OCI upload live-session ceiling was zero.
+    #[error("oci upload max active sessions must be greater than zero")]
+    ZeroOciUploadMaxActiveSessions,
+    /// The OCI registry token TTL could not be parsed.
+    #[error("invalid oci registry token ttl")]
+    OciRegistryTokenTtl(ParseIntError),
+    /// The OCI registry token TTL was zero.
+    #[error("oci registry token ttl must be greater than zero")]
+    ZeroOciRegistryTokenTtlSeconds,
+    /// The OCI registry token in-flight request ceiling could not be parsed.
+    #[error("invalid oci registry token max in-flight requests")]
+    OciRegistryTokenMaxInFlightRequests(ParseIntError),
+    /// The OCI registry token in-flight request ceiling was zero.
+    #[error("oci registry token max in-flight requests must be greater than zero")]
+    ZeroOciRegistryTokenMaxInFlightRequests,
     /// The Redis reconstruction-cache URL was empty.
     #[error("reconstruction cache redis url must not be empty")]
     EmptyReconstructionCacheRedisUrl,

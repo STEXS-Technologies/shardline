@@ -3,8 +3,9 @@
 use std::io::Cursor;
 
 use libfuzzer_sys::fuzz_target;
-use shardline_protocol::{ShardlineHash, decode_serialized_xorb_chunks, validate_serialized_xorb};
+use shardline_protocol::ShardlineHash;
 use shardline_server::fuzz_normalize_and_validate_xorb;
+use shardline_server::{decode_serialized_xorb_chunks, validate_serialized_xorb};
 
 fuzz_target!(|data: (Vec<u8>, [u8; 32])| {
     let (serialized, expected_hash_bytes) = data;
