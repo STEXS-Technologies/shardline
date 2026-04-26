@@ -136,16 +136,11 @@ pub(super) async fn bazel_put_cas(
         &hash,
         auth.as_ref().map(scope_from_auth),
     )?;
-    let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let bytes = read_body_to_bytes(&mut body).await?;
-    let observed = hex::encode(Sha256::digest(&bytes));
-    if observed != hash {
-        return Err(ServerError::ExpectedBodyHashMismatch);
-    }
-    let _stored =
-        state
-            .backend
-            .put_sha256_addressed_object_bytes_if_absent(&object_key, &hash, bytes)?;
+    let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    let _stored = state
+        .backend
+        .put_sha256_addressed_object_stream_if_absent(&object_key, &hash, body)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -305,16 +300,11 @@ pub(super) async fn lfs_put_object(
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let object_key = lfs_object_key(&oid, auth.as_ref().map(scope_from_auth))?;
-    let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let bytes = read_body_to_bytes(&mut body).await?;
-    let observed = hex::encode(Sha256::digest(&bytes));
-    if observed != oid {
-        return Err(ServerError::ExpectedBodyHashMismatch);
-    }
-    let _stored =
-        state
-            .backend
-            .put_sha256_addressed_object_bytes_if_absent(&object_key, &oid, bytes)?;
+    let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    let _stored = state
+        .backend
+        .put_sha256_addressed_object_stream_if_absent(&object_key, &oid, body)
+        .await?;
     Ok(StatusCode::OK)
 }
 
@@ -701,19 +691,13 @@ async fn oci_post_blob_upload(
 
     if let Some(digest) = query.get("digest") {
         let digest_hex = parse_sha256_digest(digest)?;
-        let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-        let bytes = read_body_to_bytes(&mut body).await?;
-        if !bytes.is_empty() {
-            let observed = hex::encode(Sha256::digest(&bytes));
-            if observed != digest_hex {
-                return Err(ServerError::ExpectedBodyHashMismatch);
-            }
+        let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+        if body.expected_total_bytes() != Some(0) {
             let object_key = oci_blob_key(repository, &digest_hex, scope)?;
-            let _stored = state.backend.put_sha256_addressed_object_bytes_if_absent(
-                &object_key,
-                &digest_hex,
-                bytes,
-            )?;
+            let _stored = state
+                .backend
+                .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
+                .await?;
             return oci_created_response(
                 &oci_blob_location(repository, &digest_hex),
                 Some(&digest_hex),

@@ -89,6 +89,11 @@ impl RequestBodyReader {
         }
     }
 
+    /// Returns the expected total body size when the transport declared one.
+    pub(crate) const fn expected_total_bytes(&self) -> Option<usize> {
+        self.expected_total_bytes
+    }
+
     /// Reads the next body chunk while enforcing the configured total byte limit.
     pub(crate) async fn next_bytes(&mut self) -> Result<Option<Bytes>, ServerError> {
         let Some(chunk) = self.stream.next().await else {
