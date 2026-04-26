@@ -649,7 +649,7 @@ impl PostgresBackend {
         })
     }
 
-    fn object_store(&self) -> ServerObjectStore {
+    pub(crate) fn object_store(&self) -> ServerObjectStore {
         self.object_store.clone()
     }
 
