@@ -45,5 +45,8 @@ pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
 pub use local_path::{DirectoryPathError, ensure_directory_path_components_are_not_symlinked};
 pub use object::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
-pub use s3::{S3ByteStream, S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError};
+pub use s3::{
+    BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,
+    S3ObjectStoreConfig, S3ObjectStoreError,
+};
 pub use store::ObjectStore;

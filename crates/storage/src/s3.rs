@@ -37,6 +37,67 @@ use crate::{
 
 /// Async byte stream returned from ranged S3 reads.
 pub type S3ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, S3ObjectStoreError>> + Send>>;
+
+/// Result of beginning a direct multipart upload for an immutable destination key.
+pub enum BeginMultipartUploadResult {
+    /// The destination already exists.
+    AlreadyExists,
+    /// The caller can stream bytes into the returned multipart writer.
+    Upload(S3MultipartUploadWriter),
+}
+
+/// Multipart upload writer for direct request-body streaming into S3-compatible storage.
+pub struct S3MultipartUploadWriter {
+    writer: WriteMultipart,
+}
+
+impl S3MultipartUploadWriter {
+    /// Queues bytes into the multipart writer.
+    pub fn write(&mut self, bytes: &[u8]) {
+        self.writer.write(bytes);
+    }
+
+    /// Waits until the multipart writer has spare upload capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the upstream multipart writer fails.
+    pub async fn wait_for_capacity(
+        &mut self,
+        max_in_flight_parts: usize,
+    ) -> Result<(), S3ObjectStoreError> {
+        self.writer
+            .wait_for_capacity(max_in_flight_parts)
+            .await
+            .map_err(S3ObjectStoreError::External)
+    }
+
+    /// Finishes the multipart upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the upstream multipart finalize call fails.
+    pub async fn finish(self) -> Result<(), S3ObjectStoreError> {
+        self.writer
+            .finish()
+            .await
+            .map(|_result| ())
+            .map_err(S3ObjectStoreError::External)
+    }
+
+    /// Aborts the multipart upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the upstream multipart abort call fails.
+    pub async fn abort(self) -> Result<(), S3ObjectStoreError> {
+        self.writer
+            .abort()
+            .await
+            .map_err(S3ObjectStoreError::External)
+    }
+}
+
 const STREAM_UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const STREAM_COMPARE_CHUNK_BYTES: usize = 256 * 1024;
 static TEMP_UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -366,6 +427,37 @@ impl S3ObjectStore {
             .map_err(S3ObjectStoreError::External)?;
 
         stream_payload_for_range(result, expected_range)
+    }
+
+    /// Begins a direct multipart upload to a content-addressed destination key.
+    ///
+    /// This path is intended for immutable digest-addressed objects, where callers
+    /// validate the stream contents independently and concurrent writers for the same
+    /// key can only be writing identical bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the destination lookup or multipart
+    /// initialization fails.
+    pub async fn begin_content_addressed_upload(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<BeginMultipartUploadResult, S3ObjectStoreError> {
+        if self.metadata(key)?.is_some() {
+            return Ok(BeginMultipartUploadResult::AlreadyExists);
+        }
+
+        let location = self.location_for_key(key)?;
+        let upload = self
+            .inner
+            .put_multipart(&location)
+            .await
+            .map_err(S3ObjectStoreError::External)?;
+        Ok(BeginMultipartUploadResult::Upload(
+            S3MultipartUploadWriter {
+                writer: WriteMultipart::new_with_chunk_size(upload, STREAM_UPLOAD_CHUNK_BYTES),
+            },
+        ))
     }
 
     fn metadata_from_external(
