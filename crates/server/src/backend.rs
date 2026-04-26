@@ -6,8 +6,12 @@ use std::sync::{
 use std::{num::NonZeroUsize, path::PathBuf};
 
 use axum::body::Bytes;
-use shardline_protocol::{ByteRange, RepositoryScope};
-use shardline_storage::{DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix, PutOutcome};
+use sha2::{Digest, Sha256};
+use shardline_protocol::{ByteRange, RepositoryScope, ShardlineHash};
+use shardline_storage::{
+    BeginMultipartUploadResult, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey,
+    ObjectMetadata, ObjectPrefix, PutOutcome,
+};
 #[cfg(test)]
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
@@ -19,11 +23,13 @@ use crate::{
         FileReconstructionResponse, ServerStatsResponse, ShardUploadResponse, UploadFileResponse,
         XorbUploadResponse,
     },
-    object_store::object_store_from_config,
+    object_store::{ServerObjectStore, object_store_from_config},
+    overflow::checked_add,
+    protocol_support::shared_sha256_object_key,
     reconstruction_cache::{
         ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache_with_loader,
     },
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
 #[derive(Debug, Clone)]
@@ -105,6 +111,34 @@ impl ServerBackend {
                 backend
                     .upload_shard_stream(body, repository_scope, shard_metadata_limits)
                     .await
+            }
+        }
+    }
+
+    pub(crate) async fn put_sha256_addressed_object_stream_if_absent(
+        &self,
+        object_key: &ObjectKey,
+        digest_hex: &str,
+        body: RequestBodyReader,
+    ) -> Result<PutOutcome, ServerError> {
+        match self {
+            Self::Local(backend) => {
+                put_sha256_addressed_object_stream_if_absent_with_object_store(
+                    &backend.object_store(),
+                    object_key,
+                    digest_hex,
+                    body,
+                )
+                .await
+            }
+            Self::Postgres(backend) => {
+                put_sha256_addressed_object_stream_if_absent_with_object_store(
+                    &backend.object_store(),
+                    object_key,
+                    digest_hex,
+                    body,
+                )
+                .await
             }
         }
     }
@@ -388,6 +422,68 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.delete_object_if_present(object_key).await,
             Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
+        }
+    }
+}
+
+async fn put_sha256_addressed_object_stream_if_absent_with_object_store(
+    object_store: &ServerObjectStore,
+    object_key: &ObjectKey,
+    digest_hex: &str,
+    mut body: RequestBodyReader,
+) -> Result<PutOutcome, ServerError> {
+    let canonical_key = shared_sha256_object_key(digest_hex)?;
+    match object_store {
+        ServerObjectStore::S3(store) => {
+            let canonical_outcome =
+                match store.begin_content_addressed_upload(&canonical_key).await? {
+                    BeginMultipartUploadResult::AlreadyExists => PutOutcome::AlreadyExists,
+                    BeginMultipartUploadResult::Upload(mut upload) => {
+                        let mut sha256 = Sha256::new();
+                        let mut total_length = 0_u64;
+                        while let Some(bytes) = body.next_bytes().await? {
+                            sha256.update(&bytes);
+                            total_length = checked_add(total_length, u64::try_from(bytes.len())?)?;
+                            upload.write(&bytes);
+                            if let Err(error) = upload.wait_for_capacity(4).await {
+                                let _ignored = upload.abort().await;
+                                return Err(ServerError::from(error));
+                            }
+                        }
+                        let observed = hex::encode(sha256.finalize());
+                        if observed != digest_hex {
+                            let _ignored = upload.abort().await;
+                            return Err(ServerError::ExpectedBodyHashMismatch);
+                        }
+                        let _total_length = total_length;
+                        upload.finish().await?;
+                        PutOutcome::Inserted
+                    }
+                };
+            if canonical_key == *object_key {
+                return Ok(canonical_outcome);
+            }
+            object_store.copy_if_absent(&canonical_key, object_key)
+        }
+        ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
+            let bytes = read_body_to_bytes(&mut body).await?;
+            let observed = hex::encode(Sha256::digest(&bytes));
+            if observed != digest_hex {
+                return Err(ServerError::ExpectedBodyHashMismatch);
+            }
+            let integrity = ObjectIntegrity::new(
+                ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes()),
+                u64::try_from(bytes.len())?,
+            );
+            let canonical_outcome = object_store.put_if_absent(
+                &canonical_key,
+                ObjectBody::from_vec(bytes),
+                &integrity,
+            )?;
+            if canonical_key == *object_key {
+                return Ok(canonical_outcome);
+            }
+            object_store.copy_if_absent(&canonical_key, object_key)
         }
     }
 }
