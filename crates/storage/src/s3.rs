@@ -19,6 +19,7 @@ use object_store::{
     CopyMode, CopyOptions, Error as ExternalObjectStoreError, GetOptions, GetResult,
     ObjectStore as ExternalObjectStore, ObjectStoreExt, PutMode, WriteMultipart,
     aws::{AmazonS3, AmazonS3Builder, S3ConditionalPut, S3CopyIfNotExists},
+    multipart::{MultipartStore, PartId},
     path::Path as ObjectStorePath,
 };
 use shardline_protocol::{ByteRange, SecretString, ShardlineHash};
@@ -458,6 +459,89 @@ impl S3ObjectStore {
                 writer: WriteMultipart::new_with_chunk_size(upload, STREAM_UPLOAD_CHUNK_BYTES),
             },
         ))
+    }
+
+    /// Starts a resumable multipart upload at a temporary S3 location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the multipart upload cannot be
+    /// initialized.
+    pub async fn create_resumable_upload(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<String, S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        self.inner
+            .create_multipart(&location)
+            .await
+            .map_err(S3ObjectStoreError::External)
+    }
+
+    /// Uploads one part into an existing resumable multipart upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the object key is invalid or the part
+    /// upload fails.
+    pub async fn upload_resumable_part(
+        &self,
+        key: &ObjectKey,
+        upload_id: &str,
+        part_idx: usize,
+        bytes: Bytes,
+    ) -> Result<String, S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        let multipart_id = upload_id.to_owned();
+        let part = self
+            .inner
+            .put_part(&location, &multipart_id, part_idx, bytes.into())
+            .await
+            .map_err(S3ObjectStoreError::External)?;
+        Ok(part.content_id)
+    }
+
+    /// Completes a resumable multipart upload once all parts are uploaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the final completion request fails.
+    pub async fn complete_resumable_upload(
+        &self,
+        key: &ObjectKey,
+        upload_id: &str,
+        part_ids: Vec<String>,
+    ) -> Result<(), S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        let multipart_id = upload_id.to_owned();
+        let parts = part_ids
+            .into_iter()
+            .map(|content_id| PartId { content_id })
+            .collect();
+        let _result = self
+            .inner
+            .complete_multipart(&location, &multipart_id, parts)
+            .await
+            .map_err(S3ObjectStoreError::External)?;
+        Ok(())
+    }
+
+    /// Aborts a resumable multipart upload and discards any uploaded parts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the abort request fails.
+    pub async fn abort_resumable_upload(
+        &self,
+        key: &ObjectKey,
+        upload_id: &str,
+    ) -> Result<(), S3ObjectStoreError> {
+        let location = self.location_for_key(key)?;
+        let multipart_id = upload_id.to_owned();
+        self.inner
+            .abort_multipart(&location, &multipart_id)
+            .await
+            .map_err(S3ObjectStoreError::External)
     }
 
     fn metadata_from_external(
