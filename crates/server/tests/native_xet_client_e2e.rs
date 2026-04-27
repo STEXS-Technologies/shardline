@@ -1,7 +1,6 @@
 mod support;
 
 use std::{
-    env::var,
     error::Error,
     fs::{create_dir_all, read, write as write_file},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -33,6 +32,7 @@ use shardline_server::{
     ObjectStorageAdapter, ServerConfig, XetCasTokenResponse, serve_with_listener,
 };
 use shardline_storage::S3ObjectStoreConfig;
+use shardline_test_support::DockerLocalStack;
 use support::ServerE2eInvariantError;
 use tokio::{
     net::TcpListener,
@@ -75,15 +75,20 @@ fn shardline_accepts_native_xet_upload_and_download_flows() {
     let Some(runtime) = runtime else {
         return;
     };
-    let result = runtime.bridge_sync(async move { exercise_native_xet_flow(None).await });
+    let result = runtime.bridge_sync(async move { exercise_native_xet_flow(None, None).await });
     let error = result.as_ref().err().map(ToString::to_string);
     assert!(result.is_ok(), "native xet e2e failed: {error:?}");
 }
 
 #[test]
 fn shardline_accepts_native_xet_upload_and_download_flows_with_s3_when_configured() {
-    let s3_config = optional_s3_e2e_config();
-    let Some(s3_config) = s3_config else {
+    let services = DockerLocalStack::builder().with_minio().start();
+    let Ok(Some(services)) = services else {
+        return;
+    };
+    let Some(s3_config) =
+        services.s3_config_with_prefix(Some(&services.unique_s3_key_prefix("native-xet-e2e")))
+    else {
         return;
     };
 
@@ -92,8 +97,10 @@ fn shardline_accepts_native_xet_upload_and_download_flows_with_s3_when_configure
     let Some(runtime) = runtime else {
         return;
     };
-    let result =
-        runtime.bridge_sync(async move { exercise_native_xet_flow(Some(s3_config)).await });
+    let result = runtime.bridge_sync(async move {
+        let _services = services;
+        exercise_native_xet_flow(Some(s3_config), None).await
+    });
     let error = result.as_ref().err().map(ToString::to_string);
     assert!(result.is_ok(), "native xet s3 e2e failed: {error:?}");
 }
@@ -503,7 +510,10 @@ async fn exercise_native_xet_sparse_download_cache_regression() -> Result<(), Te
     Ok(())
 }
 
-async fn exercise_native_xet_flow(s3_config: Option<S3ObjectStoreConfig>) -> Result<(), TestError> {
+async fn exercise_native_xet_flow(
+    s3_config: Option<S3ObjectStoreConfig>,
+    postgres_url: Option<String>,
+) -> Result<(), TestError> {
     let storage = tempfile::tempdir()?;
     let client_workdir = tempfile::tempdir()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
@@ -517,6 +527,9 @@ async fn exercise_native_xet_flow(s3_config: Option<S3ObjectStoreConfig>) -> Res
     );
     if let Some(s3_config) = s3_config {
         config = config.with_object_storage(ObjectStorageAdapter::S3, Some(s3_config));
+    }
+    if let Some(postgres_url) = postgres_url {
+        config = config.with_index_postgres_url(postgres_url)?;
     }
     let server = spawn(async move { serve_with_listener(config, listener).await });
 
@@ -1727,40 +1740,6 @@ fn mutate_bytes(base: &[u8], start: usize, end: usize, value: u8) -> Result<Vec<
     };
     region.fill(value);
     Ok(bytes)
-}
-
-fn optional_s3_e2e_config() -> Option<S3ObjectStoreConfig> {
-    let Ok(bucket) = var("SHARDLINE_S3_E2E_BUCKET") else {
-        return None;
-    };
-    let region = var("SHARDLINE_S3_E2E_REGION").unwrap_or_else(|_error| "us-east-1".to_owned());
-    let endpoint = var("SHARDLINE_S3_E2E_ENDPOINT").ok();
-    let access_key_id = var("SHARDLINE_S3_E2E_ACCESS_KEY_ID").ok();
-    let secret_access_key = var("SHARDLINE_S3_E2E_SECRET_ACCESS_KEY").ok();
-    let session_token = var("SHARDLINE_S3_E2E_SESSION_TOKEN").ok();
-    let configured_prefix = var("SHARDLINE_S3_E2E_KEY_PREFIX").ok();
-    let allow_http = var("SHARDLINE_S3_E2E_ALLOW_HTTP")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes"));
-    let unique_prefix = unique_s3_e2e_prefix(configured_prefix.as_deref());
-
-    Some(
-        S3ObjectStoreConfig::new(bucket, region)
-            .with_endpoint(endpoint)
-            .with_credentials(access_key_id, secret_access_key, session_token)
-            .with_key_prefix(Some(&unique_prefix))
-            .with_allow_http(allow_http),
-    )
-}
-
-fn unique_s3_e2e_prefix(configured_prefix: Option<&str>) -> String {
-    let unix_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u128, |duration| duration.as_nanos());
-    configured_prefix.map_or_else(
-        || format!("native-xet-e2e/{unix_nanos}"),
-        |prefix| format!("{prefix}/native-xet-e2e/{unix_nanos}"),
-    )
 }
 
 async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), TestError> {

@@ -16,12 +16,16 @@
 //! );
 //! ```
 
+mod docker;
+
 use std::{
     fmt::Display,
     io::{Error as IoError, ErrorKind},
 };
 
 use thiserror::Error;
+
+pub use docker::{DockerLocalStack, DockerLocalStackBuilder};
 
 /// Error type for test-only invariant failures.
 #[derive(Debug, Error)]

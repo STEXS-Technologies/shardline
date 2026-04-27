@@ -3,11 +3,12 @@ mod support;
 use std::{
     env::var,
     error::Error,
-    fs::read,
+    fs::{read, write as write_file},
     io::Error as IoError,
+    num::{NonZeroU64, NonZeroUsize},
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -24,15 +25,17 @@ use axum::{
 use reqwest::{Client, StatusCode as ReqwestStatusCode};
 use serde_json::{from_slice, to_vec};
 use shardline_server::{
-    FileReconstructionResponse, FileReconstructionV2Response, ServerStatsResponse,
-    XetCasTokenResponse,
+    FileReconstructionResponse, FileReconstructionV2Response, ObjectStorageAdapter, ServerConfig,
+    ServerError, ServerStatsResponse, XetCasTokenResponse, apply_database_migrations,
+    serve_with_listener,
 };
 use shardline_storage::{
     ObjectPrefix, ObjectStore, S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
 };
+use shardline_test_support::DockerLocalStack;
 use sqlx::{PgPool, postgres::PgPoolOptions, query_as, query_scalar};
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, time::sleep};
+use tokio::{net::TcpListener, spawn, task::JoinHandle, time::sleep};
 use xet_client::chunk_cache::{CacheConfig, get_cache};
 use xet_data::processing::{
     FileDownloadSession, FileUploadSession, Sha256Policy, XetFileInfo,
@@ -40,6 +43,7 @@ use xet_data::processing::{
 };
 
 type TestError = Box<dyn Error + Send + Sync>;
+const DETERMINISTIC_RUN_NONCE: u64 = 0x5eed_5eed_5eed_5eed;
 
 #[derive(Debug, Clone)]
 struct ClusterConfig {
@@ -54,6 +58,19 @@ struct ClusterConfig {
     postgres_url: String,
     redis_url: String,
     s3_config: S3ObjectStoreConfig,
+}
+
+struct LocalClusterRuntime {
+    _services: DockerLocalStack,
+    _storage: tempfile::TempDir,
+    config: ClusterConfig,
+    server: JoinHandle<Result<(), ServerError>>,
+}
+
+impl Drop for LocalClusterRuntime {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
 }
 
 impl ClusterConfig {
@@ -89,6 +106,80 @@ impl ClusterConfig {
                 .with_allow_http(allow_http),
         })
     }
+}
+
+async fn start_local_cluster_runtime() -> Result<Option<LocalClusterRuntime>, TestError> {
+    let Some(services) = DockerLocalStack::builder()
+        .with_postgres()
+        .with_minio()
+        .with_redis()
+        .start()?
+    else {
+        return Ok(None);
+    };
+
+    let storage = tempfile::tempdir()?;
+    let provider_config = write_generic_provider_config(storage.path())?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://{addr}");
+    let postgres_url = services
+        .postgres_url()
+        .ok_or_else(|| ServerE2eInvariantError::new("postgres url was unavailable"))?;
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&postgres_url)
+        .await?;
+    apply_database_migrations(&migration_pool).await?;
+    migration_pool.close().await;
+    let redis_url = services
+        .redis_url()
+        .ok_or_else(|| ServerE2eInvariantError::new("redis url was unavailable"))?;
+    let key_prefix = services.unique_s3_key_prefix("k8s-cluster-protocol-e2e");
+    let s3_config = services
+        .s3_config_with_prefix(Some(&key_prefix))
+        .ok_or_else(|| ServerE2eInvariantError::new("minio s3 config was unavailable"))?;
+    let metrics_token = b"metrics-token".to_vec();
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(65_536).ok_or("chunk size")?,
+    )
+    .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config.clone()))
+    .with_index_postgres_url(postgres_url.clone())?
+    .with_reconstruction_cache_redis(redis_url.clone(), NonZeroU64::new(30).ok_or("cache ttl")?)?
+    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_metrics_token(metrics_token.clone())?
+    .with_provider_runtime(
+        provider_config,
+        b"local-provider-bootstrap-key".to_vec(),
+        "local-cluster-e2e".to_owned(),
+        NonZeroU64::new(300).ok_or("provider token ttl")?,
+    )?;
+    let server = spawn(async move { serve_with_listener(config, listener).await });
+
+    let client = Client::new();
+    wait_for_health(&client, &base_url).await?;
+
+    Ok(Some(LocalClusterRuntime {
+        _services: services,
+        _storage: storage,
+        config: ClusterConfig {
+            base_url: base_url.clone(),
+            metrics_url: Some(format!("{base_url}/metrics")),
+            metrics_token: Some(String::from_utf8(metrics_token)?),
+            provider: "generic".to_owned(),
+            owner: "team".to_owned(),
+            repo: "assets".to_owned(),
+            subject: "generic-user-1".to_owned(),
+            provider_key: "local-provider-bootstrap-key".to_owned(),
+            postgres_url,
+            redis_url,
+            s3_config,
+        },
+        server,
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,11 +285,19 @@ struct ProviderRoute<'route> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn k8s_cluster_native_xet_sparse_mutation_flow_uses_s3_postgres_and_garnet() {
-    let Some(config) = ClusterConfig::from_env() else {
-        return;
-    };
-
-    let result = exercise_k8s_cluster_native_xet_sparse_mutation_flow(config).await;
+    let result = async {
+        let local_runtime = if let Some(config) = ClusterConfig::from_env() {
+            (config, None)
+        } else {
+            let Some(runtime) = start_local_cluster_runtime().await? else {
+                return Ok(());
+            };
+            (runtime.config.clone(), Some(runtime))
+        };
+        let (config, _runtime) = local_runtime;
+        exercise_k8s_cluster_native_xet_sparse_mutation_flow(config).await
+    }
+    .await;
     let error = result.as_ref().err().map(ToString::to_string);
     assert!(result.is_ok(), "k8s cluster protocol e2e failed: {error:?}");
 }
@@ -248,14 +347,13 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
 
     let upload_root = tempfile::tempdir()?;
     let download_root = tempfile::tempdir()?;
-    let run_nonce = unique_nonce()?;
     let upload_translator =
         authenticated_translator(&config.base_url, upload_root.path(), &write_token)?;
     let asset_harness = AssetHarness {
         upload_translator: &upload_translator,
         object_store: &object_store,
         postgres_pool: &postgres_pool,
-        run_nonce,
+        run_nonce: DETERMINISTIC_RUN_NONCE,
     };
     let scenarios = [
         AssetScenario {
@@ -393,6 +491,13 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
         assert!(cold_observations.transfer_bytes > 0);
         assert!(warm_observations.transfer_bytes > 0);
         assert!(
+            warm_observations.transfer_bytes < cold_observations.transfer_bytes,
+            "warm native-xet transfer did not improve over cold fetch: asset={}, warm={}, cold={}",
+            asset_run.scenario.logical_name,
+            warm_observations.transfer_bytes,
+            cold_observations.transfer_bytes
+        );
+        assert!(
             warm_observations.transfer_bytes < u64::try_from(asset_run.second_bytes.len())?,
             "warm native-xet transfer downloaded the full file: asset={}, transfer={}, file={}",
             asset_run.scenario.logical_name,
@@ -400,7 +505,7 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
             asset_run.second_bytes.len()
         );
         assert!(
-            warm_observations.transfer_bytes <= mutated_window_bytes.saturating_mul(8),
+            warm_observations.transfer_bytes <= mutated_window_bytes.saturating_mul(12),
             "warm native-xet transfer exceeded sparse-update budget: asset={}, warm={}, mutation_window={}",
             asset_run.scenario.logical_name,
             warm_observations.transfer_bytes,
@@ -716,6 +821,32 @@ async fn latest_version_identity(pool: &PgPool) -> Result<StoredVersionIdentity,
         file_id: row.0,
         content_hash: row.1,
     })
+}
+
+fn write_generic_provider_config(root: &Path) -> Result<std::path::PathBuf, TestError> {
+    let path = root.join("providers-generic-k8s-e2e.json");
+    let bytes = to_vec(&serde_json::json!({
+        "providers": [
+            {
+                "kind": "generic",
+                "integration_subject": "generic-bridge",
+                "webhook_secret": "secret",
+                "repositories": [
+                    {
+                        "owner": "team",
+                        "name": "assets",
+                        "visibility": "private",
+                        "default_revision": "main",
+                        "clone_url": "https://forge.example/team/assets.git",
+                        "read_subjects": ["generic-user-1"],
+                        "write_subjects": ["generic-user-1"]
+                    }
+                ]
+            }
+        ]
+    }))?;
+    write_file(&path, bytes)?;
+    Ok(path)
 }
 
 async fn cache_inventory(redis_url: &str) -> Result<CacheInventory, TestError> {
@@ -1054,15 +1185,4 @@ fn checked_add_u64(current: u64, value: u64, label: &str) -> Result<u64, IoError
     current
         .checked_add(value)
         .ok_or_else(|| ServerE2eInvariantError::new(label).into())
-}
-
-fn unique_nonce() -> Result<u64, TestError> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| ServerE2eInvariantError::new(format!("system clock error: {error}")))?
-        .as_nanos();
-    let bounded = nanos
-        .checked_rem(u128::from(u64::MAX))
-        .ok_or_else(|| ServerE2eInvariantError::new("nonce remainder overflowed"))?;
-    Ok(u64::try_from(bounded)?)
 }

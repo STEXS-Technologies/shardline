@@ -31,11 +31,13 @@ use crate::{
         lfs_object_key,
     },
     oci_adapter::{
-        OciReference, append_upload_bytes, create_upload_session, delete_upload_session,
-        lock_upload_sessions, oci_blob_key, oci_blob_location, oci_manifest_key,
-        oci_manifest_location, oci_manifest_media_type_key, oci_tag_key, oci_tag_prefix,
-        oci_tag_target_key, oci_tag_target_prefix, parse_reference, read_upload_session,
-        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
+        OciReference, abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
+        append_upload_bytes, create_upload_session, delete_upload_session,
+        finalize_s3_multipart_upload_session, lock_upload_sessions, oci_blob_key,
+        oci_blob_location, oci_manifest_key, oci_manifest_location, oci_manifest_media_type_key,
+        oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix, parse_reference,
+        read_upload_session, touch_upload_session, upload_body_integrity,
+        upload_body_path_for_session, upload_length, upload_session_length,
         upload_session_location, validate_repository,
     },
     protocol_support::{parse_sha256_digest, scope_namespace, validate_oci_repository_scope},
@@ -711,6 +713,7 @@ async fn oci_post_blob_upload(
         scope,
         state.config.oci_upload_session_ttl_seconds(),
         state.config.oci_upload_max_active_sessions(),
+        state.backend.uses_s3_object_store(),
     )
     .await?;
     Response::builder()
@@ -744,7 +747,11 @@ async fn oci_patch_blob_upload(
     if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
         return Err(ServerError::NotFound);
     }
-    let current_length = upload_length(state.config.root_dir(), session_id).await?;
+    let current_length = if let Some(length) = upload_session_length(&session) {
+        length
+    } else {
+        upload_length(state.config.root_dir(), session_id).await?
+    };
     if let Some(content_range) = headers.get(CONTENT_RANGE) {
         let content_range = content_range
             .to_str()
@@ -763,8 +770,21 @@ async fn oci_patch_blob_upload(
         }
     }
     ensure_upload_growth_within_limit(state, current_length, bytes.len())?;
-    let new_length = append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?;
-    touch_upload_session(state.config.root_dir(), session_id, session).await?;
+    let new_length = if session.use_s3_multipart {
+        let (_session, new_length) = append_s3_multipart_upload_bytes(
+            state.config.root_dir(),
+            &state.backend,
+            session_id,
+            session,
+            &bytes,
+        )
+        .await?;
+        new_length
+    } else {
+        let new_length = append_upload_bytes(state.config.root_dir(), session_id, &bytes).await?;
+        touch_upload_session(state.config.root_dir(), session_id, session).await?;
+        new_length
+    };
     let last = new_length.saturating_sub(1);
     Response::builder()
         .status(StatusCode::ACCEPTED)
@@ -800,7 +820,11 @@ async fn oci_put_blob_upload(
     if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
         return Err(ServerError::NotFound);
     }
-    let current_length = upload_length(state.config.root_dir(), session_id).await?;
+    let current_length = if let Some(length) = upload_session_length(&session) {
+        length
+    } else {
+        upload_length(state.config.root_dir(), session_id).await?
+    };
     if let Some(content_range) = headers.get(CONTENT_RANGE) {
         let content_range = content_range
             .to_str()
@@ -819,6 +843,24 @@ async fn oci_put_blob_upload(
         }
     }
     ensure_upload_growth_within_limit(state, current_length, final_bytes.len())?;
+    let object_key = oci_blob_key(repository, &digest_hex, scope)?;
+    if session.use_s3_multipart {
+        let _stored = finalize_s3_multipart_upload_session(
+            state.config.root_dir(),
+            &state.backend,
+            session_id,
+            session,
+            &object_key,
+            &digest_hex,
+            &final_bytes,
+        )
+        .await?;
+        delete_upload_session(state.config.root_dir(), session_id).await?;
+        return oci_created_response(
+            &oci_blob_location(repository, &digest_hex),
+            Some(&digest_hex),
+        );
+    }
     if !final_bytes.is_empty() {
         let _new_length =
             append_upload_bytes(state.config.root_dir(), session_id, &final_bytes).await?;
@@ -827,7 +869,6 @@ async fn oci_put_blob_upload(
     if observed != digest_hex {
         return Err(ServerError::ExpectedBodyHashMismatch);
     }
-    let object_key = oci_blob_key(repository, &digest_hex, scope)?;
     let upload_path = upload_body_path_for_session(state.config.root_dir(), session_id)?;
     let _stored = state.backend.put_sha256_addressed_object_file(
         &object_key,
@@ -861,7 +902,11 @@ async fn oci_get_blob_upload(
     if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
         return Err(ServerError::NotFound);
     }
-    let length = upload_length(state.config.root_dir(), session_id).await?;
+    let length = if let Some(length) = upload_session_length(&session) {
+        length
+    } else {
+        upload_length(state.config.root_dir(), session_id).await?
+    };
     touch_upload_session(state.config.root_dir(), session_id, session).await?;
     let last = length.saturating_sub(1);
     Response::builder()
@@ -890,6 +935,9 @@ async fn oci_delete_blob_upload(
     .await?;
     if session.repository != repository || session.scope_namespace != scope_namespace(scope) {
         return Err(ServerError::NotFound);
+    }
+    if session.use_s3_multipart {
+        abort_s3_multipart_upload_session(&state.backend, &session).await?;
     }
     delete_upload_session(state.config.root_dir(), session_id).await?;
     Response::builder()
