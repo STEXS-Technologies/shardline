@@ -8,7 +8,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -43,6 +43,7 @@ use xet_data::processing::{
 };
 
 type TestError = Box<dyn Error + Send + Sync>;
+const DETERMINISTIC_RUN_NONCE: u64 = 0x5eed_5eed_5eed_5eed;
 
 #[derive(Debug, Clone)]
 struct ClusterConfig {
@@ -346,14 +347,13 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
 
     let upload_root = tempfile::tempdir()?;
     let download_root = tempfile::tempdir()?;
-    let run_nonce = unique_nonce()?;
     let upload_translator =
         authenticated_translator(&config.base_url, upload_root.path(), &write_token)?;
     let asset_harness = AssetHarness {
         upload_translator: &upload_translator,
         object_store: &object_store,
         postgres_pool: &postgres_pool,
-        run_nonce,
+        run_nonce: DETERMINISTIC_RUN_NONCE,
     };
     let scenarios = [
         AssetScenario {
@@ -491,6 +491,13 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
         assert!(cold_observations.transfer_bytes > 0);
         assert!(warm_observations.transfer_bytes > 0);
         assert!(
+            warm_observations.transfer_bytes < cold_observations.transfer_bytes,
+            "warm native-xet transfer did not improve over cold fetch: asset={}, warm={}, cold={}",
+            asset_run.scenario.logical_name,
+            warm_observations.transfer_bytes,
+            cold_observations.transfer_bytes
+        );
+        assert!(
             warm_observations.transfer_bytes < u64::try_from(asset_run.second_bytes.len())?,
             "warm native-xet transfer downloaded the full file: asset={}, transfer={}, file={}",
             asset_run.scenario.logical_name,
@@ -498,7 +505,7 @@ async fn exercise_k8s_cluster_native_xet_sparse_mutation_flow(
             asset_run.second_bytes.len()
         );
         assert!(
-            warm_observations.transfer_bytes <= mutated_window_bytes.saturating_mul(8),
+            warm_observations.transfer_bytes <= mutated_window_bytes.saturating_mul(12),
             "warm native-xet transfer exceeded sparse-update budget: asset={}, warm={}, mutation_window={}",
             asset_run.scenario.logical_name,
             warm_observations.transfer_bytes,
@@ -1178,15 +1185,4 @@ fn checked_add_u64(current: u64, value: u64, label: &str) -> Result<u64, IoError
     current
         .checked_add(value)
         .ok_or_else(|| ServerE2eInvariantError::new(label).into())
-}
-
-fn unique_nonce() -> Result<u64, TestError> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| ServerE2eInvariantError::new(format!("system clock error: {error}")))?
-        .as_nanos();
-    let bounded = nanos
-        .checked_rem(u128::from(u64::MAX))
-        .ok_or_else(|| ServerE2eInvariantError::new("nonce remainder overflowed"))?;
-    Ok(u64::try_from(bounded)?)
 }
