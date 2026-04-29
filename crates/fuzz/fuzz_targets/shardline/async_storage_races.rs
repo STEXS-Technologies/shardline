@@ -225,12 +225,11 @@ fn local_concurrent_put_and_read(body: &[u8], integrity: &ObjectIntegrity) {
     let reader = thread::spawn(move || {
         let mut iterations = 0_u64;
         while !reader_stop.load(Ordering::SeqCst) && iterations < 100 {
-            if let Ok(Some(meta)) = reader_store.metadata(&reader_key) {
-                if let Some(range) = range_up_to(meta.length()) {
-                    if let Ok(bytes) = reader_store.read_range(&reader_key, range) {
-                        assert_eq!(bytes.len() as u64, meta.length());
-                    }
-                }
+            if let Ok(Some(meta)) = reader_store.metadata(&reader_key)
+                && let Some(range) = range_up_to(meta.length())
+                && let Ok(bytes) = reader_store.read_range(&reader_key, range)
+            {
+                assert_eq!(bytes.len() as u64, meta.length());
             }
             iterations = iterations.wrapping_add(1);
         }
@@ -486,11 +485,11 @@ fn async_concurrent_put_different_bytes(body: &[u8]) {
 
     if let Some(rt) = build_rt() {
         rt.block_on(async {
-            if let Ok(data) = store.get(&location).await {
-                if let Ok(stored) = data.bytes().await {
-                    let matches = bodies.iter().any(|b| stored.as_ref() == b.as_slice());
-                    assert!(matches, "stored bytes don't match any written body");
-                }
+            if let Ok(data) = store.get(&location).await
+                && let Ok(stored) = data.bytes().await
+            {
+                let matches = bodies.iter().any(|b| stored.as_ref() == b.as_slice());
+                assert!(matches, "stored bytes don't match any written body");
             }
         });
     }
@@ -505,11 +504,11 @@ fn async_concurrent_put_different_bytes(body: &[u8]) {
 
     if let Some(rt) = build_rt() {
         rt.block_on(async {
-            if let Ok(data) = store.get(&location).await {
-                if let Ok(stored) = data.bytes().await {
-                    let matches = bodies.iter().any(|b| stored.as_ref() == b.as_slice());
-                    assert!(matches, "stored bytes don't match any written body");
-                }
+            if let Ok(data) = store.get(&location).await
+                && let Ok(stored) = data.bytes().await
+            {
+                let matches = bodies.iter().any(|b| stored.as_ref() == b.as_slice());
+                assert!(matches, "stored bytes don't match any written body");
             }
         });
     }
@@ -765,14 +764,14 @@ fn async_toctou_multipart_race(body: &[u8], _integrity: &ObjectIntegrity) {
 
     if let Some(rt) = build_rt() {
         rt.block_on(async {
-            if let Ok(data) = store.get(&location).await {
-                if let Ok(stored) = data.bytes().await {
-                    assert_eq!(
-                        stored.as_ref(),
-                        body,
-                        "multipart TOCTOU race: stored bytes must match original body"
-                    );
-                }
+            if let Ok(data) = store.get(&location).await
+                && let Ok(stored) = data.bytes().await
+            {
+                assert_eq!(
+                    stored.as_ref(),
+                    body,
+                    "multipart TOCTOU race: stored bytes must match original body"
+                );
             }
         });
     }
