@@ -10,10 +10,10 @@ For single-node Linux service templates, see [systemd](SYSTEMD.md).
 
 ## Runtime Shape
 
-`shardline serve` accepts an explicit frontend set through repeated `--frontend` flags or
-`SHARDLINE_SERVER_FRONTENDS=xet,...`.
-The default frontend is `xet`. `--role api` and `--role transfer` only split that
-frontend set across processes for scaling; they do not choose different protocols.
+`shardline serve` accepts an explicit frontend set through repeated `--frontend` flags
+or `SHARDLINE_SERVER_FRONTENDS=xet,...`. The default frontend is `xet`. `--role api` and
+`--role transfer` only split that frontend set across processes for scaling; they do not
+choose different protocols.
 
 ## Deployment Profiles
 
@@ -50,8 +50,9 @@ docker compose -f docker-compose.yml up --build
 ```
 
 That compose profile is Docker-native by default: it generates and persists its
-development signing key inside the named data volume. To mint an authenticated local
-token against that running container, execute the CLI inside the service:
+development signing key inside the named data volume.
+To mint an authenticated local token against that running container, execute the CLI
+inside the service:
 
 ```bash
 TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
@@ -87,9 +88,10 @@ TOKEN="$(SHARDLINE_TOKEN_SIGNING_KEY=dev-signing-key shardline admin token \
 curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:18080/v1/stats
 ```
 
-For a host-native server process, run `shardline serve` directly and provide the
-runtime configuration through normal environment variables or files. Provider integration
-is independent of whether the process runs on the host or in a container.
+For a host-native server process, run `shardline serve` directly and provide the runtime
+configuration through normal environment variables or files.
+Provider integration is independent of whether the process runs on the host or in a
+container.
 
 For local S3-compatible testing, start the MinIO profile and point Shardline at the
 bucket it creates:
@@ -270,9 +272,9 @@ SHARDLINE_LOG_LEVEL=info
 Set exactly one signing-key source for a server process that exposes CAS routes:
 `SHARDLINE_TOKEN_SIGNING_KEY` for a direct environment value, or
 `SHARDLINE_TOKEN_SIGNING_KEY_FILE` for a file or mounted secret.
-If both are set, startup fails with a configuration error instead of guessing precedence.
-CAS routes require bearer tokens with a valid Shardline signature, issuer, repository
-scope, and the required read or write scope.
+If both are set, startup fails with a configuration error instead of guessing
+precedence. CAS routes require bearer tokens with a valid Shardline signature, issuer,
+repository scope, and the required read or write scope.
 The stats endpoint follows the same rule and requires a valid bearer token.
 `SHARDLINE_PROVIDER_CONFIG_FILE` and `SHARDLINE_PROVIDER_API_KEY_FILE` are optional.
 Leave them unset for a providerless deployment that serves clients directly.
@@ -291,9 +293,9 @@ SHARDLINE_TOKEN_SIGNING_KEY=change-me-for-local-only
 SHARDLINE_OBJECT_STORAGE_ADAPTER=local
 ```
 
-For production, prefer `SHARDLINE_TOKEN_SIGNING_KEY_FILE=/run/secrets/shardline-token-key`
-or a platform secret mount instead of putting the signing key directly in the process
-environment.
+For production, prefer
+`SHARDLINE_TOKEN_SIGNING_KEY_FILE=/run/secrets/shardline-token-key` or a platform secret
+mount instead of putting the signing key directly in the process environment.
 
 For local single-node, keep the default SQLite metadata store under
 `.shardline/data/metadata.sqlite3`. For durable production installs, switch to:

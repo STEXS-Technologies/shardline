@@ -1959,6 +1959,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "walkdir",
  "wasm-bindgen-futures",
  "web-time",
 ]
@@ -2905,7 +2906,11 @@ name = "shardline-fuzz"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "bytes",
+ "futures-util",
+ "hex",
  "libfuzzer-sys",
+ "object_store",
  "shardline",
  "shardline-index",
  "shardline-protocol",
@@ -2913,6 +2918,7 @@ dependencies = [
  "shardline-storage",
  "shardline-vcs",
  "tempfile",
+ "tokio",
  "xet-core-structures",
 ]
 
