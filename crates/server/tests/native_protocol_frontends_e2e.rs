@@ -24,7 +24,10 @@ use sha2::{Digest, Sha256};
 use shardline_protocol::{
     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
 };
-use shardline_server::{ServerConfig, ServerError, ServerFrontend, serve_with_listener};
+use shardline_server::{
+    ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, serve_with_listener,
+};
+use shardline_test_support::DockerLocalStack;
 use support::ServerE2eInvariantError;
 use tokio::{net::TcpListener, spawn, task::JoinHandle, time::sleep};
 
@@ -32,6 +35,7 @@ type TestError = Box<dyn Error + Send + Sync>;
 
 struct FrontendRuntime {
     _storage: tempfile::TempDir,
+    _deployment: Option<DockerLocalStack>,
     base_url: String,
     host_port: String,
     server: JoinHandle<Result<(), ServerError>>,
@@ -221,8 +225,21 @@ async fn native_docker_pull_and_push_work_against_shardline_oci_frontend() {
     assert!(result.is_ok(), "native docker oci e2e failed: {error:?}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_primary_protocol_flows_work_against_s3_object_storage() {
+    let result = exercise_native_primary_protocol_flows_on_s3().await;
+    let error = result.as_ref().err().map(ToString::to_string);
+    assert!(result.is_ok(), "native protocol s3 e2e failed: {error:?}");
+}
+
 async fn exercise_native_git_lfs_flow() -> Result<(), TestError> {
     let runtime = start_runtime(&[ServerFrontend::Lfs]).await?;
+    exercise_native_git_lfs_flow_on_runtime(runtime).await
+}
+
+async fn exercise_native_git_lfs_flow_on_runtime(
+    runtime: FrontendRuntime,
+) -> Result<(), TestError> {
     let write_token = scoped_token(TokenScope::Write, "team", "assets")?;
     let read_token = scoped_token(TokenScope::Read, "team", "assets")?;
 
@@ -530,6 +547,12 @@ async fn exercise_native_git_lfs_pull_and_fetch_all_flow() -> Result<(), TestErr
 
 async fn exercise_native_bazel_http_cache_flow() -> Result<(), TestError> {
     let runtime = start_runtime(&[ServerFrontend::BazelHttp]).await?;
+    exercise_native_bazel_http_cache_flow_on_runtime(runtime).await
+}
+
+async fn exercise_native_bazel_http_cache_flow_on_runtime(
+    runtime: FrontendRuntime,
+) -> Result<(), TestError> {
     let write_token = scoped_token(TokenScope::Write, "team", "assets")?;
     let read_token = scoped_token(TokenScope::Read, "team", "assets")?;
     let workspace = tempfile::tempdir()?;
@@ -693,6 +716,12 @@ async fn exercise_native_bazel_http_cache_toplevel_flow() -> Result<(), TestErro
 
 async fn exercise_native_oci_registry_flow() -> Result<(), TestError> {
     let runtime = start_runtime(&[ServerFrontend::Oci]).await?;
+    exercise_native_oci_registry_flow_on_runtime(runtime).await
+}
+
+async fn exercise_native_oci_registry_flow_on_runtime(
+    runtime: FrontendRuntime,
+) -> Result<(), TestError> {
     let write_token = scoped_token(TokenScope::Write, "team", "assets")?;
     let read_token = scoped_token(TokenScope::Read, "team", "assets")?;
     let source_layout = tempfile::tempdir()?;
@@ -1532,6 +1561,31 @@ async fn exercise_native_docker_oci_flow() -> Result<(), TestError> {
     Ok(())
 }
 
+async fn exercise_native_primary_protocol_flows_on_s3() -> Result<(), TestError> {
+    if command_available("git") && command_available("git-lfs") {
+        let Some(runtime) = start_runtime_with_s3(&[ServerFrontend::Lfs]).await? else {
+            return Ok(());
+        };
+        exercise_native_git_lfs_flow_on_runtime(runtime).await?;
+    }
+
+    if bazel_program().is_some() {
+        let Some(runtime) = start_runtime_with_s3(&[ServerFrontend::BazelHttp]).await? else {
+            return Ok(());
+        };
+        exercise_native_bazel_http_cache_flow_on_runtime(runtime).await?;
+    }
+
+    if command_available("skopeo") && command_available("tar") {
+        let Some(runtime) = start_runtime_with_s3(&[ServerFrontend::Oci]).await? else {
+            return Ok(());
+        };
+        exercise_native_oci_registry_flow_on_runtime(runtime).await?;
+    }
+
+    Ok(())
+}
+
 async fn start_runtime(frontends: &[ServerFrontend]) -> Result<FrontendRuntime, TestError> {
     let storage = tempfile::tempdir()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
@@ -1550,10 +1604,46 @@ async fn start_runtime(frontends: &[ServerFrontend]) -> Result<FrontendRuntime, 
 
     Ok(FrontendRuntime {
         _storage: storage,
+        _deployment: None,
         base_url,
         host_port: addr.to_string(),
         server,
     })
+}
+
+async fn start_runtime_with_s3(
+    frontends: &[ServerFrontend],
+) -> Result<Option<FrontendRuntime>, TestError> {
+    let Some(deployment) = DockerLocalStack::builder().with_minio().start()? else {
+        return Ok(None);
+    };
+    let storage = tempfile::tempdir()?;
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://{addr}");
+    let key_prefix = deployment.unique_s3_key_prefix("native-protocol-frontends");
+    let s3_config = deployment
+        .s3_config_with_prefix(Some(&key_prefix))
+        .ok_or_else(|| ServerE2eInvariantError::new("minio s3 config was unavailable"))?;
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap_or(NonZeroUsize::MIN),
+    )
+    .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config))
+    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_server_frontends(frontends.iter().copied())?;
+    let server = spawn(async move { serve_with_listener(config, listener).await });
+    wait_for_health(&base_url).await?;
+
+    Ok(Some(FrontendRuntime {
+        _storage: storage,
+        _deployment: Some(deployment),
+        base_url,
+        host_port: addr.to_string(),
+        server,
+    }))
 }
 
 fn scoped_token(scope: TokenScope, owner: &str, repo: &str) -> Result<String, TestError> {
