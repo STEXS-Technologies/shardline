@@ -23,7 +23,8 @@ Before touching the repository, have these ready:
   - forward provider webhook deliveries to Shardline
   - keep the repository's Git LFS URL pointing at the normal forge-facing endpoint
 
-Shardline is the CAS backend. Your existing forge stays the forge.
+Shardline is the CAS backend.
+Your existing forge stays the forge.
 That means there are two distinct setup layers:
 
 1. Shardline itself:

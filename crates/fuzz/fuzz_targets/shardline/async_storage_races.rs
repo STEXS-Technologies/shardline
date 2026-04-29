@@ -3,7 +3,7 @@
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
     clippy::redundant_clone,
-    clippy::shadow_unrelated,
+    clippy::shadow_unrelated
 )]
 
 use std::{
@@ -18,13 +18,13 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use libfuzzer_sys::fuzz_target;
 use object_store::{
-    CopyMode, CopyOptions, GetOptions, ObjectStore as _, ObjectStoreExt, PutMode,
-    memory::InMemory, path::Path as ObjectStorePath,
+    CopyMode, CopyOptions, GetOptions, ObjectStore as _, ObjectStoreExt, PutMode, memory::InMemory,
+    path::Path as ObjectStorePath,
 };
 use shardline_protocol::{ByteRange, ShardlineHash};
 use shardline_storage::{
-    LocalObjectStore, LocalObjectStoreError, ObjectBody, ObjectIntegrity, ObjectKey,
-    ObjectStore, PutOutcome,
+    LocalObjectStore, LocalObjectStoreError, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore,
+    PutOutcome,
 };
 
 const MAX_BODY_BYTES: usize = 256;
@@ -101,7 +101,9 @@ fn build_rt() -> Option<tokio::runtime::Runtime> {
 }
 
 fn local_concurrent_put_same_key_same_body(body: &[u8], integrity: &ObjectIntegrity) {
-    let Some((_sandbox, store)) = create_local_store() else { return };
+    let Some((_sandbox, store)) = create_local_store() else {
+        return;
+    };
     let store = Arc::new(store);
     let Some(key) = create_key(body) else { return };
     let body = body.to_vec();
@@ -113,8 +115,11 @@ fn local_concurrent_put_same_key_same_body(body: &[u8], integrity: &ObjectIntegr
     let outcomes_writer = outcomes.clone();
     let integrity_writer = *integrity;
     spawn_concurrent_writers(CONCURRENT_WRITERS, move |_i| {
-        if let Ok(result) = store_writer.put_if_absent(&key_writer, ObjectBody::from_slice(&body_writer), &integrity_writer)
-            && let Ok(mut guard) = outcomes_writer.lock()
+        if let Ok(result) = store_writer.put_if_absent(
+            &key_writer,
+            ObjectBody::from_slice(&body_writer),
+            &integrity_writer,
+        ) && let Ok(mut guard) = outcomes_writer.lock()
         {
             guard.push(result);
         }
@@ -124,7 +129,10 @@ fn local_concurrent_put_same_key_same_body(body: &[u8], integrity: &ObjectIntegr
         guard.iter().filter(|o| **o == PutOutcome::Inserted).count()
     });
     let exists = outcomes.lock().map_or(0, |guard| {
-        guard.iter().filter(|o| **o == PutOutcome::AlreadyExists).count()
+        guard
+            .iter()
+            .filter(|o| **o == PutOutcome::AlreadyExists)
+            .count()
     });
     let total = outcomes.lock().map_or(0, |guard| guard.len());
     assert!(
@@ -145,7 +153,9 @@ fn local_concurrent_put_same_key_same_body(body: &[u8], integrity: &ObjectIntegr
 }
 
 fn local_concurrent_put_same_key_different_body(body: &[u8]) {
-    let Some((_sandbox, store)) = create_local_store() else { return };
+    let Some((_sandbox, store)) = create_local_store() else {
+        return;
+    };
     let store = Arc::new(store);
     let Some(key) = create_key(body) else { return };
 
@@ -169,7 +179,8 @@ fn local_concurrent_put_same_key_different_body(body: &[u8]) {
         if let Some(chosen) = bodies.get(i) {
             let h = ShardlineHash::from_bytes(*blake3::hash(chosen).as_bytes());
             let integ = ObjectIntegrity::new(h, chosen.len() as u64);
-            if let Ok(result) = store_writer.put_if_absent(&key_writer, ObjectBody::from_slice(chosen), &integ)
+            if let Ok(result) =
+                store_writer.put_if_absent(&key_writer, ObjectBody::from_slice(chosen), &integ)
                 && let Ok(mut guard) = results_writer.lock()
             {
                 guard.push(Ok(result));
@@ -178,7 +189,10 @@ fn local_concurrent_put_same_key_different_body(body: &[u8]) {
     });
 
     let inserted = results.lock().map_or(0, |guard| {
-        guard.iter().filter(|r| matches!(r, Ok(PutOutcome::Inserted))).count()
+        guard
+            .iter()
+            .filter(|r| matches!(r, Ok(PutOutcome::Inserted)))
+            .count()
     });
     assert!(
         inserted <= 1,
@@ -186,15 +200,20 @@ fn local_concurrent_put_same_key_different_body(body: &[u8]) {
          expected at most 1 Inserted, got {inserted}"
     );
     if inserted == 0 {
-        let all_err = results.lock().map_or(true, |guard| {
-            guard.iter().all(|r| r.is_err())
-        });
-        assert!(all_err, "conflicting concurrent writes: expected all errors");
+        let all_err = results
+            .lock()
+            .map_or(true, |guard| guard.iter().all(|r| r.is_err()));
+        assert!(
+            all_err,
+            "conflicting concurrent writes: expected all errors"
+        );
     }
 }
 
 fn local_concurrent_put_and_read(body: &[u8], integrity: &ObjectIntegrity) {
-    let Some((_sandbox, store)) = create_local_store() else { return };
+    let Some((_sandbox, store)) = create_local_store() else {
+        return;
+    };
     let store = Arc::new(store);
     let Some(key) = create_key(body) else { return };
     let body = body.to_vec();
@@ -217,13 +236,17 @@ fn local_concurrent_put_and_read(body: &[u8], integrity: &ObjectIntegrity) {
         }
     });
 
-    store.put_if_absent(&key, ObjectBody::from_slice(&body), integrity).ok();
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(&body), integrity)
+        .ok();
     stop.store(true, Ordering::SeqCst);
     reader.join().ok();
 }
 
 fn local_concurrent_contains_and_put(body: &[u8], integrity: &ObjectIntegrity) {
-    let Some((_sandbox, store)) = create_local_store() else { return };
+    let Some((_sandbox, store)) = create_local_store() else {
+        return;
+    };
     let store = Arc::new(store);
     let Some(key) = create_key(body) else { return };
     let body = body.to_vec();
@@ -256,12 +279,16 @@ fn local_concurrent_contains_and_put(body: &[u8], integrity: &ObjectIntegrity) {
 }
 
 fn local_concurrent_delete_and_put(body: &[u8], integrity: &ObjectIntegrity) {
-    let Some((_sandbox, store)) = create_local_store() else { return };
+    let Some((_sandbox, store)) = create_local_store() else {
+        return;
+    };
     let store = Arc::new(store);
     let Some(key) = create_key(body) else { return };
     let body = body.to_vec();
 
-    store.put_if_absent(&key, ObjectBody::from_slice(&body), integrity).ok();
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(&body), integrity)
+        .ok();
 
     let stop = Arc::new(AtomicBool::new(false));
     let deleter_store = store.clone();
@@ -275,7 +302,9 @@ fn local_concurrent_delete_and_put(body: &[u8], integrity: &ObjectIntegrity) {
         }
     });
 
-    store.put_if_absent(&key, ObjectBody::from_slice(&body), integrity).ok();
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(&body), integrity)
+        .ok();
     stop.store(true, Ordering::SeqCst);
     deleter.join().ok();
     store.contains(&key).ok();
@@ -304,7 +333,11 @@ fn async_concurrent_put_same_key_same_body(body: &[u8], _integrity: &ObjectInteg
                         return false;
                     }
                     store
-                        .put_opts(&location, Bytes::from(body.clone()).into(), PutMode::Create.into())
+                        .put_opts(
+                            &location,
+                            Bytes::from(body.clone()).into(),
+                            PutMode::Create.into(),
+                        )
                         .await
                         .is_ok()
                 });
@@ -315,9 +348,9 @@ fn async_concurrent_put_same_key_same_body(body: &[u8], _integrity: &ObjectInteg
         });
     }
 
-    let inserted_count = results.lock().map_or(0, |guard| {
-        guard.iter().filter(|r| **r).count()
-    });
+    let inserted_count = results
+        .lock()
+        .map_or(0, |guard| guard.iter().filter(|r| **r).count());
     assert!(
         inserted_count <= 1,
         "async concurrent put same key same body: expected at most 1 Inserted, got {inserted_count}"
@@ -356,7 +389,11 @@ fn async_toctou_race_check_then_put(body: &[u8], _integrity: &ObjectIntegrity) {
                         return Ok(());
                     }
                     store
-                        .put_opts(&location, Bytes::from(body.clone()).into(), PutMode::Create.into())
+                        .put_opts(
+                            &location,
+                            Bytes::from(body.clone()).into(),
+                            PutMode::Create.into(),
+                        )
                         .await
                         .map(|_| ())
                         .map_err(|e| e.to_string())
@@ -368,10 +405,13 @@ fn async_toctou_race_check_then_put(body: &[u8], _integrity: &ObjectIntegrity) {
         });
     }
 
-    let ok_count = results.lock().map_or(0, |guard| {
-        guard.iter().filter(|r| r.is_ok()).count()
-    });
-    assert!(ok_count >= 1, "TOCTOU race: expected at least 1 successful write");
+    let ok_count = results
+        .lock()
+        .map_or(0, |guard| guard.iter().filter(|r| r.is_ok()).count());
+    assert!(
+        ok_count >= 1,
+        "TOCTOU race: expected at least 1 successful write"
+    );
     assert!(
         ok_count <= CONCURRENT_WRITERS,
         "TOCTOU race: at most {CONCURRENT_WRITERS} inserted, got {ok_count}"
@@ -394,7 +434,9 @@ fn async_concurrent_put_different_bytes(body: &[u8]) {
     bodies[0] = body_owned.clone();
 
     if let Some(rt) = build_rt() {
-        let first_body = bodies.first().map_or_else(|| body_owned.clone(), Clone::clone);
+        let first_body = bodies
+            .first()
+            .map_or_else(|| body_owned.clone(), Clone::clone);
         rt.block_on(async {
             let _discard = store
                 .put_opts(
@@ -414,7 +456,9 @@ fn async_concurrent_put_different_bytes(body: &[u8]) {
         let results = results.clone();
         spawn_concurrent_writers(CONCURRENT_WRITERS, move |i| {
             if let Some(rt) = build_rt() {
-                let chosen = bodies_for_writers.get(i).map_or_else(|| body_owned.clone(), Clone::clone);
+                let chosen = bodies_for_writers
+                    .get(i)
+                    .map_or_else(|| body_owned.clone(), Clone::clone);
                 let inserted = rt.block_on(async {
                     store
                         .put_opts(
@@ -432,9 +476,9 @@ fn async_concurrent_put_different_bytes(body: &[u8]) {
         });
     }
 
-    let inserted_count = results.lock().map_or(0, |guard| {
-        guard.iter().filter(|r| **r).count()
-    });
+    let inserted_count = results
+        .lock()
+        .map_or(0, |guard| guard.iter().filter(|r| **r).count());
     assert!(
         inserted_count <= 1,
         "async different bytes: expected at most 1 Inserted, got {inserted_count}"
@@ -451,9 +495,9 @@ fn async_concurrent_put_different_bytes(body: &[u8]) {
         });
     }
 
-    let inserted_count = results.lock().map_or(0, |guard| {
-        guard.iter().filter(|r| **r).count()
-    });
+    let inserted_count = results
+        .lock()
+        .map_or(0, |guard| guard.iter().filter(|r| **r).count());
     assert!(
         inserted_count <= 1,
         "async different bytes: expected at most 1 Inserted, got {inserted_count}"
@@ -480,7 +524,11 @@ fn async_concurrent_delete_and_put(body: &[u8], _integrity: &ObjectIntegrity) {
     if let Some(rt) = build_rt() {
         rt.block_on(async {
             let _discard = store
-                .put_opts(&location, Bytes::from(body.clone()).into(), PutMode::Create.into())
+                .put_opts(
+                    &location,
+                    Bytes::from(body.clone()).into(),
+                    PutMode::Create.into(),
+                )
                 .await;
         });
     }
@@ -529,12 +577,15 @@ fn async_concurrent_delete_and_put(body: &[u8], _integrity: &ObjectIntegrity) {
 
 fn async_list_consistency_during_writes(body: &[u8], _integrity: &ObjectIntegrity) {
     let store: Arc<InMemory> = Arc::new(InMemory::new());
-    let Some(base_key) = create_key(body) else { return };
+    let Some(base_key) = create_key(body) else {
+        return;
+    };
     let location = ObjectStorePath::from(base_key.as_str());
-    let prefix_str = base_key.as_str().split('/').next().map_or_else(
-        || "aa".to_owned(),
-        str::to_owned,
-    );
+    let prefix_str = base_key
+        .as_str()
+        .split('/')
+        .next()
+        .map_or_else(|| "aa".to_owned(), str::to_owned);
     let body = body.to_vec();
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -579,8 +630,12 @@ fn async_list_consistency_during_writes(body: &[u8], _integrity: &ObjectIntegrit
 
 fn async_concurrent_copy_race(body: &[u8], _integrity: &ObjectIntegrity) {
     let store: Arc<InMemory> = Arc::new(InMemory::new());
-    let Some(source_key) = create_key(b"source-seed") else { return };
-    let Some(dest_key) = create_key(body) else { return };
+    let Some(source_key) = create_key(b"source-seed") else {
+        return;
+    };
+    let Some(dest_key) = create_key(body) else {
+        return;
+    };
     let source_location = ObjectStorePath::from(source_key.as_str());
     let dest_location = ObjectStorePath::from(dest_key.as_str());
     let body = body.to_vec();
@@ -626,9 +681,9 @@ fn async_concurrent_copy_race(body: &[u8], _integrity: &ObjectIntegrity) {
         });
     }
 
-    let ok_count = results.lock().map_or(0, |guard| {
-        guard.iter().filter(|r| **r).count()
-    });
+    let ok_count = results
+        .lock()
+        .map_or(0, |guard| guard.iter().filter(|r| **r).count());
     assert!(
         ok_count <= 1,
         "concurrent copy race: expected at most 1 successful copy, got {ok_count}"
@@ -641,10 +696,7 @@ fn async_toctou_multipart_race(body: &[u8], _integrity: &ObjectIntegrity) {
     let location = ObjectStorePath::from(key.as_str());
 
     let chunk_size = if body.is_empty() { 1 } else { body.len() };
-    let chunks: Vec<Vec<u8>> = body
-        .chunks(chunk_size)
-        .map(|c| c.to_vec())
-        .collect();
+    let chunks: Vec<Vec<u8>> = body.chunks(chunk_size).map(|c| c.to_vec()).collect();
 
     let results: Arc<std::sync::Mutex<Vec<Result<(), String>>>> = Arc::default();
     {
@@ -699,9 +751,9 @@ fn async_toctou_multipart_race(body: &[u8], _integrity: &ObjectIntegrity) {
         });
     }
 
-    let ok_count = results.lock().map_or(0, |guard| {
-        guard.iter().filter(|r| r.is_ok()).count()
-    });
+    let ok_count = results
+        .lock()
+        .map_or(0, |guard| guard.iter().filter(|r| r.is_ok()).count());
     assert!(
         ok_count >= 1,
         "multipart TOCTOU race: expected at least 1 successful write, got {ok_count}"

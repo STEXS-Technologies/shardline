@@ -1,7 +1,8 @@
 # Client Configuration
 
-Shardline is meant to fit existing Git workflows. Clients should keep using normal Git
-operations; configuration decides how they reach the native Xet CAS path.
+Shardline is meant to fit existing Git workflows.
+Clients should keep using normal Git operations; configuration decides how they reach
+the native Xet CAS path.
 
 For the shortest forge-backed setup path, see
 [Provider Setup Guide](PROVIDER_QUICKSTART.md).
