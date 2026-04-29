@@ -1,10 +1,11 @@
 # Shardline Docs
 
-Shardline is an open, self-hostable content-addressed storage backend with
-pluggable protocol frontends.
+Shardline is an open, self-hostable content-addressed storage backend with pluggable
+protocol frontends.
 
-Use this index to find the shortest path for your task. If you are new to the project,
-start with deployment, then read the protocol or operator docs that match your use case.
+Use this index to find the shortest path for your task.
+If you are new to the project, start with deployment, then read the protocol or operator
+docs that match your use case.
 
 ## Start Here
 

@@ -2,9 +2,8 @@
 
 Shardline has a protocol-neutral CAS core and explicit frontend adapters.
 
-That means the storage, indexing, authorization, reconstruction, and operator
-workflows are shared, while each client-facing protocol lives behind a bounded
-frontend surface.
+That means the storage, indexing, authorization, reconstruction, and operator workflows
+are shared, while each client-facing protocol lives behind a bounded frontend surface.
 
 ## Supported Today
 
@@ -15,8 +14,8 @@ frontend surface.
 
 ## Starting the Server
 
-Shardline enables protocol frontends through the `--frontends` CLI flag. The
-default is `xet`.
+Shardline enables protocol frontends through the `--frontends` CLI flag.
+The default is `xet`.
 
 Start all currently implemented frontends:
 
@@ -30,10 +29,9 @@ Start only the new non-Xet frontends:
 shardline serve --role all --frontends lfs,bazel-http,oci
 ```
 
-When bearer-token auth is enabled, all enabled frontends use the same
-repository-scoped token model. The environment override is
-`SHARDLINE_SERVER_FRONTENDS`, but the CLI flag is the primary operator-facing
-entry point.
+When bearer-token auth is enabled, all enabled frontends use the same repository-scoped
+token model. The environment override is `SHARDLINE_SERVER_FRONTENDS`, but the CLI flag
+is the primary operator-facing entry point.
 
 OCI-specific knobs:
 
@@ -53,21 +51,16 @@ Current route families:
 
 ## Client Entry Points
 
-- Xet:
-  native Xet CAS routes plus the provider-aware Git/LFS bridge documented elsewhere
-- Git LFS:
-  point the client at `.../v1/lfs` as the LFS URL
-- Bazel HTTP remote cache:
-  point Bazel at `.../v1/bazel/cache`
-- OCI Distribution:
-  use the server as a registry at `http(s)://<host>/v2/`
-  and authenticate either with direct bearer tokens or the registry token flow at
+- Xet: native Xet CAS routes plus the provider-aware Git/LFS bridge documented elsewhere
+- Git LFS: point the client at `.../v1/lfs` as the LFS URL
+- Bazel HTTP remote cache: point Bazel at `.../v1/bazel/cache`
+- OCI Distribution: use the server as a registry at `http(s)://<host>/v2/` and
+  authenticate either with direct bearer tokens or the registry token flow at
   `GET /v2/token`
 
 ## Quick Start By Frontend
 
-These are the shortest validated client entry points for the implemented
-frontends.
+These are the shortest validated client entry points for the implemented frontends.
 
 Git LFS:
 

@@ -1,14 +1,13 @@
 # Architecture
 
-Shardline is an open, self-hostable content-addressed storage backend with
-pluggable protocol frontends.
-It uses a protocol-neutral CAS coordinator with explicit frontend adapters.
-The runtime hosts an explicit frontend set.
-Validated frontends in this repository today are Xet, Git LFS, Bazel HTTP remote
-cache, and OCI Distribution.
-They share the same storage, metadata, authorization, lifecycle, and operator
-surface while keeping protocol-specific request shaping and object handling in
-dedicated adapters.
+Shardline is an open, self-hostable content-addressed storage backend with pluggable
+protocol frontends. It uses a protocol-neutral CAS coordinator with explicit frontend
+adapters. The runtime hosts an explicit frontend set.
+Validated frontends in this repository today are Xet, Git LFS, Bazel HTTP remote cache,
+and OCI Distribution.
+They share the same storage, metadata, authorization, lifecycle, and operator surface
+while keeping protocol-specific request shaping and object handling in dedicated
+adapters.
 
 ## Goals
 
@@ -100,23 +99,13 @@ back to durable metadata and repairs the cache lazily.
 
 The current production server exposes multiple protocol route families:
 
-- Xet:
-  `GET /v1/reconstructions/{file_id}`,
-  `GET /v1/chunks/default/{hash}`,
-  `POST /v1/xorbs/default/{hash}`,
-  `POST /v1/shards`
-- Git LFS:
-  `POST /v1/lfs/objects/batch`,
-  `GET|HEAD|PUT /v1/lfs/objects/{oid}`
-- Bazel HTTP remote cache:
-  `GET|PUT /v1/bazel/cache/ac/{hash}`,
+- Xet: `GET /v1/reconstructions/{file_id}`, `GET /v1/chunks/default/{hash}`,
+  `POST /v1/xorbs/default/{hash}`, `POST /v1/shards`
+- Git LFS: `POST /v1/lfs/objects/batch`, `GET|HEAD|PUT /v1/lfs/objects/{oid}`
+- Bazel HTTP remote cache: `GET|PUT /v1/bazel/cache/ac/{hash}`,
   `GET|PUT /v1/bazel/cache/cas/{hash}`
-- OCI Distribution:
-  `GET /v2/`,
-  blob upload and download routes,
-  manifest `PUT|GET|HEAD|DELETE`,
-  `GET /v2/{repository}/tags/list`,
-  `GET /v2/token`
+- OCI Distribution: `GET /v2/`, blob upload and download routes, manifest
+  `PUT|GET|HEAD|DELETE`, `GET /v2/{repository}/tags/list`, `GET /v2/token`
 
 When provider-backed token issuance is enabled, the server also exposes:
 
@@ -137,8 +126,8 @@ Other frontends follow the same pattern:
 
 - protocol-specific route registration at the HTTP edge
 - protocol-specific object-key and request-shape logic inside a dedicated adapter
-- shared authorization, object storage, metadata, cache, fsck, repair, and GC
-  services in the core
+- shared authorization, object storage, metadata, cache, fsck, repair, and GC services
+  in the core
 
 The transfer endpoint is an implementation detail.
 Reconstruction responses can point to native presigned object-store URLs when an adapter
@@ -194,11 +183,10 @@ flowchart TD
 ```
 
 `api` serves control-plane and metadata-oriented endpoints such as reconstruction
-lookup, provider-backed token issuance, webhook handling, LFS batch negotiation,
-and OCI tag, manifest, and token-service routes.
-`transfer` serves the large request and response paths such as chunk download,
-protocol object upload, blob transfer, cache object transfer, and Xet xorb range
-transfer.
+lookup, provider-backed token issuance, webhook handling, LFS batch negotiation, and OCI
+tag, manifest, and token-service routes.
+`transfer` serves the large request and response paths such as chunk download, protocol
+object upload, blob transfer, cache object transfer, and Xet xorb range transfer.
 `all` keeps the single-node behavior and serves both route sets from one process.
 
 ## Source Layout
@@ -264,14 +252,14 @@ Expected concurrency behavior:
 - Xet shard metadata sections are counted and bounded before per-section records are
   materialized
 - Git LFS and Bazel HTTP object paths validate digest shape before storage access
-- OCI upload sessions, tag listing, token issuance, and manifest writes are bounded
-  by explicit limits before they reach durable state
+- OCI upload sessions, tag listing, token issuance, and manifest writes are bounded by
+  explicit limits before they reach durable state
 - object writes are idempotent by content hash
-- protocol metadata registration uses transactional metadata updates where the
-  frontend requires it
+- protocol metadata registration uses transactional metadata updates where the frontend
+  requires it
 - reconstruction planning is read-heavy and avoids coarse locks
-- transfer responses and registry/blob reads stream bytes and support range reads
-  and backpressure
+- transfer responses and registry/blob reads stream bytes and support range reads and
+  backpressure
 - local transfer reads use bounded async file buffers after metadata and authorization
   validation
 
