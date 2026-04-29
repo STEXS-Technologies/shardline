@@ -15,7 +15,11 @@ cargo-fuzz = true
 
 [dependencies]
 blake3.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hex.workspace = true
 libfuzzer-sys.workspace = true
+object_store = { workspace = true, default-features = true }
 shardline.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
@@ -23,6 +27,7 @@ shardline-server.workspace = true
 shardline-storage.workspace = true
 shardline-vcs.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
 xet-core-structures.workspace = true
 
 [[bin]]
@@ -112,6 +117,12 @@ doc = false
 [[bin]]
 name = "shardline_protocol_oci"
 path = "fuzz_targets/shardline/protocol_oci.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_async_storage_races"
+path = "fuzz_targets/shardline/async_storage_races.rs"
 test = false
 doc = false
 

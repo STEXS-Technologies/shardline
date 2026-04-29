@@ -435,6 +435,22 @@ impl S3ObjectStore {
     /// validate the stream contents independently and concurrent writers for the same
     /// key can only be writing identical bytes.
     ///
+    /// # TOCTOU Race Window
+    ///
+    /// This method has a time-of-check-to-time-of-use window between the
+    /// `metadata()` existence probe (line 448) and the `put_multipart()` call
+    /// (line 453).  If two concurrent callers both see the key as absent and
+    /// both start multipart uploads, both will receive
+    /// [`BeginMultipartUploadResult::Upload`].  The final `finish()` on each
+    /// writer will race: the first to complete stores the object; the second
+    /// may fail with `AlreadyExists` if the S3 backend enforces
+    /// `S3ConditionalPut::ETagMatch` on multipart completion, or it may
+    /// silently overwrite.  This is safe because content-addressed keys
+    /// guarantee all concurrent writers are writing identical bytes — a
+    /// duplicate multipart upload for the same digest produces the same
+    /// object.  Callers must ensure they only write bytes matching the
+    /// content hash embedded in the key.
+    ///
     /// # Errors
     ///
     /// Returns [`S3ObjectStoreError`] when the destination lookup or multipart
@@ -502,6 +518,22 @@ impl S3ObjectStore {
     /// Streams a caller-validated local file into S3-compatible storage if the destination
     /// key is absent.
     ///
+    /// # TOCTOU Race Window
+    ///
+    /// This method has a two-stage TOCTOU window.  First, the `metadata()` probe
+    /// (line 522) checks whether the destination key exists.  Second, the temporary
+    /// upload is copied to the final key with `CopyMode::Create` (line 542).
+    /// Between these two points, a concurrent writer may insert an object at the
+    /// same destination key.  The `CopyMode::Create` atomic copy then fails with
+    /// `AlreadyExists`, and the method falls through to the conflict-resolution
+    /// path which compares existing bytes against the local file.  For
+    /// content-addressed callers this is safe because all writers for the same
+    /// digest key write identical bytes.  The conflict-resolution path validates
+    /// this.  For non-content-addressed callers (e.g. `put_overwrite` paths), a
+    /// concurrent overwrite between the check and the copy could be silently
+    /// reverted by the `CopyMode::Create` failure — the older writer's object
+    /// survives and the newer writer's copy is rejected.
+    ///
     /// # Errors
     ///
     /// Callers are expected to have already validated the file hash before invoking this
@@ -566,6 +598,18 @@ impl S3ObjectStore {
     /// writers for the same key can only be writing the same bytes. It avoids the
     /// temporary-object plus copy step used by [`Self::put_file_if_absent`].
     ///
+    /// # TOCTOU Race Window
+    ///
+    /// This method has a TOCTOU window between the `metadata()` existence probe
+    /// (line 586) and the multipart upload written by `stream_file_to_location`
+    /// (line 597).  Two concurrent callers that both see the key as absent will
+    /// both start streaming their file to the same final key.  The second
+    /// multipart upload to complete may fail with `AlreadyExists` (if the S3
+    /// backend enforces `S3ConditionalPut::ETagMatch` on multipart completion)
+    /// or may silently overwrite the first upload's bytes.  This is safe for
+    /// content-addressed keys because all concurrent writers write identical
+    /// bytes — either writer's output produces the same object content.
+    ///
     /// # Errors
     ///
     /// Callers are expected to have already validated the file hash before invoking this
@@ -601,6 +645,22 @@ impl S3ObjectStore {
     ///
     /// This uses the S3-compatible provider's server-side copy path instead of reading
     /// the full source object back into process memory.
+    ///
+    /// # TOCTOU Race Window
+    ///
+    /// This method has a TOCTOU window between the `metadata()` destination
+    /// existence probe implicit in the `CopyMode::Create` copy operation and the
+    /// copy itself (line 682).  The `CopyMode::Create` is atomic at the S3 API
+    /// level — either the destination is absent and the copy succeeds, or the
+    /// destination exists and the copy fails with `AlreadyExists`.  However, the
+    /// earlier source-metadata check (line 671) and the source-or-destination
+    /// equality check (line 658) are not atomic with the copy.  A concurrent
+    /// writer that deletes the source between the metadata check and the copy
+    /// will cause the copy to fail with `NotFound`.  A concurrent writer that
+    /// inserts the destination key between the metadata check and the copy will
+    /// cause the copy to fail with `AlreadyExists`, triggering the
+    /// conflict-resolution comparison.  This is safe for content-addressed usage
+    /// where source and destination represent the same logical content.
     ///
     /// # Errors
     ///
@@ -709,6 +769,19 @@ impl S3ObjectStore {
 impl ObjectStore for S3ObjectStore {
     type Error = S3ObjectStoreError;
 
+    /// Stores an object if no identical object exists yet.
+    ///
+    /// # TOCTOU Race Window
+    ///
+    /// The `metadata()` existence probe (line 783) and `PutMode::Create` write
+    /// (line 794) are not atomic.  Two concurrent callers that both see the key
+    /// as absent will both attempt a `PutMode::Create` write.  The second write
+    /// will fail with `AlreadyExists`, and the conflict-resolution path compares
+    /// the existing bytes against the caller's body.  For content-addressed keys
+    /// this is safe because both callers write identical bytes.  The
+    /// conflict-resolution path validates the match and returns
+    /// [`PutOutcome::AlreadyExists`] on success or
+    /// [`S3ObjectStoreError::ExistingObjectConflict`] on mismatch.
     fn put_if_absent(
         &self,
         key: &ObjectKey,
