@@ -96,13 +96,18 @@ pub fn generate_pack(objects: &[GitObject]) -> Vec<u8> {
 
 /// Writes a single object to the pack stream.
 fn write_object(out: &mut Vec<u8>, obj: &GitObject) {
-    // Object header: type (3 bits) + size (4+ bits), varint-encoded
+    // Object header: type (3 bits) + size (4+ bits), varint-encoded.
+    //
+    // Git pack format (MSB-first varint):
+    //   Byte 0: [continuation:1][type:3][size_bits_0_3:4]
+    //   Byte 1+: [continuation:1][size_bits:7]
+    // Continuation means more size bytes follow.
     let type_bits = obj.object_type as u8;
     let size = obj.data.len();
 
-    // First byte: type (3 bits) + size (4 bits, LSB first)
-    let mut byte = (type_bits << 4) | (size as u8 & 0x7f);
-    let mut size_remaining = size >> 7;
+    // First byte: type in bits 6-4, low 4 bits of size in bits 3-0.
+    let mut byte = (type_bits << 4) | ((size as u8) & 0x0f);
+    let mut size_remaining = size >> 4;
 
     if size_remaining > 0 {
         byte |= 0x80; // continuation bit

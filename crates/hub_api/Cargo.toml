@@ -28,5 +28,13 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 tower = "0.5"
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 
+[dev-dependencies]
+flate2 = "1"
+http-body-util = "0.1"
+rusqlite.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
+
 [lints]
 workspace = true

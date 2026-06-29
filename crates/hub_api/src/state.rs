@@ -17,3 +17,12 @@ pub(crate) fn get() -> &'static HubState {
         .get()
         .expect("shardline_hub_api::init() must be called before serving hub routes")
 }
+
+/// Returns a reference to the global Hub API state for integration tests.
+///
+/// # Panics
+///
+/// Panics if [`init`] has not been called.
+pub fn get_for_test() -> &'static HubState {
+    get()
+}

@@ -8,5 +8,5 @@ pub mod pktline;
 pub mod smart_http;
 
 pub use smart_http::{
-    info_refs_receive_pack, info_refs_upload_pack, receive_pack, upload_pack,
+    info_refs, info_refs_receive_pack, info_refs_upload_pack, receive_pack, upload_pack,
 };
