@@ -35,12 +35,22 @@ sha2 = { version = "0.10", features = ["compress"] }
 shardline = { version = "1.0.0", path = "crates/cli" }
 shardline-cache = { version = "1.0.0", path = "crates/cache" }
 shardline-cas = { version = "1.0.0", path = "crates/cas" }
+shardline-fsck = { version = "1.0.0", path = "crates/fsck" }
+shardline-gc = { version = "1.0.0", path = "crates/gc" }
+shardline-hub-api = { version = "1.0.0", path = "crates/hub_api" }
 shardline-index = { version = "1.0.0", path = "crates/index" }
+shardline-metrics = { version = "1.0.0", path = "crates/metrics" }
 shardline-protocol = { version = "1.0.0", path = "crates/protocol" }
+shardline-protocol-adapters = { version = "1.0.0", path = "crates/protocol_adapters" }
+shardline-rebuild = { version = "1.0.0", path = "crates/rebuild" }
+shardline-provider-events = { version = "1.0.0", path = "crates/provider_events" }
+shardline-oci-adapter = { version = "1.0.0", path = "crates/oci_adapter" }
 shardline-server = { version = "1.0.0", path = "crates/server" }
+shardline-server-core = { version = "1.0.0", path = "crates/server_core" }
 shardline-storage = { version = "1.0.0", path = "crates/storage" }
 shardline-test-support = { version = "1.0.0", path = "crates/test_support" }
 shardline-vcs = { version = "1.0.0", path = "crates/vcs" }
+shardline-xet-adapter = { version = "1.0.0", path = "crates/xet_adapter" }
 sqlx = { version = "0.8.6", default-features = false }
 subtle = { version = "2.6", default-features = false }
 tempfile = "3.15"
@@ -51,6 +61,11 @@ xet-client = "1.5.1"
 xet-core-structures = "1.5.1"
 xet-data = "1.5.1"
 xet-runtime = "1.5.1"
+prometheus = { version = "0.13", default-features = false }
+tower = "0.5"
+tower-http = { version = "0.6", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 zeroize = "1.8"
 
 [profile.release]

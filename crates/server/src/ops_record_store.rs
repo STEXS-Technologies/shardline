@@ -1,66 +1,13 @@
-use shardline_index::{LocalRecordStore, PostgresRecordStore, RecordStore};
-
-/// Operation-time record-store classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpsRecordKind {
-    Latest,
-    Version,
-}
-
-/// Extra locator metadata needed by operator tooling.
-pub(crate) trait OpsRecordStore: RecordStore {
-    /// Renders a stable operator-facing location for one record locator.
-    fn locator_display(&self, locator: &Self::Locator) -> String;
-
-    /// Extracts the file identifier implied by a locator.
-    fn locator_file_id(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String>;
-
-    /// Extracts the immutable content hash implied by a version locator.
-    fn locator_content_hash(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String>;
-}
-
-impl OpsRecordStore for LocalRecordStore {
-    fn locator_display(&self, locator: &Self::Locator) -> String {
-        locator.record_key().to_owned()
-    }
-
-    fn locator_file_id(&self, locator: &Self::Locator, _kind: OpsRecordKind) -> Option<String> {
-        Some(locator.file_id().to_owned())
-    }
-
-    fn locator_content_hash(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String> {
-        if kind != OpsRecordKind::Version {
-            return None;
-        }
-
-        locator.content_hash().map(ToOwned::to_owned)
-    }
-}
-
-impl OpsRecordStore for PostgresRecordStore {
-    fn locator_display(&self, locator: &Self::Locator) -> String {
-        locator.record_key().to_owned()
-    }
-
-    fn locator_file_id(&self, locator: &Self::Locator, _kind: OpsRecordKind) -> Option<String> {
-        Some(locator.file_id().to_owned())
-    }
-
-    fn locator_content_hash(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String> {
-        if kind != OpsRecordKind::Version {
-            return None;
-        }
-
-        locator.content_hash().map(ToOwned::to_owned)
-    }
-}
+pub(crate) use shardline_server_core::{OpsRecordKind, OpsRecordStore};
 
 #[cfg(test)]
 mod tests {
     use shardline_index::{FileRecord, RecordStore};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_server_core::OpsRecordKind;
 
-    use super::{LocalRecordStore, OpsRecordKind, OpsRecordStore};
+    use super::OpsRecordStore;
+    use crate::record_store::LocalRecordStore;
 
     #[test]
     fn local_locator_helpers_extract_scoped_file_id_and_hash() {

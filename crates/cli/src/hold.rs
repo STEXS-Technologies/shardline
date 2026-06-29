@@ -12,6 +12,38 @@ use thiserror::Error;
 
 use crate::config::load_server_config;
 
+pub fn print_hold_summary(hold: &RetentionHold) {
+    println!("object_key: {}", hold.object_key().as_str());
+    println!("reason: {}", hold.reason());
+    println!("held_at_unix_seconds: {}", hold.held_at_unix_seconds());
+    match hold.release_after_unix_seconds() {
+        Some(value) => println!("release_after_unix_seconds: {value}"),
+        None => println!("release_after_unix_seconds: none"),
+    }
+}
+
+pub fn print_hold_list_summary(root: &Path, active_only: bool, holds: &[RetentionHold]) {
+    println!("root: {}", root.display());
+    println!("active_only: {active_only}");
+    println!("hold_count: {}", holds.len());
+    for (index, hold) in holds.iter().enumerate() {
+        println!("hold[{index}].object_key: {}", hold.object_key().as_str());
+        println!("hold[{index}].reason: {}", hold.reason());
+        println!(
+            "hold[{index}].held_at_unix_seconds: {}",
+            hold.held_at_unix_seconds()
+        );
+        match hold.release_after_unix_seconds() {
+            Some(value) => {
+                println!("hold[{index}].release_after_unix_seconds: {value}");
+            }
+            None => {
+                println!("hold[{index}].release_after_unix_seconds: none");
+            }
+        }
+    }
+}
+
 /// Retention-hold runtime failure.
 #[derive(Debug, Error)]
 pub enum HoldRuntimeError {

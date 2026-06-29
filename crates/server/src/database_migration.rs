@@ -93,6 +93,25 @@ pub struct DatabaseMigrationReport {
     pub migrations: Vec<DatabaseMigrationStatusEntry>,
 }
 
+impl DatabaseMigrationReport {
+    pub fn print_summary(&self) {
+        println!("backend: {}", self.backend);
+        println!("applied_count: {}", self.applied_count);
+        println!("reverted_count: {}", self.reverted_count);
+        println!("applied_total_count: {}", self.applied_total_count);
+        println!("pending_count: {}", self.pending_count);
+        for migration in &self.migrations {
+            println!(
+                "migration: version={} name={} applied={} applied_at_utc={}",
+                migration.version,
+                migration.name,
+                migration.applied,
+                migration.applied_at_utc.as_deref().unwrap_or("-")
+            );
+        }
+    }
+}
+
 /// Database-migration failure.
 #[derive(Debug, Error)]
 pub enum DatabaseMigrationError {
@@ -128,7 +147,7 @@ struct AppliedMigration {
 
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 6] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 7] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -172,6 +191,12 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 6] = [
         down_sql: include_str!(
             "../../../migrations/20260418110000_provider_repository_reconciliation.down.sql"
         ),
+    },
+    DatabaseMigration {
+        version: "20260629000000",
+        name: "hub_api",
+        up_sql: include_str!("../../../migrations/20260629000000_hub_api.up.sql"),
+        down_sql: include_str!("../../../migrations/20260629000000_hub_api.down.sql"),
     },
 ];
 

@@ -41,7 +41,7 @@ pub(crate) fn object_key(value: &str) -> Result<ObjectKey, ServerError> {
     ObjectKey::parse(value).map_err(|_error| ServerError::InvalidContentHash)
 }
 
-pub(crate) fn shared_sha256_object_key(digest_hex: &str) -> Result<ObjectKey, ServerError> {
+pub fn shared_sha256_object_key(digest_hex: &str) -> Result<ObjectKey, ServerError> {
     validate_content_hash(digest_hex)?;
     object_key(&format!("protocols/shared/sha256/{digest_hex}"))
 }

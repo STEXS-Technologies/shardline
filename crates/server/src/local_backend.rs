@@ -18,18 +18,16 @@ use crate::{
     config::default_upload_max_in_flight_chunks,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
     local_path::ensure_directory_path_components_are_not_symlinked,
-    model::{
-        FileReconstructionResponse, ServerStatsResponse, ShardUploadResponse, UploadFileResponse,
-        XorbUploadResponse,
-    },
+    model::{ServerStatsResponse, UploadFileResponse},
     object_store::{ServerObjectStore, read_full_object, reconstruct_file_record_bytes},
     overflow::{checked_add, checked_increment},
     protocol_support::shared_sha256_object_key,
     upload_ingest::{FileUploadIngestor, RequestBodyReader},
     validation::{ensure_directory, validate_identifier},
     xet_adapter::{
-        build_reconstruction_response, register_uploaded_shard_stream, resolve_dedupe_shard_object,
-        store_uploaded_xorb_stream, xorb_object_key,
+        FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse,
+        build_reconstruction_response, register_uploaded_shard_bytes, resolve_dedupe_shard_object,
+        store_uploaded_xorb_bytes, xorb_object_key,
     },
 };
 use records::{read_record, repository_references_xorb};
@@ -231,8 +229,11 @@ impl LocalBackend {
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, ServerError> {
         let integrity = ObjectIntegrity::new(chunk_hash(&bytes), u64::try_from(bytes.len())?);
-        self.object_store()
-            .put_if_absent(object_key, ObjectBody::from_vec(bytes), &integrity)
+        Ok(self.object_store().put_if_absent(
+            object_key,
+            ObjectBody::from_vec(bytes),
+            &integrity,
+        )?)
     }
 
     pub(crate) fn put_sha256_addressed_object_bytes_if_absent(
@@ -251,8 +252,9 @@ impl LocalBackend {
         if canonical_key == *object_key {
             return Ok(canonical_outcome);
         }
-        self.object_store()
-            .copy_if_absent(&canonical_key, object_key)
+        Ok(self
+            .object_store()
+            .copy_if_absent(&canonical_key, object_key)?)
     }
 
     pub(crate) fn copy_object_if_absent(
@@ -260,7 +262,7 @@ impl LocalBackend {
         source: &ObjectKey,
         destination: &ObjectKey,
     ) -> Result<PutOutcome, ServerError> {
-        self.object_store().copy_if_absent(source, destination)
+        Ok(self.object_store().copy_if_absent(source, destination)?)
     }
 
     pub(crate) fn put_object_bytes_overwrite(
@@ -269,8 +271,11 @@ impl LocalBackend {
         bytes: Vec<u8>,
     ) -> Result<(), ServerError> {
         let integrity = ObjectIntegrity::new(chunk_hash(&bytes), u64::try_from(bytes.len())?);
-        self.object_store()
-            .put_overwrite(object_key, ObjectBody::from_vec(bytes), &integrity)
+        Ok(self.object_store().put_overwrite(
+            object_key,
+            ObjectBody::from_vec(bytes),
+            &integrity,
+        )?)
     }
 
     pub(crate) fn put_sha256_addressed_object_file(
@@ -287,8 +292,9 @@ impl LocalBackend {
         if canonical_key == *object_key {
             return Ok(canonical_outcome);
         }
-        self.object_store()
-            .copy_if_absent(&canonical_key, object_key)
+        Ok(self
+            .object_store()
+            .copy_if_absent(&canonical_key, object_key)?)
     }
 
     /// Stores a raw xorb body under its content hash.
@@ -315,10 +321,12 @@ impl LocalBackend {
     pub(crate) async fn upload_xorb_stream(
         &self,
         expected_hash: &str,
-        body: RequestBodyReader,
+        mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
+        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
         let object_store = self.object_store();
-        store_uploaded_xorb_stream(&object_store, expected_hash, body).await
+        store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+            .map_err(ServerError::from)
     }
 
     /// Stores a bounded native Xet shard and indexes the contained file reconstructions.
@@ -329,15 +337,16 @@ impl LocalBackend {
     /// validation, or metadata persistence fails.
     pub(crate) async fn upload_shard_stream(
         &self,
-        body: RequestBodyReader,
+        mut body: RequestBodyReader,
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
+        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        register_uploaded_shard_stream(
+        register_uploaded_shard_bytes(
             &object_store,
-            body,
+            &uploaded_body,
             repository_scope,
             shard_metadata_limits,
             move |records, mappings| async move {
@@ -348,6 +357,7 @@ impl LocalBackend {
             },
         )
         .await
+        .map_err(ServerError::from)
     }
 
     /// Loads reconstruction metadata for a file.
@@ -366,7 +376,11 @@ impl LocalBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
-        build_reconstruction_response(self.public_base_url(), &record, requested_range)
+        Ok(build_reconstruction_response(
+            self.public_base_url(),
+            &record,
+            requested_range,
+        )?)
     }
 
     /// Loads the logical byte length for a file version.
@@ -492,7 +506,7 @@ impl LocalBackend {
     where
         Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
     {
-        self.object_store().visit_prefix(prefix, visitor)
+        crate::object_store::visit_object_prefix(&self.object_store(), prefix, visitor)
     }
 
     pub(crate) fn list_object_flat_namespace_page(
@@ -501,15 +515,16 @@ impl LocalBackend {
         start_after: Option<&ObjectKey>,
         limit: usize,
     ) -> Result<Vec<ObjectMetadata>, ServerError> {
-        self.object_store()
-            .list_flat_namespace_page(prefix, start_after, limit)
+        Ok(self
+            .object_store()
+            .list_flat_namespace_page(prefix, start_after, limit)?)
     }
 
     pub(crate) async fn delete_object_if_present(
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, ServerError> {
-        self.object_store().delete_if_present(object_key)
+        Ok(self.object_store().delete_if_present(object_key)?)
     }
 
     /// Loads the stored byte length for a chunk object.
@@ -517,7 +532,6 @@ impl LocalBackend {
     /// # Errors
     ///
     /// Returns [`ServerError`] when the hash is invalid or the chunk is missing.
-    #[cfg(test)]
     pub async fn chunk_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
         let object_store = self.object_store();
         let object_key = chunk_object_key(hash_hex)?;
@@ -625,7 +639,7 @@ impl LocalBackend {
         let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
         let mut chunks = 0_u64;
         let mut chunk_bytes = 0_u64;
-        object_store.visit_prefix(&prefix, |metadata| {
+        crate::object_store::visit_object_prefix(&object_store, &prefix, |metadata| {
             let is_chunk = chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
             if is_chunk {
                 chunks = checked_increment(chunks)?;
@@ -661,7 +675,7 @@ impl LocalBackend {
     }
 }
 
-pub(crate) fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
+pub fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
     let digest = blake3::hash(bytes);
     ShardlineHash::from_bytes(*digest.as_bytes())
 }

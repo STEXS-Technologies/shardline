@@ -28,6 +28,9 @@
 //! ```
 
 mod dedupe;
+pub mod hub;
+mod hub_local_sqlite;
+mod hub_postgres;
 mod ids;
 mod lifecycle;
 mod local_sqlite;

@@ -49,6 +49,33 @@ pub struct BackupManifestReport {
 }
 
 impl BackupManifestReport {
+    pub fn print_summary(&self) {
+        println!("manifest_version: {}", self.manifest_version);
+        println!("metadata_backend: {}", self.metadata_backend);
+        println!("object_backend: {}", self.object_backend);
+        println!("object_count: {}", self.object_count);
+        println!("object_bytes: {}", self.object_bytes);
+        println!("latest_records: {}", self.latest_records);
+        println!("version_records: {}", self.version_records);
+        println!("reconstruction_rows: {}", self.reconstruction_rows);
+        println!("dedupe_shard_mappings: {}", self.dedupe_shard_mappings);
+        println!("quarantine_candidates: {}", self.quarantine_candidates);
+        println!("retention_holds: {}", self.retention_holds);
+        println!("webhook_deliveries: {}", self.webhook_deliveries);
+        println!(
+            "provider_repository_states: {}",
+            self.provider_repository_states
+        );
+    }
+
+    pub fn print_cli_summary(&self, root: &std::path::Path, output: &std::path::Path) {
+        println!("root: {}", root.display());
+        println!("output: {}", output.display());
+        self.print_summary();
+    }
+}
+
+impl BackupManifestReport {
     fn new(metadata_backend: &str, object_backend: &str) -> Self {
         Self {
             manifest_version: 1,
@@ -269,7 +296,7 @@ where
     writer.write_all(b"[")?;
 
     let mut first_object = true;
-    object_store.visit_prefix(&prefix, |metadata| {
+    crate::object_store::visit_object_prefix(object_store, &prefix, |metadata| {
         if first_object {
             first_object = false;
         } else {

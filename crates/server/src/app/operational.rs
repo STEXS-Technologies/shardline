@@ -62,6 +62,7 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
     }
 }
 
+#[tracing::instrument(skip(state, headers), fields(hash = %hash))]
 pub(super) async fn read_chunk(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
@@ -87,6 +88,7 @@ pub(super) async fn read_chunk(
     ))
 }
 
+#[tracing::instrument(skip(state, headers, body), fields(hash = %hash))]
 pub(super) async fn upload_xorb(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
@@ -152,6 +154,7 @@ pub(super) async fn read_xorb_transfer(
     ))
 }
 
+#[tracing::instrument(skip(state, headers, body))]
 pub(super) async fn upload_shard(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

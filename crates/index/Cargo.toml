@@ -29,10 +29,11 @@ sqlx = { workspace = true, features = [
     "json",
 ] }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true

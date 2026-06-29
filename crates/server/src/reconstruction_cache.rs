@@ -38,7 +38,7 @@ pub struct ReconstructionCacheBenchReport {
 
 /// Runtime reconstruction-cache service.
 #[derive(Clone)]
-pub(crate) struct ReconstructionCacheService {
+pub struct ReconstructionCacheService {
     adapter_name: &'static str,
     adapter: SharedReconstructionCache,
 }
@@ -53,7 +53,7 @@ impl Debug for ReconstructionCacheService {
 }
 
 impl ReconstructionCacheService {
-    pub(crate) fn disabled() -> Self {
+    pub fn disabled() -> Self {
         Self {
             adapter_name: ReconstructionCacheAdapter::Disabled.as_str(),
             adapter: Arc::new(DisabledReconstructionCache::new()),
@@ -65,7 +65,7 @@ impl ReconstructionCacheService {
     /// # Errors
     ///
     /// Returns [`ServerError`] when the configured adapter cannot initialize.
-    pub(crate) fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
+    pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
         match config.reconstruction_cache_adapter() {
             ReconstructionCacheAdapter::Disabled => Ok(Self::disabled()),
             ReconstructionCacheAdapter::Memory => Ok(Self {
@@ -121,10 +121,12 @@ impl ReconstructionCacheService {
         {
             let parsed = from_slice::<FileReconstructionResponse>(&payload);
             if let Ok(response) = parsed {
+                shardline_metrics::record_reconstruction_cache_hit();
                 return Ok(response);
             }
         }
 
+        shardline_metrics::record_reconstruction_cache_miss();
         let response = load().await?;
         let payload = to_vec(&response)?;
         if payload_within_bound(&payload) {

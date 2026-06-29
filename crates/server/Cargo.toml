@@ -28,8 +28,19 @@ shardline-cache.workspace = true
 shardline-cas.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
+shardline-protocol-adapters.workspace = true
+shardline-rebuild.workspace = true
+shardline-fsck.workspace = true
+shardline-gc.workspace = true
+shardline-hub-api.workspace = true
+shardline-provider-events.workspace = true
+shardline-oci-adapter.workspace = true
+shardline-metrics.workspace = true
+shardline-server-core.workspace = true
 shardline-storage.workspace = true
 shardline-vcs.workspace = true
+shardline-xet-adapter.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 sha2.workspace = true
 sqlx = { workspace = true, features = [
     "runtime-tokio",
@@ -39,8 +50,12 @@ sqlx = { workspace = true, features = [
 subtle.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
 url.workspace = true
 xet-core-structures.workspace = true
+prometheus.workspace = true
+tower.workspace = true
+tower-http = { workspace = true, features = ["util"] }
 zeroize.workspace = true
 
 [dev-dependencies]

@@ -9,6 +9,7 @@ fn parses_supported_frontends() {
         Ok(ServerFrontend::BazelHttp)
     );
     assert_eq!(ServerFrontend::parse("oci"), Ok(ServerFrontend::Oci));
+    assert_eq!(ServerFrontend::parse("hub"), Ok(ServerFrontend::Hub));
     assert!(ServerFrontend::parse("nope").is_err());
 }
 
@@ -18,4 +19,5 @@ fn frontend_tokens_are_stable() {
     assert_eq!(ServerFrontend::Lfs.as_str(), "lfs");
     assert_eq!(ServerFrontend::BazelHttp.as_str(), "bazel-http");
     assert_eq!(ServerFrontend::Oci.as_str(), "oci");
+    assert_eq!(ServerFrontend::Hub.as_str(), "hub");
 }

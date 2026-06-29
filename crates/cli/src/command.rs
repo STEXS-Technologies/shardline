@@ -10,6 +10,23 @@ use thiserror::Error;
 
 use crate::bench::{BenchDeploymentTarget, BenchScenario};
 
+/// Wrapper that redacts sensitive database URLs in Debug output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RedactedDbUrl(String);
+
+impl RedactedDbUrl {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RedactedDbUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("***")
+    }
+}
+
 const CLI_AFTER_LONG_HELP: &str = "\
 Examples:
   shardline providerless setup
@@ -46,7 +63,7 @@ Examples:
   shardline manpage --output ./shardline.1";
 
 /// Supported Shardline CLI commands.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
     /// Bootstrap a providerless local source-checkout deployment.
     ProviderlessSetup,
@@ -62,7 +79,7 @@ pub enum CliCommand {
     /// Manage the Postgres metadata schema.
     DbMigrate {
         /// Optional explicit Postgres metadata URL override.
-        database_url: Option<String>,
+        database_url: Option<RedactedDbUrl>,
         /// Requested migration action.
         command: DatabaseMigrationCommand,
     },
@@ -245,201 +262,6 @@ pub enum CliCommand {
         /// Optional output path. Defaults to stdout.
         output: Option<PathBuf>,
     },
-}
-
-impl fmt::Debug for CliCommand {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ProviderlessSetup => formatter.write_str("ProviderlessSetup"),
-            Self::Serve { role, frontends } => formatter
-                .debug_struct("Serve")
-                .field("role", role)
-                .field("frontends", frontends)
-                .finish(),
-            Self::ConfigCheck => formatter.write_str("ConfigCheck"),
-            Self::DbMigrate {
-                database_url,
-                command,
-            } => formatter
-                .debug_struct("DbMigrate")
-                .field("database_url", &database_url.as_ref().map(|_url| "***"))
-                .field("command", command)
-                .finish(),
-            Self::AdminToken {
-                issuer,
-                subject,
-                scope,
-                provider,
-                owner,
-                repo,
-                revision,
-                ttl_seconds,
-                key_file,
-                key_env,
-            } => formatter
-                .debug_struct("AdminToken")
-                .field("issuer", issuer)
-                .field("subject", subject)
-                .field("scope", scope)
-                .field("provider", provider)
-                .field("owner", owner)
-                .field("repo", repo)
-                .field("revision", revision)
-                .field("ttl_seconds", ttl_seconds)
-                .field("key_file", key_file)
-                .field("key_env", key_env)
-                .finish(),
-            Self::Fsck { root } => formatter.debug_struct("Fsck").field("root", root).finish(),
-            Self::IndexRebuild { root } => formatter
-                .debug_struct("IndexRebuild")
-                .field("root", root)
-                .finish(),
-            Self::Gc {
-                root,
-                mark,
-                sweep,
-                retention_seconds,
-                retention_report,
-                orphan_inventory,
-            } => formatter
-                .debug_struct("Gc")
-                .field("root", root)
-                .field("mark", mark)
-                .field("sweep", sweep)
-                .field("retention_seconds", retention_seconds)
-                .field("retention_report", retention_report)
-                .field("orphan_inventory", orphan_inventory)
-                .finish(),
-            Self::GcScheduleInstall {
-                output_dir,
-                unit_prefix,
-                calendar,
-                retention_seconds,
-                binary_path,
-                env_file,
-                working_directory,
-                user,
-                group,
-            } => formatter
-                .debug_struct("GcScheduleInstall")
-                .field("output_dir", output_dir)
-                .field("unit_prefix", unit_prefix)
-                .field("calendar", calendar)
-                .field("retention_seconds", retention_seconds)
-                .field("binary_path", binary_path)
-                .field("env_file", env_file)
-                .field("working_directory", working_directory)
-                .field("user", user)
-                .field("group", group)
-                .finish(),
-            Self::GcScheduleUninstall {
-                output_dir,
-                unit_prefix,
-            } => formatter
-                .debug_struct("GcScheduleUninstall")
-                .field("output_dir", output_dir)
-                .field("unit_prefix", unit_prefix)
-                .finish(),
-            Self::Repair {
-                root,
-                webhook_retention_seconds,
-            } => formatter
-                .debug_struct("Repair")
-                .field("root", root)
-                .field("webhook_retention_seconds", webhook_retention_seconds)
-                .finish(),
-            Self::RepairLifecycle {
-                root,
-                webhook_retention_seconds,
-            } => formatter
-                .debug_struct("RepairLifecycle")
-                .field("root", root)
-                .field("webhook_retention_seconds", webhook_retention_seconds)
-                .finish(),
-            Self::BackupManifest { root, output } => formatter
-                .debug_struct("BackupManifest")
-                .field("root", root)
-                .field("output", output)
-                .finish(),
-            Self::StorageMigrate {
-                from,
-                from_root,
-                to,
-                to_root,
-                prefix,
-                dry_run,
-            } => formatter
-                .debug_struct("StorageMigrate")
-                .field("from", from)
-                .field("from_root", from_root)
-                .field("to", to)
-                .field("to_root", to_root)
-                .field("prefix", prefix)
-                .field("dry_run", dry_run)
-                .finish(),
-            Self::HoldSet {
-                root,
-                object_key,
-                reason,
-                ttl_seconds,
-            } => formatter
-                .debug_struct("HoldSet")
-                .field("root", root)
-                .field("object_key", object_key)
-                .field("reason", reason)
-                .field("ttl_seconds", ttl_seconds)
-                .finish(),
-            Self::HoldList { root, active_only } => formatter
-                .debug_struct("HoldList")
-                .field("root", root)
-                .field("active_only", active_only)
-                .finish(),
-            Self::HoldRelease { root, object_key } => formatter
-                .debug_struct("HoldRelease")
-                .field("root", root)
-                .field("object_key", object_key)
-                .finish(),
-            Self::Bench {
-                mode,
-                deployment_target,
-                scenario,
-                storage_dir,
-                iterations,
-                concurrency,
-                upload_max_in_flight_chunks,
-                chunk_size_bytes,
-                base_bytes,
-                mutated_bytes,
-                json,
-            } => formatter
-                .debug_struct("Bench")
-                .field("mode", mode)
-                .field("deployment_target", deployment_target)
-                .field("scenario", scenario)
-                .field("storage_dir", storage_dir)
-                .field("iterations", iterations)
-                .field("concurrency", concurrency)
-                .field("upload_max_in_flight_chunks", upload_max_in_flight_chunks)
-                .field("chunk_size_bytes", chunk_size_bytes)
-                .field("base_bytes", base_bytes)
-                .field("mutated_bytes", mutated_bytes)
-                .field("json", json)
-                .finish(),
-            Self::Health { server_url } => formatter
-                .debug_struct("Health")
-                .field("server_url", server_url)
-                .finish(),
-            Self::Completion { shell, output } => formatter
-                .debug_struct("Completion")
-                .field("shell", shell)
-                .field("output", output)
-                .finish(),
-            Self::Manpage { output } => formatter
-                .debug_struct("Manpage")
-                .field("output", output)
-                .finish(),
-        }
-    }
 }
 
 /// Supported benchmark modes.
@@ -1037,6 +859,8 @@ enum CliServerFrontend {
     BazelHttp,
     /// Serve the OCI Distribution frontend.
     Oci,
+    /// Serve the HuggingFace Hub API compatibility frontend.
+    Hub,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1182,19 +1006,19 @@ impl TryFrom<CliDefinition> for CliCommand {
             CliDefinitionCommand::Db(db_args) => match db_args.command {
                 DbSubcommand::Migrate(migrate) => match migrate.command {
                     DbMigrateSubcommand::Up(up_args) => Ok(Self::DbMigrate {
-                        database_url: up_args.database_url,
+                        database_url: up_args.database_url.map(RedactedDbUrl),
                         command: DatabaseMigrationCommand::Up {
                             steps: up_args.steps.map(NonZeroUsize::get),
                         },
                     }),
                     DbMigrateSubcommand::Down(down_args) => Ok(Self::DbMigrate {
-                        database_url: down_args.database_url,
+                        database_url: down_args.database_url.map(RedactedDbUrl),
                         command: DatabaseMigrationCommand::Down {
                             steps: down_args.steps.map_or(1, NonZeroUsize::get),
                         },
                     }),
                     DbMigrateSubcommand::Status(status_args) => Ok(Self::DbMigrate {
-                        database_url: status_args.database_url,
+                        database_url: status_args.database_url.map(RedactedDbUrl),
                         command: DatabaseMigrationCommand::Status,
                     }),
                 },
@@ -1345,6 +1169,7 @@ impl From<CliServerFrontend> for ServerFrontend {
             CliServerFrontend::Lfs => Self::Lfs,
             CliServerFrontend::BazelHttp => Self::BazelHttp,
             CliServerFrontend::Oci => Self::Oci,
+            CliServerFrontend::Hub => Self::Hub,
         }
     }
 }
@@ -1408,7 +1233,7 @@ mod tests {
         DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
     };
 
-    use super::{BenchMode, CliCommand, CompletionShell};
+    use super::{BenchMode, CliCommand, CompletionShell, RedactedDbUrl};
     use crate::bench::{BenchDeploymentTarget, BenchScenario};
 
     #[test]
@@ -1823,7 +1648,9 @@ mod tests {
         assert_eq!(
             CliCommand::parse(args),
             Ok(CliCommand::DbMigrate {
-                database_url: Some("postgres://user:password@localhost:5432/shardline".to_owned()),
+                database_url: Some(RedactedDbUrl(
+                    "postgres://user:password@localhost:5432/shardline".to_owned()
+                )),
                 command: DatabaseMigrationCommand::Up { steps: Some(2) },
             })
         );

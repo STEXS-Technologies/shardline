@@ -5,6 +5,12 @@ mod provider_routes;
 mod reconstruction_helpers;
 mod reconstruction_routes;
 
+pub use provider::{
+    extract_provider_subject, latest_lifecycle_signal_at, reconciled_provider_repository_state,
+    validate_provider_name_path,
+};
+pub use reconstruction_helpers::{full_byte_stream_response, parse_batch_reconstruction_query};
+
 use std::{
     num::NonZeroUsize,
     sync::{
@@ -22,7 +28,6 @@ use axum::{
 };
 use shardline_protocol::{RepositoryScope, TokenScope};
 use tokio::net::TcpListener;
-#[cfg(test)]
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
@@ -30,6 +35,8 @@ use crate::{
     ServerConfig, ServerError,
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
+    config::AuthProviderKind,
+    metrics::{MetricsLayer, metrics_routes},
     provider::ProviderTokenService,
     reconstruction_cache::ReconstructionCacheService,
     server_frontend::ServerFrontend,
@@ -47,46 +54,39 @@ use protocol_routes::{
     oci_transfer_dispatch, oci_v2_root,
 };
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
-#[cfg(test)]
-use provider::{
-    extract_provider_subject, latest_lifecycle_signal_at, reconciled_provider_repository_state,
-    validate_provider_name_path,
-};
 use provider_routes::{
     git_lfs_authenticate, handle_provider_webhook, issue_provider_token, issue_xet_read_token,
     issue_xet_write_token,
 };
-#[cfg(test)]
-use reconstruction_helpers::{full_byte_stream_response, parse_batch_reconstruction_query};
 use reconstruction_routes::{batch_reconstruction, reconstruction, reconstruction_v2};
 
-const MAX_BATCH_RECONSTRUCTION_FILE_IDS: usize = 1024;
-const MAX_BATCH_RECONSTRUCTION_QUERY_BYTES: usize = 131_072;
-const MAX_LFS_BATCH_OBJECTS: usize = 1024;
-const MAX_OCI_MANIFEST_TAGS: usize = 128;
-const MAX_OCI_TAG_LIST_PAGE_SIZE: usize = 256;
-const MAX_PROTOCOL_QUERY_BYTES: usize = 16_384;
-const MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES: usize = 16_384;
-const MAX_PROVIDER_WEBHOOK_BODY_BYTES: usize = 1_048_576;
-const MAX_PROVIDER_NAME_BYTES: usize = 64;
-const MAX_PROVIDER_SUBJECT_BYTES: usize = 512;
-const MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES: usize = 4096;
+pub const MAX_BATCH_RECONSTRUCTION_FILE_IDS: usize = 1024;
+pub const MAX_BATCH_RECONSTRUCTION_QUERY_BYTES: usize = 131_072;
+pub const MAX_LFS_BATCH_OBJECTS: usize = 1024;
+pub const MAX_OCI_MANIFEST_TAGS: usize = 128;
+pub const MAX_OCI_TAG_LIST_PAGE_SIZE: usize = 256;
+pub const MAX_PROTOCOL_QUERY_BYTES: usize = 16_384;
+pub const MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES: usize = 16_384;
+pub const MAX_PROVIDER_WEBHOOK_BODY_BYTES: usize = 1_048_576;
+pub const MAX_PROVIDER_NAME_BYTES: usize = 64;
+pub const MAX_PROVIDER_SUBJECT_BYTES: usize = 512;
+pub const MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES: usize = 4096;
 
 #[derive(Debug)]
-struct AppState {
-    config: ServerConfig,
-    role: ServerRole,
-    backend: ServerBackend,
-    auth: Option<ServerAuth>,
-    provider_tokens: Option<ProviderTokenService>,
-    reconstruction_cache: ReconstructionCacheService,
-    transfer_limiter: TransferLimiter,
-    oci_registry_token_limiter: Arc<Semaphore>,
-    protocol_metrics: ProtocolMetrics,
+pub struct AppState {
+    pub config: ServerConfig,
+    pub role: ServerRole,
+    pub backend: ServerBackend,
+    pub auth: Option<ServerAuth>,
+    pub provider_tokens: Option<ProviderTokenService>,
+    pub reconstruction_cache: ReconstructionCacheService,
+    pub transfer_limiter: TransferLimiter,
+    pub oci_registry_token_limiter: Arc<Semaphore>,
+    pub protocol_metrics: ProtocolMetrics,
 }
 
 #[derive(Debug, Default)]
-struct ProtocolMetrics {
+pub struct ProtocolMetrics {
     oci_registry_token_requests_total: AtomicU64,
     oci_registry_token_rate_limited_total: AtomicU64,
     oci_registry_token_active_requests: AtomicU64,
@@ -142,10 +142,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let provider_webhook_body_limit =
         bounded_api_body_limit(max_request_body_bytes, MAX_PROVIDER_WEBHOOK_BODY_BYTES);
     let backend = ServerBackend::from_config(&config).await?;
-    let auth = config
-        .token_signing_key()
-        .map(ServerAuth::new)
-        .transpose()?;
+    let auth = build_auth_provider(&config).await?;
     let provider_tokens = if role.serves_api() {
         match (
             config.provider_config_path(),
@@ -197,7 +194,8 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let mut app = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
-        .route("/metrics", get(metrics));
+        .route("/metrics", get(metrics))
+        .layer(MetricsLayer);
     if role.serves_api() {
         app = app
             .route(
@@ -216,7 +214,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             .route("/v1/stats", get(stats));
     }
     for frontend in state.config.server_frontends() {
-        app = register_frontend_routes(app, *frontend, role);
+        app = register_frontend_routes(app, *frontend, role, &state);
     }
 
     Ok(app
@@ -230,8 +228,10 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 ///
 /// Returns [`ServerError`] when the listener cannot bind or the server exits with an
 /// IO error.
+#[tracing::instrument(skip(config), fields(bind_addr = %config.bind_addr()))]
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
     let listener = TcpListener::bind(config.bind_addr()).await?;
+    tracing::info!("listening on {}", config.bind_addr());
     serve_with_listener(config, listener).await
 }
 
@@ -246,6 +246,7 @@ pub async fn serve_with_listener(
     listener: TcpListener,
 ) -> Result<(), ServerError> {
     let app = router(config).await?;
+    tracing::info!("router initialized, starting HTTP serve");
     serve_http(listener, app).await?;
     Ok(())
 }
@@ -254,12 +255,15 @@ fn register_frontend_routes(
     app: Router<Arc<AppState>>,
     frontend: ServerFrontend,
     role: ServerRole,
+    app_state: &AppState,
 ) -> Router<Arc<AppState>> {
     match frontend {
         ServerFrontend::Xet => register_xet_routes(app, role),
         ServerFrontend::Lfs => register_lfs_routes(app, role),
         ServerFrontend::BazelHttp => register_bazel_routes(app, role),
         ServerFrontend::Oci => register_oci_routes(app, role),
+        ServerFrontend::Hub => register_hub_routes(app, app_state),
+        ServerFrontend::Metrics => app.merge(metrics_routes::<Arc<AppState>>()),
     }
 }
 
@@ -358,8 +362,40 @@ const fn scope_from_auth(auth: &AuthContext) -> &RepositoryScope {
     auth.claims().repository()
 }
 
-fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: usize) -> usize {
+pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: usize) -> usize {
     configured_limit.get().min(endpoint_limit)
+}
+
+fn register_hub_routes(app: Router<Arc<AppState>>, app_state: &AppState) -> Router<Arc<AppState>> {
+    let hub_auth = app_state
+        .auth
+        .as_ref()
+        .map(|sa| shardline_hub_api::auth::HubAuth::from_arc(sa.provider_arc()));
+
+    // Create a HubStore from the configured backend
+    let root_dir = app_state.config.root_dir();
+    let store: shardline_index::hub::BoxedHubStore =
+        if let Some(pg_url) = app_state.config.index_postgres_url() {
+            // Use Postgres for Hub metadata
+            let pool = sqlx::PgPool::connect_lazy(pg_url)
+                .expect("failed to create lazy Postgres pool for Hub API");
+            let pg_store = shardline_index::PostgresIndexStore::new(pool);
+            shardline_index::hub::BoxedHubStore::from_store(pg_store)
+        } else {
+            // Use local SQLite for Hub metadata
+            let hub_root = root_dir.join("hub");
+            std::fs::create_dir_all(&hub_root).ok();
+            let sqlite_store = shardline_index::LocalIndexStore::new(hub_root)
+                .expect("failed to open Hub API SQLite store");
+            shardline_index::hub::BoxedHubStore::from_store(sqlite_store)
+        };
+
+    let hub_state = shardline_hub_api::routes::HubState {
+        store,
+        auth: hub_auth,
+    };
+    shardline_hub_api::init(hub_state);
+    app.merge(shardline_hub_api::hub_routes())
 }
 
 fn endpoint_body_limit(
@@ -370,13 +406,49 @@ fn endpoint_body_limit(
         .ok_or(ServerError::Overflow)
 }
 
-#[cfg(test)]
-async fn acquire_chunk_transfer_permit(
+pub async fn acquire_chunk_transfer_permit(
     state: &AppState,
     hash_hex: &str,
 ) -> Result<OwnedSemaphorePermit, ServerError> {
     let total_bytes = state.backend.chunk_length(hash_hex).await?;
     state.transfer_limiter.acquire_bytes(total_bytes).await
+}
+
+async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>, ServerError> {
+    match config.auth_provider() {
+        AuthProviderKind::Local => {
+            let Some(key) = config.token_signing_key() else {
+                return Ok(None);
+            };
+            Ok(Some(ServerAuth::new(key)?))
+        }
+        AuthProviderKind::Passthrough => {
+            let provider = Box::new(shardline_server_core::auth::PassthroughProvider);
+            Ok(Some(ServerAuth::from_provider(provider)))
+        }
+        AuthProviderKind::Oidc => {
+            let issuer = config.auth_oidc_issuer().ok_or_else(|| {
+                ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
+            })?;
+            let provider = crate::oidc_provider::OidcProvider::new(issuer)
+                .await
+                .map_err(|_e| {
+                    ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
+                })?;
+            Ok(Some(ServerAuth::from_provider(Box::new(provider))))
+        }
+        AuthProviderKind::Jwks => {
+            let jwks_url = config.auth_jwks_url().ok_or_else(|| {
+                ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
+            })?;
+            let provider = crate::jwks_provider::JwksProvider::new(jwks_url)
+                .await
+                .map_err(|_e| {
+                    ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
+                })?;
+            Ok(Some(ServerAuth::from_provider(Box::new(provider))))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -21,6 +21,109 @@ pub struct RepairReport {
     pub fsck: LocalFsckReport,
 }
 
+impl RepairReport {
+    pub fn print_summary(&self) {
+        println!(
+            "index_rebuild.scanned_version_records: {}",
+            self.index_rebuild.scanned_version_records
+        );
+        println!(
+            "index_rebuild.scanned_retained_shards: {}",
+            self.index_rebuild.scanned_retained_shards
+        );
+        println!(
+            "index_rebuild.rebuilt_latest_records: {}",
+            self.index_rebuild.rebuilt_latest_records
+        );
+        println!(
+            "index_rebuild.unchanged_latest_records: {}",
+            self.index_rebuild.unchanged_latest_records
+        );
+        println!(
+            "index_rebuild.removed_stale_latest_records: {}",
+            self.index_rebuild.removed_stale_latest_records
+        );
+        println!(
+            "index_rebuild.scanned_reconstructions: {}",
+            self.index_rebuild.scanned_reconstructions
+        );
+        println!(
+            "index_rebuild.unchanged_reconstructions: {}",
+            self.index_rebuild.unchanged_reconstructions
+        );
+        println!(
+            "index_rebuild.removed_stale_reconstructions: {}",
+            self.index_rebuild.removed_stale_reconstructions
+        );
+        println!(
+            "index_rebuild.rebuilt_dedupe_shard_mappings: {}",
+            self.index_rebuild.rebuilt_dedupe_shard_mappings
+        );
+        println!(
+            "index_rebuild.unchanged_dedupe_shard_mappings: {}",
+            self.index_rebuild.unchanged_dedupe_shard_mappings
+        );
+        println!(
+            "index_rebuild.removed_stale_dedupe_shard_mappings: {}",
+            self.index_rebuild.removed_stale_dedupe_shard_mappings
+        );
+        println!(
+            "index_rebuild.issue_count: {}",
+            self.index_rebuild.issue_count()
+        );
+        self.lifecycle_repair
+            .print_summary_prefixed("lifecycle_repair");
+        println!("fsck.latest_records: {}", self.fsck.latest_records);
+        println!("fsck.version_records: {}", self.fsck.version_records);
+        println!(
+            "fsck.inspected_chunk_references: {}",
+            self.fsck.inspected_chunk_references
+        );
+        println!(
+            "fsck.inspected_dedupe_shard_mappings: {}",
+            self.fsck.inspected_dedupe_shard_mappings
+        );
+        println!(
+            "fsck.inspected_reconstructions: {}",
+            self.fsck.inspected_reconstructions
+        );
+        println!(
+            "fsck.inspected_webhook_deliveries: {}",
+            self.fsck.inspected_webhook_deliveries
+        );
+        println!(
+            "fsck.inspected_provider_repository_states: {}",
+            self.fsck.inspected_provider_repository_states
+        );
+        println!("fsck.issue_count: {}", self.fsck.issue_count());
+    }
+
+    pub fn print_cli_summary(&self, root: &Path, webhook_retention_seconds: u64) {
+        println!("root: {}", root.display());
+        println!("webhook_retention_seconds: {webhook_retention_seconds}");
+        self.print_summary();
+    }
+
+    pub fn print_issues(&self) {
+        for issue in &self.index_rebuild.issues {
+            eprintln!(
+                "index_rebuild.issue: {} location={} detail={}",
+                issue.kind.as_str(),
+                issue.location,
+                issue.detail
+            );
+        }
+        for issue in &self.fsck.issues {
+            eprintln!(
+                "fsck.issue: {} location={} detail={}",
+                issue.kind.as_str(),
+                issue.location,
+                issue.detail
+            );
+        }
+    }
+}
+
 /// Local lifecycle-repair runtime failure.
 #[derive(Debug, Error)]
 pub enum RepairRuntimeError {

@@ -16,10 +16,12 @@ use super::{AppState, MAX_BATCH_RECONSTRUCTION_FILE_IDS, MAX_BATCH_RECONSTRUCTIO
 use crate::{
     ServerError,
     download_stream::ServerByteStream,
-    model::{FileReconstructionResponse, FileReconstructionV2Response},
     reconstruction_cache::ReconstructionCacheService,
     transfer_limiter::TransferLimiter,
-    xet_adapter::{reconstruction_v2_from_v1, validate_hash_path},
+    xet_adapter::{
+        FileReconstructionResponse, FileReconstructionV2Response, reconstruction_v2_from_v1,
+        validate_hash_path,
+    },
 };
 
 struct TransferByteStreamState {
@@ -57,7 +59,7 @@ pub(super) fn byte_range_stream_response(
         .into_response()
 }
 
-pub(super) fn full_byte_stream_response(
+pub fn full_byte_stream_response(
     byte_stream: ServerByteStream,
     transfer_limiter: TransferLimiter,
     total_length: u64,
@@ -215,7 +217,7 @@ pub(super) fn parse_batch_reconstruction_file_ids(uri: &Uri) -> Result<Vec<Strin
     parse_batch_reconstruction_query(query)
 }
 
-pub(super) fn parse_batch_reconstruction_query(query: &str) -> Result<Vec<String>, ServerError> {
+pub fn parse_batch_reconstruction_query(query: &str) -> Result<Vec<String>, ServerError> {
     if query.len() > MAX_BATCH_RECONSTRUCTION_QUERY_BYTES {
         return Err(ServerError::RequestQueryTooLarge);
     }

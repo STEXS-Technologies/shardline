@@ -51,7 +51,8 @@ pub fn ensure_directory_path_components_are_not_symlinked(
 }
 
 fn validate_existing_directory_component(path: &Path) -> Result<(), DirectoryPathError> {
-    match fs::symlink_metadata(path) {
+    let check_path = resolve_platform_symlinks(path);
+    match fs::symlink_metadata(&check_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             Err(DirectoryPathError::SymlinkedComponent(path.to_path_buf()))
         }
@@ -62,6 +63,36 @@ fn validate_existing_directory_component(path: &Path) -> Result<(), DirectoryPat
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(DirectoryPathError::Io(error)),
     }
+}
+
+/// Resolves well-known platform symlinks in the path without resolving user-created symlinks.
+///
+/// On macOS, `/var` is a symlink to `/private/var`. This allows `tempfile::tempdir()` paths
+/// (which live under `/var/folders/...`) to pass the symlink safety check.
+#[cfg(target_os = "macos")]
+fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+    let components: Vec<_> = path.components().collect();
+    if let [Component::RootDir, Component::Normal(first), rest @ ..] = components.as_slice() {
+        #[cfg(unix)]
+        let is_var = first.as_encoded_bytes() == b"var";
+        #[cfg(not(unix))]
+        let is_var = first.to_string_lossy() == "var";
+
+        if is_var {
+            let mut resolved = PathBuf::from("/private");
+            resolved.push("var");
+            for component in rest {
+                resolved.push(component.as_os_str());
+            }
+            return resolved;
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(test)]

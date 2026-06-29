@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shardline
+      POSTGRES_PASSWORD: shardline-dev-password
+      POSTGRES_DB: shardline
+    ports:
+      - "127.0.0.1:5532:5432"
+    volumes:
+      - shardline_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shardline"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   shardline:
     build:
       context: .
@@ -64,6 +81,8 @@ services:
 
 volumes:
   shardline_data:
+    driver: local
+  shardline_postgres:
     driver: local
   shardline_minio:
     driver: local

@@ -1,5 +1,6 @@
 use axum::http::{HeaderMap, header::AUTHORIZATION};
-use shardline_protocol::{TokenClaims, TokenCodecError, TokenScope, TokenSigner};
+use shardline_protocol::{TokenClaims, TokenCodecError, TokenScope};
+use shardline_server_core::{AuthError, AuthProvider};
 use subtle::ConstantTimeEq;
 
 use crate::ServerError;
@@ -26,21 +27,45 @@ impl AuthContext {
     }
 }
 
-/// Local bearer-token verifier.
-#[derive(Debug, Clone)]
+/// Bearer-token verifier backed by a pluggable [`AuthProvider`].
+#[derive(Clone)]
 pub struct ServerAuth {
-    signer: TokenSigner,
+    provider: std::sync::Arc<dyn AuthProvider>,
 }
 
 impl ServerAuth {
-    /// Creates the bearer-token verifier.
+    /// Creates a bearer-token verifier from a signing key using the local
+    /// Ed25519 provider.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the signing key is invalid.
     pub fn new(signing_key: &[u8]) -> Result<Self, ServerError> {
-        let signer = TokenSigner::new(signing_key)?;
-        Ok(Self { signer })
+        let provider =
+            shardline_server_core::auth::LocalEd25519Provider::new(signing_key)?;
+        Ok(Self {
+            provider: std::sync::Arc::new(provider),
+        })
+    }
+
+    /// Creates a bearer-token verifier from a boxed [`AuthProvider`].
+    #[must_use]
+    pub fn from_provider(provider: Box<dyn AuthProvider>) -> Self {
+        Self {
+            provider: std::sync::Arc::from(provider),
+        }
+    }
+
+    /// Returns a reference to the underlying [`AuthProvider`].
+    #[must_use]
+    pub fn provider(&self) -> &dyn AuthProvider {
+        self.provider.as_ref()
+    }
+
+    /// Returns a clone of the underlying [`AuthProvider`] as an [`Arc`].
+    #[must_use]
+    pub fn provider_arc(&self) -> std::sync::Arc<dyn AuthProvider> {
+        self.provider.clone()
     }
 
     /// Validates the request token and required scope.
@@ -61,12 +86,20 @@ impl ServerAuth {
             .to_str()
             .map_err(|_error| ServerError::InvalidAuthorizationHeader)?;
         let token = parse_bearer_token(header)?;
-        let claims = self.signer.verify_now(token)?;
+        let claims = self.provider.verify_token(token)?;
         if !scope_allows(claims.scope(), required_scope) {
             return Err(ServerError::InsufficientScope);
         }
 
         Ok(AuthContext::new(claims))
+    }
+}
+
+impl std::fmt::Debug for ServerAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerAuth")
+            .field("provider", &"<dyn AuthProvider>")
+            .finish()
     }
 }
 
@@ -119,6 +152,19 @@ const fn scope_allows(actual_scope: TokenScope, required_scope: TokenScope) -> b
 impl From<TokenCodecError> for ServerError {
     fn from(error: TokenCodecError) -> Self {
         Self::InvalidToken(error)
+    }
+}
+
+impl From<AuthError> for ServerError {
+    fn from(error: AuthError) -> Self {
+        match error {
+            AuthError::InvalidToken => Self::InvalidToken(TokenCodecError::InvalidFormat),
+            AuthError::ExpiredToken => Self::InvalidToken(TokenCodecError::Expired),
+            AuthError::InsufficientScope => Self::InsufficientScope,
+            AuthError::ProviderError(_msg) => {
+                Self::InvalidToken(TokenCodecError::InvalidFormat)
+            }
+        }
     }
 }
 

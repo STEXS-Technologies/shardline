@@ -1,0 +1,31 @@
+[package]
+name = "shardline-oci-adapter"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-oci-adapter"
+readme = "../../README.md"
+description = "OCI Distribution protocol adapter for the Shardline server ecosystem."
+
+[dependencies]
+blake3.workspace = true
+bytes.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+shardline-index.workspace = true
+shardline-protocol.workspace = true
+shardline-server-core.workspace = true
+shardline-storage.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

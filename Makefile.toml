@@ -192,12 +192,18 @@ args = ["deny", "check"]
 [tasks.ci]
 description = "Run the core contributor CI checks, including dependency advisories"
 workspace = false
-dependencies = ["format-check", "clippy", "test", "verify-release-binary", "audit"]
+dependencies = ["format-check", "clippy", "test", "verify-release-binary", "check-migration-sync", "audit"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"
 workspace = false
 dependencies = ["ci", "deny"]
+
+[tasks.check-migration-sync]
+description = "Verify Postgres and SQLite migration versions are in sync"
+workspace = false
+command = "bash"
+args = ["scripts/check_migration_sync.sh"]
 
 [tasks.sqlx]
 description = "Run raw SQLx CLI commands"

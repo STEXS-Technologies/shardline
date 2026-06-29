@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use shardline_index::RepositoryRecordScope;
-use shardline_protocol::RepositoryProvider;
 #[cfg(test)]
 use shardline_protocol::RepositoryScope;
+
+pub(crate) use shardline_server_core::provider_directory;
 
 #[cfg(test)]
 pub(crate) fn scoped_root(base: &Path, repository_scope: &RepositoryScope) -> PathBuf {
@@ -30,10 +31,6 @@ pub(crate) fn repository_scoped_root(
         .join(provider_directory(repository_scope.provider()))
         .join(path_component(repository_scope.owner()))
         .join(path_component(repository_scope.name()))
-}
-
-pub(crate) const fn provider_directory(provider: RepositoryProvider) -> &'static str {
-    provider.as_str()
 }
 
 #[cfg(test)]
