@@ -196,6 +196,8 @@ The included ingress maps these route families:
 - API: `/healthz`, `/v1/providers`, `/api`, `/reconstructions`, `/v1/reconstructions`,
   `/v2/reconstructions`, `/shards`, `/v1/shards`, `/v1/stats`
 - transfer: `/v1/chunks`, `/v1/xorbs`, `/transfer/xorb`
+- hub: `/api/*`, `/{type}/{ns}/{repo}/info/refs`, `/{type}/{ns}/{repo}/HEAD`,
+  `/{type}/{ns}/{repo}/git-upload-pack`, `/{type}/{ns}/{repo}/git-receive-pack`
 
 Provider integration remains optional in this profile.
 A scaled deployment can run as a direct Xet-compatible backend with only the CAS and
@@ -559,6 +561,148 @@ In a split deployment behind a reverse proxy, route ownership is:
 
 - `api`: `/v1/reconstructions/*`, `/v1/providers/*`, `/v1/shards`, `/v1/stats`
 - `transfer`: `/v1/chunks/*`, `/v1/xorbs/*`, `/transfer/xorb/*`
+- `hub`: `/api/*`, `/{type}/{ns}/{repo}/info/refs`, `/{type}/{ns}/{repo}/HEAD`,
+  `/{type}/{ns}/{repo}/git-upload-pack`, `/{type}/{ns}/{repo}/git-receive-pack`
+
+## Hub API
+
+The Hub API provides HuggingFace Hub compatibility. Enable it by adding `hub` to the
+frontend set:
+
+```text
+SHARDLINE_SERVER_FRONTENDS=xet,hub
+```
+
+Or pass `--frontend hub` to `shardline serve`.
+
+### REST Endpoints
+
+Once enabled, these routes are available:
+
+```text
+GET  /api/{type}/{ns}/{repo}              — get repository info
+POST /api/{type}/{ns}/{repo}              — create repository
+GET  /api/{type}/{ns}/{repo}/revisions     — list revisions
+POST /api/{type}/{ns}/{repo}/revisions     — create revision
+GET  /api/{type}/{ns}/{repo}/revisions/{sha}/entries — list file entries
+POST /api/{type}/{ns}/{repo}/revisions/{sha}/entries — store file entries
+POST /api/{type}/{ns}/{repo}/lfs/objects   — store LFS objects
+POST /api/{type}/{ns}/{repo}/login          — token exchange
+GET  /api/whoami                            — current user info
+```
+
+### Git Smart HTTP Endpoints
+
+Direct `git clone` and `git push` via the Git Smart HTTP protocol:
+
+```text
+GET  /{type}/{ns}/{repo}/info/refs          — discovery (service=upload-pack|receive-pack)
+GET  /{type}/{ns}/{repo}/HEAD               — HEAD reference
+POST /{type}/{ns}/{repo}/git-upload-pack    — clone/fetch pack generation
+POST /{type}/{ns}/{repo}/git-receive-pack   — push pack acceptance
+```
+
+Clone a Hub repository:
+
+```bash
+git clone http://127.0.0.1:8080/models/my-org/my-model
+```
+
+Push to a Hub repository:
+
+```bash
+cd my-model
+git remote add hub http://127.0.0.1:8080/models/my-org/my-model
+git push hub main
+```
+
+Pack files are generated from stored file entries. LFS pointer blobs are created for
+files with LFS metadata. The `.gitattributes` file is auto-generated when LFS files
+are present.
+
+### Hub API Metadata Storage
+
+Hub metadata (repos, revisions, file entries, LFS objects) is stored separately from
+the main CAS index:
+
+- **SQLite**: `{root_dir}/hub/` directory (default for local deployments)
+- **Postgres**: same connection as the main index (`SHARDLINE_INDEX_POSTGRES_URL`)
+
+For Postgres deployments, apply the Hub API migration:
+
+```text
+shardline db migrate up
+```
+
+The Hub API migration is migration 7 in the bundled set.
+
+### Hub API with huggingface-cli
+
+Point the CLI at your Shardline server:
+
+```bash
+export HF_ENDPOINT=http://127.0.0.1:8080
+huggingface-cli upload my-org/my-model ./model-files
+huggingface-cli download my-org/my-model
+```
+
+### Hub API Authentication
+
+Hub API routes use the same `AuthProvider` trait as CAS routes. When an auth provider
+is configured (OIDC, JWKS, or Ed25519), Hub API bearer tokens are validated against it.
+
+When no auth provider is configured (providerless mode), Hub API routes accept all
+requests anonymously.
+
+## Authentication Providers
+
+Shardline supports pluggable authentication via the `SHARDLINE_AUTH_PROVIDER` variable:
+
+```text
+SHARDLINE_AUTH_PROVIDER=local          # Ed25519 key pair (default)
+SHARDLINE_AUTH_PROVIDER=oidc           # OpenID Connect
+SHARDLINE_AUTH_PROVIDER=jwks           # JSON Web Key Set
+SHARDLINE_AUTH_PROVIDER=passthrough    # Trust upstream proxy
+```
+
+### Local (Ed25519)
+
+Default for providerless deployments. Tokens are signed with a local key pair.
+
+```text
+SHARDLINE_TOKEN_SIGNING_KEY=change-me-for-local-only
+# or
+SHARDLINE_TOKEN_SIGNING_KEY_FILE=/run/secrets/shardline-token-key
+```
+
+### OIDC
+
+Validate tokens against an OpenID Connect issuer:
+
+```text
+SHARDLINE_AUTH_PROVIDER=oidc
+SHARDLINE_AUTH_OIDC_ISSUER=https://accounts.google.com
+```
+
+### JWKS
+
+Validate tokens against a JSON Web Key Set endpoint:
+
+```text
+SHARDLINE_AUTH_PROVIDER=jwks
+SHARDLINE_AUTH_JWKS_URL=https://example.com/.well-known/jwks.json
+```
+
+### Passthrough
+
+Trust an upstream reverse proxy that handles authentication. The server reads the
+`Authorization` header directly without validation:
+
+```text
+SHARDLINE_AUTH_PROVIDER=passthrough
+```
+
+Use this behind a trusted proxy (e.g., Cloudflare Access, oauth2-proxy).
 
 ## Health Checks
 
@@ -588,21 +732,17 @@ for private data.
 When `SHARDLINE_METRICS_TOKEN_FILE` is set, the endpoint rejects unauthenticated scrape
 requests and requires `Authorization: Bearer <metrics-token>`.
 
-Initial metrics:
+50+ metrics across 9 categories:
 
-- request count by route, method, status
-- request duration
-- upload bytes accepted
-- upload bytes stored
-- download bytes served
-- logical bytes registered
-- dedupe hits and misses
-- xorb validation failures
-- shard validation failures
-- reconstruction lookup failures
-- transfer range failures
-- object-store latency
-- index-store latency
+- **Storage**: objects stored/retrieved, bytes transferred, dedup hits/misses
+- **Transfer**: upload/download counts, bytes, chunks processed, range failures
+- **Xet**: xorbs/shards processed, reconstruction terms, validation failures
+- **Protocol**: LFS, Bazel, OCI request counts and latencies
+- **Reconstruction**: lookups, cache hits/misses, failures
+- **GC/FSCK**: runs, duration, chunks quarantined/swept, orphans found
+- **Backend**: local/S3 operation counts and latency histograms
+- **Provider**: token issuance, webhook events processed
+- **System**: active connections, memory usage, cache eviction counts
 
 Metric labels must be bounded.
 Do not use raw hashes, tokens, user IDs, repository names, or object keys as labels.

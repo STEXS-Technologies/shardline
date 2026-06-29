@@ -65,9 +65,9 @@ git remote add hub http://localhost:8080/models/my-org/my-model
 git push hub main
 ```
 
-> **Note:** Git protocol support is experimental. The server generates minimal
-> pack files from stored revisions. For full content serving, use the REST API
-> or CLI workflow.
+Pack files are generated from stored revisions with real Git tree, blob, and commit
+objects. LFS pointer blobs are created for files tracked via LFS. The `.gitattributes`
+file is auto-generated when LFS files are present.
 
 ## Supported Endpoints
 
@@ -94,12 +94,16 @@ git push hub main
 
 ## Architecture
 
-The Hub API state is in-memory by default. Repository metadata, file trees, and LFS
-objects are held in process-local stores initialized at startup:
+Hub metadata is persisted to the configured index store:
 
-- `RepoStore` — repository registry and revision tracking
-- `TreeStore` — per-commit file trees
-- `LfsStore` — LFS object storage (batch, upload, download)
+- **SQLite** (local): `{root_dir}/hub/` directory — 4 tables for repos, revisions,
+  file entries, and LFS objects
+- **Postgres** (production): same connection as the main index — 7th migration in the
+  bundled set
+
+The `HubStore` trait in `shardline-index` defines the storage contract. `BoxedHubStore`
+provides type-erased access. When an auth provider is configured, Hub API routes use
+`HubAuth` (wrapping `Arc<dyn AuthProvider>`) for bearer token validation.
 
 The Hub API merges into the main Axum router at startup, sharing the same bind address
 and TLS configuration as all other frontends.
@@ -108,13 +112,7 @@ and TLS configuration as all other frontends.
 
 This is an initial implementation. Known limitations:
 
-- **Git protocol (experimental)** — Git Smart HTTP endpoints are implemented for
-  clone/fetch (`git-upload-pack`) and push (`git-receive-pack`). The implementation
-  generates minimal pack files from stored revisions. Full object storage integration
-  (serving actual file content from CAS) is planned.
 - **No webhooks or callbacks** — repository event notifications are not implemented.
-- **Single-process only** — the in-memory stores are not shared across scaled API
-  instances. The Hub frontend is intended for single-node deployments today.
 - **No model card or metadata search** — repository README, model card, and search
   endpoints are not yet implemented.
 - **No dataset viewer** — dataset-specific preview and streaming endpoints are not yet
