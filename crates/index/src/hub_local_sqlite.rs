@@ -170,7 +170,7 @@ impl HubStore for LocalIndexStore {
         let conn = open_hub_connection(self.root())?;
         let mut stmt = conn.prepare(
             "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
-             FROM shardline_hub_revisions WHERE repo_id = ?1 ORDER BY created_at_unix_seconds DESC",
+             FROM shardline_hub_revisions WHERE repo_id = ?1 ORDER BY created_at_unix_seconds DESC, rowid DESC",
         )?;
         let rows = stmt.query_map(params![repo_id], |row| {
             Ok(HubRevision {

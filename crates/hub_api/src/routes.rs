@@ -70,7 +70,7 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         // Git Smart HTTP endpoints
         .route(
             "/{type}/{ns}/{repo}/info/refs",
-            get(git::info_refs_upload_pack),
+            get(git::info_refs),
         )
         .route(
             "/{type}/{ns}/{repo}/HEAD",
@@ -640,10 +640,11 @@ async fn git_head(
         .list_revisions(&repo_id)
         .map_err(|_| HubApiError::RepoNotFound)?;
 
-    // Find HEAD revision
+    // Find HEAD revision — prefer explicit HEAD, then empty, then fall back to latest.
     let head_sha = revisions
         .iter()
         .find(|r| r.ref_name == "HEAD" || r.ref_name.is_empty())
+        .or_else(|| revisions.first())
         .map(|r| r.sha.as_str())
         .unwrap_or("0000000000000000000000000000000000000000");
 
