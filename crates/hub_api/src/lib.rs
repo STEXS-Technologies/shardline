@@ -18,6 +18,7 @@
 pub mod auth;
 pub mod commit;
 pub mod error;
+pub mod git;
 pub mod models;
 pub mod resolve;
 pub mod routes;

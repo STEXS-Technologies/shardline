@@ -14,9 +14,11 @@ axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+flate2 = "1"
 hex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha1 = "0.10"
 shardline-index.workspace = true
 shardline-metrics.workspace = true
 shardline-protocol.workspace = true
