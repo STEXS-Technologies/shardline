@@ -99,6 +99,18 @@ pub struct GcScheduleInstallReport {
     pub retention_seconds: u64,
 }
 
+impl GcScheduleInstallReport {
+    pub fn print_summary(&self) {
+        println!("service_path: {}", self.service_path.display());
+        println!("timer_path: {}", self.timer_path.display());
+        println!("binary_path: {}", self.binary_path.display());
+        println!("env_file: {}", self.env_file.display());
+        println!("working_directory: {}", self.working_directory.display());
+        println!("calendar: {}", self.calendar);
+        println!("retention_seconds: {}", self.retention_seconds);
+    }
+}
+
 /// Summary for a scheduled-GC uninstall run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcScheduleUninstallReport {
@@ -110,6 +122,15 @@ pub struct GcScheduleUninstallReport {
     pub removed_service: bool,
     /// Whether the timer file existed and was removed.
     pub removed_timer: bool,
+}
+
+impl GcScheduleUninstallReport {
+    pub fn print_summary(&self) {
+        println!("service_path: {}", self.service_path.display());
+        println!("timer_path: {}", self.timer_path.display());
+        println!("removed_service: {}", self.removed_service);
+        println!("removed_timer: {}", self.removed_timer);
+    }
 }
 
 /// Scheduled-GC helper failure.

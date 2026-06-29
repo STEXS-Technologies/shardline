@@ -1,0 +1,22 @@
+[package]
+name = "shardline-server-core"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-server-core"
+readme = "../../README.md"
+description = "Shared core types for the Shardline server ecosystem."
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shardline-index.workspace = true
+shardline-protocol.workspace = true
+shardline-storage.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

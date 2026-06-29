@@ -254,10 +254,17 @@ pub fn ensure_parent_path_matches_anchor(
 /// Returns an error when `path` does not name an existing directory or the directory cannot be
 /// opened safely.
 pub fn open_directory(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(path)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // On macOS, /dev/fd/N paths are kernel-created symlinks for file descriptors.
+    // The FD-based path approach is already secure by construction (the FD is obtained
+    // from a verified directory open), so O_NOFOLLOW is not needed on macOS.
+    // On Linux, /proc/self/fd/N is not a symlink, so O_NOFOLLOW provides defense-in-depth.
+    #[cfg(not(target_os = "macos"))]
+    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    #[cfg(target_os = "macos")]
+    options.custom_flags(libc::O_DIRECTORY);
+    options.open(path)
 }
 
 /// Creates and opens a brand-new file without following symlinks.

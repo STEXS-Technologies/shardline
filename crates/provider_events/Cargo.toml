@@ -1,0 +1,28 @@
+[package]
+name = "shardline-provider-events"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-provider-events"
+readme = "../../README.md"
+description = "Provider webhook event processing for the Shardline server."
+
+[dependencies]
+serde_json.workspace = true
+shardline-index.workspace = true
+shardline-protocol.workspace = true
+shardline-server-core.workspace = true
+shardline-storage.workspace = true
+shardline-vcs.workspace = true
+shardline-xet-adapter.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+xet-core-structures.workspace = true
+
+[lints]
+workspace = true

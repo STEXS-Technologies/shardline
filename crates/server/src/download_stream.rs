@@ -11,9 +11,9 @@ use tokio::{
 
 use crate::{ServerError, object_store::ServerObjectStore};
 
-pub(crate) const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
+pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
-pub(crate) type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
+pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
 
 struct LocalObjectByteStreamState {
     file: File,

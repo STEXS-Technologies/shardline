@@ -34,6 +34,15 @@ pub struct ProviderlessSetupReport {
     pub env_file: PathBuf,
 }
 
+impl ProviderlessSetupReport {
+    pub fn print_summary(&self) {
+        println!("state_dir: {}", self.state_dir.display());
+        println!("root_dir: {}", self.data_dir.display());
+        println!("token_signing_key_file: {}", self.key_file.display());
+        println!("env_file: {}", self.env_file.display());
+    }
+}
+
 /// Failure while creating or loading providerless source-checkout state.
 #[derive(Debug, Error)]
 pub enum ProviderlessRuntimeError {

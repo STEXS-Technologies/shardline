@@ -1,0 +1,22 @@
+[package]
+name = "shardline-protocol-adapters"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-protocol-adapters"
+readme = "../../README.md"
+description = "Shared protocol adapters for Git LFS, Bazel HTTP cache, and related object-key mapping."
+
+[dependencies]
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+shardline-protocol.workspace = true
+shardline-storage.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

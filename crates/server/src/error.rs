@@ -13,6 +13,9 @@ use shardline_index::{
     PostgresMetadataStoreError, QuarantineCandidateError, RetentionHoldError, WebhookDeliveryError,
 };
 use shardline_protocol::{HashParseError, HttpRangeParseError, TokenCodecError};
+pub use shardline_server_core::{
+    InvalidLifecycleMetadataError, InvalidReconstructionResponseError, InvalidSerializedShardError,
+};
 use shardline_storage::{LocalObjectStoreError, ObjectPrefixError, S3ObjectStoreError};
 use thiserror::Error;
 use tokio::task::JoinError;
@@ -20,162 +23,10 @@ use tokio::task::JoinError;
 use crate::{
     config::ServerConfigError, provider::ProviderServiceError, xet_adapter::XorbParseError,
 };
-
-/// Lifecycle metadata consistency failure.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub enum InvalidLifecycleMetadataError {
-    /// A quarantine candidate cannot be deleted before it was first observed.
-    #[error(
-        "quarantine candidate for {object_key} had delete-after {delete_after_unix_seconds} before first-seen {first_seen_unreachable_at_unix_seconds}"
-    )]
-    QuarantineCandidateDeleteBeforeFirstSeen {
-        /// Quarantined object key.
-        object_key: String,
-        /// Candidate deletion timestamp.
-        delete_after_unix_seconds: u64,
-        /// First observed unreachable timestamp.
-        first_seen_unreachable_at_unix_seconds: u64,
-    },
-    /// A quarantine candidate referenced an object that is no longer present.
-    #[error("quarantine candidate referenced missing object {object_key}")]
-    QuarantineCandidateMissingObject {
-        /// Quarantined object key.
-        object_key: String,
-    },
-    /// A quarantine candidate recorded a length that differs from object-store metadata.
-    #[error(
-        "quarantine candidate for {object_key} expected length {expected_length}, got {observed_length}"
-    )]
-    QuarantineCandidateLengthMismatch {
-        /// Quarantined object key.
-        object_key: String,
-        /// Length recorded in quarantine metadata.
-        expected_length: u64,
-        /// Length observed in object-store metadata.
-        observed_length: u64,
-    },
-    /// A retention hold cannot be released before it was created.
-    #[error(
-        "retention hold for {object_key} had release-after {release_after_unix_seconds} before held-at {held_at_unix_seconds}"
-    )]
-    RetentionHoldReleaseBeforeHeld {
-        /// Held object key.
-        object_key: String,
-        /// Hold release timestamp.
-        release_after_unix_seconds: u64,
-        /// Hold creation timestamp.
-        held_at_unix_seconds: u64,
-    },
-    /// An active retention hold referenced an object that is no longer present.
-    #[error("active retention hold referenced missing object {object_key}")]
-    ActiveRetentionHoldMissingObject {
-        /// Held object key.
-        object_key: String,
-    },
-    /// An active retention hold coexisted with quarantine metadata for the same object.
-    #[error("active retention hold for {object_key} coexisted with quarantine state")]
-    ActiveRetentionHoldQuarantined {
-        /// Held object key.
-        object_key: String,
-    },
-}
-
-/// Serialized shard validation failure.
-#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
-pub enum InvalidSerializedShardError {
-    /// The external shard parser rejected the bytes.
-    #[error("shard parser rejected metadata")]
-    ParserRejectedMetadata,
-    /// A native Xet term used an empty or inverted chunk range.
-    #[error("native xet term had an empty or inverted chunk range")]
-    NativeXetTermEmptyOrInvertedChunkRange,
-    /// A native Xet term referenced chunks past the end of its xorb.
-    #[error("native xet term range exceeded xorb chunk count")]
-    NativeXetTermRangeExceededXorbChunkCount,
-    /// A shard file term used an empty or inverted chunk range.
-    #[error("shard file term had an empty or inverted chunk range")]
-    ShardFileTermEmptyOrInvertedChunkRange,
-    /// The transient xorb metadata cache could not return a just-inserted entry.
-    #[error("xorb metadata cache insertion failed")]
-    XorbMetadataCacheInsertionFailed,
-    /// A shard term started past the referenced xorb chunk list.
-    #[error("shard term chunk range started past the xorb chunk list")]
-    ShardTermRangeStartedPastXorbChunkList,
-    /// A shard term ended past the referenced xorb chunk list.
-    #[error("shard term chunk range ended past the xorb chunk list")]
-    ShardTermRangeEndedPastXorbChunkList,
-    /// The retained shard chunk hash list was not strictly ordered.
-    #[error("retained shard chunk hashes were not strictly ordered")]
-    RetainedShardChunkHashesNotStrictlyOrdered,
-}
-
-/// Reconstruction response shape failure.
-#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
-pub enum InvalidReconstructionResponseError {
-    /// A guarded test record store detected a forbidden global latest-record walk.
-    #[error("global latest-record walk attempted")]
-    RecordStoreGlobalLatestWalkAttempted,
-    /// A guarded test record store could not find the requested record.
-    #[error("record not found")]
-    RecordStoreRecordNotFound,
-    /// V1 response emitted more terms than the source record has chunks.
-    #[error("response term count exceeded record chunk count")]
-    TermCountExceededRecordChunkCount,
-    /// A response term had no bytes.
-    #[error("response term had zero unpacked length")]
-    TermHadZeroUnpackedLength,
-    /// A response term contained an empty chunk range.
-    #[error("response term had an empty chunk range")]
-    TermHadEmptyChunkRange,
-    /// A response term did not have matching fetch metadata.
-    #[error("response term did not have matching fetch info")]
-    TermMissingFetchInfo,
-    /// A fetch-info entry had no fetches.
-    #[error("response fetch info contained an empty fetch list")]
-    EmptyFetchList,
-    /// A fetch URL did not point to the xorb hash that owns it.
-    #[error("response fetch URL did not match its xorb hash")]
-    FetchUrlHashMismatch,
-    /// A fetch entry had an empty chunk range.
-    #[error("response fetch entry had an empty chunk range")]
-    FetchEntryEmptyChunkRange,
-    /// A fetch entry had an inverted byte range.
-    #[error("response fetch entry had an inverted byte range")]
-    FetchEntryInvertedByteRange,
-    /// A fetch entry did not correspond to any response term.
-    #[error("response fetch entry did not have a matching term")]
-    FetchEntryMissingTerm,
-    /// V2 conversion changed `offset_into_first_range`.
-    #[error("v2 response changed offset_into_first_range")]
-    V2ChangedOffsetIntoFirstRange,
-    /// V2 conversion changed the reconstruction terms.
-    #[error("v2 response changed reconstruction terms")]
-    V2ChangedTerms,
-    /// V2 conversion changed the xorb fetch-info cardinality.
-    #[error("v2 response changed xorb fetch-info cardinality")]
-    V2ChangedXorbFetchInfoCardinality,
-    /// V2 conversion emitted a hash absent from V1 fetch-info.
-    #[error("v2 response emitted a fetch hash absent from v1")]
-    V2FetchHashAbsentFromV1,
-    /// V2 conversion emitted an empty fetch list.
-    #[error("v2 response emitted an empty fetch list")]
-    V2EmptyFetchList,
-    /// V2 conversion emitted a fetch entry without ranges.
-    #[error("v2 response emitted a fetch entry without ranges")]
-    V2FetchEntryWithoutRanges,
-    /// V2 conversion emitted an empty chunk range.
-    #[error("v2 response emitted an empty chunk range")]
-    V2EmptyChunkRange,
-    /// V2 conversion emitted an inverted byte range.
-    #[error("v2 response emitted an inverted byte range")]
-    V2InvertedByteRange,
-    /// V2 fetch count did not match V1.
-    #[error("v2 response fetch count disagreed with v1")]
-    V2FetchCountDisagreedWithV1,
-    /// V2 range count did not match V1.
-    #[error("v2 response range count disagreed with v1")]
-    V2RangeCountDisagreedWithV1,
-}
+use shardline_gc::GcError;
+use shardline_oci_adapter::OciAdapterError;
+use shardline_provider_events::ProviderEventsError;
+use shardline_xet_adapter::XetAdapterError;
 
 /// Server runtime failure.
 #[derive(Debug, Error)]
@@ -537,6 +388,121 @@ impl From<XorbParseError> for ServerError {
             XorbParseError::InvalidFormat(_)
             | XorbParseError::NumericConversion(_)
             | XorbParseError::Io(_) => Self::InvalidSerializedXorb,
+        }
+    }
+}
+
+impl From<XetAdapterError> for ServerError {
+    fn from(value: XetAdapterError) -> Self {
+        match value {
+            XetAdapterError::Io(e) => Self::Io(e),
+            XetAdapterError::NumericConversion(e) => Self::NumericConversion(e),
+            XetAdapterError::HashParse(e) => Self::HashParse(e),
+            XetAdapterError::ObjectStore(e) => Self::from(e),
+            XetAdapterError::LocalObjectStore(e) => Self::ObjectStore(e),
+            XetAdapterError::S3ObjectStore(e) => Self::S3ObjectStore(e),
+            XetAdapterError::IndexStore(e) => Self::IndexStore(e),
+            XetAdapterError::MemoryIndexStore(e) => Self::MemoryIndexStore(e),
+            XetAdapterError::MemoryRecordStore(e) => Self::MemoryRecordStore(e),
+            XetAdapterError::PostgresMetadata(e) => Self::PostgresMetadata(e),
+            XetAdapterError::FileRecordInvariant(e) => Self::FileRecordInvariant(e),
+            XetAdapterError::InvalidContentHash => Self::InvalidContentHash,
+            XetAdapterError::InvalidXorbPrefix => Self::InvalidXorbPrefix,
+            XetAdapterError::XorbHashMismatch => Self::XorbHashMismatch,
+            XetAdapterError::InvalidSerializedXorb => Self::InvalidSerializedXorb,
+            XetAdapterError::InvalidSerializedShard(e) => Self::InvalidSerializedShard(e),
+            XetAdapterError::MissingReferencedXorb => Self::MissingReferencedXorb,
+            XetAdapterError::TooManyShardTerms => Self::TooManyShardTerms,
+            XetAdapterError::NotFound => Self::NotFound,
+            XetAdapterError::Overflow => Self::Overflow,
+            XetAdapterError::RangeNotSatisfiable => Self::RangeNotSatisfiable,
+        }
+    }
+}
+
+impl From<ProviderEventsError> for ServerError {
+    fn from(value: ProviderEventsError) -> Self {
+        match value {
+            ProviderEventsError::Overflow => Self::Overflow,
+            ProviderEventsError::InvalidContentHash => Self::InvalidContentHash,
+            ProviderEventsError::InvalidProviderWebhookPayload => {
+                Self::InvalidProviderWebhookPayload
+            }
+            ProviderEventsError::ConflictingRenameTargetRecord => {
+                Self::ConflictingRenameTargetRecord
+            }
+            ProviderEventsError::Json(e) => Self::Json(e),
+            ProviderEventsError::NumericConversion(e) => Self::NumericConversion(e),
+            ProviderEventsError::RetentionHold(e) => Self::RetentionHold(e),
+            ProviderEventsError::XetAdapter(e) => Self::from(e),
+            ProviderEventsError::IndexStore(e) => Self::IndexStore(e),
+            ProviderEventsError::MemoryIndexStore(e) => Self::MemoryIndexStore(e),
+            ProviderEventsError::MemoryRecordStore(e) => Self::MemoryRecordStore(e),
+            ProviderEventsError::PostgresMetadata(e) => Self::PostgresMetadata(e),
+            ProviderEventsError::WebhookDelivery(e) => Self::WebhookDelivery(e),
+            ProviderEventsError::ObjectStore(e) => Self::from(e),
+            ProviderEventsError::ParseStoredFileRecord(e) => Self::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e.to_string(),
+            )),
+        }
+    }
+}
+
+impl From<GcError> for ServerError {
+    fn from(err: GcError) -> Self {
+        match err {
+            GcError::Io(e) => Self::Io(e),
+            GcError::Json(e) => Self::Json(e),
+            GcError::NumericConversion(e) => Self::NumericConversion(e),
+            GcError::ObjectStore(e) => Self::from(e),
+            GcError::LocalObjectStore(e) => Self::ObjectStore(e),
+            GcError::S3ObjectStore(e) => Self::S3ObjectStore(e),
+            GcError::ObjectPrefix(e) => Self::ObjectPrefix(e),
+            GcError::IndexStore(e) => Self::IndexStore(e),
+            GcError::MemoryIndexStore(e) => Self::MemoryIndexStore(e),
+            GcError::MemoryRecordStore(e) => Self::MemoryRecordStore(e),
+            GcError::PostgresMetadata(e) => Self::PostgresMetadata(e),
+            GcError::RetentionHold(e) => Self::RetentionHold(e),
+            GcError::QuarantineCandidate(e) => Self::QuarantineCandidate(e),
+            GcError::WebhookDelivery(e) => Self::WebhookDelivery(e),
+            GcError::FileRecordInvariant(e) => Self::FileRecordInvariant(e),
+            GcError::InvalidLifecycleMetadata(e) => Self::InvalidLifecycleMetadata(e),
+            GcError::InvalidContentHash => Self::InvalidContentHash,
+            GcError::Overflow => Self::Overflow,
+            GcError::XetAdapter(e) => Self::from(e),
+        }
+    }
+}
+
+impl From<OciAdapterError> for ServerError {
+    fn from(value: OciAdapterError) -> Self {
+        match value {
+            OciAdapterError::Io(e) => Self::Io(e),
+            OciAdapterError::Json(e) => Self::Json(e),
+            OciAdapterError::NumericConversion(e) => Self::NumericConversion(e),
+            OciAdapterError::ObjectStore(e) => Self::from(e),
+            OciAdapterError::S3ObjectStore(e) => Self::S3ObjectStore(e),
+            OciAdapterError::LocalObjectStore(e) => Self::ObjectStore(e),
+            OciAdapterError::ObjectPrefix(e) => Self::ObjectPrefix(e),
+            OciAdapterError::NotFound => Self::NotFound,
+            OciAdapterError::Overflow => Self::Overflow,
+            OciAdapterError::InvalidContentHash => Self::InvalidContentHash,
+            OciAdapterError::InvalidDigest => Self::InvalidDigest,
+            OciAdapterError::InvalidRepositoryName => Self::InvalidRepositoryName,
+            OciAdapterError::InvalidManifestReference => Self::InvalidManifestReference,
+            OciAdapterError::InvalidUploadSession => Self::InvalidUploadSession,
+            OciAdapterError::TooManyUploadSessions => Self::TooManyUploadSessions,
+            OciAdapterError::ExpectedBodyHashMismatch => Self::ExpectedBodyHashMismatch,
+            OciAdapterError::BlockingTask(e) => Self::BlockingTask(e),
+        }
+    }
+}
+
+impl From<shardline_protocol_adapters::ProtocolError> for ServerError {
+    fn from(error: shardline_protocol_adapters::ProtocolError) -> Self {
+        match error {
+            shardline_protocol_adapters::ProtocolError::InvalidContentHash => Self::InvalidContentHash,
         }
     }
 }

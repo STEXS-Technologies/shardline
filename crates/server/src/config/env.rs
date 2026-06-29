@@ -11,7 +11,7 @@ use super::secrets::{
     read_secret_file_bytes,
 };
 use super::{
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
+    AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
     DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
     MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
     ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
@@ -214,6 +214,18 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(signing_key) = token_signing_key {
         config = config.with_token_signing_key(signing_key)?;
+    }
+    let auth_provider = AuthProviderKind::parse(
+        &var("SHARDLINE_AUTH_PROVIDER").unwrap_or_else(|_error| "local".to_owned()),
+    )?;
+    let auth_oidc_issuer = var("SHARDLINE_AUTH_OIDC_ISSUER").ok();
+    let auth_jwks_url = var("SHARDLINE_AUTH_JWKS_URL").ok();
+    config = config.with_auth_provider(auth_provider);
+    if let Some(issuer) = auth_oidc_issuer {
+        config = config.with_auth_oidc_issuer(issuer);
+    }
+    if let Some(url) = auth_jwks_url {
+        config = config.with_auth_jwks_url(url);
     }
     if let Some(metrics_token) = metrics_token {
         config = config.with_metrics_token(metrics_token)?;

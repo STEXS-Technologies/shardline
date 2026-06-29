@@ -6,9 +6,9 @@ use shardline_protocol::{ByteRange, ShardlineHash};
 use crate::{
     InvalidReconstructionResponseError, InvalidSerializedShardError, ServerError,
     app::{parse_oci_path, parse_upload_content_range},
-    bazel_http_adapter::{BazelCacheKind, bazel_cache_object_key},
+    BazelCacheKind, bazel_cache_object_key,
     config::ShardMetadataLimits,
-    lfs_adapter::lfs_object_key,
+    lfs_object_key,
     lifecycle_repair::{
         QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
         classify_quarantine_repair_action, classify_retention_hold_repair_action,

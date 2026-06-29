@@ -6,7 +6,7 @@ use crate::ServerError;
 
 /// Weighted transfer concurrency limiter based on chunk-equivalent cost.
 #[derive(Debug, Clone)]
-pub(crate) struct TransferLimiter {
+pub struct TransferLimiter {
     chunk_size_bytes: NonZeroUsize,
     max_in_flight_chunks: NonZeroUsize,
     semaphore: Arc<Semaphore>,
@@ -15,7 +15,7 @@ pub(crate) struct TransferLimiter {
 impl TransferLimiter {
     /// Creates a transfer limiter that budgets concurrent response work in
     /// chunk-equivalent permits.
-    pub(crate) fn new(chunk_size_bytes: NonZeroUsize, max_in_flight_chunks: NonZeroUsize) -> Self {
+    pub fn new(chunk_size_bytes: NonZeroUsize, max_in_flight_chunks: NonZeroUsize) -> Self {
         Self {
             chunk_size_bytes,
             max_in_flight_chunks,
@@ -29,7 +29,7 @@ impl TransferLimiter {
     ///
     /// Returns [`ServerError`] when the limiter capacity cannot be represented or the
     /// semaphore has been closed.
-    pub(crate) async fn acquire_bytes(
+    pub async fn acquire_bytes(
         &self,
         total_bytes: u64,
     ) -> Result<OwnedSemaphorePermit, ServerError> {

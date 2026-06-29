@@ -1,0 +1,23 @@
+[package]
+name = "shardline-rebuild"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-rebuild"
+readme = "../../README.md"
+description = "Index rebuild logic for the Shardline server ecosystem."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+shardline-index.workspace = true
+shardline-protocol.workspace = true
+shardline-server-core.workspace = true
+shardline-storage.workspace = true
+shardline-xet-adapter.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

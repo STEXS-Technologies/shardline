@@ -180,7 +180,7 @@ pub(crate) enum OciReference {
     Tag(String),
 }
 
-pub(crate) fn oci_blob_key(
+pub fn oci_blob_key(
     repository: &str,
     digest_hex: &str,
     repository_scope: Option<&RepositoryScope>,
@@ -195,7 +195,7 @@ pub(crate) fn oci_blob_key(
     ))
 }
 
-pub(crate) fn oci_manifest_key(
+pub fn oci_manifest_key(
     repository: &str,
     digest_hex: &str,
     repository_scope: Option<&RepositoryScope>,
@@ -210,7 +210,7 @@ pub(crate) fn oci_manifest_key(
     ))
 }
 
-pub(crate) fn oci_manifest_media_type_key(
+pub fn oci_manifest_media_type_key(
     repository: &str,
     digest_hex: &str,
     repository_scope: Option<&RepositoryScope>,

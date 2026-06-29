@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     Json,
@@ -11,9 +12,9 @@ use shardline_protocol::TokenScope;
 
 use crate::{
     ServerError,
-    model::BatchReconstructionResponse,
     xet_adapter::{
-        build_batch_reconstruction_response, validate_hash_path, validate_optional_content_hash,
+        BatchReconstructionResponse, build_batch_reconstruction_response, validate_hash_path,
+        validate_optional_content_hash,
     },
 };
 
@@ -48,16 +49,27 @@ pub(super) async fn reconstruction(
         auth.as_ref().map(scope_from_auth),
     )
     .await?;
-    Ok(Json(
-        load_reconstruction_response(
-            &state,
-            &file_id,
-            query.content_hash.as_deref(),
-            requested_range,
-            auth.as_ref().map(scope_from_auth),
-        )
-        .await?,
-    ))
+    let start = Instant::now();
+    let result = load_reconstruction_response(
+        &state,
+        &file_id,
+        query.content_hash.as_deref(),
+        requested_range,
+        auth.as_ref().map(scope_from_auth),
+    )
+    .await;
+    let elapsed = start.elapsed();
+    match &result {
+        Ok(response) => {
+            let chunks = u64::try_from(response.terms.len()).unwrap_or(0);
+            shardline_metrics::record_reconstruction(true, elapsed, chunks);
+            shardline_metrics::metrics().xet.record_reconstruction(true, elapsed, chunks);
+        }
+        Err(_) => {
+            shardline_metrics::record_reconstruction(false, elapsed, 0);
+        }
+    }
+    Ok(Json(result?))
 }
 
 pub(super) async fn reconstruction_v2(
@@ -77,16 +89,27 @@ pub(super) async fn reconstruction_v2(
         auth.as_ref().map(scope_from_auth),
     )
     .await?;
-    Ok(Json(
-        load_reconstruction_v2_response(
-            &state,
-            &file_id,
-            query.content_hash.as_deref(),
-            requested_range,
-            auth.as_ref().map(scope_from_auth),
-        )
-        .await?,
-    ))
+    let start = Instant::now();
+    let result = load_reconstruction_v2_response(
+        &state,
+        &file_id,
+        query.content_hash.as_deref(),
+        requested_range,
+        auth.as_ref().map(scope_from_auth),
+    )
+    .await;
+    let elapsed = start.elapsed();
+    match &result {
+        Ok(response) => {
+            let chunks = u64::try_from(response.terms.len()).unwrap_or(0);
+            shardline_metrics::record_reconstruction(true, elapsed, chunks);
+            shardline_metrics::metrics().xet.record_reconstruction(true, elapsed, chunks);
+        }
+        Err(_) => {
+            shardline_metrics::record_reconstruction(false, elapsed, 0);
+        }
+    }
+    Ok(Json(result?))
 }
 
 pub(super) async fn batch_reconstruction(
@@ -97,6 +120,7 @@ pub(super) async fn batch_reconstruction(
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     let repository_scope = auth.as_ref().map(scope_from_auth);
     let file_ids = parse_batch_reconstruction_file_ids(&uri)?;
+    let start = Instant::now();
     let mut responses = Vec::new();
 
     for file_id in file_ids {
@@ -106,6 +130,14 @@ pub(super) async fn batch_reconstruction(
             Err(error) => return Err(error),
         }
     }
+
+    let elapsed = start.elapsed();
+    let total_chunks: u64 = responses
+        .iter()
+        .map(|(_, r)| u64::try_from(r.terms.len()).unwrap_or(0))
+        .sum();
+    shardline_metrics::record_reconstruction(true, elapsed, total_chunks);
+    shardline_metrics::metrics().xet.record_reconstruction(true, elapsed, total_chunks);
 
     Ok(Json(build_batch_reconstruction_response(responses)))
 }

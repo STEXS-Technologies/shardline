@@ -149,7 +149,7 @@ where
     Ok(())
 }
 
-pub(super) fn reconciled_provider_repository_state(
+pub fn reconciled_provider_repository_state(
     state: &ProviderRepositoryState,
     reconciled_at_unix_seconds: u64,
 ) -> ProviderRepositoryState {
@@ -190,7 +190,7 @@ fn reconciled_timestamp(
     Some(now_unix_seconds)
 }
 
-pub(super) fn latest_lifecycle_signal_at(state: &ProviderRepositoryState) -> Option<u64> {
+pub fn latest_lifecycle_signal_at(state: &ProviderRepositoryState) -> Option<u64> {
     match (
         state.last_access_changed_at_unix_seconds(),
         state.last_revision_pushed_at_unix_seconds(),
@@ -213,7 +213,7 @@ fn normalize_provider_name(provider: &str) -> &str {
     }
 }
 
-pub(super) const fn validate_provider_name_path(provider: &str) -> Result<(), ServerError> {
+pub const fn validate_provider_name_path(provider: &str) -> Result<(), ServerError> {
     if provider.is_empty() || provider.len() > MAX_PROVIDER_NAME_BYTES {
         return Err(ServerError::InvalidProviderTokenRequest);
     }
@@ -221,7 +221,7 @@ pub(super) const fn validate_provider_name_path(provider: &str) -> Result<(), Se
     Ok(())
 }
 
-pub(super) fn extract_provider_subject(
+pub fn extract_provider_subject(
     headers: &HeaderMap,
     query_subject: Option<&str>,
 ) -> Result<String, ServerError> {

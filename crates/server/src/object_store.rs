@@ -1,19 +1,20 @@
 #[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
     fs::File,
     io::{ErrorKind, Read},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use shardline_index::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout,
 };
 use shardline_protocol::ByteRange;
-use shardline_storage::{
-    DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
-    ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore, S3ObjectStoreConfig,
-};
+pub use shardline_server_core::ServerObjectStore;
+pub use shardline_server_core::ServerObjectStoreError;
+use shardline_storage::{ObjectKey, ObjectMetadata, ObjectPrefix};
 
 use crate::{
     ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, chunk_store::chunk_object_key,
@@ -36,213 +37,27 @@ type LocalObjectReadHookSlot = Option<LocalObjectReadHookRegistration>;
 static BEFORE_LOCAL_OBJECT_READ_HOOK: LazyLock<Mutex<LocalObjectReadHookSlot>> =
     LazyLock::new(|| Mutex::new(None));
 
-#[derive(Debug, Clone)]
-pub(crate) enum ServerObjectStore {
-    Local(LocalObjectStore),
-    S3(S3ObjectStore),
-    Blackhole,
-}
-
-impl ObjectStore for ServerObjectStore {
-    type Error = ServerError;
-
-    fn put_if_absent(
-        &self,
-        key: &ObjectKey,
-        body: ObjectBody<'_>,
-        integrity: &ObjectIntegrity,
-    ) -> Result<PutOutcome, Self::Error> {
-        match self {
-            Self::Local(store) => Ok(store.put_if_absent(key, body, integrity)?),
-            Self::S3(store) => Ok(store.put_if_absent(key, body, integrity)?),
-            Self::Blackhole => Ok(PutOutcome::Inserted),
-        }
-    }
-
-    fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
-        match self {
-            Self::Local(store) => Ok(store.read_range(key, range)?),
-            Self::S3(store) => Ok(store.read_range(key, range)?),
-            Self::Blackhole => Err(ServerError::NotFound),
-        }
-    }
-
-    fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-        match self {
-            Self::Local(store) => Ok(store.contains(key)?),
-            Self::S3(store) => Ok(store.contains(key)?),
-            Self::Blackhole => Ok(false),
-        }
-    }
-
-    fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
-        match self {
-            Self::Local(store) => Ok(store.metadata(key)?),
-            Self::S3(store) => Ok(store.metadata(key)?),
-            Self::Blackhole => Ok(None),
-        }
-    }
-
-    fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
-        match self {
-            Self::Local(store) => Ok(store.list_prefix(prefix)?),
-            Self::S3(store) => Ok(store.list_prefix(prefix)?),
-            Self::Blackhole => Ok(Vec::new()),
-        }
-    }
-
-    fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
-        match self {
-            Self::Local(store) => Ok(store.delete_if_present(key)?),
-            Self::S3(store) => Ok(store.delete_if_present(key)?),
-            Self::Blackhole => Ok(DeleteOutcome::NotFound),
+impl From<ServerObjectStoreError> for ServerError {
+    fn from(value: ServerObjectStoreError) -> Self {
+        match value {
+            ServerObjectStoreError::NotFound => Self::NotFound,
+            ServerObjectStoreError::Overflow => Self::Overflow,
+            ServerObjectStoreError::InvalidContentHash => Self::InvalidContentHash,
+            ServerObjectStoreError::StoredObjectLengthMismatch => Self::StoredObjectLengthMismatch,
+            ServerObjectStoreError::Local(e) => Self::ObjectStore(e),
+            ServerObjectStoreError::S3(e) => Self::S3ObjectStore(e),
+            ServerObjectStoreError::Io(e) => Self::Io(e),
+            ServerObjectStoreError::NumericConversion(e) => Self::NumericConversion(e),
         }
     }
 }
 
-impl ServerObjectStore {
-    pub(crate) fn local(root: impl Into<PathBuf>) -> Result<Self, ServerError> {
-        Ok(Self::Local(LocalObjectStore::new(root.into())?))
-    }
-
-    pub(crate) fn s3(config: S3ObjectStoreConfig) -> Result<Self, ServerError> {
-        Ok(Self::S3(S3ObjectStore::new(config)?))
-    }
-
-    pub(crate) const fn blackhole() -> Self {
-        Self::Blackhole
-    }
-
-    pub(crate) fn put_if_absent(
-        &self,
-        key: &ObjectKey,
-        body: ObjectBody<'_>,
-        integrity: &ObjectIntegrity,
-    ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.put_if_absent(key, body, integrity)?),
-            Self::S3(store) => Ok(store.put_if_absent(key, body, integrity)?),
-            Self::Blackhole => Ok(PutOutcome::Inserted),
-        }
-    }
-
-    pub(crate) fn put_overwrite(
-        &self,
-        key: &ObjectKey,
-        body: ObjectBody<'_>,
-        integrity: &ObjectIntegrity,
-    ) -> Result<(), ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.put_overwrite(key, body, integrity)?),
-            Self::S3(store) => Ok(store.put_overwrite(key, body, integrity)?),
-            Self::Blackhole => Ok(()),
-        }
-    }
-
-    pub(crate) fn read_range(
-        &self,
-        key: &ObjectKey,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.read_range(key, range)?),
-            Self::S3(store) => Ok(store.read_range(key, range)?),
-            Self::Blackhole => Err(ServerError::NotFound),
-        }
-    }
-
-    pub(crate) fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.metadata(key)?),
-            Self::S3(store) => Ok(store.metadata(key)?),
-            Self::Blackhole => Ok(None),
-        }
-    }
-
-    pub(crate) fn visit_prefix<Visitor>(
-        &self,
-        prefix: &ObjectPrefix,
-        mut visitor: Visitor,
-    ) -> Result<(), ServerError>
-    where
-        Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
-    {
-        match self {
-            Self::Local(store) => store.visit_prefix(prefix, &mut visitor),
-            Self::S3(store) => store.visit_prefix(prefix, &mut visitor),
-            Self::Blackhole => Ok(()),
-        }
-    }
-
-    pub(crate) fn list_flat_namespace_page(
-        &self,
-        prefix: &ObjectPrefix,
-        start_after: Option<&ObjectKey>,
-        limit: usize,
-    ) -> Result<Vec<ObjectMetadata>, ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.list_flat_namespace_page(prefix, start_after, limit)?),
-            Self::S3(store) => Ok(store.list_flat_namespace_page(prefix, start_after, limit)?),
-            Self::Blackhole => Ok(Vec::new()),
-        }
-    }
-
-    pub(crate) fn local_path_for_key(&self, key: &ObjectKey) -> Option<PathBuf> {
-        match self {
-            Self::Local(store) => Some(store.path_for_key(key)),
-            Self::S3(_store) => None,
-            Self::Blackhole => None,
-        }
-    }
-
-    pub(crate) fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.delete_if_present(key)?),
-            Self::S3(store) => Ok(store.delete_if_present(key)?),
-            Self::Blackhole => Ok(DeleteOutcome::NotFound),
-        }
-    }
-
-    pub(crate) fn copy_if_absent(
-        &self,
-        source: &ObjectKey,
-        destination: &ObjectKey,
-    ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.copy_object_if_absent(source, destination)?),
-            Self::S3(store) => Ok(store.copy_object_if_absent(source, destination)?),
-            Self::Blackhole => Err(ServerError::NotFound),
-        }
-    }
-
-    pub(crate) fn put_content_addressed_file(
-        &self,
-        key: &ObjectKey,
-        path: &Path,
-        integrity: &ObjectIntegrity,
-    ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(store) => Ok(store.put_temporary_file_if_absent(key, path, integrity)?),
-            Self::S3(store) => Ok(store.put_content_addressed_file(key, path, integrity)?),
-            Self::Blackhole => Ok(PutOutcome::Inserted),
-        }
-    }
-
-    pub(crate) fn local_root(&self) -> Option<&Path> {
-        match self {
-            Self::Local(store) => Some(store.root()),
-            Self::S3(_store) => None,
-            Self::Blackhole => None,
-        }
-    }
-
-    pub(crate) const fn backend_name(&self) -> &'static str {
-        match self {
-            Self::Local(_store) => "local",
-            Self::S3(_store) => "s3",
-            Self::Blackhole => "blackhole",
-        }
-    }
+pub(crate) fn visit_object_prefix(
+    object_store: &ServerObjectStore,
+    prefix: &ObjectPrefix,
+    mut visitor: impl FnMut(ObjectMetadata) -> Result<(), ServerError>,
+) -> Result<(), ServerError> {
+    object_store.visit_prefix(prefix, &mut visitor)
 }
 
 pub(crate) fn read_full_object(
@@ -263,7 +78,7 @@ pub(crate) fn read_full_object(
 
     let end = length.checked_sub(1).ok_or(ServerError::Overflow)?;
     let range = ByteRange::new(0, end).map_err(|_error| ServerError::Overflow)?;
-    object_store.read_range(object_key, range)
+    Ok(object_store.read_range(object_key, range)?)
 }
 
 pub(crate) fn reconstruct_local_file_bytes(
@@ -459,13 +274,15 @@ pub(crate) fn object_store_from_config(
     config: &ServerConfig,
 ) -> Result<ServerObjectStore, ServerError> {
     match config.object_storage_adapter() {
-        ObjectStorageAdapter::Local => ServerObjectStore::local(config.root_dir().join("chunks")),
+        ObjectStorageAdapter::Local => {
+            Ok(ServerObjectStore::local(config.root_dir().join("chunks"))?)
+        }
         ObjectStorageAdapter::S3 => {
             let s3_config = config
                 .s3_object_store_config()
                 .ok_or(ServerError::MissingS3ObjectStoreConfig)?
                 .clone();
-            ServerObjectStore::s3(s3_config)
+            Ok(ServerObjectStore::s3(s3_config)?)
         }
     }
 }

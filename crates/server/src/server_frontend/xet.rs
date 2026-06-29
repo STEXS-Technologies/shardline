@@ -7,11 +7,18 @@ use crate::{
     InvalidSerializedShardError, ServerError,
     object_store::{ServerObjectStore, read_full_object},
     xet_adapter::{
-        map_xorb_visit_error, shard_hash_from_object_key_if_present,
-        try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
-        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
+        XorbVisitError, shard_hash_from_object_key_if_present, try_for_each_serialized_xorb_chunk,
+        validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
+        xorb_hash_from_object_key_if_present, xorb_object_key,
     },
 };
+
+fn map_xorb_visit_error_server(error: XorbVisitError<ServerError>) -> ServerError {
+    match error {
+        XorbVisitError::Parse(error) => ServerError::from(error),
+        XorbVisitError::Visitor(error) => error,
+    }
+}
 
 pub(super) fn push_optional_chunk_container_key(
     object_keys: &mut Vec<ObjectKey>,
@@ -25,7 +32,7 @@ pub(super) fn push_optional_chunk_container_key(
 }
 
 pub(super) fn referenced_term_object_key(term_hash: &str) -> Result<ObjectKey, ServerError> {
-    xorb_object_key(term_hash)
+    Ok(xorb_object_key(term_hash)?)
 }
 
 pub(super) fn managed_protocol_object_identity(
@@ -48,12 +55,22 @@ pub(super) fn owns_protocol_object(key: &ObjectKey) -> Result<bool, ServerError>
 pub(super) fn visit_protocol_object_member_chunks<Visitor>(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
-    visitor: Visitor,
+    mut visitor: Visitor,
 ) -> Result<(), ServerError>
 where
     Visitor: FnMut(String) -> Result<(), ServerError>,
 {
-    visit_stored_xorb_chunk_hashes(object_store, object_key, visitor)
+    let mut result = Ok(());
+    visit_stored_xorb_chunk_hashes(object_store, object_key, |chunk_hash_hex| {
+        match visitor(chunk_hash_hex) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                result = Err(e);
+                Err(crate::xet_adapter::XetAdapterError::NotFound)
+            }
+        }
+    })?;
+    result
 }
 
 pub(super) fn append_referenced_term_bytes(
@@ -87,5 +104,5 @@ pub(super) fn append_referenced_term_bytes(
         chunk_index = chunk_index.checked_add(1).ok_or(ServerError::Overflow)?;
         Ok::<(), ServerError>(())
     })
-    .map_err(map_xorb_visit_error)
+    .map_err(map_xorb_visit_error_server)
 }

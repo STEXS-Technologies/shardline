@@ -100,6 +100,20 @@ pub struct StorageMigrationReport {
 }
 
 impl StorageMigrationReport {
+    pub fn print_summary(&self) {
+        println!("source_backend: {}", self.source_backend);
+        println!("destination_backend: {}", self.destination_backend);
+        println!("prefix: {}", self.prefix);
+        println!("dry_run: {}", self.dry_run);
+        println!("scanned_objects: {}", self.scanned_objects);
+        println!("scanned_bytes: {}", self.scanned_bytes);
+        println!("inserted_objects: {}", self.inserted_objects);
+        println!("already_present_objects: {}", self.already_present_objects);
+        println!("copied_bytes: {}", self.copied_bytes);
+    }
+}
+
+impl StorageMigrationReport {
     fn new(options: &StorageMigrationOptions) -> Self {
         Self {
             source_backend: options.source.backend_name().to_owned(),
@@ -132,7 +146,7 @@ pub fn run_storage_migration(
     let prefix = ObjectPrefix::parse(&options.prefix)?;
     let mut report = StorageMigrationReport::new(options);
 
-    source.visit_prefix(&prefix, |metadata| {
+    crate::object_store::visit_object_prefix(&source, &prefix, |metadata| {
         report.scanned_objects = checked_add(report.scanned_objects, 1)?;
         report.scanned_bytes = checked_add(report.scanned_bytes, metadata.length())?;
         if options.dry_run {
@@ -203,9 +217,9 @@ fn ensure_observed_hash_matches_key(
 fn endpoint_store(endpoint: &StorageMigrationEndpoint) -> Result<ServerObjectStore, ServerError> {
     match endpoint {
         StorageMigrationEndpoint::LocalStateRoot(root) => {
-            ServerObjectStore::local(root.join("chunks"))
+            Ok(ServerObjectStore::local(root.join("chunks"))?)
         }
-        StorageMigrationEndpoint::S3(config) => ServerObjectStore::s3(config.clone()),
+        StorageMigrationEndpoint::S3(config) => Ok(ServerObjectStore::s3(config.clone())?),
     }
 }
 

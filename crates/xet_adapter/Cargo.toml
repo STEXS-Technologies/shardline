@@ -1,0 +1,29 @@
+[package]
+name = "shardline-xet-adapter"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-xet-adapter"
+readme = "../../README.md"
+description = "Xet xorb and shard adapter for the Shardline server ecosystem."
+
+[dependencies]
+axum.workspace = true
+serde = { workspace = true, features = ["derive"] }
+shardline-index.workspace = true
+shardline-metrics.workspace = true
+shardline-protocol.workspace = true
+shardline-server-core.workspace = true
+shardline-storage.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+xet-core-structures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+xet-core-structures.workspace = true
+
+[lints]
+workspace = true

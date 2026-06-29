@@ -11,6 +11,7 @@ are shared, while each client-facing protocol lives behind a bounded frontend su
 - Git LFS
 - Bazel HTTP remote cache
 - OCI Distribution
+- HuggingFace Hub API
 
 ## Starting the Server
 
@@ -48,6 +49,9 @@ Current route families:
   `GET|PUT /v1/bazel/cache/cas/{hash}`
 - OCI Distribution: `GET /v2/`, blob upload and download routes, manifest
   `PUT|GET|HEAD|DELETE`, `GET /v2/{repository}/tags/list`, and `GET /v2/token`
+- HuggingFace Hub API: `/api/whoami-v2`, `/api/repos/create`,
+  `/api/{type}/{ns}/{repo}`, `/api/{type}/{ns}/{repo}/commit/{rev}`,
+  `/objects/batch`, `/lfs/objects/{oid}`
 
 ## Client Entry Points
 

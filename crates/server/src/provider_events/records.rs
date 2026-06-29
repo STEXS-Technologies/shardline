@@ -58,12 +58,21 @@ pub(super) fn collect_deleted_repository_record_references(
         if record.chunk_size == 0 {
             let xorb_object_key = xorb_object_key(&chunk.hash)?;
             held_object_keys.insert(xorb_object_key.as_str().to_owned());
+            let mut visit_result = Ok(());
             visit_stored_xorb_chunk_hashes(object_store, &xorb_object_key, |chunk_hash_hex| {
-                let chunk_object_key = chunk_object_key(&chunk_hash_hex)?;
-                held_object_keys.insert(chunk_object_key.as_str().to_owned());
-                chunk_hashes.insert(chunk_hash_hex);
-                Ok(())
+                match chunk_object_key(&chunk_hash_hex) {
+                    Ok(chunk_object_key) => {
+                        held_object_keys.insert(chunk_object_key.as_str().to_owned());
+                        chunk_hashes.insert(chunk_hash_hex);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        visit_result = Err(e);
+                        Err(crate::xet_adapter::XetAdapterError::NotFound)
+                    }
+                }
             })?;
+            visit_result?;
             continue;
         }
 

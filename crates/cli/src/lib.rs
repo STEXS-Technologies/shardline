@@ -51,7 +51,7 @@ pub use bench::{
     BenchConfig, BenchDeploymentTarget, BenchInventoryScope, BenchReport, BenchRuntimeError,
     BenchScenario, IngestBenchReport, run_bench, run_ingest_bench,
 };
-pub use command::{BenchMode, CliCommand, CliParseError, CompletionShell};
+pub use command::{BenchMode, CliCommand, CliParseError, CompletionShell, RedactedDbUrl};
 pub use config::{
     ConfigRuntimeError, effective_root, load_server_config, run_config_check_from_env,
 };
@@ -62,7 +62,10 @@ pub use gc_schedule::{
     GcScheduleError, GcScheduleInstallOptions, GcScheduleInstallReport, GcScheduleUninstallReport,
     install_gc_schedule, uninstall_gc_schedule,
 };
-pub use hold::{HoldRuntimeError, run_hold_list, run_hold_release, run_hold_set};
+pub use hold::{
+    HoldRuntimeError, print_hold_list_summary, print_hold_summary, run_hold_list, run_hold_release,
+    run_hold_set,
+};
 pub use local_output::write_output_bytes;
 pub use providerless::{
     ProviderlessRuntimeError, ProviderlessSetupReport, load_runtime_server_config,
