@@ -9,6 +9,7 @@ use axum::{
 use crate::auth::HubAuth;
 use crate::commit::{self, CommitInstruction, ParsedCommit};
 use crate::error::HubApiError;
+use crate::git;
 use crate::models::*;
 use crate::resolve;
 use shardline_index::hub::{BoxedHubStore, HubFileEntry, HubRepoType};
@@ -66,6 +67,23 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/objects/batch", post(lfs_batch))
         .route("/lfs/objects/{oid}", put(lfs_upload))
         .route("/lfs/objects/{oid}", get(lfs_download))
+        // Git Smart HTTP endpoints
+        .route(
+            "/{type}/{ns}/{repo}/info/refs",
+            get(git::info_refs_upload_pack),
+        )
+        .route(
+            "/{type}/{ns}/{repo}/HEAD",
+            get(git_head),
+        )
+        .route(
+            "/{type}/{ns}/{repo}/git-upload-pack",
+            post(git::upload_pack),
+        )
+        .route(
+            "/{type}/{ns}/{repo}/git-receive-pack",
+            post(git::receive_pack),
+        )
 }
 
 // ---- Health ----
@@ -607,4 +625,27 @@ async fn lfs_download(
         [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
         data,
     ))
+}
+
+// ---- Git HEAD reference ----
+
+/// Serves the HEAD reference for a repository.
+async fn git_head(
+    Path((repo_type, ns, repo)): Path<(String, String, String)>,
+) -> Result<String, HubApiError> {
+    let state = crate::state::get();
+    let repo_id = format!("{repo_type}/{ns}/{repo}");
+    let revisions = state
+        .store
+        .list_revisions(&repo_id)
+        .map_err(|_| HubApiError::RepoNotFound)?;
+
+    // Find HEAD revision
+    let head_sha = revisions
+        .iter()
+        .find(|r| r.ref_name == "HEAD" || r.ref_name.is_empty())
+        .map(|r| r.sha.as_str())
+        .unwrap_or("0000000000000000000000000000000000000000");
+
+    Ok(format!("ref: refs/heads/main\n{head_sha} refs/heads/main\n"))
 }

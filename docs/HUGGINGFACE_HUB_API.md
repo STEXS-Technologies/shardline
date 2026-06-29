@@ -51,6 +51,24 @@ export HF_HUB_DISABLE_TELEMETRY=1
 export TRANSFORMERS_VERBOSITY=info
 ```
 
+## Using with Git
+
+The Hub API supports Git Smart HTTP protocol for clone, fetch, and push:
+
+```bash
+# Clone a repository
+git clone http://localhost:8080/models/my-org/my-model
+
+# Push changes
+cd my-model
+git remote add hub http://localhost:8080/models/my-org/my-model
+git push hub main
+```
+
+> **Note:** Git protocol support is experimental. The server generates minimal
+> pack files from stored revisions. For full content serving, use the REST API
+> or CLI workflow.
+
 ## Supported Endpoints
 
 | Endpoint | Method | Description |
@@ -66,6 +84,10 @@ export TRANSFORMERS_VERBOSITY=info
 | `/api/{type}/{ns}/{repo}/xet-read-token/{rev}` | GET | Xet read token exchange |
 | `/api/{type}/{ns}/{repo}/xet-write-token/{rev}` | GET | Xet write token exchange |
 | `/{type}/{ns}/{repo}/resolve/{rev}/{path}` | GET | Resolve and download a file |
+| `/{type}/{ns}/{repo}/info/refs` | GET | Git Smart HTTP refs discovery |
+| `/{type}/{ns}/{repo}/HEAD` | GET | Git HEAD reference |
+| `/{type}/{ns}/{repo}/git-upload-pack` | POST | Git clone/fetch (upload-pack) |
+| `/{type}/{ns}/{repo}/git-receive-pack` | POST | Git push (receive-pack) |
 | `/objects/batch` | POST | LFS batch request |
 | `/lfs/objects/{oid}` | PUT | Upload an LFS object |
 | `/lfs/objects/{oid}` | GET | Download an LFS object |
@@ -86,13 +108,10 @@ and TLS configuration as all other frontends.
 
 This is an initial implementation. Known limitations:
 
-- **In-memory state only** — repository and file metadata is not persisted to disk or a
-  database. A server restart loses all Hub API state.
-- **No authentication** — the Hub API currently accepts all requests anonymously. Token
-  exchange endpoints return placeholder tokens. Production use requires pairing with an
-  external reverse proxy or future auth integration.
-- **No Git protocol** — the Hub API provides REST endpoints only. Direct `git push` to
-  Hub-style repositories is not supported; use the CLI upload/download workflow.
+- **Git protocol (experimental)** — Git Smart HTTP endpoints are implemented for
+  clone/fetch (`git-upload-pack`) and push (`git-receive-pack`). The implementation
+  generates minimal pack files from stored revisions. Full object storage integration
+  (serving actual file content from CAS) is planned.
 - **No webhooks or callbacks** — repository event notifications are not implemented.
 - **Single-process only** — the in-memory stores are not shared across scaled API
   instances. The Hub frontend is intended for single-node deployments today.
