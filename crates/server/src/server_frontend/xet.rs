@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use shardline_index::{FileChunkRecord, parse_xet_hash_hex};
-use shardline_storage::ObjectKey;
+use shardline_storage::{ObjectKey, ObjectStore};
 
 use crate::{
     InvalidSerializedShardError, ServerError,

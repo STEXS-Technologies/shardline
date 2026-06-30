@@ -36,7 +36,7 @@ use shardline_server_core::{
     InvalidLifecycleMetadataError, ServerObjectStore, ServerObjectStoreError,
     server_frontend::ServerFrontend,
 };
-use shardline_storage::{LocalObjectStoreError, ObjectPrefixError, S3ObjectStoreError};
+use shardline_storage::{LocalObjectStoreError, ObjectPrefixError, ObjectStore, S3ObjectStoreError};
 use shardline_xet_adapter::XetAdapterError;
 use thiserror::Error;
 

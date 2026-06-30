@@ -8,6 +8,7 @@ use shardline_server_core::{
     chunk_object_key, content_hash, parse_stored_file_record_bytes, read_full_object,
     validate_content_hash, validate_identifier,
 };
+use shardline_storage::ObjectStore;
 use shardline_xet_adapter::{
     XorbVisitError, try_for_each_serialized_xorb_chunk, validate_serialized_xorb, xorb_object_key,
 };

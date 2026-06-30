@@ -37,7 +37,7 @@ use shardline_server_core::{
     InvalidSerializedShardError, OpsRecordKind, OpsRecordStore, ServerObjectStore,
     ServerObjectStoreError, ShardMetadataLimits, checked_increment, read_full_object,
 };
-use shardline_storage::ObjectKey;
+use shardline_storage::{ObjectKey, ObjectStore};
 use shardline_xet_adapter::{XetAdapterError, XorbParseError, retained_shard_chunk_hashes};
 use thiserror::Error;
 

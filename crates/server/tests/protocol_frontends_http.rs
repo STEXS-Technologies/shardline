@@ -28,7 +28,7 @@ use shardline_server::{
     oci_manifest_key, oci_manifest_media_type_key, serve_with_listener, shared_sha256_object_key,
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
-use shardline_storage::{ObjectBody, ObjectIntegrity};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use support::{bearer_token, wait_for_health};
 
 struct ProtocolFrontendRuntime {

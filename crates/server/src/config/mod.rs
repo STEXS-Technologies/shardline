@@ -32,6 +32,43 @@ use secrets::{
 #[cfg(test)]
 use secrets::{configure_provider_runtime_from_paths, read_secret_file_bytes};
 
+/// Authentication configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AuthConfig {
+    pub(crate) token_signing_key: Option<SecretBytes>,
+    pub(crate) auth_provider: AuthProviderKind,
+    pub(crate) auth_oidc_issuer: Option<String>,
+    pub(crate) auth_jwks_url: Option<String>,
+    pub(crate) auth_jwks_issuer: Option<String>,
+}
+
+/// OCI registry configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct OciConfig {
+    pub(crate) upload_session_ttl_seconds: NonZeroU64,
+    pub(crate) upload_max_active_sessions: NonZeroUsize,
+    pub(crate) registry_token_ttl_seconds: NonZeroU64,
+    pub(crate) registry_token_max_in_flight_requests: NonZeroUsize,
+}
+
+/// Reconstruction cache configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CacheConfig {
+    pub(crate) adapter: ReconstructionCacheAdapter,
+    pub(crate) ttl_seconds: NonZeroU64,
+    pub(crate) memory_max_entries: NonZeroUsize,
+    pub(crate) redis_url: Option<SecretString>,
+}
+
+/// Provider token issuance configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProviderConfig {
+    pub(crate) config_path: Option<PathBuf>,
+    pub(crate) api_key: Option<SecretBytes>,
+    pub(crate) token_issuer: Option<String>,
+    pub(crate) token_ttl_seconds: Option<NonZeroU64>,
+}
+
 /// Public server configuration.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -47,25 +84,12 @@ pub struct ServerConfig {
     chunk_size: NonZeroUsize,
     upload_max_in_flight_chunks: NonZeroUsize,
     transfer_max_in_flight_chunks: NonZeroUsize,
-    reconstruction_cache_adapter: ReconstructionCacheAdapter,
-    reconstruction_cache_ttl_seconds: NonZeroU64,
-    reconstruction_cache_memory_max_entries: NonZeroUsize,
-    oci_upload_session_ttl_seconds: NonZeroU64,
-    oci_upload_max_active_sessions: NonZeroUsize,
-    oci_registry_token_ttl_seconds: NonZeroU64,
-    oci_registry_token_max_in_flight_requests: NonZeroUsize,
-    reconstruction_cache_redis_url: Option<SecretString>,
     index_postgres_url: Option<SecretString>,
-    token_signing_key: Option<SecretBytes>,
-    auth_provider: AuthProviderKind,
-    auth_oidc_issuer: Option<String>,
-    auth_jwks_url: Option<String>,
-    auth_jwks_issuer: Option<String>,
     metrics_token: Option<SecretBytes>,
-    provider_config_path: Option<PathBuf>,
-    provider_api_key: Option<SecretBytes>,
-    provider_token_issuer: Option<String>,
-    provider_token_ttl_seconds: Option<NonZeroU64>,
+    auth: AuthConfig,
+    oci: OciConfig,
+    cache: CacheConfig,
+    provider: ProviderConfig,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -91,44 +115,25 @@ impl fmt::Debug for ServerConfig {
                 &self.transfer_max_in_flight_chunks,
             )
             .field(
-                "reconstruction_cache_adapter",
-                &self.reconstruction_cache_adapter,
-            )
-            .field(
-                "reconstruction_cache_ttl_seconds",
-                &self.reconstruction_cache_ttl_seconds,
-            )
-            .field(
-                "reconstruction_cache_memory_max_entries",
-                &self.reconstruction_cache_memory_max_entries,
-            )
-            .field(
-                "oci_upload_session_ttl_seconds",
-                &self.oci_upload_session_ttl_seconds,
-            )
-            .field(
-                "oci_upload_max_active_sessions",
-                &self.oci_upload_max_active_sessions,
-            )
-            .field(
-                "oci_registry_token_ttl_seconds",
-                &self.oci_registry_token_ttl_seconds,
-            )
-            .field(
-                "oci_registry_token_max_in_flight_requests",
-                &self.oci_registry_token_max_in_flight_requests,
-            )
-            .field(
-                "reconstruction_cache_redis_url",
-                &self
-                    .reconstruction_cache_redis_url
-                    .as_ref()
-                    .map(|_url| "***"),
-            )
-            .field(
                 "index_postgres_url",
                 &self.index_postgres_url.as_ref().map(|_url| "***"),
             )
+            .field(
+                "metrics_token",
+                &self.metrics_token.as_ref().map(|_token| "***"),
+            )
+            .field("auth", &self.auth)
+            .field("oci", &self.oci)
+            .field("cache", &self.cache)
+            .field("provider", &self.provider)
+            .finish()
+    }
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthConfig")
             .field(
                 "token_signing_key",
                 &self.token_signing_key.as_ref().map(|_key| "***"),
@@ -136,20 +141,61 @@ impl fmt::Debug for ServerConfig {
             .field("auth_provider", &self.auth_provider)
             .field("auth_oidc_issuer", &self.auth_oidc_issuer)
             .field("auth_jwks_url", &self.auth_jwks_url)
+            .field("auth_jwks_issuer", &self.auth_jwks_issuer)
+            .finish()
+    }
+}
+
+impl fmt::Debug for OciConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OciConfig")
             .field(
-                "metrics_token",
-                &self.metrics_token.as_ref().map(|_token| "***"),
+                "upload_session_ttl_seconds",
+                &self.upload_session_ttl_seconds,
             )
-            .field("provider_config_path", &self.provider_config_path)
             .field(
-                "provider_api_key",
-                &self.provider_api_key.as_ref().map(|_key| "***"),
+                "upload_max_active_sessions",
+                &self.upload_max_active_sessions,
             )
-            .field("provider_token_issuer", &self.provider_token_issuer)
             .field(
-                "provider_token_ttl_seconds",
-                &self.provider_token_ttl_seconds,
+                "registry_token_ttl_seconds",
+                &self.registry_token_ttl_seconds,
             )
+            .field(
+                "registry_token_max_in_flight_requests",
+                &self.registry_token_max_in_flight_requests,
+            )
+            .finish()
+    }
+}
+
+impl fmt::Debug for CacheConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CacheConfig")
+            .field("adapter", &self.adapter)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("memory_max_entries", &self.memory_max_entries)
+            .field(
+                "redis_url",
+                &self.redis_url.as_ref().map(|_url| "***"),
+            )
+            .finish()
+    }
+}
+
+impl fmt::Debug for ProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderConfig")
+            .field("config_path", &self.config_path)
+            .field(
+                "api_key",
+                &self.api_key.as_ref().map(|_key| "***"),
+            )
+            .field("token_issuer", &self.token_issuer)
+            .field("token_ttl_seconds", &self.token_ttl_seconds)
             .finish()
     }
 }
@@ -265,27 +311,34 @@ impl ServerConfig {
             chunk_size,
             upload_max_in_flight_chunks: default_upload_max_in_flight_chunks(),
             transfer_max_in_flight_chunks: default_transfer_max_in_flight_chunks(),
-            reconstruction_cache_adapter: ReconstructionCacheAdapter::Memory,
-            reconstruction_cache_ttl_seconds: DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
-            reconstruction_cache_memory_max_entries:
-                DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES,
-            oci_upload_session_ttl_seconds: DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
-            oci_upload_max_active_sessions: DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
-            oci_registry_token_ttl_seconds: DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
-            oci_registry_token_max_in_flight_requests:
-                DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
-            reconstruction_cache_redis_url: None,
             index_postgres_url: None,
-            token_signing_key: None,
-            auth_provider: AuthProviderKind::Local,
-            auth_oidc_issuer: None,
-            auth_jwks_url: None,
-            auth_jwks_issuer: None,
             metrics_token: None,
-            provider_config_path: None,
-            provider_api_key: None,
-            provider_token_issuer: None,
-            provider_token_ttl_seconds: None,
+            auth: AuthConfig {
+                token_signing_key: None,
+                auth_provider: AuthProviderKind::Local,
+                auth_oidc_issuer: None,
+                auth_jwks_url: None,
+                auth_jwks_issuer: None,
+            },
+            oci: OciConfig {
+                upload_session_ttl_seconds: DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
+                upload_max_active_sessions: DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
+                registry_token_ttl_seconds: DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS,
+                registry_token_max_in_flight_requests:
+                    DEFAULT_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS,
+            },
+            cache: CacheConfig {
+                adapter: ReconstructionCacheAdapter::Memory,
+                ttl_seconds: DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
+                memory_max_entries: DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES,
+                redis_url: None,
+            },
+            provider: ProviderConfig {
+                config_path: None,
+                api_key: None,
+                token_issuer: None,
+                token_ttl_seconds: None,
+            },
         }
     }
 
@@ -382,47 +435,48 @@ impl ServerConfig {
     /// Returns the selected reconstruction-cache adapter.
     #[must_use]
     pub(crate) const fn reconstruction_cache_adapter(&self) -> ReconstructionCacheAdapter {
-        self.reconstruction_cache_adapter
+        self.cache.adapter
     }
 
     /// Returns the reconstruction-cache entry TTL in seconds.
     #[must_use]
     pub(crate) const fn reconstruction_cache_ttl_seconds(&self) -> NonZeroU64 {
-        self.reconstruction_cache_ttl_seconds
+        self.cache.ttl_seconds
     }
 
     /// Returns the bounded in-memory reconstruction-cache capacity.
     #[must_use]
     pub(crate) const fn reconstruction_cache_memory_max_entries(&self) -> NonZeroUsize {
-        self.reconstruction_cache_memory_max_entries
+        self.cache.memory_max_entries
     }
 
     /// Returns the maximum idle lifetime for OCI upload sessions.
     #[must_use]
     pub(crate) const fn oci_upload_session_ttl_seconds(&self) -> NonZeroU64 {
-        self.oci_upload_session_ttl_seconds
+        self.oci.upload_session_ttl_seconds
     }
 
     /// Returns the maximum number of live OCI upload sessions allowed per server root.
     #[must_use]
     pub(crate) const fn oci_upload_max_active_sessions(&self) -> NonZeroUsize {
-        self.oci_upload_max_active_sessions
+        self.oci.upload_max_active_sessions
     }
 
     #[must_use]
     pub(crate) const fn oci_registry_token_ttl_seconds(&self) -> NonZeroU64 {
-        self.oci_registry_token_ttl_seconds
+        self.oci.registry_token_ttl_seconds
     }
 
     #[must_use]
     pub(crate) const fn oci_registry_token_max_in_flight_requests(&self) -> NonZeroUsize {
-        self.oci_registry_token_max_in_flight_requests
+        self.oci.registry_token_max_in_flight_requests
     }
 
     /// Returns the optional Redis URL for the reconstruction cache.
     #[must_use]
     pub(crate) fn reconstruction_cache_redis_url(&self) -> Option<&str> {
-        self.reconstruction_cache_redis_url
+        self.cache
+            .redis_url
             .as_ref()
             .map(SecretString::expose_secret)
     }
@@ -515,8 +569,8 @@ impl ServerConfig {
     /// Selects the disabled reconstruction-cache adapter.
     #[must_use]
     pub fn with_reconstruction_cache_disabled(mut self) -> Self {
-        self.reconstruction_cache_adapter = ReconstructionCacheAdapter::Disabled;
-        self.reconstruction_cache_redis_url = None;
+        self.cache.adapter = ReconstructionCacheAdapter::Disabled;
+        self.cache.redis_url = None;
         self
     }
 
@@ -527,10 +581,10 @@ impl ServerConfig {
         reconstruction_cache_ttl_seconds: NonZeroU64,
         reconstruction_cache_memory_max_entries: NonZeroUsize,
     ) -> Self {
-        self.reconstruction_cache_adapter = ReconstructionCacheAdapter::Memory;
-        self.reconstruction_cache_ttl_seconds = reconstruction_cache_ttl_seconds;
-        self.reconstruction_cache_memory_max_entries = reconstruction_cache_memory_max_entries;
-        self.reconstruction_cache_redis_url = None;
+        self.cache.adapter = ReconstructionCacheAdapter::Memory;
+        self.cache.ttl_seconds = reconstruction_cache_ttl_seconds;
+        self.cache.memory_max_entries = reconstruction_cache_memory_max_entries;
+        self.cache.redis_url = None;
         self
     }
 
@@ -540,7 +594,7 @@ impl ServerConfig {
         mut self,
         oci_upload_session_ttl_seconds: NonZeroU64,
     ) -> Self {
-        self.oci_upload_session_ttl_seconds = oci_upload_session_ttl_seconds;
+        self.oci.upload_session_ttl_seconds = oci_upload_session_ttl_seconds;
         self
     }
 
@@ -550,7 +604,7 @@ impl ServerConfig {
         mut self,
         oci_upload_max_active_sessions: NonZeroUsize,
     ) -> Self {
-        self.oci_upload_max_active_sessions = oci_upload_max_active_sessions;
+        self.oci.upload_max_active_sessions = oci_upload_max_active_sessions;
         self
     }
 
@@ -559,7 +613,7 @@ impl ServerConfig {
         mut self,
         oci_registry_token_ttl_seconds: NonZeroU64,
     ) -> Self {
-        self.oci_registry_token_ttl_seconds = oci_registry_token_ttl_seconds;
+        self.oci.registry_token_ttl_seconds = oci_registry_token_ttl_seconds;
         self
     }
 
@@ -568,7 +622,7 @@ impl ServerConfig {
         mut self,
         oci_registry_token_max_in_flight_requests: NonZeroUsize,
     ) -> Self {
-        self.oci_registry_token_max_in_flight_requests = oci_registry_token_max_in_flight_requests;
+        self.oci.registry_token_max_in_flight_requests = oci_registry_token_max_in_flight_requests;
         self
     }
 
@@ -587,9 +641,9 @@ impl ServerConfig {
             return Err(ServerConfigError::EmptyReconstructionCacheRedisUrl);
         }
 
-        self.reconstruction_cache_adapter = ReconstructionCacheAdapter::Redis;
-        self.reconstruction_cache_ttl_seconds = reconstruction_cache_ttl_seconds;
-        self.reconstruction_cache_redis_url =
+        self.cache.adapter = ReconstructionCacheAdapter::Redis;
+        self.cache.ttl_seconds = reconstruction_cache_ttl_seconds;
+        self.cache.redis_url =
             Some(SecretString::new(reconstruction_cache_redis_url));
         Ok(self)
     }
@@ -605,31 +659,32 @@ impl ServerConfig {
     /// Returns the configured auth provider kind.
     #[must_use]
     pub const fn auth_provider(&self) -> AuthProviderKind {
-        self.auth_provider
+        self.auth.auth_provider
     }
 
     /// Returns the optional OIDC issuer URL.
     #[must_use]
     pub fn auth_oidc_issuer(&self) -> Option<&str> {
-        self.auth_oidc_issuer.as_deref()
+        self.auth.auth_oidc_issuer.as_deref()
     }
 
     /// Returns the optional JWKS endpoint URL.
     #[must_use]
     pub fn auth_jwks_url(&self) -> Option<&str> {
-        self.auth_jwks_url.as_deref()
+        self.auth.auth_jwks_url.as_deref()
     }
 
     /// Returns the optional JWKS issuer for token validation.
     #[must_use]
     pub fn auth_jwks_issuer(&self) -> Option<&str> {
-        self.auth_jwks_issuer.as_deref()
+        self.auth.auth_jwks_issuer.as_deref()
     }
 
     /// Returns the optional token signing key.
     #[must_use]
     pub fn token_signing_key(&self) -> Option<&[u8]> {
-        self.token_signing_key
+        self.auth
+            .token_signing_key
             .as_ref()
             .map(SecretBytes::expose_secret)
     }
@@ -643,13 +698,14 @@ impl ServerConfig {
     /// Returns the optional provider configuration path.
     #[must_use]
     pub fn provider_config_path(&self) -> Option<&Path> {
-        self.provider_config_path.as_deref()
+        self.provider.config_path.as_deref()
     }
 
     /// Returns the optional provider bootstrap key.
     #[must_use]
     pub fn provider_api_key(&self) -> Option<&[u8]> {
-        self.provider_api_key
+        self.provider
+            .api_key
             .as_ref()
             .map(SecretBytes::expose_secret)
     }
@@ -657,13 +713,13 @@ impl ServerConfig {
     /// Returns the provider token issuer identity when provider issuance is enabled.
     #[must_use]
     pub fn provider_token_issuer(&self) -> Option<&str> {
-        self.provider_token_issuer.as_deref()
+        self.provider.token_issuer.as_deref()
     }
 
     /// Returns the provider token lifetime when provider issuance is enabled.
     #[must_use]
     pub const fn provider_token_ttl_seconds(&self) -> Option<NonZeroU64> {
-        self.provider_token_ttl_seconds
+        self.provider.token_ttl_seconds
     }
 
     /// Sets the PostgreSQL connection URL for the index store.
@@ -706,35 +762,35 @@ impl ServerConfig {
             },
         )?;
 
-        self.token_signing_key = Some(SecretBytes::new(token_signing_key));
+        self.auth.token_signing_key = Some(SecretBytes::new(token_signing_key));
         Ok(self)
     }
 
     /// Selects the authentication provider.
     #[must_use]
     pub const fn with_auth_provider(mut self, auth_provider: AuthProviderKind) -> Self {
-        self.auth_provider = auth_provider;
+        self.auth.auth_provider = auth_provider;
         self
     }
 
     /// Sets the OIDC issuer URL for the OIDC auth provider.
     #[must_use]
     pub fn with_auth_oidc_issuer(mut self, issuer: String) -> Self {
-        self.auth_oidc_issuer = Some(issuer);
+        self.auth.auth_oidc_issuer = Some(issuer);
         self
     }
 
     /// Sets the JWKS endpoint URL for the JWKS auth provider.
     #[must_use]
     pub fn with_auth_jwks_url(mut self, url: String) -> Self {
-        self.auth_jwks_url = Some(url);
+        self.auth.auth_jwks_url = Some(url);
         self
     }
 
     /// Sets the JWKS issuer for token validation.
     #[must_use]
     pub fn with_auth_jwks_issuer(mut self, issuer: String) -> Self {
-        self.auth_jwks_issuer = Some(issuer);
+        self.auth.auth_jwks_issuer = Some(issuer);
         self
     }
 
@@ -788,14 +844,14 @@ impl ServerConfig {
         if issuer_identity.trim().is_empty() {
             return Err(ServerConfigError::EmptyProviderTokenIssuer);
         }
-        if self.token_signing_key.is_none() {
+        if self.auth.token_signing_key.is_none() {
             return Err(ServerConfigError::ProviderTokensRequireSigningKey);
         }
 
-        self.provider_config_path = Some(provider_config_path);
-        self.provider_api_key = Some(SecretBytes::new(provider_api_key));
-        self.provider_token_issuer = Some(issuer_identity);
-        self.provider_token_ttl_seconds = Some(ttl_seconds);
+        self.provider.config_path = Some(provider_config_path);
+        self.provider.api_key = Some(SecretBytes::new(provider_api_key));
+        self.provider.token_issuer = Some(issuer_identity);
+        self.provider.token_ttl_seconds = Some(ttl_seconds);
         Ok(self)
     }
 
@@ -806,7 +862,7 @@ impl ServerConfig {
     /// Returns [`ServerConfigError::MissingTokenSigningKeyForServedRoutes`] when the
     /// selected role would expose authenticated CAS routes without a signing key.
     pub const fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
-        if self.token_signing_key.is_none()
+        if self.auth.token_signing_key.is_none()
             && (self.server_role.serves_api() || self.server_role.serves_transfer())
         {
             return Err(ServerConfigError::MissingTokenSigningKeyForServedRoutes);

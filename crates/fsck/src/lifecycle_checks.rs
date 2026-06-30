@@ -3,6 +3,7 @@ use std::{collections::HashSet, path::Path};
 use shardline_index::AsyncIndexStore;
 use shardline_protocol::RepositoryScope;
 use shardline_server_core::{ServerObjectStore, checked_increment, provider_directory};
+use shardline_storage::ObjectStore;
 
 use super::{
     FsckError, FsckIssueDetail, FsckIssueKind, FsckReachability, FsckReport,

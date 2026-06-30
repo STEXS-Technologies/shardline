@@ -1,6 +1,6 @@
 use axum::body::Bytes;
 use shardline_protocol::RepositoryScope;
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 
 use crate::{
     ServerError, ShardMetadataLimits,

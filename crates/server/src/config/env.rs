@@ -202,11 +202,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             reconstruction_cache_ttl_seconds,
             reconstruction_cache_memory_max_entries,
         );
-    config.reconstruction_cache_adapter = reconstruction_cache_adapter;
-    config.reconstruction_cache_redis_url = reconstruction_cache_redis_url.map(SecretString::new);
-    if config.reconstruction_cache_adapter == ReconstructionCacheAdapter::Redis
+    config.cache.adapter = reconstruction_cache_adapter;
+    config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
+    if config.cache.adapter == ReconstructionCacheAdapter::Redis
         && config
-            .reconstruction_cache_redis_url
+            .cache
+            .redis_url
             .as_ref()
             .map(SecretString::expose_secret)
             .is_none_or(|value| value.trim().is_empty())

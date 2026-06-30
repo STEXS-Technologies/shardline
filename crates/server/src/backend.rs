@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use shardline_protocol::{ByteRange, RepositoryScope, ShardlineHash};
 use shardline_storage::{
     BeginMultipartUploadResult, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey,
-    ObjectMetadata, ObjectPrefix, PutOutcome,
+    ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
 };
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 

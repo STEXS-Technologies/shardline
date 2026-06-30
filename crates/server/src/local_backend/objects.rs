@@ -1,6 +1,7 @@
 use shardline_protocol::ByteRange;
 use shardline_storage::{
-    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, PutOutcome,
+    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore,
+    PutOutcome,
 };
 
 use super::LocalBackend;
