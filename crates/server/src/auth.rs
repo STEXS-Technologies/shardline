@@ -132,10 +132,11 @@ pub(crate) fn authorize_static_bearer_token(
         .map_err(|_error| ServerError::InvalidAuthorizationHeader)?;
     let token = parse_bearer_token(header)?;
     let actual = token.as_bytes();
-    if actual.len() != expected_token.len() {
-        return Err(ServerError::InvalidAuthorizationHeader);
-    }
-    if expected_token.ct_eq(actual).into() {
+
+    use sha2::{Digest, Sha256};
+    let actual_hash = Sha256::digest(actual);
+    let expected_hash = Sha256::digest(expected_token);
+    if bool::from(actual_hash.ct_eq(&expected_hash)) {
         return Ok(());
     }
 

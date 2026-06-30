@@ -1,6 +1,6 @@
 use std::{
     str::FromStr,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -40,14 +40,14 @@ impl Clone for OidcProvider {
 }
 
 struct CachedJwks {
-    keys: Vec<Jwk>,
+    keys: Arc<Vec<Jwk>>,
     fetched_at: Instant,
 }
 
 impl Clone for CachedJwks {
     fn clone(&self) -> Self {
         Self {
-            keys: self.keys.clone(),
+            keys: Arc::clone(&self.keys),
             fetched_at: self.fetched_at,
         }
     }
@@ -137,17 +137,17 @@ impl OidcProvider {
             issuer: issuer.to_owned(),
             audience,
             cached_keys: Mutex::new(Some(CachedJwks {
-                keys: jwks.keys,
+                keys: Arc::new(jwks.keys),
                 fetched_at: Instant::now(),
             })),
         })
     }
 
-    fn get_cached_keys(&self) -> Option<Vec<Jwk>> {
+    fn get_cached_keys(&self) -> Option<Arc<Vec<Jwk>>> {
         let guard = self.cached_keys.lock().ok()?;
         let cached = guard.as_ref()?;
         if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
-            return Some(cached.keys.clone());
+            return Some(Arc::clone(&cached.keys));
         }
         None
     }
@@ -204,15 +204,28 @@ impl OidcProvider {
 
         let payload = token_data.claims;
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if let Some(iat) = payload.get("iat").and_then(|v| v.as_u64()) {
+            if iat > now {
+                return Err(AuthError::InvalidToken);
+            }
+        }
+
+        if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_u64()) {
+            if nbf > now {
+                return Err(AuthError::InvalidToken);
+            }
+        }
+
         let exp = payload
             .get("exp")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| AuthError::ProviderError("missing exp claim".to_owned()))?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         if exp < now {
             return Err(AuthError::ExpiredToken);
         }

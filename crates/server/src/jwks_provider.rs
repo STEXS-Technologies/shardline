@@ -1,6 +1,6 @@
 use std::{
     str::FromStr,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -41,14 +41,14 @@ impl Clone for JwksProvider {
 }
 
 struct CachedJwks {
-    keys: Vec<Jwk>,
+    keys: Arc<Vec<Jwk>>,
     fetched_at: Instant,
 }
 
 impl Clone for CachedJwks {
     fn clone(&self) -> Self {
         Self {
-            keys: self.keys.clone(),
+            keys: Arc::clone(&self.keys),
             fetched_at: self.fetched_at,
         }
     }
@@ -124,13 +124,13 @@ impl JwksProvider {
             jwks_url: jwks_url.to_owned(),
             issuer: issuer.to_owned(),
             cached_keys: Mutex::new(Some(CachedJwks {
-                keys: jwks.keys,
+                keys: Arc::new(jwks.keys),
                 fetched_at: Instant::now(),
             })),
         })
     }
 
-    fn get_or_refresh_keys(&self) -> Result<Vec<Jwk>, AuthError> {
+    fn get_or_refresh_keys(&self) -> Result<Arc<Vec<Jwk>>, AuthError> {
         {
             let guard = self
                 .cached_keys
@@ -138,7 +138,7 @@ impl JwksProvider {
                 .map_err(|e| AuthError::ProviderError(e.to_string()))?;
             if let Some(cached) = guard.as_ref() {
                 if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
-                    return Ok(cached.keys.clone());
+                    return Ok(Arc::clone(&cached.keys));
                 }
             }
         }
@@ -151,15 +151,16 @@ impl JwksProvider {
             .json()
             .map_err(|e| AuthError::ProviderError(format!("JWKS parse failed: {e}")))?;
 
+        let keys = Arc::new(jwks.keys);
         let mut guard = self
             .cached_keys
             .lock()
             .map_err(|e| AuthError::ProviderError(e.to_string()))?;
         *guard = Some(CachedJwks {
-            keys: jwks.keys.clone(),
+            keys: Arc::clone(&keys),
             fetched_at: Instant::now(),
         });
-        Ok(jwks.keys)
+        Ok(keys)
     }
 
     fn verify_jwt_claims(

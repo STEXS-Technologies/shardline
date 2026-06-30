@@ -29,9 +29,9 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[CRITICAL]** Missing `exp` defaults to never-expiring — exp required via `ok_or_else` at `oidc_provider.rs:210`, `jwks_provider.rs:215`
 - [x] **[HIGH]** Log injection — `sanitize_log_url` at `routes.rs:86-98`, used at `routes.rs:75`
 - [x] **[MEDIUM]** OIDC provider no `aud` claim check — `validation.set_audience` at `oidc_provider.rs:198`
-- [ ] **[MEDIUM]** OIDC provider no `iat`/`nbf` claim check — `oidc_provider.rs:143-211`
+- [x] **[MEDIUM]** OIDC provider no `iat`/`nbf` claim check — `oidc_provider.rs:143-211`
 - [ ] **[MEDIUM]** Secret file TOCTOU race — `server/src/config/secrets.rs:189-198`
-- [ ] **[MEDIUM]** Static bearer token length leaks via timing — `server/src/auth.rs:135-136`
+- [x] **[MEDIUM]** Static bearer token length leaks via timing — `server/src/auth.rs:135-136`
 - [x] **[MEDIUM]** No CORS on Hub API routes — CORS layer added to `hub_api/src/lib.rs`
 - [x] **[MEDIUM]** No security headers (CSP, X-Frame-Options, etc.) — Security headers middleware added to `hub_api/src/lib.rs`
 - [x] **[MEDIUM]** Unbounded webhook task spawning — `Semaphore::new(16)` at `routes.rs:31`, acquired at `routes.rs:69`
@@ -58,11 +58,11 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [ ] **[MEDIUM]** `HubStore` has 15 methods — split into `HubRepoStore`, `HubRevisionStore`, `HubLfsStore`, `HubWebhookStore`
 - [ ] **[HIGH]** `xet_adapter` depends on `server_core` (dependency inversion) — extract `ServerObjectStore` + related types into `shardline-storage-core`
 - [ ] **[MEDIUM]** `LocalBackend`/`PostgresBackend` share no common trait — define `trait MetadataBackend`
-- [ ] **[MEDIUM]** Duplicate `validate_content_hash` in 7 locations — consolidate into `protocol` or `server_core`
+- [x] **[MEDIUM]** Duplicate `validate_content_hash` in 7 locations — consolidate into `protocol` or `server_core`
 - [ ] **[MEDIUM]** Duplicate `checked_add`, `unix_now_seconds_checked` — consolidate
 - [ ] **[MEDIUM]** Duplicate `read_full_object` — `server_core` vs `server`
-- [ ] **[MEDIUM]** Duplicate `parse_stored_file_record_bytes` — `server_core` vs `server`
-- [ ] **[MEDIUM]** Duplicate `chunk_object_key` — across 3 crates
+- [x] **[MEDIUM]** Duplicate `parse_stored_file_record_bytes` — `server_core` vs `server`
+- [x] **[MEDIUM]** Duplicate `chunk_object_key` — across 3 crates
 - [x] **[MEDIUM]** `server/src/oci_adapter.rs` (916 lines) — god-module mixing SHA-256, upload sessions, S3 multipart, protocol keys
 - [x] **[HIGH]** `server/src/oci_adapter.rs` and `oci_adapter/src/lib.rs` near-complete copies (916 vs 1051 lines) — consolidate
 - [x] **[HIGH]** `server/src/provider_events/records.rs` full copy of `provider_events/src/records.rs`
@@ -70,7 +70,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [ ] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations — architectural tech debt
 - [ ] **[LOW]** `cli` depends on `server` (full dependency tree)
 - [ ] **[LOW]** `fsck`/`gc`/`rebuild`/`provider_events` identical dependency footprints
-- [ ] **[LOW]** Unnecessary re-export: `pub use serde::{Deserialize, Serialize}` in `server_core`
+- [x] **[LOW]** Unnecessary re-export: `pub use serde::{Deserialize, Serialize}` in `server_core`
 
 ---
 
@@ -109,8 +109,8 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[HIGH]** Zero `BufWriter`/`BufReader` usage — all local file I/O unbuffered — `BufReader` in `object_store.rs:201`, `BufWriter` in `oci_adapter/src/lib.rs:1004`; remaining file reads are small bounded metadata files in `local_sqlite/helpers.rs`
 - [ ] **[MEDIUM]** Memory cache O(n) eviction — `cache/src/memory.rs:112-119`
 - [ ] **[MEDIUM]** Memory cache thundering herd on expiry — `cache/src/memory.rs:44-68`
-- [ ] **[MEDIUM]** JWKS/OIDC keys cloned on every cache hit
-- [ ] **[MEDIUM]** `std::fs::create_dir_all` error silently discarded at startup — `server/src/app.rs:387`
+- [x] **[MEDIUM]** JWKS/OIDC keys cloned on every cache hit
+- [x] **[MEDIUM]** `std::fs::create_dir_all` error silently discarded at startup — `server/src/app.rs:387`
 - [ ] **[LOW]** `record_completed_chunks` sorts unconditionally on every `finish()`
 
 ---
@@ -131,9 +131,9 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 - [ ] **[MEDIUM]** 3 versions of `hashbrown` (0.14, 0.15, 0.17)
 - [ ] **[MEDIUM]** 2 versions of `hashlink`, `cfg-if`, `core-foundation`, `itertools`, `webpki-roots`, `whoami`, `rand`
-- [ ] **[MEDIUM]** `hub_api` bypasses workspace for 5 deps
+- [x] **[MEDIUM]** `hub_api` bypasses workspace for 5 deps
 - [ ] **[MEDIUM]** `reqwest` enables `blocking` feature (used only for JWKS/OIDC refresh)
-- [ ] **[LOW]** `fuzz` crate uses `edition = "2024"` directly instead of workspace
+- [x] **[LOW]** `fuzz` crate uses `edition = "2024"` directly instead of workspace
 
 ---
 
