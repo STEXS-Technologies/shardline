@@ -1178,12 +1178,8 @@ mod tests {
 
     #[test]
     fn local_index_store_satisfies_index_store_lifecycle_contract() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let store = LocalIndexStore::new(storage.path().to_path_buf());
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
         assert!(store.is_ok());
         let Ok(store) = store else {
             return;

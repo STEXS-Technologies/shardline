@@ -324,8 +324,14 @@ impl FileUploadIngestor {
             return Err(ServerError::Overflow);
         }
 
-        self.completed_chunks
-            .sort_unstable_by_key(|outcome| outcome.sequence);
+        let already_sorted = self
+            .completed_chunks
+            .windows(2)
+            .all(|w| w[0].sequence <= w[1].sequence);
+        if !already_sorted {
+            self.completed_chunks
+                .sort_unstable_by_key(|outcome| outcome.sequence);
+        }
         let mut expected_offset = 0_u64;
         let completed_chunks = std::mem::take(&mut self.completed_chunks);
         for outcome in completed_chunks {

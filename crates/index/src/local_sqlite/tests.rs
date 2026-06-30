@@ -146,8 +146,8 @@ async fn local_sqlite_matches_memory_adapters_across_state_machine_operations() 
 
 async fn exercise_local_record_store_commit_file_version_metadata_is_atomic()
 -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
-    let store = LocalRecordStore::new(storage.path().to_path_buf())?;
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalRecordStore::new(storage.path_buf())?;
     let record = sample_record(Some(sample_repository_scope()?));
     let connection = open_sqlite_connection(storage.path())?;
     connection.execute_batch(
@@ -184,9 +184,9 @@ async fn exercise_local_record_store_commit_file_version_metadata_is_atomic()
 
 async fn exercise_local_record_store_commit_native_shard_metadata_is_atomic()
 -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
-    let record_store = LocalRecordStore::new(storage.path().to_path_buf())?;
-    let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
+    let storage = shardline_test_support::TempStorage::new();
+    let record_store = LocalRecordStore::new(storage.path_buf())?;
+    let index_store = LocalIndexStore::new(storage.path_buf())?;
     let record = sample_record(None);
     let shard_object_key = ObjectKey::parse("shards/aa/native.shard")?;
     let mapping = DedupeShardMapping::new(ShardlineHash::from_bytes([7; 32]), shard_object_key);
@@ -233,7 +233,7 @@ async fn exercise_local_record_store_commit_native_shard_metadata_is_atomic()
 
 fn exercise_local_metadata_root_normalizes_gc_suffix_to_parent_database()
 -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
+    let storage = shardline_test_support::TempStorage::new();
 
     let _store = LocalIndexStore::new(storage.path().join("gc"))?;
 
@@ -263,8 +263,8 @@ fn exercise_local_metadata_root_normalizes_gc_suffix_to_parent_database()
 }
 
 fn exercise_local_sqlite_connection_enables_defensive_settings() -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
-    let store = LocalIndexStore::new(storage.path().to_path_buf())?;
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalIndexStore::new(storage.path_buf())?;
     let connection = store.open_connection()?;
 
     if !connection.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)? {
@@ -293,8 +293,8 @@ fn exercise_local_sqlite_connection_enables_defensive_settings() -> Result<(), B
 }
 
 fn exercise_local_sqlite_rejects_invalid_legacy_import_state() -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
-    let _store = LocalIndexStore::new(storage.path().to_path_buf())?;
+    let storage = shardline_test_support::TempStorage::new();
+    let _store = LocalIndexStore::new(storage.path_buf())?;
     let connection = open_sqlite_connection(storage.path())?;
     connection.execute(
         "UPDATE shardline_local_metadata_meta
@@ -318,8 +318,8 @@ fn exercise_local_sqlite_rejects_invalid_legacy_import_state() -> Result<(), Box
 
 async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
 -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
-    let store = LocalRecordStore::new(storage.path().to_path_buf())?;
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalRecordStore::new(storage.path_buf())?;
     let record = sample_record(Some(sample_repository_scope()?));
     RecordStore::write_version_record(&store, &record).await?;
     RecordStore::write_latest_record(&store, &record).await?;
@@ -352,9 +352,9 @@ async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
 
 async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_operations()
 -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
-    let local_index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
-    let local_record_store = LocalRecordStore::new(storage.path().to_path_buf())?;
+    let storage = shardline_test_support::TempStorage::new();
+    let local_index_store = LocalIndexStore::new(storage.path_buf())?;
+    let local_record_store = LocalRecordStore::new(storage.path_buf())?;
     let memory_index_store = MemoryIndexStore::new();
     let memory_record_store = MemoryRecordStore::new();
     let fixtures = StateMachineFixtures::load()?;
@@ -614,7 +614,7 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
 }
 
 async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<(), Box<dyn Error>> {
-    let storage = tempfile::tempdir()?;
+    let storage = shardline_test_support::TempStorage::new();
     let scope = sample_repository_scope()?;
     let record = sample_record(Some(scope.clone()));
     write_json(

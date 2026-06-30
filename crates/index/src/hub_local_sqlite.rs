@@ -470,11 +470,10 @@ use rusqlite::OptionalExtension;
 mod tests {
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType};
-    use tempfile::TempDir;
 
-    fn make_store() -> (TempDir, LocalIndexStore) {
-        let tmp = TempDir::new().expect("tempdir");
-        let root = tmp.path().to_path_buf();
+    fn make_store() -> (shardline_test_support::TempStorage, LocalIndexStore) {
+        let ts = shardline_test_support::TempStorage::new();
+        let root = ts.path();
 
         // Manually create database and apply hub migrations.
         // We cannot use LocalIndexStore::new() on macOS because it uses
@@ -532,13 +531,13 @@ mod tests {
         .expect("create hub tables");
         drop(conn);
 
-        let store = LocalIndexStore::open(root);
-        (tmp, store)
+        let store = LocalIndexStore::open(root.to_path_buf());
+        (ts, store)
     }
 
     #[test]
     fn create_and_get_repo() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
 
         let repo = store
             .create_repo(HubRepoType::Model, "org/model", false)
@@ -557,21 +556,21 @@ mod tests {
 
     #[test]
     fn get_repo_returns_none_for_missing() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let result = store.get_repo("nope/nope").expect("get_repo");
         assert!(result.is_none());
     }
 
     #[test]
     fn list_repos_is_empty_initially() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let repos = store.list_repos().expect("list_repos");
         assert!(repos.is_empty());
     }
 
     #[test]
     fn list_repos_returns_all_in_alphabetical_order() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Space, "z/space", false).unwrap();
         store.create_repo(HubRepoType::Model, "a/model", false).unwrap();
         store.create_repo(HubRepoType::Dataset, "m/dataset", false).unwrap();
@@ -585,7 +584,7 @@ mod tests {
 
     #[test]
     fn search_repos_by_name_prefix() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model-a", false).unwrap();
         store.create_repo(HubRepoType::Model, "org/model-b", false).unwrap();
         store.create_repo(HubRepoType::Dataset, "org/dataset", false).unwrap();
@@ -598,7 +597,7 @@ mod tests {
 
     #[test]
     fn search_repos_by_type_filter() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "a/model", false).unwrap();
         store.create_repo(HubRepoType::Dataset, "b/dataset", false).unwrap();
         store.create_repo(HubRepoType::Model, "c/model", false).unwrap();
@@ -610,7 +609,7 @@ mod tests {
 
     #[test]
     fn search_repos_respects_limit() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         for i in 0..10 {
             store.create_repo(HubRepoType::Model, &format!("repo-{i:02}"), false).unwrap();
         }
@@ -623,7 +622,7 @@ mod tests {
 
     #[test]
     fn create_repo_duplicate_fails() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
         let result = store.create_repo(HubRepoType::Dataset, "org/model", true);
         assert!(result.is_err());
@@ -631,7 +630,7 @@ mod tests {
 
     #[test]
     fn create_repo_stores_private_flag() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let repo = store
             .create_repo(HubRepoType::Dataset, "org/private", true)
             .unwrap();
@@ -643,7 +642,7 @@ mod tests {
 
     #[test]
     fn create_repo_all_repo_types() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
 
         let model = store.create_repo(HubRepoType::Model, "m1", false).unwrap();
         assert_eq!(model.repo_type, HubRepoType::Model);
@@ -657,7 +656,7 @@ mod tests {
 
     #[test]
     fn create_revision_initial_no_parent() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
 
         let rev = store
@@ -672,7 +671,7 @@ mod tests {
 
     #[test]
     fn create_revision_with_parent_succeeds() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
 
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
@@ -686,7 +685,7 @@ mod tests {
 
     #[test]
     fn create_revision_wrong_parent_fails() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
 
         let result = store.create_revision(
@@ -701,14 +700,14 @@ mod tests {
 
     #[test]
     fn create_revision_on_nonexistent_repo_fails() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let result = store.create_revision("nope", None, "abc", "main", "msg");
         assert!(result.is_err());
     }
 
     #[test]
     fn list_revisions_returns_all_revisions() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 
@@ -734,7 +733,7 @@ mod tests {
 
     #[test]
     fn resolve_revision_main_returns_default_branch() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
 
         let sha = store.resolve_revision("org/model", "main").expect("resolve main");
@@ -745,7 +744,7 @@ mod tests {
 
     #[test]
     fn resolve_revision_empty_string_returns_head() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
 
         let sha = store.resolve_revision("org/model", "").expect("resolve empty");
@@ -754,7 +753,7 @@ mod tests {
 
     #[test]
     fn resolve_revision_by_sha() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
         store
             .create_revision("org/model", None, "abc123", "main", "commit")
@@ -766,7 +765,7 @@ mod tests {
 
     #[test]
     fn resolve_revision_by_ref_name() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
         store
             .create_revision("org/model", None, "abc123", "feature", "commit")
@@ -778,7 +777,7 @@ mod tests {
 
     #[test]
     fn resolve_revision_nonexistent_returns_none() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/model", false).unwrap();
 
         let sha = store.resolve_revision("org/model", "nonexistent").expect("resolve");
@@ -787,7 +786,7 @@ mod tests {
 
     #[test]
     fn store_and_get_files() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
 
         let files = vec![
             HubFileEntry { path: "a.txt".into(), size: 100, sha: "sha_a".into(), is_lfs: false, inline_content: None },
@@ -810,7 +809,7 @@ mod tests {
 
     #[test]
     fn store_files_empty() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.store_files("empty_commit", &[]).expect("store_files empty");
         let files = store.get_files("empty_commit").expect("get_files");
         assert!(files.is_empty());
@@ -818,7 +817,7 @@ mod tests {
 
     #[test]
     fn store_files_overwrites_existing() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
 
         let v1 = vec![HubFileEntry {
             path: "f.txt".into(), size: 10, sha: "old".into(), is_lfs: false, inline_content: None,
@@ -839,7 +838,7 @@ mod tests {
 
     #[test]
     fn put_and_get_lfs_object() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
 
         let data = b"hello lfs content";
         store.put_lfs_object("oid_abc", data).expect("put_lfs_object");
@@ -850,27 +849,27 @@ mod tests {
 
     #[test]
     fn get_lfs_object_nonexistent_returns_none() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let result = store.get_lfs_object("nope").expect("get_lfs_object");
         assert!(result.is_none());
     }
 
     #[test]
     fn has_lfs_object_true() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.put_lfs_object("oid_1", b"data").unwrap();
         assert!(store.has_lfs_object("oid_1").expect("has_lfs_object"));
     }
 
     #[test]
     fn has_lfs_object_false() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         assert!(!store.has_lfs_object("nope").expect("has_lfs_object"));
     }
 
     #[test]
     fn put_lfs_object_overwrites() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.put_lfs_object("oid", b"old").unwrap();
         store.put_lfs_object("oid", b"new").unwrap();
 
@@ -880,7 +879,7 @@ mod tests {
 
     #[test]
     fn lfs_object_large_data() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let large = vec![0xABu8; 1024 * 1024]; // 1 MB
         store.put_lfs_object("large_oid", &large).unwrap();
 
@@ -893,7 +892,7 @@ mod tests {
 
     #[test]
     fn full_lifecycle_single_commit() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
 
         // Create repo
         let repo = store.create_repo(HubRepoType::Model, "org/llm", false).unwrap();
@@ -931,7 +930,7 @@ mod tests {
 
     #[test]
     fn full_lifecycle_multi_branch() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Dataset, "org/data", false).unwrap();
         let _initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 
@@ -962,7 +961,7 @@ mod tests {
 
     #[test]
     fn boxed_hub_store_create_and_get_repo() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let boxed = BoxedHubStore::from_store(store);
 
         let repo = boxed
@@ -978,7 +977,7 @@ mod tests {
 
     #[test]
     fn boxed_hub_store_revision_and_files() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let boxed = BoxedHubStore::from_store(store);
 
         boxed.create_repo(HubRepoType::Model, "org/m", false).unwrap();
@@ -1003,7 +1002,7 @@ mod tests {
 
     #[test]
     fn boxed_hub_store_lfs() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let boxed = BoxedHubStore::from_store(store);
 
         boxed.put_lfs_object("oid1", b"content").unwrap();
@@ -1016,7 +1015,7 @@ mod tests {
 
     #[test]
     fn boxed_hub_store_list_repos_and_revisions() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let boxed = BoxedHubStore::from_store(store);
 
         assert!(boxed.list_repos().unwrap().is_empty());
@@ -1033,7 +1032,7 @@ mod tests {
 
     #[test]
     fn boxed_hub_store_resolve_revision() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let boxed = BoxedHubStore::from_store(store);
 
         boxed.create_repo(HubRepoType::Model, "org/m", false).unwrap();
@@ -1046,14 +1045,14 @@ mod tests {
 
     #[test]
     fn empty_commit_sha_no_files() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         let files = store.get_files("nonexistent_sha").unwrap();
         assert!(files.is_empty());
     }
 
     #[test]
     fn sequential_commits_on_single_branch() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/m", false).unwrap();
 
         // create_repo inserts initial revision with SHA = empty tree
@@ -1082,7 +1081,7 @@ mod tests {
 
     #[test]
     fn optimistic_concurrency_rejects_stale_parent() {
-        let (_tmp, store) = make_store();
+        let (_ts, store) = make_store();
         store.create_repo(HubRepoType::Model, "org/m", false).unwrap();
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 

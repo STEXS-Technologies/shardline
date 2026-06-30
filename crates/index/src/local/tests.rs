@@ -19,8 +19,8 @@ use crate::{
 
 #[test]
 fn local_index_store_roundtrips_reconstruction_xorb_and_quarantine_state() {
-    let storage = tempfile::tempdir().unwrap();
-    let store = LocalIndexStore::new(storage.path().to_path_buf()).unwrap();
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalIndexStore::new(storage.path_buf()).unwrap();
 
     let hash = ShardlineHash::from_bytes([3; 32]);
     let file_id = FileId::new(hash);
@@ -113,16 +113,12 @@ fn local_index_store_roundtrips_reconstruction_xorb_and_quarantine_state() {
 
 #[test]
 fn local_index_store_rejects_invalid_stored_range() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
 
     let hash = ShardlineHash::from_bytes([4; 32]);
     let path = store
@@ -148,11 +144,7 @@ fn local_index_store_rejects_invalid_stored_range() {
 #[cfg(unix)]
 #[test]
 fn local_index_store_rejects_symlinked_reconstruction_metadata() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = shardline_test_support::TempStorage::new();
     let outside = tempfile::NamedTempFile::new();
     assert!(outside.is_ok());
     let Ok(outside) = outside else {
@@ -160,7 +152,7 @@ fn local_index_store_rejects_symlinked_reconstruction_metadata() {
     };
     let written = fs::write(outside.path(), r#"{"terms":[]}"#);
     assert!(written.is_ok());
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
+    let store = LocalIndexStore::new(storage.path());
     assert!(store.is_ok());
     let Ok(store) = store else {
         return;
@@ -187,17 +179,9 @@ fn local_index_store_rejects_symlinked_reconstruction_metadata() {
 #[cfg(unix)]
 #[test]
 fn local_index_store_rejects_symlinked_reconstruction_parent_directory() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let outside = tempfile::tempdir();
-    assert!(outside.is_ok());
-    let Ok(outside) = outside else {
-        return;
-    };
-    let store = LocalIndexStore::open(storage.path().to_path_buf());
+    let storage = shardline_test_support::TempStorage::new();
+    let outside = shardline_test_support::TempStorage::new();
+    let store = LocalIndexStore::open(storage.path());
     let link = storage.path().join("reconstructions");
     let linked = symlink(outside.path(), &link);
     assert!(linked.is_ok());
@@ -222,17 +206,9 @@ fn local_index_store_rejects_symlinked_reconstruction_parent_directory() {
 #[cfg(unix)]
 #[test]
 fn local_index_store_rejects_reconstruction_parent_swap_race() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let outside = tempfile::tempdir();
-    assert!(outside.is_ok());
-    let Ok(outside) = outside else {
-        return;
-    };
-    let store = LocalIndexStore::open(storage.path().to_path_buf());
+    let storage = shardline_test_support::TempStorage::new();
+    let outside = shardline_test_support::TempStorage::new();
+    let store = LocalIndexStore::open(storage.path());
     let hash = ShardlineHash::from_bytes([11; 32]);
     let file_id = FileId::new(hash);
     let path = store.reconstruction_path(&file_id);
@@ -277,11 +253,7 @@ fn local_index_store_rejects_reconstruction_parent_swap_race() {
 #[cfg(unix)]
 #[test]
 fn local_index_store_new_rejects_symlinked_root_ancestor() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = shardline_test_support::TempStorage::new();
     let target = storage.path().join("target");
     let created = fs::create_dir_all(&target);
     assert!(created.is_ok());
@@ -301,11 +273,7 @@ fn local_index_store_new_rejects_symlinked_root_ancestor() {
 #[cfg(unix)]
 #[test]
 fn local_index_store_list_reconstruction_file_ids_rejects_symlinked_root_ancestor() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = shardline_test_support::TempStorage::new();
     let target = storage.path().join("target");
     let directory = target.join("gc/reconstructions");
     let created = fs::create_dir_all(&directory);
@@ -330,11 +298,7 @@ fn local_index_store_list_reconstruction_file_ids_rejects_symlinked_root_ancesto
 
 #[test]
 fn local_index_store_open_is_non_mutating_until_write() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
+    let storage = shardline_test_support::TempStorage::new();
     let root = storage.path().join("index");
 
     let store = LocalIndexStore::open(root.clone());
@@ -350,16 +314,12 @@ fn local_index_store_open_is_non_mutating_until_write() {
 
 #[test]
 fn local_index_store_rejects_invalid_stored_dedupe_shard_object_key() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
 
     let hash = ShardlineHash::from_bytes([8; 32]);
     let hash_hex = xet_hash_hex_string(&hash);
@@ -385,16 +345,12 @@ fn local_index_store_rejects_invalid_stored_dedupe_shard_object_key() {
 
 #[test]
 fn local_index_store_reads_legacy_quarantine_record_shape() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
     let hash = "de".repeat(32);
     let path = storage
         .path()
@@ -440,16 +396,12 @@ fn local_index_store_reads_legacy_quarantine_record_shape() {
 
 #[test]
 fn local_index_store_rejects_inverted_quarantine_timeline() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
     let hash = "ab".repeat(32);
     let path = storage
         .path()
@@ -483,16 +435,12 @@ fn local_index_store_rejects_inverted_quarantine_timeline() {
 
 #[test]
 fn local_index_store_rejects_oversized_webhook_delivery_metadata_before_reading() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
     let delivery = WebhookDelivery::new(
         RepositoryProvider::GitHub,
         "team".to_owned(),
@@ -535,16 +483,12 @@ fn local_index_store_rejects_oversized_webhook_delivery_metadata_before_reading(
 
 #[test]
 fn local_index_store_rejects_oversized_reconstruction_metadata_before_reading() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
 
     let hash = ShardlineHash::from_bytes([9; 32]);
     let path = store
@@ -572,16 +516,12 @@ fn local_index_store_rejects_oversized_reconstruction_metadata_before_reading() 
 
 #[test]
 fn local_index_store_rejects_metadata_growth_after_length_validation() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalIndexStore::new(storage.path_buf());
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
 
     let hash = ShardlineHash::from_bytes([10; 32]);
     let path = store

@@ -35,7 +35,7 @@ use std::{
     fmt::Display,
     io::{Error as IoError, ErrorKind},
     num::NonZeroUsize,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use thiserror::Error;
@@ -92,7 +92,13 @@ impl TempStorage {
 
     /// Returns the temporary directory path.
     #[must_use]
-    pub fn path(&self) -> PathBuf {
+    pub fn path(&self) -> &Path {
+        self.temp.path()
+    }
+
+    /// Returns the temporary directory path as an owned `PathBuf`.
+    #[must_use]
+    pub fn path_buf(&self) -> PathBuf {
         self.temp.path().to_path_buf()
     }
 }
