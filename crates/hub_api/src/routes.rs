@@ -919,9 +919,11 @@ async fn lfs_download(
 
 /// Serves the HEAD reference for a repository.
 async fn git_head(
+    headers: axum::http::HeaderMap,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<String, HubApiError> {
     let state = crate::state::get();
+    authorize(state, &headers, TokenScope::Read)?;
     let repo_id = format!("{repo_type}/{ns}/{repo}");
     let revisions = state
         .store

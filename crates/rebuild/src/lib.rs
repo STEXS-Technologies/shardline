@@ -594,3 +594,156 @@ fn push_issue(
     });
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_report() -> IndexRebuildReport {
+        IndexRebuildReport {
+            scanned_version_records: 0,
+            scanned_retained_shards: 0,
+            rebuilt_latest_records: 0,
+            unchanged_latest_records: 0,
+            removed_stale_latest_records: 0,
+            scanned_reconstructions: 0,
+            unchanged_reconstructions: 0,
+            removed_stale_reconstructions: 0,
+            rebuilt_dedupe_shard_mappings: 0,
+            unchanged_dedupe_shard_mappings: 0,
+            removed_stale_dedupe_shard_mappings: 0,
+            issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn report_is_clean_when_no_issues() {
+        let report = empty_report();
+        assert!(report.is_clean());
+        assert_eq!(report.issue_count(), 0);
+    }
+
+    #[test]
+    fn report_is_not_clean_with_issues() {
+        let mut report = empty_report();
+        report.issues.push(IndexRebuildIssue {
+            kind: IndexRebuildIssueKind::InvalidVersionRecordJson,
+            location: "test/path".to_owned(),
+            detail: IndexRebuildIssueDetail::RecordJsonInvalid,
+        });
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+    }
+
+    #[test]
+    fn issue_count_matches_vec_len() {
+        let mut report = empty_report();
+        for i in 0..5 {
+            report.issues.push(IndexRebuildIssue {
+                kind: IndexRebuildIssueKind::InvalidVersionFileId,
+                location: format!("loc/{i}"),
+                detail: IndexRebuildIssueDetail::InvalidFileId {
+                    file_id: format!("fid-{i}"),
+                },
+            });
+        }
+        assert_eq!(report.issue_count(), 5);
+    }
+
+    #[test]
+    fn index_rebuild_report_equality() {
+        let a = empty_report();
+        let mut b = empty_report();
+        b.scanned_version_records = 42;
+        assert_ne!(a, b);
+
+        b.scanned_version_records = 0;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn issue_kind_as_str_returns_expected_labels() {
+        assert_eq!(
+            IndexRebuildIssueKind::OversizedVersionRecordMetadata.as_str(),
+            "oversized_version_record_metadata"
+        );
+        assert_eq!(
+            IndexRebuildIssueKind::InvalidVersionRecordJson.as_str(),
+            "invalid_version_record_json"
+        );
+        assert_eq!(
+            IndexRebuildIssueKind::InvalidVersionFileId.as_str(),
+            "invalid_version_file_id"
+        );
+        assert_eq!(
+            IndexRebuildIssueKind::InvalidVersionContentHash.as_str(),
+            "invalid_version_content_hash"
+        );
+        assert_eq!(
+            IndexRebuildIssueKind::InvalidVersionRepositoryScope.as_str(),
+            "invalid_version_repository_scope"
+        );
+        assert_eq!(
+            IndexRebuildIssueKind::VersionPathMismatch.as_str(),
+            "version_path_mismatch"
+        );
+        assert_eq!(
+            IndexRebuildIssueKind::InvalidVersionReconstructionPlan.as_str(),
+            "invalid_version_reconstruction_plan"
+        );
+        assert_eq!(
+            IndexRebuildIssueKind::InvalidRetainedShard.as_str(),
+            "invalid_retained_shard"
+        );
+    }
+
+    #[test]
+    fn issue_detail_display_messages() {
+        let detail = IndexRebuildIssueDetail::OversizedVersionRecordMetadata;
+        assert!(!detail.to_string().is_empty());
+
+        let detail = IndexRebuildIssueDetail::RecordJsonInvalid;
+        assert!(!detail.to_string().is_empty());
+
+        let detail = IndexRebuildIssueDetail::InvalidFileId {
+            file_id: "bad-id".to_owned(),
+        };
+        assert!(detail.to_string().contains("bad-id"));
+
+        let detail = IndexRebuildIssueDetail::InvalidContentHash {
+            content_hash: "abc123".to_owned(),
+        };
+        assert!(detail.to_string().contains("abc123"));
+
+        let detail = IndexRebuildIssueDetail::InvalidRepositoryScope;
+        assert!(!detail.to_string().is_empty());
+
+        let detail = IndexRebuildIssueDetail::VersionPathMismatch {
+            expected_locator: "/expected/path".to_owned(),
+        };
+        assert!(detail.to_string().contains("/expected/path"));
+
+        let detail =
+            IndexRebuildIssueDetail::InvalidReconstructionPlan(IndexRebuildReconstructionPlanDetail::ChunkHashInvalid);
+        assert!(!detail.to_string().is_empty());
+
+        let detail =
+            IndexRebuildIssueDetail::InvalidRetainedShard(shardline_server_core::InvalidSerializedShardError::ParserRejectedMetadata);
+        assert!(!detail.to_string().is_empty());
+    }
+
+    #[test]
+    fn push_issue_increments_count() {
+        let mut report = empty_report();
+        push_issue(
+            &mut report,
+            IndexRebuildIssueKind::InvalidVersionFileId,
+            "loc".to_owned(),
+            IndexRebuildIssueDetail::InvalidFileId {
+                file_id: "x".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.issue_count(), 1);
+    }
+}
