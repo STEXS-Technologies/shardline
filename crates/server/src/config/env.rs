@@ -29,6 +29,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     };
     let public_base_url = var("SHARDLINE_PUBLIC_BASE_URL")
         .unwrap_or_else(|_error| "http://127.0.0.1:8080".to_owned());
+    // Validate public_base_url is a valid URL before consuming it.
+    if url::Url::parse(&public_base_url).is_err() {
+        return Err(ServerConfigError::InvalidPublicBaseUrl(public_base_url));
+    }
     let server_role =
         ServerRole::parse(&var("SHARDLINE_SERVER_ROLE").unwrap_or_else(|_error| "all".to_owned()))
             .map_err(|_error| ServerConfigError::InvalidServerRole)?;
@@ -215,11 +219,33 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     if let Some(signing_key) = token_signing_key {
         config = config.with_token_signing_key(signing_key)?;
     }
+
+    // Validate chunk size upper bound (1 GB).
+    const MAX_CHUNK_SIZE: usize = 1_073_741_824;
+    if chunk_size.get() > MAX_CHUNK_SIZE {
+        return Err(ServerConfigError::ChunkSizeTooLarge);
+    }
+
+    // Validate auth provider configuration.
     let auth_provider = AuthProviderKind::parse(
         &var("SHARDLINE_AUTH_PROVIDER").unwrap_or_else(|_error| "local".to_owned()),
     )?;
     let auth_oidc_issuer = var("SHARDLINE_AUTH_OIDC_ISSUER").ok();
     let auth_jwks_url = var("SHARDLINE_AUTH_JWKS_URL").ok();
+    let auth_jwks_issuer = var("SHARDLINE_AUTH_JWKS_ISSUER").ok();
+    match auth_provider {
+        AuthProviderKind::Oidc => {
+            if auth_oidc_issuer.is_none() {
+                return Err(ServerConfigError::MissingOidcIssuer);
+            }
+        }
+        AuthProviderKind::Jwks => {
+            if auth_jwks_url.is_none() {
+                return Err(ServerConfigError::MissingJwksUrl);
+            }
+        }
+        AuthProviderKind::Local | AuthProviderKind::Passthrough => {}
+    }
     config = config.with_auth_provider(auth_provider);
     if let Some(issuer) = auth_oidc_issuer {
         config = config.with_auth_oidc_issuer(issuer);
@@ -227,9 +253,21 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     if let Some(url) = auth_jwks_url {
         config = config.with_auth_jwks_url(url);
     }
+    if let Some(issuer) = auth_jwks_issuer {
+        config = config.with_auth_jwks_issuer(issuer);
+    }
     if let Some(metrics_token) = metrics_token {
         config = config.with_metrics_token(metrics_token)?;
     }
+
+    // Validate Hub frontend requires auth configuration.
+    if config.server_frontends().contains(&crate::server_frontend::ServerFrontend::Hub)
+        && config.token_signing_key().is_none()
+        && auth_provider == AuthProviderKind::Local
+    {
+        return Err(ServerConfigError::HubRequiresAuth);
+    }
+
     let issuer_identity = var("SHARDLINE_PROVIDER_TOKEN_ISSUER")
         .unwrap_or_else(|_error| "shardline-provider".to_owned());
     let provider_ttl_seconds = var("SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS")

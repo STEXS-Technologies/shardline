@@ -31,6 +31,7 @@ pub(super) struct XetTokenQuery {
     subject: Option<String>,
 }
 
+#[tracing::instrument(skip(state, headers, body), fields(provider))]
 pub(super) async fn issue_provider_token(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -44,6 +45,7 @@ pub(super) async fn issue_provider_token(
     ))
 }
 
+#[tracing::instrument(skip(state, headers, body), fields(provider))]
 pub(super) async fn git_lfs_authenticate(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,

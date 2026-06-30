@@ -30,8 +30,7 @@ use std::{
 
 use shardline_index::{
     AsyncIndexStore, FileRecord, FileRecordInvariantError, LocalIndexStoreError,
-    MemoryIndexStoreError, MemoryRecordStoreError, PostgresMetadataStoreError, RecordStore,
-    xet_hash_hex_string,
+    MemoryIndexStoreError, MemoryRecordStoreError, PostgresMetadataStoreError, xet_hash_hex_string,
 };
 use shardline_protocol::HashParseError;
 use shardline_server_core::{
@@ -775,10 +774,7 @@ pub(crate) fn object_location_display(
 }
 
 pub(crate) fn unix_now_seconds_checked() -> Result<u64, FsckError> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_error| FsckError::Overflow)
+    shardline_server_core::unix_now_seconds_checked().map_err(|_e| FsckError::Overflow)
 }
 
 async fn inspect_dedupe_shard_mappings<IndexAdapter>(

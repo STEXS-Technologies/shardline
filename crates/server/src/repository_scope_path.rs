@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use shardline_index::RepositoryRecordScope;
 #[cfg(test)]
 use shardline_protocol::RepositoryScope;
-
-pub(crate) use shardline_server_core::provider_directory;
+#[cfg(test)]
+use shardline_server_core::provider_directory;
 
 #[cfg(test)]
 pub(crate) fn scoped_root(base: &Path, repository_scope: &RepositoryScope) -> PathBuf {

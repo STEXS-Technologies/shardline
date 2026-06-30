@@ -284,3 +284,41 @@ pub(super) async fn metrics(
         body,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_output_is_valid_prometheus_text_format() {
+        let body = format!(
+            concat!(
+                "# HELP shardline_up Whether the Shardline process is serving requests.\n",
+                "# TYPE shardline_up gauge\n",
+                "shardline_up 1\n",
+                "# HELP shardline_server_info Static Shardline runtime information.\n",
+                "# TYPE shardline_server_info gauge\n",
+                "shardline_server_info{{role=\"all\",frontends=\"xet\",metadata_backend=\"local\",object_backend=\"local\",cache_backend=\"memory\"}} 1\n",
+            ),
+        );
+        assert!(body.starts_with("# HELP"));
+        assert!(body.contains("# TYPE"));
+        assert!(body.contains("shardline_up 1"));
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            assert!(
+                parts.len() == 2,
+                "each metric line must have a name and value: {trimmed}"
+            );
+            let value = parts[1];
+            assert!(
+                value.parse::<f64>().is_ok(),
+                "metric value must be a number: {trimmed}"
+            );
+        }
+    }
+}

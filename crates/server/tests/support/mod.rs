@@ -33,7 +33,7 @@ pub(crate) fn bearer_token(
     repo: &str,
     revision: Option<&str>,
 ) -> Result<String, Box<dyn StdError>> {
-    let signer = TokenSigner::new(b"signing-key")?;
+    let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!")?;
     let repository = RepositoryScope::new(provider, owner, repo, revision)?;
     let claims = TokenClaims::new("local", subject, scope, repository, u64::MAX)?;
     Ok(signer.sign(&claims)?)

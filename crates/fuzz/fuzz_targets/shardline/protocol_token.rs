@@ -110,7 +110,7 @@ fuzz_target!(|data: ProtocolTokenInput| {
         assert!(matches!(expired, Err(TokenCodecError::Expired)));
     }
 
-    let wrong_signer = TokenSigner::new(b"wrong-signing-key");
+    let wrong_signer = TokenSigner::new(b"wrong-signing-key-32-bytes!!!");
     assert!(wrong_signer.is_ok());
     let Ok(wrong_signer) = wrong_signer else {
         return;

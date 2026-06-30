@@ -60,6 +60,7 @@ pub struct ServerConfig {
     auth_provider: AuthProviderKind,
     auth_oidc_issuer: Option<String>,
     auth_jwks_url: Option<String>,
+    auth_jwks_issuer: Option<String>,
     metrics_token: Option<SecretBytes>,
     provider_config_path: Option<PathBuf>,
     provider_api_key: Option<SecretBytes>,
@@ -279,6 +280,7 @@ impl ServerConfig {
             auth_provider: AuthProviderKind::Local,
             auth_oidc_issuer: None,
             auth_jwks_url: None,
+            auth_jwks_issuer: None,
             metrics_token: None,
             provider_config_path: None,
             provider_api_key: None,
@@ -618,6 +620,12 @@ impl ServerConfig {
         self.auth_jwks_url.as_deref()
     }
 
+    /// Returns the optional JWKS issuer for token validation.
+    #[must_use]
+    pub fn auth_jwks_issuer(&self) -> Option<&str> {
+        self.auth_jwks_issuer.as_deref()
+    }
+
     /// Returns the optional token signing key.
     #[must_use]
     pub fn token_signing_key(&self) -> Option<&[u8]> {
@@ -658,11 +666,11 @@ impl ServerConfig {
         self.provider_token_ttl_seconds
     }
 
-    /// Enables local bearer-token verification with the supplied signing key.
+    /// Sets the PostgreSQL connection URL for the index store.
     ///
     /// # Errors
     ///
-    /// Returns [`ServerConfigError::EmptyTokenSigningKey`] when the signing key is
+    /// Returns [`ServerConfigError::EmptyIndexPostgresUrl`] when the URL is
     /// empty.
     pub fn with_index_postgres_url(
         mut self,
@@ -720,6 +728,13 @@ impl ServerConfig {
     #[must_use]
     pub fn with_auth_jwks_url(mut self, url: String) -> Self {
         self.auth_jwks_url = Some(url);
+        self
+    }
+
+    /// Sets the JWKS issuer for token validation.
+    #[must_use]
+    pub fn with_auth_jwks_issuer(mut self, issuer: String) -> Self {
+        self.auth_jwks_issuer = Some(issuer);
         self
     }
 
@@ -1169,6 +1184,21 @@ pub enum ServerConfigError {
     /// Provider token issuance needs the CAS signing key.
     #[error("provider token issuance requires shardline token signing key configuration")]
     ProviderTokensRequireSigningKey,
+    /// The chunk size exceeds the maximum allowed value.
+    #[error("chunk size must not exceed 1 GB")]
+    ChunkSizeTooLarge,
+    /// The public base URL is not a valid URL.
+    #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
+    InvalidPublicBaseUrl(String),
+    /// OIDC auth provider requires an issuer URL.
+    #[error("oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER")]
+    MissingOidcIssuer,
+    /// JWKS auth provider requires a JWKS URL.
+    #[error("jwks auth provider requires SHARDLINE_AUTH_JWKS_URL")]
+    MissingJwksUrl,
+    /// Hub frontend requires an auth provider to be configured.
+    #[error("hub frontend requires auth configuration (SHARDLINE_AUTH_PROVIDER with token signing key or oidc/jwks)")]
+    HubRequiresAuth,
 }
 
 #[cfg(test)]

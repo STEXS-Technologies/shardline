@@ -26,15 +26,7 @@ pub(crate) fn validate_identifier(value: &str) -> Result<(), ServerError> {
 }
 
 pub(crate) fn validate_content_hash(value: &str) -> Result<(), ServerError> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(ServerError::InvalidContentHash);
-    }
-
-    Ok(())
+    shardline_server_core::validate_content_hash_with(value, || ServerError::InvalidContentHash)
 }
 
 pub(crate) async fn ensure_directory(path: &Path) -> Result<(), ServerError> {

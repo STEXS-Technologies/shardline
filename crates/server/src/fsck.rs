@@ -10,7 +10,7 @@ use crate::{
 pub use shardline_fsck::{
     FsckError, FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,
     LocalFsckIssueKind, LocalFsckReport, ProviderRepositoryStateTimestampField,
-    WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS, run_local_fsck,
+    run_local_fsck,
 };
 
 /// Runs integrity checks against the configured metadata backend and local chunk storage.

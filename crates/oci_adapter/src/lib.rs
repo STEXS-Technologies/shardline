@@ -115,7 +115,9 @@ impl Default for SerializableSha256State {
 
 impl SerializableSha256State {
     fn update(&mut self, bytes: &[u8]) -> Result<(), OciAdapterError> {
-        self.total_length = checked_add(self.total_length, u64::try_from(bytes.len())?)?;
+        self.total_length =
+            shardline_server_core::checked_add(self.total_length, u64::try_from(bytes.len())?)
+                .map_err(|_e| OciAdapterError::Overflow)?;
         let mut remaining = bytes;
         if !self.buffer.is_empty() {
             let needed = 64_usize.saturating_sub(self.buffer.len());
@@ -661,7 +663,8 @@ pub async fn append_s3_multipart_upload_bytes<B: OciBackend>(
             .ok_or(OciAdapterError::NotFound)?;
         multipart.sha256_state.update(bytes)?;
         multipart.total_length =
-            checked_add(multipart.total_length, u64::try_from(bytes.len())?)?;
+            shardline_server_core::checked_add(multipart.total_length, u64::try_from(bytes.len())?)
+                .map_err(|_e| OciAdapterError::Overflow)?;
 
         let temporary_object_key = ObjectKey::parse(&multipart.temporary_object_key)
             .map_err(|_error| OciAdapterError::InvalidContentHash)?;
@@ -984,18 +987,9 @@ async fn write_upload_tail(
 }
 
 fn unix_now_seconds_checked() -> Result<u64, OciAdapterError> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_error| OciAdapterError::Overflow)
+    shardline_server_core::unix_now_seconds_checked().map_err(|_e| OciAdapterError::Overflow)
 }
 
-const fn checked_add(left: u64, right: u64) -> Result<u64, OciAdapterError> {
-    match left.checked_add(right) {
-        Some(value) => Ok(value),
-        None => Err(OciAdapterError::Overflow),
-    }
-}
 
 fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
@@ -1006,7 +1000,10 @@ fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Res
     })?;
     std::fs::create_dir_all(parent)?;
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, bytes)?;
+    let file = File::create(&temporary)?;
+    let mut writer = std::io::BufWriter::new(file);
+    std::io::Write::write_all(&mut writer, bytes)?;
+    drop(writer);
     std::fs::rename(&temporary, path)?;
     let _ignored = root;
     Ok(())

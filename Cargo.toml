@@ -22,6 +22,7 @@ criterion = { version = "0.5.1", default-features = false }
 futures-util = "0.3"
 getrandom = "0.3"
 hex = "0.4"
+jsonwebtoken = "9"
 hmac = "0.12"
 libc = "0.2.177"
 libfuzzer-sys = "0.4"

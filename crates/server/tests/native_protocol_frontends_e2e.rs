@@ -1647,7 +1647,7 @@ async fn start_runtime_with_s3(
 }
 
 fn scoped_token(scope: TokenScope, owner: &str, repo: &str) -> Result<String, TestError> {
-    let signer = TokenSigner::new(b"signing-key")?;
+    let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!")?;
     let repository = RepositoryScope::new(RepositoryProvider::GitHub, owner, repo, Some("main"))?;
     let claims = TokenClaims::new("local", "native-client", scope, repository, u64::MAX)?;
     Ok(signer.sign(&claims)?)

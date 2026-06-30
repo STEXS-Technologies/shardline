@@ -28,8 +28,8 @@ shardline-protocol.workspace = true
 shardline-server-core.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
-tower = "0.5"
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+url.workspace = true
 
 [dev-dependencies]
 flate2 = "1"

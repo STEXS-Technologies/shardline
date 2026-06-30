@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use shardline_protocol::RepositoryScope;
+use shardline_server_core::validate_content_hash_with;
 use shardline_storage::ObjectKey;
 
 use crate::OciAdapterError;
@@ -10,8 +11,7 @@ pub(crate) fn parse_sha256_digest(value: &str) -> Result<String, OciAdapterError
     let Some(hash_hex) = value.strip_prefix("sha256:") else {
         return Err(OciAdapterError::InvalidDigest);
     };
-    validate_content_hash(hash_hex)
-        .map_err(|_error| OciAdapterError::InvalidDigest)?;
+    validate_content_hash_with(hash_hex, || OciAdapterError::InvalidDigest)?;
     Ok(hash_hex.to_owned())
 }
 
@@ -43,7 +43,7 @@ pub(crate) fn object_key(value: &str) -> Result<ObjectKey, OciAdapterError> {
 }
 
 pub(crate) fn shared_sha256_object_key(digest_hex: &str) -> Result<ObjectKey, OciAdapterError> {
-    validate_content_hash(digest_hex)?;
+    validate_content_hash_with(digest_hex, || OciAdapterError::InvalidContentHash)?;
     object_key(&format!("protocols/shared/sha256/{digest_hex}"))
 }
 
@@ -124,17 +124,6 @@ pub(crate) fn validate_upload_session_id(value: &str) -> Result<(), OciAdapterEr
     Ok(())
 }
 
-pub(crate) fn validate_content_hash(value: &str) -> Result<(), OciAdapterError> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(OciAdapterError::InvalidContentHash);
-    }
-
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

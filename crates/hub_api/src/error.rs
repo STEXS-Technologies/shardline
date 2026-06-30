@@ -64,19 +64,18 @@ pub enum HubApiError {
 
 impl IntoResponse for HubApiError {
     fn into_response(self) -> Response {
-        let status = match &self {
-            Self::Io(_) | Self::Json(_) | Self::CasError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::NotFound | Self::RepoNotFound | Self::RevisionNotFound => {
-                StatusCode::NOT_FOUND
+        let (status, message) = match &self {
+            Self::Io(_) | Self::Json(_) | Self::CasError(_) | Self::PktLine(_) | Self::Pack(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
             }
-            Self::Unauthorized | Self::InvalidToken => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::PathValidation(_) => StatusCode::BAD_REQUEST,
-            Self::PktLine(_) | Self::Pack(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotFound | Self::RepoNotFound | Self::RevisionNotFound => {
+                (StatusCode::NOT_FOUND, self.to_string())
+            }
+            Self::Unauthorized | Self::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
+            Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::PathValidation(_) => (StatusCode::BAD_REQUEST, self.to_string()),
         };
-        let body = ErrorBody {
-            error: self.to_string(),
-        };
+        let body = ErrorBody { error: message };
         (status, Json(body)).into_response()
     }
 }

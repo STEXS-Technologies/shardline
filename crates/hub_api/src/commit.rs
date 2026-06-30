@@ -5,6 +5,57 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::error::HubApiError;
 
+/// Maximum allowed commit file path length.
+const MAX_COMMIT_PATH_LEN: usize = 1024;
+
+/// Maximum number of instructions allowed in a single NDJSON commit.
+const MAX_COMMIT_INSTRUCTIONS: usize = 100_000;
+
+/// Validates a commit file path to prevent path traversal and injection.
+///
+/// Rejects paths that:
+/// - Contain `..` components
+/// - Start with `/` (absolute paths)
+/// - Contain null bytes
+/// - Contain control characters (ASCII 0x00–0x1F, 0x7F)
+/// - Exceed the maximum allowed length
+fn validate_commit_path(path: &str) -> Result<(), HubApiError> {
+    if path.len() > MAX_COMMIT_PATH_LEN {
+        return Err(HubApiError::PathValidation(format!(
+            "commit path exceeds maximum length of {MAX_COMMIT_PATH_LEN}"
+        )));
+    }
+
+    if path.starts_with('/') {
+        return Err(HubApiError::PathValidation(
+            "commit path must not be absolute".to_owned(),
+        ));
+    }
+
+    if path.contains('\0') {
+        return Err(HubApiError::PathValidation(
+            "commit path contains null byte".to_owned(),
+        ));
+    }
+
+    if path.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(HubApiError::PathValidation(
+            "commit path contains control characters".to_owned(),
+        ));
+    }
+
+    // Check for path traversal via `..` components.
+    for component in path.split('/') {
+        if component == ".." {
+            return Err(HubApiError::PathValidation(
+                "commit path must not contain '..' components".to_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// A parsed commit instruction.
 #[derive(Debug, Clone)]
 pub enum CommitInstruction {
@@ -79,6 +130,12 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
             continue;
         }
 
+        if instructions.len() >= MAX_COMMIT_INSTRUCTIONS {
+            return Err(HubApiError::PathValidation(format!(
+                "commit contains too many instructions (max {MAX_COMMIT_INSTRUCTIONS})"
+            )));
+        }
+
         if let Some(file) = parsed.get("file") {
             let path = file
                 .get("path")
@@ -86,6 +143,7 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                 .ok_or_else(|| {
                     HubApiError::PathValidation(format!("line {line_idx}: missing file path"))
                 })?;
+            validate_commit_path(path)?;
             let content_b64 = file
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -109,6 +167,7 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                 .ok_or_else(|| {
                     HubApiError::PathValidation(format!("line {line_idx}: missing lfsFile path"))
                 })?;
+            validate_commit_path(path)?;
             let oid = lfs_file
                 .get("oid")
                 .and_then(|v| v.as_str())
@@ -138,6 +197,7 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
                         "line {line_idx}: missing deletedEntry path"
                     ))
                 })?;
+            validate_commit_path(path)?;
             instructions.push(CommitInstruction::Delete {
                 path: path.to_owned(),
             });

@@ -28,7 +28,7 @@ use crate::model::ProviderTokenIssueRequest;
 
 #[test]
 fn provider_service_rejects_missing_bootstrap_key() {
-    let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+    let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
     assert!(issuer.is_ok());
     let Ok(issuer) = issuer else {
         return;
@@ -102,7 +102,7 @@ fn provider_service_rejects_oversized_bootstrap_key_header() {
         return;
     };
     headers.insert("x-shardline-provider-key", header);
-    let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+    let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
     assert!(issuer.is_ok());
     let Ok(issuer) = issuer else {
         return;
@@ -137,7 +137,7 @@ fn provider_service_rejects_mismatched_bootstrap_key_length_before_lookup() {
         "x-shardline-provider-key",
         HeaderValue::from_static("short"),
     );
-    let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+    let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
     assert!(issuer.is_ok());
     let Ok(issuer) = issuer else {
         return;
@@ -167,7 +167,7 @@ fn provider_service_rejects_mismatched_bootstrap_key_length_before_lookup() {
 
 #[test]
 fn provider_token_service_debug_redacts_secret_material() {
-    let issuer = ProviderTokenIssuer::new("issuer", &[5, 6, 7, 8], NonZeroU64::MIN);
+    let issuer = ProviderTokenIssuer::new("issuer", &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36], NonZeroU64::MIN);
     assert!(issuer.is_ok());
     let Ok(issuer) = issuer else {
         return;
@@ -194,7 +194,7 @@ fn provider_service_issues_token_for_allowed_subject() {
         "x-shardline-provider-key",
         HeaderValue::from_static("bootstrap"),
     );
-    let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+    let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
     assert!(issuer.is_ok());
     let Ok(issuer) = issuer else {
         return;
@@ -242,7 +242,7 @@ fn provider_service_parses_github_repository_deleted_webhook() {
     let service = ProviderTokenService {
         api_key: SecretBytes::from_slice(b"bootstrap"),
         issuer: {
-            let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+            let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
             assert!(issuer.is_ok());
             let Ok(issuer) = issuer else {
                 return;
@@ -301,7 +301,7 @@ fn provider_service_rejects_oversized_webhook_delivery_header_before_adapter_par
     let service = ProviderTokenService {
         api_key: SecretBytes::from_slice(b"bootstrap"),
         issuer: {
-            let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+            let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
             assert!(issuer.is_ok());
             let Ok(issuer) = issuer else {
                 return;
@@ -356,7 +356,7 @@ fn provider_service_rejects_oversized_webhook_auth_header_before_adapter_parsing
     let service = ProviderTokenService {
         api_key: SecretBytes::from_slice(b"bootstrap"),
         issuer: {
-            let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+            let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
             assert!(issuer.is_ok());
             let Ok(issuer) = issuer else {
                 return;
@@ -404,7 +404,7 @@ fn provider_service_rejects_non_utf8_webhook_auth_header_before_adapter_parsing(
     let service = ProviderTokenService {
         api_key: SecretBytes::from_slice(b"bootstrap"),
         issuer: {
-            let issuer = ProviderTokenIssuer::new("issuer", b"signing-key", NonZeroU64::MIN);
+            let issuer = ProviderTokenIssuer::new("issuer", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
             assert!(issuer.is_ok());
             let Ok(issuer) = issuer else {
                 return;
@@ -511,7 +511,7 @@ fn provider_service_rejects_oversized_configuration_before_json_parsing() {
         b"bootstrap".to_vec(),
         "issuer",
         NonZeroU64::MIN,
-        b"signing-key",
+        b"a]32-byte-signing-key-for-testing!",
     );
 
     assert!(matches!(
@@ -552,7 +552,7 @@ fn provider_service_rejects_configuration_growth_after_validation() {
         b"bootstrap".to_vec(),
         "issuer",
         NonZeroU64::MIN,
-        b"signing-key",
+        b"a]32-byte-signing-key-for-testing!",
     );
 
     assert!(matches!(
@@ -587,7 +587,7 @@ fn provider_service_accepts_projected_secret_symlink_configuration_path() {
         b"bootstrap".to_vec(),
         "issuer",
         NonZeroU64::MIN,
-        b"signing-key",
+        b"a]32-byte-signing-key-for-testing!",
     );
 
     assert!(service.is_ok());
@@ -617,7 +617,7 @@ fn provider_service_rejects_symlinked_configuration_path_outside_directory() {
         b"bootstrap".to_vec(),
         "issuer",
         NonZeroU64::MIN,
-        b"signing-key",
+        b"a]32-byte-signing-key-for-testing!",
     );
 
     assert!(matches!(service, Err(ProviderServiceError::Io(_))));

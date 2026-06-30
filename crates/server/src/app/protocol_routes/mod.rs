@@ -7,7 +7,7 @@ pub(crate) use lfs::{lfs_batch, lfs_get_object, lfs_head_object, lfs_put_object}
 pub(crate) use oci::{
     oci_api_dispatch, oci_dispatch, oci_registry_token, oci_transfer_dispatch, oci_v2_root,
 };
-pub(crate) use oci::{OciPath, parse_oci_path};
+pub(crate) use oci::parse_oci_path;
 
 use std::{
     collections::BTreeMap,
@@ -147,7 +147,8 @@ fn parse_query_values(uri: &axum::http::Uri, key: &str) -> Result<Vec<String>, S
 
 #[cfg(test)]
 mod tests {
-    use super::{OciPath, parse_oci_path};
+    use super::parse_oci_path;
+    use crate::app::protocol_routes::oci::OciPath;
     use crate::ServerError;
     use axum::http::Uri;
 

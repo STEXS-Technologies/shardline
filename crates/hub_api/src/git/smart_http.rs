@@ -226,6 +226,11 @@ pub async fn receive_pack(
 
     let (updates, pack_data) = parse_receive_pack_request(&body);
 
+    let updates: Vec<_> = updates
+        .into_iter()
+        .filter(|(_old, _new, refname)| is_valid_refname(refname))
+        .collect();
+
     if updates.is_empty() {
         return build_report_response(&[]);
     }
@@ -244,6 +249,20 @@ pub async fn receive_pack(
 }
 
 // ---- Helper functions ----
+
+/// Validates a Git refname for receive-pack.
+///
+/// Rejects empty refnames, refnames with ASCII control characters, and
+/// refnames that do not start with `refs/`.
+fn is_valid_refname(refname: &str) -> bool {
+    if refname.is_empty() {
+        return false;
+    }
+    if refname.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return false;
+    }
+    refname.starts_with("refs/")
+}
 
 /// Collects all refs from the HubStore for a given repo.
 async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
@@ -710,6 +729,9 @@ fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
     objects
 }
 
+/// Maximum allowed decompressed size for zlib data (512 MB).
+const MAX_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
+
 fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
     use flate2::read::ZlibDecoder;
     use std::io::Read;
@@ -717,6 +739,12 @@ fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::
     let mut decoder = ZlibDecoder::new(data);
     let mut output = Vec::new();
     decoder.read_to_end(&mut output)?;
+    if output.len() > MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "decompressed data exceeds maximum size of {MAX_DECOMPRESSED_SIZE} bytes"
+        )
+        .into());
+    }
     let bytes_used = decoder.total_in() as usize;
     Ok((output, bytes_used))
 }
@@ -730,7 +758,10 @@ async fn store_push_objects(
     state
         .store
         .create_revision(repo_id, None, new_sha, "main", &format!("Push to {new_sha}"))
-        .map_err(|e| format!("failed to create revision: {e}"))?;
+        .map_err(|e| {
+            tracing::warn!("failed to create revision for {repo_id}: {e}");
+            "failed to create revision".to_owned()
+        })?;
 
     Ok(())
 }

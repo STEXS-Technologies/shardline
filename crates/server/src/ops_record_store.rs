@@ -1,4 +1,4 @@
-pub(crate) use shardline_server_core::{OpsRecordKind, OpsRecordStore};
+pub(crate) use shardline_server_core::OpsRecordStore;
 
 #[cfg(test)]
 mod tests {
