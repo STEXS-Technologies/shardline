@@ -34,6 +34,7 @@ use super::super::{
 use super::token::oci_authorize;
 use super::tags::oci_created_response;
 
+#[tracing::instrument(skip(state, headers, uri, body), fields(repository))]
 pub(crate) async fn oci_post_blob_upload(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -98,6 +99,7 @@ pub(crate) async fn oci_post_blob_upload(
         .map_err(|_error| ServerError::Overflow)
 }
 
+#[tracing::instrument(skip(state, auth_headers, headers, body), fields(repository, session_id))]
 pub(crate) async fn oci_patch_blob_upload(
     state: &Arc<AppState>,
     auth_headers: &HeaderMap,
@@ -168,6 +170,7 @@ pub(crate) async fn oci_patch_blob_upload(
         .map_err(|_error| ServerError::Overflow)
 }
 
+#[tracing::instrument(skip(state, headers, uri, body), fields(repository, session_id))]
 pub(crate) async fn oci_put_blob_upload(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -257,6 +260,7 @@ pub(crate) async fn oci_put_blob_upload(
     )
 }
 
+#[tracing::instrument(skip(state, headers), fields(repository, session_id))]
 pub(crate) async fn oci_get_blob_upload(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -291,6 +295,7 @@ pub(crate) async fn oci_get_blob_upload(
         .map_err(|_error| ServerError::Overflow)
 }
 
+#[tracing::instrument(skip(state, headers), fields(repository, session_id))]
 pub(crate) async fn oci_delete_blob_upload(
     state: &Arc<AppState>,
     headers: &HeaderMap,

@@ -33,7 +33,7 @@ fn protocol_benchmarks(criterion: &mut Criterion) {
         "benchmark token claims fixture should be valid",
     );
     let signer = must(
-        TokenSigner::new(b"benchmark-signing-key"),
+        TokenSigner::new(b"benchmark-signing-key-32-bytes!!"),
         "benchmark token signer fixture should be valid",
     );
     let token = must(

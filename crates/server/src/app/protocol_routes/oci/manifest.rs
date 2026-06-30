@@ -39,6 +39,7 @@ pub(super) const DOCKER_SCHEMA2_MANIFEST_MEDIA_TYPE: &str =
 pub(super) const DOCKER_SCHEMA2_MANIFEST_LIST_MEDIA_TYPE: &str =
     "application/vnd.docker.distribution.manifest.list.v2+json";
 
+#[tracing::instrument(skip(state, headers), fields(repository, reference))]
 pub(crate) async fn oci_get_manifest(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -75,6 +76,7 @@ pub(crate) async fn oci_get_manifest(
     .await
 }
 
+#[tracing::instrument(skip(state, headers, uri, body), fields(repository, reference))]
 pub(crate) async fn oci_put_manifest(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -137,6 +139,7 @@ pub(crate) async fn oci_put_manifest(
         .map_err(|_error| ServerError::Overflow)
 }
 
+#[tracing::instrument(skip(state, headers), fields(repository, reference))]
 pub(crate) async fn oci_delete_manifest(
     state: &Arc<AppState>,
     headers: &HeaderMap,

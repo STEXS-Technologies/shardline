@@ -372,7 +372,7 @@ impl HubStore for PostgresIndexStore {
             tokio::runtime::Handle::current().block_on(async {
                 let mut rows = sqlx::query(
                     "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
-                     WHERE commit_sha = $1 ORDER BY path",
+                     WHERE commit_sha = $1 ORDER BY path LIMIT 100000",
                 )
                 .bind(&commit_sha)
                 .fetch(&pool);
@@ -406,7 +406,7 @@ impl HubStore for PostgresIndexStore {
                 )
                 .bind(&oid)
                 .bind(&data)
-                .bind(data.len() as i64)
+                .bind(i64::try_from(data.len()).map_err(|_e| PostgresMetadataStoreError::IntegerOutOfRange)?)
                 .execute(&pool)
                 .await?;
                 Ok(())
@@ -600,18 +600,27 @@ mod tests {
     }
 
     async fn cleanup_repo(store: &PostgresIndexStore, repo_id: &str) {
-        let _ = sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)")
+        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)")
             .bind(repo_id)
             .execute(store.pool())
-            .await;
-        let _ = sqlx::query("DELETE FROM shardline_hub_revisions WHERE repo_id = $1")
+            .await
+        {
+            eprintln!("cleanup: failed to delete file entries for {repo_id}: {e}");
+        }
+        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_revisions WHERE repo_id = $1")
             .bind(repo_id)
             .execute(store.pool())
-            .await;
-        let _ = sqlx::query("DELETE FROM shardline_hub_repos WHERE repo_id = $1")
+            .await
+        {
+            eprintln!("cleanup: failed to delete revisions for {repo_id}: {e}");
+        }
+        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_repos WHERE repo_id = $1")
             .bind(repo_id)
             .execute(store.pool())
-            .await;
+            .await
+        {
+            eprintln!("cleanup: failed to delete repo {repo_id}: {e}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -703,10 +712,13 @@ mod tests {
         assert_eq!(retrieved[1].path, "b.bin");
         assert!(retrieved[1].is_lfs);
 
-        let _ = sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha = $1")
+        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_file_entries WHERE commit_sha = $1")
             .bind("pg-commit-files")
             .execute(store.pool())
-            .await;
+            .await
+        {
+            eprintln!("cleanup: failed to delete file entries for pg-commit-files: {e}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -725,10 +737,13 @@ mod tests {
         assert!(store.has_lfs_object("pg-lfs-oid1").expect("has_lfs_object"));
         assert!(!store.has_lfs_object("pg-lfs-nope").expect("has_lfs_object"));
 
-        let _ = sqlx::query("DELETE FROM shardline_hub_lfs_objects WHERE oid = $1")
+        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_lfs_objects WHERE oid = $1")
             .bind("pg-lfs-oid1")
             .execute(store.pool())
-            .await;
+            .await
+        {
+            eprintln!("cleanup: failed to delete lfs object pg-lfs-oid1: {e}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

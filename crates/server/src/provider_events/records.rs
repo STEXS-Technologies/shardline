@@ -11,7 +11,7 @@ use crate::{
     error::IndexError,
     object_store::ServerObjectStore,
     record_store::parse_stored_file_record_bytes,
-    repository_scope_path::provider_directory,
+    shardline_server_core::provider_directory,
     xet_adapter::{visit_stored_xorb_chunk_hashes, xorb_object_key},
 };
 

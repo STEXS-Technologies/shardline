@@ -1,8 +1,10 @@
 use std::{
+    str::FromStr,
     sync::Mutex,
     time::{Duration, Instant},
 };
 
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use reqwest::Client;
 use serde::Deserialize;
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
@@ -60,18 +62,25 @@ struct JwksResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct Jwk {
-    _kid: String,
+    kid: String,
     #[serde(rename = "kty")]
-    _key_type: String,
+    key_type: String,
     #[serde(rename = "alg")]
-    _algorithm: String,
+    algorithm: String,
     #[serde(rename = "use")]
-    _public_key_use: Option<String>,
-    _n: Option<String>,
-    _e: Option<String>,
+    public_key_use: Option<String>,
+    n: Option<String>,
+    e: Option<String>,
+    #[serde(rename = "x")]
+    x_coord: Option<String>,
+    #[serde(rename = "y")]
+    y_coord: Option<String>,
+    #[serde(rename = "crv")]
+    curve: Option<String>,
     #[serde(rename = "x5c")]
-    _x509_chain: Option<Vec<String>>,
+    x509_chain: Option<Vec<String>>,
 }
 
 /// OIDC provider initialization failure.
@@ -146,41 +155,60 @@ impl OidcProvider {
         payload_b64: &str,
         signature_b64: &str,
     ) -> Result<TokenClaims, AuthError> {
-        let _keys = self.get_cached_keys().ok_or_else(|| {
+        let keys = self.get_cached_keys().ok_or_else(|| {
             AuthError::ProviderError("JWKS keys not available or expired".to_owned())
         })?;
 
         let header_json = base64_decode_url(header_b64)
             .map_err(|e| AuthError::ProviderError(format!("invalid JWT header: {e}")))?;
-        let _header: serde_json::Value = serde_json::from_slice(&header_json)
+        let header: serde_json::Value = serde_json::from_slice(&header_json)
             .map_err(|e| AuthError::ProviderError(format!("invalid JWT header JSON: {e}")))?;
 
-        let payload_json = base64_decode_url(payload_b64)
-            .map_err(|e| AuthError::ProviderError(format!("invalid JWT payload: {e}")))?;
-        let payload: serde_json::Value = serde_json::from_slice(&payload_json)
-            .map_err(|e| AuthError::ProviderError(format!("invalid JWT payload JSON: {e}")))?;
+        let kid = header
+            .get("kid")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AuthError::ProviderError("missing kid in JWT header".to_owned()))?;
 
-        let _sig_bytes = base64_decode_url(signature_b64)
-            .map_err(|e| AuthError::ProviderError(format!("invalid JWT signature: {e}")))?;
+        let alg_str = header
+            .get("alg")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AuthError::ProviderError("missing alg in JWT header".to_owned()))?;
+
+        if alg_str == "none" {
+            return Err(AuthError::InvalidToken);
+        }
+
+        let algorithm = Algorithm::from_str(alg_str)
+            .map_err(|_e| AuthError::ProviderError(format!("unsupported algorithm: {alg_str}")))?;
+
+        let jwk = keys
+            .iter()
+            .find(|k| k.kid == kid && is_algorithm_compatible(&k.key_type, algorithm))
+            .ok_or_else(|| AuthError::ProviderError(format!("no matching key for kid {kid}")))?;
+
+        let decoding_key = build_decoding_key(jwk, algorithm)
+            .map_err(|e| AuthError::ProviderError(format!("failed to build decoding key: {e}")))?;
+
+        let mut validation = Validation::new(algorithm);
+        validation.set_issuer(&[self.issuer.as_str()]);
+
+        let token = format!("{header_b64}.{payload_b64}.{signature_b64}");
+        let token_data = decode::<serde_json::Value>(&token, &decoding_key, &validation)
+            .map_err(|e| AuthError::ProviderError(format!("JWT verification failed: {e}")))?;
+
+        let payload = token_data.claims;
 
         let exp = payload
             .get("exp")
             .and_then(|v| v.as_u64())
-            .unwrap_or(u64::MAX);
+            .ok_or_else(|| AuthError::ProviderError("missing exp claim".to_owned()))?;
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         if exp < now {
             return Err(AuthError::ExpiredToken);
-        }
-
-        let iss = payload
-            .get("iss")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if iss != self.issuer {
-            return Err(AuthError::InvalidToken);
         }
 
         let sub = payload
@@ -225,6 +253,46 @@ impl AuthProvider for OidcProvider {
         Err(AuthError::ProviderError(
             "OIDC provider does not support token minting".to_owned(),
         ))
+    }
+}
+
+fn is_algorithm_compatible(key_type: &str, algorithm: Algorithm) -> bool {
+    matches!(
+        (key_type, algorithm),
+        ("RSA", Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512)
+            | ("EC", Algorithm::ES256 | Algorithm::ES384)
+            | ("RSA", Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512)
+    )
+}
+
+fn build_decoding_key(jwk: &Jwk, algorithm: Algorithm) -> Result<DecodingKey, String> {
+    match algorithm {
+        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512
+        | Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512 => {
+            let n = jwk
+                .n
+                .as_ref()
+                .ok_or("RSA key missing n parameter")?;
+            let e = jwk
+                .e
+                .as_ref()
+                .ok_or("RSA key missing e parameter")?;
+            DecodingKey::from_rsa_components(n, e).map_err(|e| format!("invalid RSA key: {e}"))
+        }
+        Algorithm::ES256 | Algorithm::ES384 => {
+            let x = jwk
+                .x_coord
+                .as_ref()
+                .ok_or("EC key missing x parameter")?;
+            let y = jwk
+                .y_coord
+                .as_ref()
+                .ok_or("EC key missing y parameter")?;
+            DecodingKey::from_ec_components(x, y).map_err(|e| format!("invalid EC key: {e}"))
+        }
+        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 | Algorithm::EdDSA => {
+            Err(format!("unsupported algorithm: {algorithm:?}"))
+        }
     }
 }
 

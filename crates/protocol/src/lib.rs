@@ -43,7 +43,7 @@
 //!     1_700_000_600,
 //! )?;
 //!
-//! let signer = TokenSigner::new(b"development-only-signing-key")?;
+//! let signer = TokenSigner::new(b"development-only-signing-key-32bytes")?;
 //! let token = signer.sign(&claims)?;
 //! let verified = signer.verify_at(&token, 1_700_000_000)?;
 //!

@@ -6,6 +6,9 @@ use axum::{
     routing::{delete, get, post, put},
 };
 
+use std::sync::LazyLock;
+use tokio::sync::Semaphore;
+
 use crate::auth::HubAuth;
 use crate::commit::{self, CommitInstruction, ParsedCommit};
 use crate::error::HubApiError;
@@ -25,6 +28,8 @@ async fn deliver_webhook_events(
     event: &str,
     revision: &str,
 ) {
+    static WEBHOOK_DELIVERY_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(16));
+
     let client = match &state.http_client {
         Some(client) => client.clone(),
         None => return,
@@ -61,6 +66,10 @@ async fn deliver_webhook_events(
         let body = body.clone();
         let secret = webhook.secret.clone();
         let client = client.clone();
+        let Ok(_permit) = WEBHOOK_DELIVERY_SEMAPHORE.acquire().await else {
+            tracing::warn!("webhook delivery semaphore closed");
+            return;
+        };
         tokio::spawn(async move {
             if let Err(e) = deliver_one_webhook(&client, &url, &body, secret.as_deref()).await {
                 tracing::warn!("webhook delivery to {url} failed: {e}");
@@ -1169,6 +1178,79 @@ fn parse_csv_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<Dataset
 
 // ---- Webhook endpoints ----
 
+/// Maximum allowed webhook URL length.
+const MAX_WEBHOOK_URL_LEN: usize = 2048;
+
+/// Validates a webhook URL to prevent SSRF attacks.
+///
+/// Checks:
+/// - Scheme is `http` or `https`
+/// - Host is present
+/// - URL length does not exceed 2048 characters
+/// - Host is not a private/internal IP or reserved address
+fn validate_webhook_url(url: &str) -> Result<(), HubApiError> {
+    if url.len() > MAX_WEBHOOK_URL_LEN {
+        return Err(HubApiError::PathValidation(format!(
+            "webhook URL exceeds maximum length of {MAX_WEBHOOK_URL_LEN}"
+        )));
+    }
+
+    let parsed = url::Url::parse(url)
+        .map_err(|e| HubApiError::PathValidation(format!("invalid webhook URL: {e}")))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(HubApiError::PathValidation(format!(
+            "webhook URL scheme must be http or https, got {scheme}"
+        )));
+    }
+
+    let host_str = parsed
+        .host_str()
+        .ok_or_else(|| HubApiError::PathValidation("webhook URL has no host".to_owned()))?;
+
+    // Strip brackets from IPv6 addresses like [::1]
+    let host = host_str
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host_str);
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_ip(&ip) {
+            return Err(HubApiError::PathValidation(
+                "webhook URL must not point to a private/internal/reserved address".to_owned(),
+            ));
+        }
+    } else if host == "localhost" {
+        return Err(HubApiError::PathValidation(
+            "webhook URL must not point to localhost".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Returns `true` if the IP address is private, loopback, link-local, or
+/// otherwise reserved (not globally routable).
+#[allow(clippy::missing_const_for_fn)]
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() // 127.0.0.0/8
+                || v4.is_private() // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_link_local() // 169.254.0.0/16
+                || v4.is_unspecified() // 0.0.0.0
+                || v4.is_broadcast()
+                || v4.is_documentation() // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() // ::1
+                || v6.is_unspecified() // ::
+                || v6.is_unicast_link_local() // fe80::/10
+        }
+    }
+}
+
 /// Creates a webhook for a repository.
 async fn webhook_create(
     headers: axum::http::HeaderMap,
@@ -1178,6 +1260,7 @@ async fn webhook_create(
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Write)?;
+    validate_webhook_url(&request.url)?;
     let name = format!("{ns}/{repo}");
     let _ = state
         .store

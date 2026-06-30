@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant},
@@ -14,6 +14,85 @@ struct MemoryEntry {
     payload: Vec<u8>,
     expires_at: Instant,
     inserted_at: Instant,
+    seq: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct EvictionKey(Instant, u64);
+
+impl Ord for EvictionKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .cmp(&other.0)
+            .then_with(|| self.1.cmp(&other.1))
+    }
+}
+
+impl PartialOrd for EvictionKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug)]
+struct CacheInner {
+    entries: HashMap<ReconstructionCacheKey, MemoryEntry>,
+    eviction_order: BTreeMap<EvictionKey, ReconstructionCacheKey>,
+    next_seq: u64,
+}
+
+impl CacheInner {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            eviction_order: BTreeMap::new(),
+            next_seq: 0,
+        }
+    }
+
+    fn insert(&mut self, key: ReconstructionCacheKey, entry: MemoryEntry) {
+        let inserted_at = entry.inserted_at;
+        if let Some(old) = self.entries.insert(key.clone(), entry) {
+            self.eviction_order
+                .remove(&EvictionKey(old.inserted_at, old.seq));
+        }
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.eviction_order
+            .insert(EvictionKey(inserted_at, seq), key);
+    }
+
+    fn remove(&mut self, key: &ReconstructionCacheKey) -> Option<MemoryEntry> {
+        if let Some(entry) = self.entries.remove(key) {
+            self.eviction_order
+                .remove(&EvictionKey(entry.inserted_at, entry.seq));
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    fn evict_oldest(&mut self) {
+        while let Some((_eviction_key, key)) = self.eviction_order.pop_first() {
+            if self.entries.contains_key(&key) {
+                self.entries.remove(&key);
+                return;
+            }
+        }
+    }
+
+    fn prune_expired(&mut self, now: Instant) {
+        let expired: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.expires_at <= now)
+            .map(|(k, v)| (k.clone(), EvictionKey(v.inserted_at, v.seq)))
+            .collect();
+        for (key, eviction_key) in expired {
+            self.entries.remove(&key);
+            self.eviction_order.remove(&eviction_key);
+        }
+    }
 }
 
 /// Bounded in-memory reconstruction cache adapter.
@@ -21,7 +100,7 @@ struct MemoryEntry {
 pub struct MemoryReconstructionCache {
     ttl: Duration,
     max_entries: NonZeroUsize,
-    entries: Arc<RwLock<HashMap<ReconstructionCacheKey, MemoryEntry>>>,
+    inner: Arc<RwLock<CacheInner>>,
 }
 
 impl MemoryReconstructionCache {
@@ -31,7 +110,7 @@ impl MemoryReconstructionCache {
         Self {
             ttl: Duration::from_secs(ttl_seconds.get()),
             max_entries,
-            entries: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(CacheInner::new())),
         }
     }
 }
@@ -48,8 +127,8 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
         Box::pin(async move {
             let now = Instant::now();
             {
-                let entries = self.entries.read().await;
-                if let Some(entry) = entries.get(key) {
+                let inner = self.inner.read().await;
+                if let Some(entry) = inner.entries.get(key) {
                     if entry.expires_at > now {
                         return Ok(Some(entry.payload.clone()));
                     }
@@ -58,12 +137,13 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 }
             }
 
-            let mut entries = self.entries.write().await;
-            let should_remove = entries
+            let mut inner = self.inner.write().await;
+            let should_remove = inner
+                .entries
                 .get(key)
                 .is_some_and(|entry| entry.expires_at <= now);
             if should_remove {
-                let _removed = entries.remove(key);
+                inner.remove(key);
             }
             Ok(None)
         })
@@ -77,17 +157,18 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
         Box::pin(async move {
             let now = Instant::now();
             let expires_at = now.checked_add(self.ttl).map_or(now, |value| value);
-            let mut entries = self.entries.write().await;
-            prune_expired_entries(&mut entries, now);
-            if !entries.contains_key(key) && entries.len() >= self.max_entries.get() {
-                evict_oldest_entry(&mut entries);
+            let mut inner = self.inner.write().await;
+            inner.prune_expired(now);
+            if !inner.entries.contains_key(key) && inner.entries.len() >= self.max_entries.get() {
+                inner.evict_oldest();
             }
-            entries.insert(
+            inner.insert(
                 key.clone(),
                 MemoryEntry {
                     payload: payload.to_vec(),
                     expires_at,
                     inserted_at: now,
+                    seq: 0,
                 },
             );
             Ok(())
@@ -99,23 +180,9 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
         key: &'operation ReconstructionCacheKey,
     ) -> ReconstructionCacheFuture<'operation, bool> {
         Box::pin(async move {
-            let mut entries = self.entries.write().await;
-            Ok(entries.remove(key).is_some())
+            let mut inner = self.inner.write().await;
+            Ok(inner.remove(key).is_some())
         })
-    }
-}
-
-fn prune_expired_entries(entries: &mut HashMap<ReconstructionCacheKey, MemoryEntry>, now: Instant) {
-    entries.retain(|_key, entry| entry.expires_at > now);
-}
-
-fn evict_oldest_entry(entries: &mut HashMap<ReconstructionCacheKey, MemoryEntry>) {
-    let oldest_key = entries
-        .iter()
-        .min_by_key(|(_key, entry)| entry.inserted_at)
-        .map(|(key, _entry)| key.clone());
-    if let Some(oldest_key) = oldest_key {
-        let _removed = entries.remove(&oldest_key);
     }
 }
 

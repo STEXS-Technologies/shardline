@@ -50,14 +50,7 @@ impl From<shardline_storage::ObjectKeyError> for ProtocolError {
 ///
 /// Returns [`ProtocolError::InvalidContentHash`] when the input is malformed.
 pub fn validate_content_hash(value: &str) -> Result<(), ProtocolError> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(ProtocolError::InvalidContentHash);
-    }
-    Ok(())
+    shardline_server_core::validate_content_hash_with(value, || ProtocolError::InvalidContentHash)
 }
 
 /// Maps a raw string to a validated [`ObjectKey`].

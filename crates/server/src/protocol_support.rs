@@ -33,10 +33,6 @@ pub(crate) fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> Str
     )
 }
 
-pub(crate) fn stable_hex_id(value: &str) -> String {
-    hex::encode(Sha256::digest(value.as_bytes()))
-}
-
 pub(crate) fn object_key(value: &str) -> Result<ObjectKey, ServerError> {
     ObjectKey::parse(value).map_err(|_error| ServerError::InvalidContentHash)
 }

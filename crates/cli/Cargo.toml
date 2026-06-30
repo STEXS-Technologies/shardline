@@ -39,7 +39,6 @@ libc.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-server.workspace = true

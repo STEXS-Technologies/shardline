@@ -84,7 +84,7 @@ pub enum ProviderWebhookOutcomeKind {
 }
 
 /// Default retention window for new local quarantine candidates.
-pub const DEFAULT_LOCAL_GC_RETENTION_SECONDS: u64 = 86_400;
+pub use shardline_server_core::DEFAULT_LOCAL_GC_RETENTION_SECONDS;
 
 /// Provider webhook event processing failure.
 #[derive(Debug, Error)]

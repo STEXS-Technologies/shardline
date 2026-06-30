@@ -237,10 +237,20 @@ pub enum GcScheduleError {
 /// # Errors
 ///
 /// Returns [`GcScheduleError`] when one option is invalid or the unit files cannot be
-/// written.
+/// written. On non-Linux platforms, always returns an error since systemd is not available.
 pub fn install_gc_schedule(
     options: &GcScheduleInstallOptions,
 ) -> Result<GcScheduleInstallReport, GcScheduleError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = options;
+        return Err(GcScheduleError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "scheduled garbage collection via systemd is only supported on Linux",
+        )));
+    }
+    #[cfg(target_os = "linux")]
+    {
     let resolved = resolve_install_options(options)?;
 
     ensure_output_directory(&resolved.output_dir)?;
@@ -270,6 +280,7 @@ pub fn install_gc_schedule(
         calendar: resolved.calendar,
         retention_seconds: resolved.retention_seconds,
     })
+    }
 }
 
 /// Removes systemd units for scheduled Shardline garbage collection.
@@ -786,6 +797,7 @@ mod tests {
         assert!(!report.timer_path.exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_rejects_control_characters() {
         let sandbox = tempfile::tempdir();
@@ -885,6 +897,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_rejects_relative_env_file() {
         let result = install_gc_schedule(&GcScheduleInstallOptions {
@@ -903,6 +916,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_rejects_oversized_env_file() {
         let sandbox = tempfile::tempdir();
@@ -974,7 +988,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_rejects_symlinked_env_file() {
         let sandbox = tempfile::tempdir();

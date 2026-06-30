@@ -6,12 +6,10 @@ use shardline_server_core::{ServerObjectStore, chunk_hash, read_full_object};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome};
 use xet_core_structures::xorb_object::reconstruct_xorb_with_footer;
 
-fn validate_content_hash_local(value: &str) -> Result<(), XetAdapterError> {
-    shardline_server_core::validate_content_hash_with(value, || XetAdapterError::InvalidContentHash)
-}
-
 fn chunk_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
-    validate_content_hash_local(hash_hex)?;
+    shardline_server_core::validate_content_hash_with(hash_hex, || {
+        XetAdapterError::InvalidContentHash
+    })?;
     let prefix = hash_hex
         .get(..2)
         .ok_or(XetAdapterError::InvalidContentHash)?;
@@ -35,7 +33,9 @@ pub struct StoredXorbUpload {
 ///
 /// Returns an error when the hash is not valid or the object key cannot be constructed.
 pub fn xorb_object_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
-    validate_content_hash_local(hash_hex)?;
+    shardline_server_core::validate_content_hash_with(hash_hex, || {
+        XetAdapterError::InvalidContentHash
+    })?;
     let prefix = hash_hex
         .get(..2)
         .ok_or(XetAdapterError::InvalidContentHash)?;
@@ -77,7 +77,9 @@ pub fn xorb_hash_from_object_key_if_present(
     if !hash_hex.starts_with(prefix) {
         return Ok(None);
     }
-    validate_content_hash_local(hash_hex)?;
+    shardline_server_core::validate_content_hash_with(hash_hex, || {
+        XetAdapterError::InvalidContentHash
+    })?;
     Ok(Some(hash_hex))
 }
 

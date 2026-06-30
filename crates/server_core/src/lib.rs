@@ -117,14 +117,12 @@ impl From<TokenCodecError> for AuthError {
             | TokenCodecError::InvalidFormat
             | TokenCodecError::InvalidHex(_)
             | TokenCodecError::Claims(_) => Self::InvalidToken,
-            TokenCodecError::EmptySigningKey | TokenCodecError::Json(_) => {
-                Self::ProviderError(error.to_string())
-            }
+            TokenCodecError::EmptySigningKey
+            | TokenCodecError::SigningKeyTooShort
+            | TokenCodecError::Json(_) => Self::ProviderError(error.to_string()),
         }
     }
 }
-
-pub use serde::{Deserialize, Serialize};
 
 /// Validates that a content hash is exactly 64 lowercase hex characters.
 ///
@@ -1028,3 +1026,20 @@ pub const fn checked_increment(value: u64) -> Result<u64, RebuildOverflowError> 
 #[derive(Debug, Clone, Copy, Error)]
 #[error("arithmetic overflow")]
 pub struct RebuildOverflowError;
+
+/// Returns the current Unix time in seconds, or an error if the system clock
+/// is before the Unix epoch.
+///
+/// # Errors
+///
+/// Returns [`RebuildOverflowError`] when the system time is before the Unix
+/// epoch.
+pub fn unix_now_seconds_checked() -> Result<u64, RebuildOverflowError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_e| RebuildOverflowError)
+}
+
+/// Default retention window for new local quarantine candidates.
+pub const DEFAULT_LOCAL_GC_RETENTION_SECONDS: u64 = 86_400;

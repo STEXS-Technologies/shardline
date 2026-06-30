@@ -37,6 +37,7 @@ pub mod routes;
 pub mod state;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 
 /// Builds the Hub API router with all registered routes.
 ///
@@ -44,7 +45,7 @@ use axum::Router;
 /// Axum router. Call [`state::init`] with a [`routes::HubState`] before
 /// serving requests.
 pub fn hub_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
-    routes::router()
+    routes::router().route_layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
 }
 
 /// Initializes the Hub API with the given state.

@@ -351,7 +351,7 @@ mod tests {
         let Ok(temp) = temp else {
             return;
         };
-        let wrote = write(temp.path(), b"signing-key");
+        let wrote = write(temp.path(), b"a]32-byte-signing-key-for-testing!");
         assert!(wrote.is_ok());
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
@@ -384,7 +384,7 @@ mod tests {
         let Ok(temp) = temp else {
             return;
         };
-        let initial = b"signing-key";
+        let initial = b"a]32-byte-signing-key-for-testing!";
         let wrote = write(temp.path(), initial);
         assert!(wrote.is_ok());
         let repository =
@@ -439,7 +439,7 @@ mod tests {
         assert!(created.is_ok());
         let target = data_dir.join("real.key");
         let link = sandbox.path().join("linked.key");
-        let wrote = write(&target, b"signing-key");
+        let wrote = write(&target, b"a]32-byte-signing-key-for-testing!");
         assert!(wrote.is_ok());
         let linked = symlink(std::path::Path::new("..data").join("real.key"), &link);
         assert!(linked.is_ok());
@@ -470,7 +470,7 @@ mod tests {
         let Ok(outside) = outside else {
             return;
         };
-        let wrote = write(outside.path(), b"signing-key");
+        let wrote = write(outside.path(), b"a]32-byte-signing-key-for-testing!");
         assert!(wrote.is_ok());
         let link = sandbox.path().join("linked.key");
         let linked = symlink(outside.path(), &link);

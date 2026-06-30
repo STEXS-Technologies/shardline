@@ -169,7 +169,7 @@ impl From<GcError> for shardline_server_core::ServerObjectStoreError {
 }
 
 /// Default retention window for new local quarantine candidates.
-pub const DEFAULT_LOCAL_GC_RETENTION_SECONDS: u64 = 86_400;
+pub use shardline_server_core::DEFAULT_LOCAL_GC_RETENTION_SECONDS;
 
 /// Local filesystem garbage-collection execution options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

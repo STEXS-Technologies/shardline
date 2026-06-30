@@ -424,99 +424,6 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn create_resumable_object_upload(
-        &self,
-        object_key: &ObjectKey,
-    ) -> Result<Option<String>, ServerError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => {
-                    Ok(Some(store.create_resumable_upload(object_key).await?))
-                }
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(None),
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => {
-                    Ok(Some(store.create_resumable_upload(object_key).await?))
-                }
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(None),
-            },
-        }
-    }
-
-    pub(crate) async fn upload_resumable_object_part(
-        &self,
-        object_key: &ObjectKey,
-        upload_id: &str,
-        part_idx: usize,
-        bytes: Bytes,
-    ) -> Result<String, ServerError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => Ok(store
-                    .upload_resumable_part(object_key, upload_id, part_idx, bytes)
-                    .await?),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(ServerError::NotFound)
-                }
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => Ok(store
-                    .upload_resumable_part(object_key, upload_id, part_idx, bytes)
-                    .await?),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(ServerError::NotFound)
-                }
-            },
-        }
-    }
-
-    pub(crate) async fn complete_resumable_object_upload(
-        &self,
-        object_key: &ObjectKey,
-        upload_id: &str,
-        part_ids: Vec<String>,
-    ) -> Result<(), ServerError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => Ok(store
-                    .complete_resumable_upload(object_key, upload_id, part_ids)
-                    .await?),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(ServerError::NotFound)
-                }
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => Ok(store
-                    .complete_resumable_upload(object_key, upload_id, part_ids)
-                    .await?),
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-                    Err(ServerError::NotFound)
-                }
-            },
-        }
-    }
-
-    pub(crate) async fn abort_resumable_object_upload(
-        &self,
-        object_key: &ObjectKey,
-        upload_id: &str,
-    ) -> Result<(), ServerError> {
-        match self {
-            Self::Local(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => {
-                    Ok(store.abort_resumable_upload(object_key, upload_id).await?)
-                }
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(()),
-            },
-            Self::Postgres(backend) => match backend.object_store() {
-                ServerObjectStore::S3(store) => {
-                    Ok(store.abort_resumable_upload(object_key, upload_id).await?)
-                }
-                ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => Ok(()),
-            },
-        }
-    }
 }
 
 impl shardline_oci_adapter::OciBackend for ServerBackend {
@@ -675,7 +582,7 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
 }
 
 fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterError {
-    use crate::error::{IndexError, ObjectStoreError};
+    use crate::error::ObjectStoreError;
     use shardline_oci_adapter::OciAdapterError;
     match error {
         ServerError::Io(e) => OciAdapterError::Io(e),

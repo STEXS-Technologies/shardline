@@ -347,7 +347,7 @@ mod tests {
             revision,
             access: RepositoryAccess::Read,
         };
-        let issuer = ProviderTokenIssuer::new("gitlab-adapter", b"signing-key", NonZeroU64::MIN);
+        let issuer = ProviderTokenIssuer::new("gitlab-adapter", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
         assert!(issuer.is_ok());
         let Ok(issuer) = issuer else {
             return;
@@ -369,7 +369,7 @@ mod tests {
         );
         assert_eq!(issued.claims().expires_at_unix_seconds(), 42);
 
-        let signer = TokenSigner::new(b"signing-key");
+        let signer = TokenSigner::new(b"a]32-byte-signing-key-for-testing!");
         assert!(signer.is_ok());
         let Ok(signer) = signer else {
             return;
@@ -399,7 +399,7 @@ mod tests {
             revision,
             access: RepositoryAccess::Write,
         };
-        let issuer = ProviderTokenIssuer::new("generic", b"signing-key", NonZeroU64::MIN);
+        let issuer = ProviderTokenIssuer::new("generic", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN);
         assert!(issuer.is_ok());
         let Ok(issuer) = issuer else {
             return;

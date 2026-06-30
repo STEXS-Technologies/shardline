@@ -7,7 +7,7 @@ use crate::{
     InvalidSerializedShardError, ServerError,
     object_store::{ServerObjectStore, read_full_object},
     xet_adapter::{
-        XorbVisitError, shard_hash_from_object_key_if_present, try_for_each_serialized_xorb_chunk,
+        XorbVisitError, try_for_each_serialized_xorb_chunk,
         validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
         xorb_hash_from_object_key_if_present, xorb_object_key,
     },
@@ -33,19 +33,6 @@ pub(super) fn push_optional_chunk_container_key(
 
 pub(super) fn referenced_term_object_key(term_hash: &str) -> Result<ObjectKey, ServerError> {
     Ok(xorb_object_key(term_hash)?)
-}
-
-pub(super) fn managed_protocol_object_identity(
-    key: &ObjectKey,
-) -> Result<Option<String>, ServerError> {
-    if let Some(hash) = xorb_hash_from_object_key_if_present(key)? {
-        return Ok(Some(hash.to_owned()));
-    }
-    if let Some(hash) = shard_hash_from_object_key_if_present(key)? {
-        return Ok(Some(hash.to_owned()));
-    }
-
-    Ok(None)
 }
 
 pub(super) fn owns_protocol_object(key: &ObjectKey) -> Result<bool, ServerError> {

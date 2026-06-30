@@ -32,12 +32,10 @@ use crate::error::XetAdapterError;
 
 use super::{ValidatedXorbChunk, validate_serialized_xorb, xorb_object_key};
 
-fn validate_content_hash_local(value: &str) -> Result<(), XetAdapterError> {
-    shardline_server_core::validate_content_hash_with(value, || XetAdapterError::InvalidContentHash)
-}
-
 fn shard_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
-    validate_content_hash_local(hash_hex)?;
+    shardline_server_core::validate_content_hash_with(hash_hex, || {
+        XetAdapterError::InvalidContentHash
+    })?;
     let prefix = hash_hex
         .get(..2)
         .ok_or(XetAdapterError::InvalidContentHash)?;
@@ -435,7 +433,9 @@ pub fn shard_hash_from_object_key_if_present(
     if !hash_hex.starts_with(prefix) {
         return Ok(None);
     }
-    validate_content_hash_local(hash_hex)?;
+    shardline_server_core::validate_content_hash_with(hash_hex, || {
+        XetAdapterError::InvalidContentHash
+    })?;
     Ok(Some(hash_hex))
 }
 

@@ -112,6 +112,7 @@ pub(super) async fn reconstruction_v2(
     Ok(Json(result?))
 }
 
+#[tracing::instrument(skip(state, headers, uri))]
 pub(super) async fn batch_reconstruction(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

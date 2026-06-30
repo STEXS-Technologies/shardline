@@ -37,28 +37,6 @@ pub(crate) fn referenced_term_object_key(
     Err(ServerError::InvalidContentHash)
 }
 
-pub(crate) fn managed_protocol_object_identity(
-    frontends: &[ServerFrontend],
-    key: &ObjectKey,
-) -> Result<Option<String>, ServerError> {
-    for frontend in frontends {
-        match frontend {
-            ServerFrontend::Xet => {
-                if let Some(hash) = xet::managed_protocol_object_identity(key)? {
-                    return Ok(Some(hash));
-                }
-            }
-            ServerFrontend::Lfs
-            | ServerFrontend::BazelHttp
-            | ServerFrontend::Oci
-            | ServerFrontend::Hub
-            | ServerFrontend::Metrics => {}
-        }
-    }
-
-    Ok(None)
-}
-
 pub(crate) fn visit_protocol_object_member_chunks<Visitor>(
     frontends: &[ServerFrontend],
     object_store: &ServerObjectStore,

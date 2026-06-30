@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_missing_header() {
-        let auth = ServerAuth::new(b"signing-key");
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
         assert!(auth.is_ok());
         let Ok(auth) = auth else {
             return;
@@ -197,12 +197,12 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_insufficient_scope() {
-        let auth = ServerAuth::new(b"signing-key");
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
         assert!(auth.is_ok());
         let Ok(auth) = auth else {
             return;
         };
-        let signer = TokenSigner::new(b"signing-key");
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
         assert!(signer.is_ok());
         let Ok(signer) = signer else {
             return;
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_oversized_bearer_token_before_decoding() {
-        let auth = ServerAuth::new(b"signing-key");
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
         assert!(auth.is_ok());
         let Ok(auth) = auth else {
             return;
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn server_auth_rejects_bearer_token_with_whitespace() {
-        let auth = ServerAuth::new(b"signing-key");
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
         assert!(auth.is_ok());
         let Ok(auth) = auth else {
             return;
@@ -286,12 +286,12 @@ mod tests {
 
     #[test]
     fn server_auth_accepts_valid_write_token() {
-        let auth = ServerAuth::new(b"signing-key");
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!");
         assert!(auth.is_ok());
         let Ok(auth) = auth else {
             return;
         };
-        let signer = TokenSigner::new(b"signing-key");
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!");
         assert!(signer.is_ok());
         let Ok(signer) = signer else {
             return;

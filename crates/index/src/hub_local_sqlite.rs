@@ -337,7 +337,7 @@ impl HubStore for LocalIndexStore {
         conn.execute(
             "INSERT OR REPLACE INTO shardline_hub_lfs_objects (oid, data, size, created_at_unix_seconds)
              VALUES (?1, ?2, ?3, ?4)",
-            params![oid, data, data.len() as i64, u64_to_i64(now)?],
+            params![oid, data, i64::try_from(data.len()).map_err(|_e| LocalIndexStoreError::IntegerOutOfRange)?, u64_to_i64(now)?],
         )?;
         Ok(())
     }
