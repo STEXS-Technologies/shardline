@@ -665,3 +665,76 @@ fn orphan_inventory_entry(
 
 /// Re-exported index types for convenience.
 pub use shardline_index::LocalRecordStore;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_retention_seconds_value() {
+        assert_eq!(DEFAULT_LOCAL_GC_RETENTION_SECONDS, 86_400);
+    }
+
+    #[test]
+    fn default_gc_options_are_dry_run() {
+        let opts = LocalGcOptions::default();
+        assert!(!opts.mark);
+        assert!(!opts.sweep);
+        assert_eq!(opts.retention_seconds, DEFAULT_LOCAL_GC_RETENTION_SECONDS);
+    }
+
+    #[test]
+    fn dry_run_options() {
+        let opts = LocalGcOptions::dry_run();
+        assert!(!opts.mark);
+        assert!(!opts.sweep);
+        assert_eq!(opts.retention_seconds, DEFAULT_LOCAL_GC_RETENTION_SECONDS);
+    }
+
+    #[test]
+    fn mark_only_options() {
+        let opts = LocalGcOptions::mark_only(3600);
+        assert!(opts.mark);
+        assert!(!opts.sweep);
+        assert_eq!(opts.retention_seconds, 3600);
+    }
+
+    #[test]
+    fn sweep_only_options() {
+        let opts = LocalGcOptions::sweep_only();
+        assert!(!opts.mark);
+        assert!(opts.sweep);
+        assert_eq!(opts.retention_seconds, DEFAULT_LOCAL_GC_RETENTION_SECONDS);
+    }
+
+    #[test]
+    fn mark_and_sweep_options() {
+        let opts = LocalGcOptions::mark_and_sweep(7200);
+        assert!(opts.mark);
+        assert!(opts.sweep);
+        assert_eq!(opts.retention_seconds, 7200);
+    }
+
+    #[test]
+    fn mode_name_dry_run() {
+        assert_eq!(LocalGcOptions::dry_run().mode_name(), "dry-run");
+    }
+
+    #[test]
+    fn mode_name_mark() {
+        assert_eq!(LocalGcOptions::mark_only(100).mode_name(), "mark");
+    }
+
+    #[test]
+    fn mode_name_sweep() {
+        assert_eq!(LocalGcOptions::sweep_only().mode_name(), "sweep");
+    }
+
+    #[test]
+    fn mode_name_mark_and_sweep() {
+        assert_eq!(
+            LocalGcOptions::mark_and_sweep(100).mode_name(),
+            "mark-and-sweep"
+        );
+    }
+}
