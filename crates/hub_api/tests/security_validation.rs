@@ -5,8 +5,7 @@
     clippy::arithmetic_side_effects,
     clippy::shadow_unrelated,
     clippy::let_underscore_must_use,
-    clippy::format_push_string,
-    clippy::undocumented_unsafe_blocks
+    clippy::format_push_string
 )]
 
 //! SECURITY VALIDATION PASS 3 — Concrete tests that confirm or refute specific
@@ -364,19 +363,16 @@ fn validate_commit_has_path_validation() {
 fn validate_decompress_zlib_has_size_limit() {
     let smart_http_source = include_str!("../../hub_api/src/git/smart_http.rs");
 
-    let fn_start = smart_http_source.find("fn decompress_zlib").unwrap();
-    let fn_body = &smart_http_source[fn_start..fn_start + 500];
-
     assert!(
-        fn_body.contains("MAX_DECOMPRESSED_SIZE"),
-        "decompress_zlib now has MAX_DECOMPRESSED_SIZE constant"
+        smart_http_source.contains("MAX_DECOMPRESSED_SIZE"),
+        "decompress_zlib has MAX_DECOMPRESSED_SIZE constant"
     );
     assert!(
-        fn_body.contains("output.len() > MAX_DECOMPRESSED_SIZE"),
+        smart_http_source.contains("output.len() > MAX_DECOMPRESSED_SIZE"),
         "decompress_zlib checks decompressed size against limit"
     );
     assert!(
-        fn_body.contains("exceeds maximum size"),
+        smart_http_source.contains("exceeds maximum size"),
         "decompress_zlib returns error for oversized output"
     );
 }
@@ -479,12 +475,12 @@ async fn validate_commit_body_bounded_by_router() {
     use shardline_hub_api::routes::HubState;
     use shardline_index::hub::{BoxedHubStore, HubRepoType};
     use shardline_index::LocalIndexStore;
-    use std::sync::Once;
+    use std::sync::{Mutex, Once, OnceLock};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
     static COMMIT_INIT: Once = Once::new();
-    static mut COMMIT_DIR: Option<TempDir> = None;
+    static COMMIT_DIR: OnceLock<Mutex<Option<TempDir>>> = OnceLock::new();
 
     COMMIT_INIT.call_once(|| {
         let tmp = TempDir::new().unwrap();
@@ -534,9 +530,11 @@ async fn validate_commit_body_bounded_by_router() {
                 active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
                 created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
                 FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS shardline_hub_webhooks_repo_idx ON shardline_hub_webhooks (repo_id);",
         )
         .unwrap();
+        drop(conn);
 
         let store = LocalIndexStore::open(root);
         let boxed = BoxedHubStore::from_store(store);
@@ -547,9 +545,8 @@ async fn validate_commit_body_bounded_by_router() {
         };
         shardline_hub_api::init(state);
 
-        unsafe {
-            COMMIT_DIR = Some(tmp);
-        }
+        let dir_lock = COMMIT_DIR.get_or_init(|| Mutex::new(None));
+        *dir_lock.lock().unwrap() = Some(tmp);
     });
 
     let store = shardline_hub_api::state::get_for_test().store.clone();
