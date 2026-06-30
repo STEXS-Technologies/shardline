@@ -78,10 +78,11 @@ pub mod test_invariant_error;
 
 pub use app::ProtocolMetrics;
 pub use app::{AppState, acquire_chunk_transfer_permit, full_byte_stream_response};
+pub use backend::{ServerBackend, BenchmarkBackend};
+#[cfg(test)]
 pub use backend::{
-    ServerBackend, BenchmarkBackend, clear_repository_reference_probe_filter,
-    lock_repository_reference_probe_test, repository_reference_probe_count,
-    reset_repository_reference_probe_count_for_hash,
+    clear_repository_reference_probe_filter, lock_repository_reference_probe_test,
+    repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
 };
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
 pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};

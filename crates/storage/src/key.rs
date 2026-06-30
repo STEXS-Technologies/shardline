@@ -131,6 +131,8 @@ fn is_valid_storage_path(value: &str, allow_trailing_separator: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::{
         MAX_OBJECT_KEY_BYTES, MAX_OBJECT_PREFIX_BYTES, ObjectKey, ObjectKeyError, ObjectPrefix,
         ObjectPrefixError,
@@ -276,5 +278,50 @@ mod tests {
         let prefix = ObjectPrefix::parse("xorbs//default/");
 
         assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn object_key_parse_never_accepts_absolute_path(s in ".*") {
+            let input = format!("/{s}");
+            let result = ObjectKey::parse(&input);
+            prop_assert!(result.is_err(), "absolute path should be rejected: {input:?}");
+        }
+
+        #[test]
+        fn object_key_parse_never_accepts_traversal(s in "[a-z]{1,10}") {
+            let input = format!("{s}/../{s}");
+            let result = ObjectKey::parse(&input);
+            prop_assert!(result.is_err(), "traversal should be rejected: {input:?}");
+        }
+
+        #[test]
+        fn object_key_parse_never_accepts_backslash(s in "[a-z]{1,10}") {
+            let input = format!("{s}\\{s}");
+            let result = ObjectKey::parse(&input);
+            prop_assert!(result.is_err(), "backslash should be rejected: {input:?}");
+        }
+
+        #[test]
+        fn object_key_parse_accepts_valid_relative_path(segs in prop::collection::vec("[a-z]{1,20}", 1..5usize)) {
+            let input = segs.join("/");
+            let result = ObjectKey::parse(&input);
+            prop_assert!(result.is_ok(), "valid relative path should be accepted: {input:?}");
+            let key = result.unwrap();
+            prop_assert_eq!(key.as_str(), input.as_str());
+        }
+
+        #[test]
+        fn object_key_parse_rejects_oversized(s in "[a-z]{4097,8192}") {
+            let result = ObjectKey::parse(&s);
+            prop_assert_eq!(result, Err(ObjectKeyError::TooLong));
+        }
+
+        #[test]
+        fn object_key_parse_rejects_control_characters(s in "[a-z\t\n]{1,100}") {
+            prop_assume!(s.chars().any(|c| c.is_control()));
+            let result = ObjectKey::parse(&s);
+            prop_assert!(result.is_err(), "control characters should be rejected: {s:?}");
+        }
     }
 }

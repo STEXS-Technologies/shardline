@@ -19,6 +19,7 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
 pub struct OidcProvider {
     client: Client,
     issuer: String,
+    audience: Option<String>,
     cached_keys: Mutex<Option<CachedJwks>>,
 }
 
@@ -32,6 +33,7 @@ impl Clone for OidcProvider {
         Self {
             client: self.client.clone(),
             issuer: self.issuer.clone(),
+            audience: self.audience.clone(),
             cached_keys: Mutex::new(cached_keys),
         }
     }
@@ -104,7 +106,7 @@ impl OidcProvider {
     ///
     /// Returns [`OidcProviderError`] when the discovery endpoint is unreachable
     /// or the response is malformed.
-    pub async fn new(issuer: &str) -> Result<Self, OidcProviderError> {
+    pub async fn new(issuer: &str, audience: Option<String>) -> Result<Self, OidcProviderError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -133,6 +135,7 @@ impl OidcProvider {
         Ok(Self {
             client,
             issuer: issuer.to_owned(),
+            audience,
             cached_keys: Mutex::new(Some(CachedJwks {
                 keys: jwks.keys,
                 fetched_at: Instant::now(),
@@ -191,6 +194,9 @@ impl OidcProvider {
 
         let mut validation = Validation::new(algorithm);
         validation.set_issuer(&[self.issuer.as_str()]);
+        if let Some(ref audience) = self.audience {
+            validation.set_audience(&[audience.as_str()]);
+        }
 
         let token = format!("{header_b64}.{payload_b64}.{signature_b64}");
         let token_data = decode::<serde_json::Value>(&token, &decoding_key, &validation)

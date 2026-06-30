@@ -2,6 +2,14 @@
 resolver = "3"
 members = ["crates/*"]
 
+# Duplicate dependency note:
+# - hashbrown: 3 versions (0.14, 0.15, 0.17) — pinned by xet ecosystem crates (xet-client, xet-data)
+#   at different versions; cannot be unified without upstream changes.
+# - hashlink, cfg-if, core-foundation, itertools, webpki-roots, whoami, rand: 2 versions each —
+#   transitive deps from xet-client 1.5.x and other third-party crates pin incompatible versions.
+# - reqwest: duplicate (0.12 workspace, 0.13 pinned by xet-client 1.5.2) — NOT FIXABLE.
+# - getrandom: duplicate (0.3 workspace, older via xet ecosystem) — NOT FIXABLE.
+
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -71,6 +79,7 @@ tower-http = { version = "0.6", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
 zeroize = "1.8"
+proptest = "1"
 
 [profile.release]
 opt-level = 3
