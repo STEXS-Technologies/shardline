@@ -13,6 +13,7 @@ const MAX_PAYLOAD: usize = 0xFFFF - 4;
 /// # Errors
 ///
 /// Returns `Err` if `line` exceeds 65516 bytes (pkt-line max payload).
+#[allow(clippy::arithmetic_side_effects)]
 pub fn encode_line(line: &str) -> Result<String, PktLineError> {
     if line.len() > MAX_PAYLOAD {
         return Err(PktLineError::PayloadTooLarge {
@@ -29,6 +30,7 @@ pub fn encode_line(line: &str) -> Result<String, PktLineError> {
 /// # Errors
 ///
 /// Returns `Err` if `data` exceeds 65516 bytes.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn encode_line_bytes(data: &[u8]) -> Result<String, PktLineError> {
     if data.len() > MAX_PAYLOAD {
         return Err(PktLineError::PayloadTooLarge {
@@ -81,6 +83,8 @@ pub const RESPONSE_END: &str = "0002";
 /// - `1`: pack data
 /// - `2`: progress/error messages
 /// - `3`: fatal error
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn sideband_data(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     // Each chunk is at most 65516 bytes of payload
@@ -94,6 +98,8 @@ pub fn sideband_data(data: &[u8]) -> Vec<u8> {
 }
 
 /// Wraps a message in sideband channel 2 (progress).
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn sideband_progress(msg: &str) -> Vec<u8> {
     let len = msg.len() + 5;
     let mut out = format!("{len:04x}").into_bytes();
@@ -103,6 +109,8 @@ pub fn sideband_progress(msg: &str) -> Vec<u8> {
 }
 
 /// Wraps a message in sideband channel 3 (fatal).
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
 pub fn sideband_fatal(msg: &str) -> Vec<u8> {
     let len = msg.len() + 5;
     let mut out = format!("{len:04x}").into_bytes();
@@ -115,6 +123,8 @@ pub fn sideband_fatal(msg: &str) -> Vec<u8> {
 ///
 /// Returns a list of decoded lines (without the 4-byte length prefix).
 /// Stops at flush packet (`0000`).
+#[must_use]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
     let mut lines = Vec::new();
     let mut pos = 0;
@@ -149,6 +159,8 @@ pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
 ///
 /// Returns the reassembled data from channel 1 (pack data).
 /// Channel 2 (progress) and channel 3 (fatal) are logged but not returned.
+#[must_use]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
     let mut pack_data = Vec::new();
     let mut messages = Vec::new();
@@ -178,7 +190,7 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
             b'1' => pack_data.extend_from_slice(payload),
             b'2' | b'3' => {
                 if let Ok(msg) = std::str::from_utf8(payload) {
-                    messages.push(msg.to_string());
+                    messages.push(msg.to_owned());
                 }
             }
             _ => {}
@@ -191,6 +203,11 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

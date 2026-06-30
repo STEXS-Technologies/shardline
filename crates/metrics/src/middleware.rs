@@ -13,7 +13,8 @@ pub struct MetricsLayer {
 }
 
 impl MetricsLayer {
-    pub fn new(metrics: std::sync::Arc<CasMetrics>) -> Self {
+    #[must_use]
+    pub const fn new(metrics: std::sync::Arc<CasMetrics>) -> Self {
         Self { metrics }
     }
 }
@@ -48,7 +49,7 @@ where
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let start = Instant::now();
         let method = req.method().to_string();
-        let path = req.uri().path().to_string();
+        let path = req.uri().path().to_owned();
 
         self.metrics.system.connection_opened();
 

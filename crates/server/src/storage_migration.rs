@@ -108,7 +108,10 @@ impl StorageMigrationReport {
         println!("scanned_objects: {}", self.scanned_objects);
         println!("scanned_bytes: {}", self.scanned_bytes);
         println!("inserted_objects: {}", self.inserted_objects);
-        println!("already_present_objects: {}", self.already_present_objects);
+        println!(
+            "already_present_objects: {}",
+            self.already_present_objects
+        );
         println!("copied_bytes: {}", self.copied_bytes);
     }
 }

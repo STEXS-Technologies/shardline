@@ -138,7 +138,20 @@ impl From<GcError> for shardline_server_core::ServerObjectStoreError {
             GcError::S3ObjectStore(e) => Self::S3(e),
             GcError::Io(e) => Self::Io(e),
             GcError::NumericConversion(e) => Self::NumericConversion(e),
-            _ => Self::Overflow,
+            GcError::Json(_)
+            | GcError::ObjectPrefix(_)
+            | GcError::IndexStore(_)
+            | GcError::MemoryIndexStore(_)
+            | GcError::MemoryRecordStore(_)
+            | GcError::PostgresMetadata(_)
+            | GcError::RetentionHold(_)
+            | GcError::QuarantineCandidate(_)
+            | GcError::WebhookDelivery(_)
+            | GcError::FileRecordInvariant(_)
+            | GcError::InvalidLifecycleMetadata(_)
+            | GcError::InvalidContentHash
+            | GcError::Overflow
+            | GcError::XetAdapter(_) => Self::Overflow,
         }
     }
 }
@@ -256,10 +269,7 @@ impl LocalGcReport {
             "active_quarantine_candidates: {}",
             self.active_quarantine_candidates
         );
-        println!(
-            "new_quarantine_candidates: {}",
-            self.new_quarantine_candidates
-        );
+        println!("new_quarantine_candidates: {}", self.new_quarantine_candidates);
         println!(
             "retained_quarantine_candidates: {}",
             self.retained_quarantine_candidates
@@ -281,10 +291,10 @@ impl LocalGcReport {
         retention_report: Option<&std::path::Path>,
         orphan_inventory: Option<&std::path::Path>,
     ) {
-        println!("mode: {mode}");
+        println!("mode: {}", mode);
         println!("root: {}", root.display());
         if mark {
-            println!("retention_seconds: {retention_seconds}");
+            println!("retention_seconds: {}", retention_seconds);
         }
         if let Some(path) = retention_report {
             println!("retention_report: {}", path.display());

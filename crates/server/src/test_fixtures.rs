@@ -16,11 +16,16 @@ use xet_core_structures::{
     },
 };
 
+#[must_use]
 pub fn xet_hash_hex(hash: &MerkleHash) -> String {
     let bytes: [u8; 32] = hash.as_bytes().try_into().unwrap_or([0; 32]);
     xet_hash_hex_string(ShardlineHash::from_bytes(bytes))
 }
 
+/// # Panics
+///
+/// Panics if serialized xorb object creation fails.
+#[must_use]
 pub fn single_chunk_xorb(bytes: &[u8]) -> (Bytes, String) {
     let chunk_hash = compute_data_hash(bytes);
     let xorb_hash = xorb_hash(&[(chunk_hash, u64::try_from(bytes.len()).unwrap_or(0))]);
@@ -41,6 +46,10 @@ pub fn single_chunk_xorb(bytes: &[u8]) -> (Bytes, String) {
     )
 }
 
+/// # Panics
+///
+/// Panics if any xorb hash, xorb block, or file reconstruction info cannot be added.
+#[must_use]
 pub fn single_file_shard(parts: &[(&[u8], &str)]) -> (Bytes, String) {
     let mut shard = MDBInMemoryShard::default();
     let mut file_segments = Vec::with_capacity(parts.len());
@@ -103,6 +112,10 @@ pub fn single_file_shard(parts: &[(&[u8], &str)]) -> (Bytes, String) {
     (Bytes::from(serialized), xet_hash_hex(&file_hash))
 }
 
+/// # Panics
+///
+/// Panics if the byte copy into the hashed writer fails.
+#[must_use]
 pub fn shard_hash_hex(bytes: &[u8]) -> String {
     let mut sink = HashedWrite::new(io::sink());
     let copied = io::copy(&mut Cursor::new(bytes), &mut sink);

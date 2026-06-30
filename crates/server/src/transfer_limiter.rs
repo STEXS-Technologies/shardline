@@ -15,6 +15,7 @@ pub struct TransferLimiter {
 impl TransferLimiter {
     /// Creates a transfer limiter that budgets concurrent response work in
     /// chunk-equivalent permits.
+    #[must_use]
     pub fn new(chunk_size_bytes: NonZeroUsize, max_in_flight_chunks: NonZeroUsize) -> Self {
         Self {
             chunk_size_bytes,

@@ -187,7 +187,7 @@ impl AtomicOutputFile {
             self.anchored.file_name(),
         )?;
         if let Err(error) = ensure_parent_path_matches_anchor(&self.anchored) {
-            let _ = remove_at(self.anchored.parent_dir(), self.anchored.file_name());
+            drop(remove_at(self.anchored.parent_dir(), self.anchored.file_name()));
             return Err(error);
         }
         self.committed = true;

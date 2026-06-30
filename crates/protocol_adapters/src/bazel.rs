@@ -18,6 +18,12 @@ impl BazelCacheKind {
     }
 }
 
+/// Returns the storage object key for a Bazel cache entry.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::InvalidContentHash`] when `hash_hex` is malformed
+/// or the constructed key is invalid.
 pub fn bazel_cache_object_key(
     kind: BazelCacheKind,
     hash_hex: &str,

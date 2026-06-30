@@ -144,10 +144,7 @@ impl LocalGcReport {
             "active_quarantine_candidates: {}",
             self.active_quarantine_candidates
         );
-        println!(
-            "new_quarantine_candidates: {}",
-            self.new_quarantine_candidates
-        );
+        println!("new_quarantine_candidates: {}", self.new_quarantine_candidates);
         println!(
             "retained_quarantine_candidates: {}",
             self.retained_quarantine_candidates
@@ -169,10 +166,10 @@ impl LocalGcReport {
         retention_report: Option<&Path>,
         orphan_inventory: Option<&Path>,
     ) {
-        println!("mode: {mode}");
+        println!("mode: {}", mode);
         println!("root: {}", root.display());
         if mark {
-            println!("retention_seconds: {retention_seconds}");
+            println!("retention_seconds: {}", retention_seconds);
         }
         if let Some(path) = retention_report {
             println!("retention_report: {}", path.display());

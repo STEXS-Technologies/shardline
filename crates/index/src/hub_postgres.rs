@@ -2,16 +2,16 @@ use futures_util::TryStreamExt;
 use sqlx::Row;
 
 use crate::{
-    hub::{HubFileEntry, HubRepo, HubRepoType, HubRevision, HubStore},
-    postgres::{PostgresIndexStore, PostgresMetadataStoreError},
+    hub::{HubFileEntry, HubRepo, HubRepoType, HubRevision, HubStore, HubWebhook},
+    postgres::{PostgresIndexStore, PostgresMetadataStoreError, i64_to_u64, u64_to_i64},
 };
 
-fn repo_type_to_str(t: HubRepoType) -> &'static str {
+const fn repo_type_to_str(t: HubRepoType) -> &'static str {
     t.as_str()
 }
 
 fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError> {
-    HubRepoType::from_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
+    HubRepoType::parse_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
 }
 
 impl HubStore for PostgresIndexStore {
@@ -68,7 +68,7 @@ impl HubStore for PostgresIndexStore {
                     repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                     private: row.try_get::<bool, _>("private")?,
                     default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: row.try_get::<i64, _>("created_at_unix_seconds")? as u64,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
                 })
             })
         })
@@ -97,7 +97,7 @@ impl HubStore for PostgresIndexStore {
                     repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                     private: row.try_get::<bool, _>("private")?,
                     default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: row.try_get::<i64, _>("created_at_unix_seconds")? as u64,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
                 }))
             })
         })
@@ -121,7 +121,7 @@ impl HubStore for PostgresIndexStore {
                         repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                         private: row.try_get::<bool, _>("private")?,
                         default_branch: row.try_get("default_branch")?,
-                        created_at_unix_seconds: row.try_get::<i64, _>("created_at_unix_seconds")? as u64,
+                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
                     });
                 }
                 Ok(repos)
@@ -141,29 +141,32 @@ impl HubStore for PostgresIndexStore {
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let mut rows = if let Some(rt) = repo_type {
-                    let rt_str = rt.as_str();
-                    sqlx::query(
-                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                         FROM shardline_hub_repos
-                         WHERE repo_id LIKE $1 AND repo_type = $2
-                         ORDER BY repo_id LIMIT $3",
-                    )
-                    .bind(&pattern)
-                    .bind(rt_str)
-                    .bind(limit)
-                    .fetch(&pool)
-                } else {
-                    sqlx::query(
-                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                         FROM shardline_hub_repos
-                         WHERE repo_id LIKE $1
-                         ORDER BY repo_id LIMIT $2",
-                    )
-                    .bind(&pattern)
-                    .bind(limit)
-                    .fetch(&pool)
-                };
+                let mut rows = repo_type.map_or_else(
+                    || {
+                        sqlx::query(
+                            "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                             FROM shardline_hub_repos
+                             WHERE repo_id LIKE $1
+                             ORDER BY repo_id LIMIT $2",
+                        )
+                        .bind(&pattern)
+                        .bind(limit)
+                        .fetch(&pool)
+                    },
+                    |rt| {
+                        let rt_str = rt.as_str();
+                        sqlx::query(
+                            "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                             FROM shardline_hub_repos
+                             WHERE repo_id LIKE $1 AND repo_type = $2
+                             ORDER BY repo_id LIMIT $3",
+                        )
+                        .bind(&pattern)
+                        .bind(rt_str)
+                        .bind(limit)
+                        .fetch(&pool)
+                    },
+                );
 
                 let mut repos = Vec::new();
                 while let Some(row) = rows.try_next().await? {
@@ -172,7 +175,7 @@ impl HubStore for PostgresIndexStore {
                         repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                         private: row.try_get::<bool, _>("private")?,
                         default_branch: row.try_get("default_branch")?,
-                        created_at_unix_seconds: row.try_get::<i64, _>("created_at_unix_seconds")? as u64,
+                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
                     });
                 }
                 Ok(repos)
@@ -254,7 +257,7 @@ impl HubStore for PostgresIndexStore {
                     sha: row.try_get("sha")?,
                     parent_sha: row.try_get("parent_sha")?,
                     message: row.try_get("message")?,
-                    created_at_unix_seconds: row.try_get::<i64, _>("created_at_unix_seconds")? as u64,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
                 })
             })
         })
@@ -282,7 +285,7 @@ impl HubStore for PostgresIndexStore {
                         sha: row.try_get("sha")?,
                         parent_sha: row.try_get("parent_sha")?,
                         message: row.try_get("message")?,
-                        created_at_unix_seconds: row.try_get::<i64, _>("created_at_unix_seconds")? as u64,
+                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
                     });
                 }
                 Ok(revisions)
@@ -349,7 +352,7 @@ impl HubStore for PostgresIndexStore {
                     )
                     .bind(&commit_sha)
                     .bind(&file.path)
-                    .bind(file.size as i64)
+                    .bind(u64_to_i64(file.size)?)
                     .bind(&file.sha)
                     .bind(file.is_lfs)
                     .bind(&file.inline_content)
@@ -378,7 +381,7 @@ impl HubStore for PostgresIndexStore {
                 while let Some(row) = rows.try_next().await? {
                     entries.push(HubFileEntry {
                         path: row.try_get("path")?,
-                        size: row.try_get::<i64, _>("size")? as u64,
+                        size: i64_to_u64(row.try_get::<i64, _>("size")?)?,
                         sha: row.try_get("sha")?,
                         is_lfs: row.try_get::<bool, _>("is_lfs")?,
                         inline_content: row.try_get("inline_content")?,
@@ -444,6 +447,131 @@ impl HubStore for PostgresIndexStore {
                 .fetch_one(&pool)
                 .await?;
                 Ok(exists)
+            })
+        })
+    }
+
+    fn create_webhook(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+    ) -> Result<HubWebhook, Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let url = url.to_owned();
+        let events_str = events.join(",");
+        let secret = secret.map(ToOwned::to_owned);
+        let events_vec = events.to_vec();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let row = sqlx::query(
+                    "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
+                     VALUES (CONCAT('wh-', EXTRACT(EPOCH FROM now())::text, '-', (SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 5) AS bigint)), 0) + 1 FROM shardline_hub_webhooks WHERE repo_id = $1)::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
+                     RETURNING id, repo_id, url, events, secret, active, created_at_unix_seconds",
+                )
+                .bind(&repo_id)
+                .bind(&url)
+                .bind(&events_str)
+                .bind(secret.as_deref())
+                .fetch_one(&pool)
+                .await?;
+
+                Ok(HubWebhook {
+                    id: row.try_get("id")?,
+                    repo_id: row.try_get("repo_id")?,
+                    url: row.try_get("url")?,
+                    events: events_vec,
+                    secret: row.try_get("secret")?,
+                    active: row.try_get::<bool, _>("active")?,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                })
+            })
+        })
+    }
+
+    fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut rows = sqlx::query(
+                    "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
+                     FROM shardline_hub_webhooks WHERE repo_id = $1",
+                )
+                .bind(&repo_id)
+                .fetch(&pool);
+
+                let mut webhooks = Vec::new();
+                while let Some(row) = rows.try_next().await? {
+                    let events_str: String = row.try_get("events")?;
+                    webhooks.push(HubWebhook {
+                        id: row.try_get("id")?,
+                        repo_id: row.try_get("repo_id")?,
+                        url: row.try_get("url")?,
+                        events: events_str.split(',').map(ToOwned::to_owned).collect(),
+                        secret: row.try_get("secret")?,
+                        active: row.try_get::<bool, _>("active")?,
+                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                    });
+                }
+                Ok(webhooks)
+            })
+        })
+    }
+
+    fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let webhook_id = webhook_id.to_owned();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query(
+                    "DELETE FROM shardline_hub_webhooks WHERE repo_id = $1 AND id = $2",
+                )
+                .bind(&repo_id)
+                .bind(&webhook_id)
+                .execute(&pool)
+                .await?;
+                Ok(())
+            })
+        })
+    }
+
+    fn webhooks_for_event(&self, repo_id: &str, event: &str) -> Result<Vec<HubWebhook>, Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+        let event = event.to_owned();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut rows = sqlx::query(
+                    "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
+                     FROM shardline_hub_webhooks
+                     WHERE repo_id = $1 AND (',' || events || ',') LIKE ('%' || $2 || '%')",
+                )
+                .bind(&repo_id)
+                .bind(&event)
+                .fetch(&pool);
+
+                let mut webhooks = Vec::new();
+                while let Some(row) = rows.try_next().await? {
+                    let events_str: String = row.try_get("events")?;
+                    webhooks.push(HubWebhook {
+                        id: row.try_get("id")?,
+                        repo_id: row.try_get("repo_id")?,
+                        url: row.try_get("url")?,
+                        events: events_str.split(',').map(ToOwned::to_owned).collect(),
+                        secret: row.try_get("secret")?,
+                        active: row.try_get::<bool, _>("active")?,
+                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                    });
+                }
+                Ok(webhooks)
             })
         })
     }

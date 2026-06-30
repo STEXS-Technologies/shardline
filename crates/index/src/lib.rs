@@ -1,4 +1,14 @@
 #![deny(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )
+)]
 
 //! Metadata index contracts and adapters for Shardline.
 //!

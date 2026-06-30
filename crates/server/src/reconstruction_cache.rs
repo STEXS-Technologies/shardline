@@ -53,6 +53,7 @@ impl Debug for ReconstructionCacheService {
 }
 
 impl ReconstructionCacheService {
+    #[must_use]
     pub fn disabled() -> Self {
         Self {
             adapter_name: ReconstructionCacheAdapter::Disabled.as_str(),

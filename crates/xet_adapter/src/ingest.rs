@@ -11,6 +11,9 @@ use crate::{
 
 use super::{dedupe_shard_mapping, parse_uploaded_shard, store_uploaded_xorb};
 
+/// # Errors
+///
+/// Returns an error when the xorb upload fails validation or storage.
 pub fn store_uploaded_xorb_bytes(
     object_store: &ServerObjectStore,
     expected_hash: &str,
@@ -23,6 +26,9 @@ pub fn store_uploaded_xorb_bytes(
     })
 }
 
+/// # Errors
+///
+/// Returns an error when shard parsing or commit fails.
 pub async fn register_uploaded_shard_bytes<Commit, CommitFuture>(
     object_store: &ServerObjectStore,
     uploaded_body: &[u8],

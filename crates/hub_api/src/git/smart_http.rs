@@ -60,6 +60,13 @@ fn authorize_write(headers: &HeaderMap) -> Result<(), HubApiError> {
 /// Dispatches to upload-pack or receive-pack based on the `service` query
 /// parameter. Requires Read scope for upload-pack, Write scope for
 /// receive-pack.
+///
+/// # Errors
+///
+/// Returns [`HubApiError::NotFound`] if the service is unknown or the repo
+/// does not exist. Returns [`HubApiError::Unauthorized`] or
+/// [`HubApiError::Forbidden`] on auth failure.
+#[allow(clippy::indexing_slicing)]
 pub async fn info_refs(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Query(query): Query<InfoRefsQuery>,
@@ -119,6 +126,10 @@ pub async fn info_refs(
 /// Handles Git Smart HTTP discovery for upload-pack (clone/fetch).
 ///
 /// Returns the refs advertisement in pkt-line format.
+///
+/// # Errors
+///
+/// Forwards errors from [`info_refs`].
 pub async fn info_refs_upload_pack(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Query(query): Query<InfoRefsQuery>,
@@ -135,6 +146,10 @@ pub async fn info_refs_upload_pack(
 }
 
 /// Handles Git Smart HTTP discovery for receive-pack (push).
+///
+/// # Errors
+///
+/// Forwards errors from [`info_refs`].
 pub async fn info_refs_receive_pack(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Query(query): Query<InfoRefsQuery>,
@@ -153,6 +168,11 @@ pub async fn info_refs_receive_pack(
 // ---- Upload-pack: POST /{type}/{ns}/{repo}/git-upload-pack ----
 
 /// Handles the upload-pack request (clone/fetch).
+///
+/// # Errors
+///
+/// Returns [`HubApiError::Unauthorized`] or [`HubApiError::Forbidden`] on
+/// auth failure. Returns [`HubApiError::NotFound`] if the repo does not exist.
 pub async fn upload_pack(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     headers: HeaderMap,
@@ -190,6 +210,11 @@ pub async fn upload_pack(
 // ---- Receive-pack: POST /{type}/{ns}/{repo}/git-receive-pack ----
 
 /// Handles the receive-pack request (push).
+///
+/// # Errors
+///
+/// Returns [`HubApiError::Unauthorized`] or [`HubApiError::Forbidden`] on
+/// auth failure. Returns [`HubApiError::NotFound`] if the repo does not exist.
 pub async fn receive_pack(
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     headers: HeaderMap,
@@ -226,7 +251,10 @@ async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
     let revisions = state
         .store
         .list_revisions(repo_id)
-        .map_err(|_| HubApiError::RepoNotFound)?;
+        .map_err(|e| {
+            tracing::debug!("failed to list revisions for {repo_id}: {e}");
+            HubApiError::RepoNotFound
+        })?;
 
     let mut refs = Vec::new();
     let mut seen_refs = std::collections::HashSet::new();
@@ -235,13 +263,13 @@ async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
         if rev.ref_name == "HEAD" || rev.ref_name.is_empty() {
             if seen_refs.insert("HEAD".to_owned()) {
                 refs.push(GitRef {
-                    name: "HEAD".to_string(),
+                    name: "HEAD".to_owned(),
                     sha1: rev.sha.clone(),
                 });
             }
             if seen_refs.insert("refs/heads/main".to_owned()) {
                 refs.push(GitRef {
-                    name: "refs/heads/main".to_string(),
+                    name: "refs/heads/main".to_owned(),
                     sha1: rev.sha.clone(),
                 });
             }
@@ -264,23 +292,23 @@ async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
     }
 
     // If no HEAD was explicitly set, use the latest revision as HEAD.
-    if !seen_refs.contains("HEAD") {
-        if let Some(latest) = revisions.last() {
-            refs.insert(
-                0,
-                GitRef {
-                    name: "HEAD".to_string(),
-                    sha1: latest.sha.clone(),
-                },
-            );
-            // Also ensure refs/heads/main exists pointing to HEAD.
-            let main_ref = format!("refs/heads/{}", latest.ref_name);
-            if !seen_refs.contains(&main_ref) {
-                refs.push(GitRef {
-                    name: main_ref,
-                    sha1: latest.sha.clone(),
-                });
-            }
+    if !seen_refs.contains("HEAD")
+        && let Some(latest) = revisions.last()
+    {
+        refs.insert(
+            0,
+            GitRef {
+                name: "HEAD".to_owned(),
+                sha1: latest.sha.clone(),
+            },
+        );
+        // Also ensure refs/heads/main exists pointing to HEAD.
+        let main_ref = format!("refs/heads/{}", latest.ref_name);
+        if !seen_refs.contains(&main_ref) {
+            refs.push(GitRef {
+                name: main_ref,
+                sha1: latest.sha.clone(),
+            });
         }
     }
 
@@ -303,7 +331,7 @@ fn parse_wants(lines: &[Vec<u8>]) -> Vec<String> {
             let s = s.trim();
             let hash = s.strip_prefix("want ")?;
             let hash = hash.split_whitespace().next()?;
-            Some(hash.to_string())
+            Some(hash.to_owned())
         })
         .collect()
 }
@@ -316,7 +344,7 @@ fn parse_haves(lines: &[Vec<u8>]) -> Vec<String> {
             let s = s.trim();
             let hash = s.strip_prefix("have ")?;
             let hash = hash.split_whitespace().next()?;
-            Some(hash.to_string())
+            Some(hash.to_owned())
         })
         .collect()
 }
@@ -391,7 +419,7 @@ async fn generate_pack_for_refs(refs: &[GitRef]) -> Result<Vec<u8>, HubApiError>
             &tree_sha,
             parent_sha.as_ref(),
             "Shardline Hub <hub@shardline.dev>",
-            &git_ref
+            git_ref
                 .name
                 .strip_prefix("refs/heads/")
                 .unwrap_or(&git_ref.name),
@@ -438,13 +466,14 @@ fn tree_object_from_entries(entries: &[(u32, String, [u8; 20])]) -> GitObject {
 ///
 /// `prefix` is the current directory path (empty string for root).
 /// `sub_trees` collects any sub-tree objects created during recursion.
-fn build_tree_entries<'a>(
-    files: &[&'a HubFileEntry],
+#[allow(clippy::indexing_slicing)]
+fn build_tree_entries<'input>(
+    files: &[&'input HubFileEntry],
     prefix: &str,
     sub_trees: &mut Vec<GitObject>,
 ) -> Vec<(u32, String, [u8; 20])> {
     let mut result = Vec::new();
-    let mut children: std::collections::HashMap<String, Vec<&'a HubFileEntry>> =
+    let mut children: std::collections::HashMap<String, Vec<&'input HubFileEntry>> =
         std::collections::HashMap::new();
 
     for file in files {
@@ -519,6 +548,7 @@ fn build_lfs_pointer_blob(oid: &str, size: u64) -> GitObject {
 
 /// Generates a `.gitattributes` blob that tells Git to treat LFS files
 /// as LFS-tracked. Returns `None` if no files are LFS-tracked.
+#[allow(clippy::expect_used)]
 fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
     let lfs_files: Vec<&HubFileEntry> = files.iter().filter(|f| f.is_lfs).collect();
     if lfs_files.is_empty() {
@@ -531,12 +561,15 @@ fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
 
     for file in &sorted {
-        content.push_str(&format!("{} filter=lfs diff=lfs merge=lfs -text\n", file.path));
+        use std::fmt::Write;
+        writeln!(&mut content, "{} filter=lfs diff=lfs merge=lfs -text", file.path)
+            .expect("write to String never fails");
     }
 
     Some(GitObject::blob(content.into_bytes()))
 }
 
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Vec<u8>) {
     let mut updates = Vec::new();
     let mut pack_start = 0;
@@ -544,7 +577,7 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
     let lines = pktline::decode_lines(body);
     for line in &lines {
         let s = match std::str::from_utf8(line) {
-            Ok(s) => s.trim().to_string(),
+            Ok(s) => s.trim().to_owned(),
             Err(_) => continue,
         };
 
@@ -555,9 +588,9 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
         let parts: Vec<&str> = s.split_whitespace().collect();
         if parts.len() >= 3 {
             updates.push((
-                parts[0].to_string(),
-                parts[1].to_string(),
-                parts[2].to_string(),
+                parts[0].to_owned(),
+                parts[1].to_owned(),
+                parts[2].to_owned(),
             ));
         }
     }
@@ -565,15 +598,15 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
     let mut pos = 0;
     while pos + 4 <= body.len() {
         let hex_len = &body[pos..pos + 4];
-        if let Ok(hex_str) = std::str::from_utf8(hex_len) {
-            if let Ok(len) = u16::from_str_radix(hex_str, 16) {
-                if len == 0 {
-                    pack_start = pos + 4;
-                    break;
-                }
-                pos += len as usize;
-                continue;
+        if let Ok(hex_str) = std::str::from_utf8(hex_len)
+            && let Ok(len) = u16::from_str_radix(hex_str, 16)
+        {
+            if len == 0 {
+                pack_start = pos + 4;
+                break;
             }
+            pos += len as usize;
+            continue;
         }
         break;
     }
@@ -587,6 +620,7 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
     (updates, pack_data)
 }
 
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
     if data.len() < 12 {
         return Vec::new();
@@ -627,7 +661,7 @@ fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
         }
 
         match obj_type {
-            1 | 2 | 3 | 4 => {
+            1..=4 => {
                 let remaining = &data[pos..];
                 match decompress_zlib(remaining) {
                     Ok((decompressed, bytes_used)) => {
@@ -648,10 +682,10 @@ fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
             }
             6 => {
                 // OFS_DELTA — skip
-                let mut current = data[pos];
+                let mut ofs_byte = data[pos];
                 pos += 1;
-                while current & 0x80 != 0 && pos < data.len() {
-                    current = data[pos];
+                while ofs_byte & 0x80 != 0 && pos < data.len() {
+                    ofs_byte = data[pos];
                     pos += 1;
                 }
                 let remaining = &data[pos..];
@@ -731,6 +765,11 @@ fn build_report_response(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

@@ -2925,6 +2925,7 @@ dependencies = [
  "shardline-xet-adapter",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2962,6 +2963,7 @@ dependencies = [
  "shardline-xet-adapter",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2974,11 +2976,14 @@ dependencies = [
  "chrono",
  "flate2",
  "hex",
+ "hmac",
  "http-body-util",
+ "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "shardline-index",
  "shardline-metrics",
  "shardline-protocol",
@@ -3098,6 +3103,7 @@ dependencies = [
  "shardline-storage",
  "shardline-xet-adapter",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

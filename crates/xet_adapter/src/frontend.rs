@@ -7,11 +7,17 @@ pub const XORB_TRANSFER_ROUTE: &str = "/transfer/xorb/{prefix}/{hash}";
 pub const XET_READ_TOKEN_ROUTE: &str = "/api/{provider}/{owner}/{repo}/xet-read-token/{rev}";
 pub const XET_WRITE_TOKEN_ROUTE: &str = "/api/{provider}/{owner}/{repo}/xet-write-token/{rev}";
 
+/// # Errors
+///
+/// Returns an error when the hash is not valid hex.
 pub fn validate_hash_path(value: &str) -> Result<(), XetAdapterError> {
     parse_xet_hash_hex(value)?;
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the provided hash is not valid hex.
 pub fn validate_optional_content_hash(content_hash: Option<&str>) -> Result<(), XetAdapterError> {
     if let Some(content_hash) = content_hash {
         validate_hash_path(content_hash)?;
@@ -20,6 +26,9 @@ pub fn validate_optional_content_hash(content_hash: Option<&str>) -> Result<(), 
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the prefix does not match the expected transfer namespace.
 pub fn validate_xorb_transfer_namespace(prefix: &str) -> Result<(), XetAdapterError> {
     if prefix != XORB_TRANSFER_NAMESPACE {
         return Err(XetAdapterError::InvalidXorbPrefix);
@@ -28,6 +37,7 @@ pub fn validate_xorb_transfer_namespace(prefix: &str) -> Result<(), XetAdapterEr
     Ok(())
 }
 
+#[must_use]
 pub fn build_xorb_transfer_url(public_base_url: &str, hash_hex: &str) -> String {
     let trimmed_base_url = public_base_url.trim_end_matches('/');
     let mut url = String::with_capacity(

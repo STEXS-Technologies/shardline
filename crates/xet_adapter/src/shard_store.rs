@@ -52,6 +52,9 @@ pub struct ParsedShardUpload {
     pub dedupe_chunk_hashes: Vec<String>,
 }
 
+/// # Errors
+///
+/// Returns an error when the shard cannot be parsed or stored.
 pub fn parse_uploaded_shard(
     object_store: &ServerObjectStore,
     uploaded_shard: &[u8],
@@ -82,6 +85,9 @@ pub fn parse_uploaded_shard(
     })
 }
 
+/// # Errors
+///
+/// Returns an error when the shard cannot be parsed or stored.
 pub fn parse_uploaded_shard_with_metrics(
     object_store: &ServerObjectStore,
     uploaded_shard: &[u8],
@@ -93,6 +99,9 @@ pub fn parse_uploaded_shard_with_metrics(
     Ok(result)
 }
 
+/// # Errors
+///
+/// Returns an error when the dedupe shard object cannot be resolved.
 pub async fn resolve_dedupe_shard_object<IndexAdapter>(
     index_store: &IndexAdapter,
     object_store: &ServerObjectStore,
@@ -118,6 +127,9 @@ where
     Ok((shard_key.clone(), metadata.length()))
 }
 
+/// # Errors
+///
+/// Returns an error when the shard bytes cannot be deserialized.
 pub fn retained_shard_chunk_hashes(
     shard_bytes: &[u8],
     limits: ShardMetadataLimits,
@@ -385,10 +397,16 @@ fn invalid_serialized_shard<T>(_error: &T) -> XetAdapterError {
     InvalidSerializedShardError::ParserRejectedMetadata.into()
 }
 
+/// # Errors
+///
+/// Returns an error when the hash is not valid or the object key cannot be constructed.
 pub fn shard_object_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
     shard_object_key_local(hash_hex)
 }
 
+/// # Errors
+///
+/// Returns an error when the object key cannot be validated.
 pub fn shard_hash_from_object_key_if_present(
     key: &ObjectKey,
 ) -> Result<Option<&str>, XetAdapterError> {
@@ -522,6 +540,9 @@ fn load_xorb_range_info(
     Ok(XorbRangeInfo { packed_chunk_ends })
 }
 
+/// # Errors
+///
+/// Returns an error when the chunk hash is not valid.
 pub fn dedupe_shard_mapping(
     chunk_hash_hex: &str,
     shard_key: &ObjectKey,
@@ -530,7 +551,7 @@ pub fn dedupe_shard_mapping(
     Ok(DedupeShardMapping::new(chunk_hash, shard_key.clone()))
 }
 
-fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
+const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
     match error {
         ObjectKeyError::Empty
         | ObjectKeyError::UnsafePath
@@ -550,7 +571,7 @@ impl XorbRangeInfo {
         if range_start == 0 {
             return Ok(0);
         }
-        let previous_index = range_start.checked_sub(1).ok_or(XetAdapterError::from(
+        let previous_index = range_start.checked_sub(1).ok_or_else(|| XetAdapterError::from(
             InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList,
         ))?;
         self.packed_chunk_ends

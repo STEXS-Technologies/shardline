@@ -1,3 +1,15 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::shadow_unrelated,
+    clippy::let_underscore_must_use,
+    clippy::format_push_string,
+    clippy::needless_pass_by_value,
+    clippy::undocumented_unsafe_blocks
+)]
+
 //! Integration tests for Git Smart HTTP protocol endpoints.
 //!
 //! These tests exercise the full request/response cycle through Axum,
@@ -59,7 +71,18 @@ fn setup() {
                 data BLOB NOT NULL,
                 size INTEGER NOT NULL CHECK (size >= 0),
                 created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
+                id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                events TEXT NOT NULL DEFAULT 'push',
+                secret TEXT,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS shardline_hub_webhooks_repo_idx ON shardline_hub_webhooks (repo_id);",
         )
         .expect("create hub tables");
         drop(conn);
@@ -70,6 +93,7 @@ fn setup() {
         let state = HubState {
             store: boxed,
             auth: None,
+            http_client: None,
         };
         shardline_hub_api::init(state);
 
@@ -95,7 +119,7 @@ fn create_repo_and_commit(
 ) -> String {
     let state = shardline_hub_api::state::get_for_test();
     let repo_id = format!("{repo_type}/{ns}/{repo}");
-    let rt = HubRepoType::from_str(repo_type).unwrap();
+    let rt = HubRepoType::parse_str(repo_type).unwrap();
     let _ = state.store.create_repo(rt, &repo_id, false);
     let parent_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
     let files_hash = format!("{:016x}", files.len());

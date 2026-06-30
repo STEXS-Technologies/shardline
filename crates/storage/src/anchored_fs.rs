@@ -326,6 +326,10 @@ pub fn fd_child_path(directory: &File, child: &OsStr) -> PathBuf {
 /// On Linux, `/proc/self/fd/N/child` paths resolve through the FD, so `std::fs::rename`
 /// works even after the parent directory is renamed. On macOS, `/dev/fd/N` cannot traverse
 /// children, so this uses `renameat` with the parent FD instead.
+///
+/// # Errors
+///
+/// Returns an error when either name contains a null byte or the rename fails.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Result<()> {
@@ -333,10 +337,13 @@ pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Resul
     use std::os::unix::io::AsRawFd;
 
     let old_cstr = CString::new(old_name.as_encoded_bytes())
-        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name contains null byte"))?;
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("name contains null byte: {e}")))?;
     let new_cstr = CString::new(new_name.as_encoded_bytes())
-        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name contains null byte"))?;
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("name contains null byte: {e}")))?;
 
+    // SAFETY: renameat(2) is safe when given valid FDs and null-terminated strings.
+    // The parent FD is an open directory descriptor; old_cstr and new_cstr are
+    // valid C strings produced by CString::new above.
     let result = unsafe {
         libc::renameat(
             parent.as_raw_fd(),
@@ -364,6 +371,10 @@ pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Resul
 /// Removes a file within a directory using FD-relative operations.
 ///
 /// On macOS, `/dev/fd/N` cannot traverse children, so this uses `unlinkat`.
+///
+/// # Errors
+///
+/// Returns an error when the name contains a null byte or the removal fails.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
@@ -371,7 +382,9 @@ pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
     let cstr = CString::new(name.as_encoded_bytes())
-        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name contains null byte"))?;
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("name contains null byte: {e}")))?;
+    // SAFETY: unlinkat(2) is safe when given a valid FD and null-terminated string.
+    // The parent FD is an open directory descriptor; cstr is a valid C string.
     let result = unsafe { libc::unlinkat(parent.as_raw_fd(), cstr.as_ptr(), 0) };
     if result == 0 {
         Ok(())
@@ -404,10 +417,14 @@ pub fn remove_if_present(path: &Path) -> io::Result<()> {
 #[allow(unsafe_code)]
 fn macos_fd_real_path(fd: std::os::unix::io::RawFd) -> PathBuf {
     let mut buf = [0i8; 1024];
+    // SAFETY: fcntl(2) with F_GETPATH writes a NUL-terminated path into buf.
+    // buf is stack-allocated with sufficient size for any valid filesystem path.
     let result = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
     if result < 0 {
         return PathBuf::from(format!("/dev/fd/{fd}"));
     }
+    // SAFETY: fcntl(F_GETPATH) guarantees the buffer contains a valid NUL-terminated
+    // C string when it returns success (result >= 0).
     let c_str = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
     PathBuf::from(c_str.to_string_lossy().as_ref())
 }

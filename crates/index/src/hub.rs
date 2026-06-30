@@ -21,7 +21,7 @@ impl HubRepoType {
 
     /// Parses from a string.
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "model" | "models" => Some(Self::Model),
             "dataset" | "datasets" => Some(Self::Dataset),
@@ -36,7 +36,7 @@ impl HubRepoType {
     /// and this crate defines `HubRepoType`. This converts between them.
     #[must_use]
     pub fn from_api_repo_type(rt: &str) -> Option<Self> {
-        Self::from_str(rt)
+        Self::parse_str(rt)
     }
 }
 
@@ -52,6 +52,10 @@ pub struct HubRepo {
 
 impl HubRepo {
     /// Generates a deterministic SHA for a commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if formatting the hash fails.
     pub fn compute_commit_sha(parent_sha: &str, message: &str, files_hash: &str) -> Result<String, std::fmt::Error> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -85,6 +89,18 @@ pub struct HubFileEntry {
     pub inline_content: Option<Vec<u8>>,
 }
 
+/// A registered webhook for a Hub repository.
+#[derive(Debug, Clone)]
+pub struct HubWebhook {
+    pub id: String,
+    pub repo_id: String,
+    pub url: String,
+    pub events: Vec<String>,
+    pub secret: Option<String>,
+    pub active: bool,
+    pub created_at_unix_seconds: u64,
+}
+
 /// Hub API persistence contract.
 ///
 /// Both [`LocalIndexStore`](crate::LocalIndexStore) and
@@ -95,6 +111,11 @@ pub trait HubStore: Send + Sync {
     type Error: std::fmt::Display + Send + Sync + 'static;
 
     /// Creates a new repository. Returns `Err` if the repo already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the repository already exists or the storage backend
+    /// operation fails.
     fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -103,15 +124,27 @@ pub trait HubStore: Send + Sync {
     ) -> Result<HubRepo, Self::Error>;
 
     /// Returns a repository by ID, or `None` if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error>;
 
     /// Lists all repositories.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error>;
 
     /// Searches repositories by name prefix and optional type filter.
     ///
     /// Returns up to `limit` repositories whose `repo_id` starts with `name_prefix`,
     /// optionally filtered by `repo_type`. Results are ordered by `repo_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn search_repos(
         &self,
         repo_type: Option<HubRepoType>,
@@ -123,6 +156,11 @@ pub trait HubStore: Send + Sync {
     ///
     /// If `parent_sha` is provided, implements optimistic concurrency: returns
     /// `Err` if the current HEAD does not match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on optimistic concurrency conflict or when the storage
+    /// backend operation fails.
     fn create_revision(
         &self,
         repo_id: &str,
@@ -133,25 +171,91 @@ pub trait HubStore: Send + Sync {
     ) -> Result<HubRevision, Self::Error>;
 
     /// Lists all revisions for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error>;
 
     /// Resolves a revision string ("main", a SHA, or a ref name) to a SHA.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn resolve_revision(&self, repo_id: &str, revision: &str) -> Result<Option<String>, Self::Error>;
 
     /// Stores file entries for a given commit SHA.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error>;
 
     /// Returns all file entries at a given commit SHA.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error>;
 
     /// Stores an LFS object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn put_lfs_object(&self, oid: &str, data: &[u8]) -> Result<(), Self::Error>;
 
     /// Returns an LFS object by OID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn get_lfs_object(&self, oid: &str) -> Result<Option<Vec<u8>>, Self::Error>;
 
     /// Returns whether an LFS object exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     fn has_lfs_object(&self, oid: &str) -> Result<bool, Self::Error>;
+
+    /// Creates a webhook for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    fn create_webhook(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+    ) -> Result<crate::hub::HubWebhook, Self::Error>;
+
+    /// Lists all webhooks for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    fn list_webhooks(&self, repo_id: &str) -> Result<Vec<crate::hub::HubWebhook>, Self::Error>;
+
+    /// Deletes a webhook by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), Self::Error>;
+
+    /// Returns webhooks subscribed to a given event for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    fn webhooks_for_event(
+        &self,
+        repo_id: &str,
+        event: &str,
+    ) -> Result<Vec<crate::hub::HubWebhook>, Self::Error>;
 }
 
 /// A type-erased wrapper that boxes errors for use as `dyn HubStore`.
@@ -233,6 +337,31 @@ trait ErasedHubStore: Send + Sync {
         &self,
         oid: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn create_webhook(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+    ) -> Result<HubWebhook, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn list_webhooks(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn delete_webhook(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    fn webhooks_for_event(
+        &self,
+        repo_id: &str,
+        event: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 impl<T: HubStore> ErasedHubStore for T {
@@ -243,7 +372,7 @@ impl<T: HubStore> ErasedHubStore for T {
         private: bool,
     ) -> Result<HubRepo, Box<dyn std::error::Error + Send + Sync>> {
         T::create_repo(self, repo_type, name, private)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn get_repo(
@@ -251,12 +380,12 @@ impl<T: HubStore> ErasedHubStore for T {
         repo_id: &str,
     ) -> Result<Option<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         T::get_repo(self, repo_id)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         T::list_repos(self)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn search_repos(
@@ -266,7 +395,7 @@ impl<T: HubStore> ErasedHubStore for T {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         T::search_repos(self, repo_type, name_prefix, limit)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn create_revision(
@@ -278,7 +407,7 @@ impl<T: HubStore> ErasedHubStore for T {
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(self, repo_id, parent_sha, new_sha, ref_name, message)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn list_revisions(
@@ -286,7 +415,7 @@ impl<T: HubStore> ErasedHubStore for T {
         repo_id: &str,
     ) -> Result<Vec<HubRevision>, Box<dyn std::error::Error + Send + Sync>> {
         T::list_revisions(self, repo_id)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn resolve_revision(
@@ -295,7 +424,7 @@ impl<T: HubStore> ErasedHubStore for T {
         revision: &str,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         T::resolve_revision(self, repo_id, revision)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn store_files(
@@ -304,7 +433,7 @@ impl<T: HubStore> ErasedHubStore for T {
         files: &[HubFileEntry],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::store_files(self, commit_sha, files)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn get_files(
@@ -312,7 +441,7 @@ impl<T: HubStore> ErasedHubStore for T {
         commit_sha: &str,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
         T::get_files(self, commit_sha)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn put_lfs_object(
@@ -321,7 +450,7 @@ impl<T: HubStore> ErasedHubStore for T {
         data: &[u8],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::put_lfs_object(self, oid, data)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn get_lfs_object(
@@ -329,7 +458,7 @@ impl<T: HubStore> ErasedHubStore for T {
         oid: &str,
     ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
         T::get_lfs_object(self, oid)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn has_lfs_object(
@@ -337,7 +466,44 @@ impl<T: HubStore> ErasedHubStore for T {
         oid: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         T::has_lfs_object(self, oid)
-            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn create_webhook(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+    ) -> Result<HubWebhook, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_webhook(self, repo_id, url, events, secret)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn list_webhooks(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_webhooks(self, repo_id)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn delete_webhook(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::delete_webhook(self, repo_id, webhook_id)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn webhooks_for_event(
+        &self,
+        repo_id: &str,
+        event: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+        T::webhooks_for_event(self, repo_id, event)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 }
 
@@ -357,6 +523,10 @@ impl BoxedHubStore {
     }
 
     /// Creates a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn create_repo(
         &self,
         repo_type: HubRepoType,
@@ -367,6 +537,10 @@ impl BoxedHubStore {
     }
 
     /// Returns a repository by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn get_repo(
         &self,
         repo_id: &str,
@@ -375,6 +549,10 @@ impl BoxedHubStore {
     }
 
     /// Lists all repositories.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn list_repos(
         &self,
     ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
@@ -382,6 +560,10 @@ impl BoxedHubStore {
     }
 
     /// Searches repositories by name prefix and optional type filter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn search_repos(
         &self,
         repo_type: Option<HubRepoType>,
@@ -392,6 +574,10 @@ impl BoxedHubStore {
     }
 
     /// Creates a new revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn create_revision(
         &self,
         repo_id: &str,
@@ -404,6 +590,10 @@ impl BoxedHubStore {
     }
 
     /// Lists all revisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn list_revisions(
         &self,
         repo_id: &str,
@@ -412,6 +602,10 @@ impl BoxedHubStore {
     }
 
     /// Resolves a revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn resolve_revision(
         &self,
         repo_id: &str,
@@ -421,6 +615,10 @@ impl BoxedHubStore {
     }
 
     /// Stores file entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn store_files(
         &self,
         commit_sha: &str,
@@ -430,6 +628,10 @@ impl BoxedHubStore {
     }
 
     /// Returns file entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn get_files(
         &self,
         commit_sha: &str,
@@ -438,6 +640,10 @@ impl BoxedHubStore {
     }
 
     /// Stores an LFS object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn put_lfs_object(
         &self,
         oid: &str,
@@ -447,6 +653,10 @@ impl BoxedHubStore {
     }
 
     /// Returns an LFS object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn get_lfs_object(
         &self,
         oid: &str,
@@ -455,11 +665,68 @@ impl BoxedHubStore {
     }
 
     /// Returns whether an LFS object exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
     pub fn has_lfs_object(
         &self,
         oid: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         self.inner.has_lfs_object(oid)
+    }
+
+    /// Creates a webhook for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    pub fn create_webhook(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+    ) -> Result<HubWebhook, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.create_webhook(repo_id, url, events, secret)
+    }
+
+    /// Lists all webhooks for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    pub fn list_webhooks(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.list_webhooks(repo_id)
+    }
+
+    /// Deletes a webhook by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    pub fn delete_webhook(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.delete_webhook(repo_id, webhook_id)
+    }
+
+    /// Returns webhooks subscribed to a given event for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    pub fn webhooks_for_event(
+        &self,
+        repo_id: &str,
+        event: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.webhooks_for_event(repo_id, event)
     }
 }
 
@@ -560,5 +827,38 @@ where
         oid: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         T::has_lfs_object(&self.0, oid).map_err(Into::into)
+    }
+
+    fn create_webhook(
+        &self,
+        repo_id: &str,
+        url: &str,
+        events: &[String],
+        secret: Option<&str>,
+    ) -> Result<HubWebhook, Box<dyn std::error::Error + Send + Sync>> {
+        T::create_webhook(&self.0, repo_id, url, events, secret).map_err(Into::into)
+    }
+
+    fn list_webhooks(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_webhooks(&self.0, repo_id).map_err(Into::into)
+    }
+
+    fn delete_webhook(
+        &self,
+        repo_id: &str,
+        webhook_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::delete_webhook(&self.0, repo_id, webhook_id).map_err(Into::into)
+    }
+
+    fn webhooks_for_event(
+        &self,
+        repo_id: &str,
+        event: &str,
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+        T::webhooks_for_event(&self.0, repo_id, event).map_err(Into::into)
     }
 }

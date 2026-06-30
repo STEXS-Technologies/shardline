@@ -214,7 +214,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             .route("/v1/stats", get(stats));
     }
     for frontend in state.config.server_frontends() {
-        app = register_frontend_routes(app, *frontend, role, &state);
+        app = register_frontend_routes(app, *frontend, role, &state)?;
     }
 
     Ok(app
@@ -256,14 +256,14 @@ fn register_frontend_routes(
     frontend: ServerFrontend,
     role: ServerRole,
     app_state: &AppState,
-) -> Router<Arc<AppState>> {
+) -> Result<Router<Arc<AppState>>, ServerError> {
     match frontend {
-        ServerFrontend::Xet => register_xet_routes(app, role),
-        ServerFrontend::Lfs => register_lfs_routes(app, role),
-        ServerFrontend::BazelHttp => register_bazel_routes(app, role),
-        ServerFrontend::Oci => register_oci_routes(app, role),
+        ServerFrontend::Xet => Ok(register_xet_routes(app, role)),
+        ServerFrontend::Lfs => Ok(register_lfs_routes(app, role)),
+        ServerFrontend::BazelHttp => Ok(register_bazel_routes(app, role)),
+        ServerFrontend::Oci => Ok(register_oci_routes(app, role)),
         ServerFrontend::Hub => register_hub_routes(app, app_state),
-        ServerFrontend::Metrics => app.merge(metrics_routes::<Arc<AppState>>()),
+        ServerFrontend::Metrics => Ok(app.merge(metrics_routes::<Arc<AppState>>())),
     }
 }
 
@@ -362,40 +362,54 @@ const fn scope_from_auth(auth: &AuthContext) -> &RepositoryScope {
     auth.claims().repository()
 }
 
+#[must_use]
 pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: usize) -> usize {
     configured_limit.get().min(endpoint_limit)
 }
 
-fn register_hub_routes(app: Router<Arc<AppState>>, app_state: &AppState) -> Router<Arc<AppState>> {
+fn register_hub_routes(
+    app: Router<Arc<AppState>>,
+    app_state: &AppState,
+) -> Result<Router<Arc<AppState>>, ServerError> {
     let hub_auth = app_state
         .auth
         .as_ref()
         .map(|sa| shardline_hub_api::auth::HubAuth::from_arc(sa.provider_arc()));
 
-    // Create a HubStore from the configured backend
+    // Create a HubStore from the configured backend.
+    // When using Postgres, share the main server's pool so Hub API and the core
+    // server operate on the same database connection pool (multi-process safe).
     let root_dir = app_state.config.root_dir();
     let store: shardline_index::hub::BoxedHubStore =
-        if let Some(pg_url) = app_state.config.index_postgres_url() {
-            // Use Postgres for Hub metadata
-            let pool = sqlx::PgPool::connect_lazy(pg_url)
-                .expect("failed to create lazy Postgres pool for Hub API");
-            let pg_store = shardline_index::PostgresIndexStore::new(pool);
-            shardline_index::hub::BoxedHubStore::from_store(pg_store)
-        } else {
-            // Use local SQLite for Hub metadata
-            let hub_root = root_dir.join("hub");
-            std::fs::create_dir_all(&hub_root).ok();
-            let sqlite_store = shardline_index::LocalIndexStore::new(hub_root)
-                .expect("failed to open Hub API SQLite store");
-            shardline_index::hub::BoxedHubStore::from_store(sqlite_store)
-        };
+        app_state.config.index_postgres_url().map_or_else(
+            || -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
+                let hub_root = root_dir.join("hub");
+                std::fs::create_dir_all(&hub_root).ok();
+                let sqlite_store = shardline_index::LocalIndexStore::new(hub_root)
+                    .map_err(|e| ServerError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                Ok(shardline_index::hub::BoxedHubStore::from_store(sqlite_store))
+            },
+            |pg_url| -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
+                let pool = sqlx::PgPool::connect_lazy(pg_url)
+                    .map_err(|e| ServerError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                let pg_store = shardline_index::PostgresIndexStore::new(pool);
+                Ok(shardline_index::hub::BoxedHubStore::from_store(pg_store))
+            },
+        )?;
+
+    // Build an HTTP client for outbound webhook delivery.
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok();
 
     let hub_state = shardline_hub_api::routes::HubState {
         store,
         auth: hub_auth,
+        http_client,
     };
     shardline_hub_api::init(hub_state);
-    app.merge(shardline_hub_api::hub_routes())
+    Ok(app.merge(shardline_hub_api::hub_routes()))
 }
 
 fn endpoint_body_limit(
@@ -406,6 +420,12 @@ fn endpoint_body_limit(
         .ok_or(ServerError::Overflow)
 }
 
+/// Acquires a semaphore permit for a chunk transfer.
+///
+/// # Errors
+///
+/// Returns [`ServerError`] if the chunk length cannot be determined or the transfer limiter
+/// is closed.
 pub async fn acquire_chunk_transfer_permit(
     state: &AppState,
     hash_hex: &str,

@@ -18,6 +18,7 @@ shardline-server-core.workspace = true
 shardline-storage.workspace = true
 shardline-xet-adapter.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

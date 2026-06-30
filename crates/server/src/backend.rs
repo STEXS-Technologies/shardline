@@ -693,10 +693,62 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         ServerError::TooManyUploadSessions => OciAdapterError::TooManyUploadSessions,
         ServerError::ExpectedBodyHashMismatch => OciAdapterError::ExpectedBodyHashMismatch,
         ServerError::BlockingTask(e) => OciAdapterError::BlockingTask(e),
-        other => OciAdapterError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            other.to_string(),
-        )),
+        ref other @ (
+            ServerError::RequestBodyRead(_)
+            | ServerError::RequestBodyTooLarge
+            | ServerError::RequestQueryTooLarge
+            | ServerError::RequestBodyFrameOutOfBounds
+            | ServerError::HashParse(_)
+            | ServerError::MissingS3ObjectStoreConfig
+            | ServerError::IndexStore(_)
+            | ServerError::MemoryIndexStore(_)
+            | ServerError::MemoryRecordStore(_)
+            | ServerError::PostgresMetadata(_)
+            | ServerError::RetentionHold(_)
+            | ServerError::QuarantineCandidate(_)
+            | ServerError::WebhookDelivery(_)
+            | ServerError::FileRecordInvariant(_)
+            | ServerError::StoredFileMetadataTooLarge { .. }
+            | ServerError::StoredFileMetadataLengthMismatch
+            | ServerError::InvalidLifecycleMetadata(_)
+            | ServerError::InvalidFileId
+            | ServerError::MissingRequiredMetadataTable(_)
+            | ServerError::InvalidXorbPrefix
+            | ServerError::XorbHashMismatch
+            | ServerError::InvalidSerializedXorb
+            | ServerError::InvalidSerializedShard(_)
+            | ServerError::MissingReferencedXorb
+            | ServerError::TooManyShardTerms
+            | ServerError::TooManyBatchReconstructionFileIds
+            | ServerError::InvalidRangeHeader
+            | ServerError::RangeNotSatisfiable
+            | ServerError::MissingAuthorization
+            | ServerError::InvalidAuthorizationHeader
+            | ServerError::InvalidToken(_)
+            | ServerError::InsufficientScope
+            | ServerError::ProviderTokensDisabled
+            | ServerError::MissingProviderApiKey
+            | ServerError::InvalidProviderApiKey
+            | ServerError::MissingProviderSubject
+            | ServerError::InvalidProviderTokenRequest
+            | ServerError::MissingProviderWebhookAuthentication
+            | ServerError::InvalidProviderWebhookAuthentication
+            | ServerError::InvalidProviderWebhookPayload
+            | ServerError::UnknownProvider
+            | ServerError::ProviderDenied
+            | ServerError::Provider(_)
+            | ServerError::ReconstructionCache(_)
+            | ServerError::Config(_)
+            | ServerError::NotAcceptable
+            | ServerError::UnauthorizedChallenge(_)
+            | ServerError::TooManyRegistryTokenRequests
+            | ServerError::MissingReconstructionCacheRedisUrl
+            | ServerError::TransferLimiterClosed
+            | ServerError::StoredObjectLengthMismatch
+            | ServerError::StorageMigrationSourceHashMismatch { .. }
+            | ServerError::ConflictingRenameTargetRecord
+            | ServerError::InvalidReconstructionResponse(_)
+        ) => OciAdapterError::Io(std::io::Error::other(other.to_string())),
     }
 }
 
