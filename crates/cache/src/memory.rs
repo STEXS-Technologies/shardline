@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 
 use crate::{AsyncReconstructionCache, ReconstructionCacheFuture, ReconstructionCacheKey};
 
@@ -39,6 +39,7 @@ struct CacheInner {
     entries: HashMap<ReconstructionCacheKey, MemoryEntry>,
     eviction_order: BTreeMap<EvictionKey, ReconstructionCacheKey>,
     next_seq: u64,
+    loading: HashMap<ReconstructionCacheKey, Arc<Notify>>,
 }
 
 impl CacheInner {
@@ -47,6 +48,7 @@ impl CacheInner {
             entries: HashMap::new(),
             eviction_order: BTreeMap::new(),
             next_seq: 0,
+            loading: HashMap::new(),
         }
     }
 
@@ -132,12 +134,36 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                     if entry.expires_at > now {
                         return Ok(Some(entry.payload.clone()));
                     }
-                } else {
+                } else if !inner.loading.contains_key(key) {
                     return Ok(None);
                 }
             }
 
             let mut inner = self.inner.write().await;
+
+            if let Some(entry) = inner.entries.get(key) {
+                if entry.expires_at > now {
+                    return Ok(Some(entry.payload.clone()));
+                }
+            }
+
+            if let Some(notify) = inner.loading.get(key) {
+                let notify = Arc::clone(notify);
+                drop(inner);
+                notify.notified().await;
+
+                let inner = self.inner.read().await;
+                if let Some(entry) = inner.entries.get(key) {
+                    if entry.expires_at > Instant::now() {
+                        return Ok(Some(entry.payload.clone()));
+                    }
+                }
+                return Ok(None);
+            }
+
+            let notify = Arc::new(Notify::new());
+            inner.loading.insert(key.clone(), Arc::clone(&notify));
+
             let should_remove = inner
                 .entries
                 .get(key)
@@ -171,6 +197,9 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                     seq: 0,
                 },
             );
+            if let Some(notify) = inner.loading.remove(key) {
+                notify.notify_waiters();
+            }
             Ok(())
         })
     }
