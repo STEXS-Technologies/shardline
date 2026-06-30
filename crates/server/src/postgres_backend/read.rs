@@ -422,6 +422,7 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::QuarantineCandidate(_)
         | PostgresMetadataStoreError::WebhookDelivery(_)
         | PostgresMetadataStoreError::IntegerOutOfRange
-        | PostgresMetadataStoreError::InvalidRecordKind => ServerError::PostgresMetadata(error),
+        | PostgresMetadataStoreError::InvalidRecordKind
+        | PostgresMetadataStoreError::InvalidRepoType(_) => ServerError::PostgresMetadata(error),
     }
 }

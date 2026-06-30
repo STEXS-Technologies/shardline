@@ -1093,7 +1093,8 @@ pub(super) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::WebhookDelivery(_)
         | other @ LocalIndexStoreError::IntegerOutOfRange
         | other @ LocalIndexStoreError::InvalidRecordKind
-        | other @ LocalIndexStoreError::InvalidLegacyImportState => {
+        | other @ LocalIndexStoreError::InvalidLegacyImportState
+        | other @ LocalIndexStoreError::InvalidRepoType(_) => {
             SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(other))
         }
     })?;

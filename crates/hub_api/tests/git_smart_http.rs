@@ -51,6 +51,7 @@ fn setup() {
                 size INTEGER NOT NULL CHECK (size >= 0),
                 sha TEXT NOT NULL,
                 is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
+                inline_content BLOB,
                 PRIMARY KEY (commit_sha, path)
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
@@ -320,12 +321,14 @@ async fn upload_pack_with_files() {
                 size: 13,
                 sha: "deadbeef".to_owned(),
                 is_lfs: false,
+                inline_content: None,
             },
             HubFileEntry {
                 path: "src/main.rs".to_owned(),
                 size: 100,
                 sha: "cafebabe".to_owned(),
                 is_lfs: false,
+                inline_content: None,
             },
         ],
         "Add files",
@@ -376,12 +379,14 @@ async fn upload_pack_with_lfs_files() {
                 size: 1024,
                 sha: "lfs-oid-123".to_owned(),
                 is_lfs: true,
+                inline_content: None,
             },
             HubFileEntry {
                 path: "README.md".to_owned(),
                 size: 100,
                 sha: "deadbeef".to_owned(),
                 is_lfs: false,
+                inline_content: None,
             },
         ],
         "Add LFS file",

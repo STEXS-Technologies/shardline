@@ -60,6 +60,14 @@ pub enum HubApiError {
     /// Optimistic concurrency conflict.
     #[error("optimistic concurrency conflict")]
     OptimisticConcurrency,
+
+    /// Pkt-line encoding error.
+    #[error("protocol error: {0}")]
+    PktLine(#[from] crate::git::pktline::PktLineError),
+
+    /// Pack file generation error.
+    #[error("pack error: {0}")]
+    Pack(#[from] crate::git::pack::PackError),
 }
 
 impl IntoResponse for HubApiError {
@@ -74,6 +82,7 @@ impl IntoResponse for HubApiError {
             Self::Conflict | Self::OptimisticConcurrency => StatusCode::CONFLICT,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::PathValidation(_) => StatusCode::BAD_REQUEST,
+            Self::PktLine(_) | Self::Pack(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = ErrorBody {
             error: self.to_string(),

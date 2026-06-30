@@ -138,6 +138,9 @@ pub enum PostgresMetadataStoreError {
     /// A stored record kind was invalid.
     #[error("stored record kind was invalid")]
     InvalidRecordKind,
+    /// An invalid repository type string was encountered.
+    #[error("invalid repository type: {0}")]
+    InvalidRepoType(String),
 }
 
 impl From<SqlxError> for PostgresMetadataStoreError {

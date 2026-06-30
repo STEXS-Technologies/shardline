@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::Path,
+    extract::{Path, Query},
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
     routing::{get, post, put},
@@ -46,8 +46,18 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
             get(xet_write_token),
         )
         .route("/api/repos/create", post(repo_create))
+        .route("/api/repos", get(repo_list))
+        .route("/api/{type}/search", get(repo_search))
         .route("/api/{type}/{ns}/{repo}", post(repo_create_type))
         .route("/api/{type}/{ns}/{repo}", get(repo_info))
+        .route(
+            "/api/{type}/{ns}/{repo}/modelcard",
+            get(repo_modelcard),
+        )
+        .route(
+            "/api/{type}/{ns}/{repo}/revisions",
+            get(repo_revisions),
+        )
         .route(
             "/api/{type}/{ns}/{repo}/preupload/{rev}",
             post(preupload),
@@ -143,10 +153,19 @@ async fn xet_read_token(
 ) -> Result<Json<TokenExchangeResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("xet_read_token", "GET", 200);
     let state = crate::state::get();
-    authorize(state, &headers, TokenScope::Read)?;
-    Ok(Json(TokenExchangeResponse {
-        token: "hub-api-placeholder-token".to_owned(),
-    }))
+    let ctx = if let Some(auth) = &state.auth {
+        auth.authorize(&headers, TokenScope::Read)?
+    } else {
+        return Err(HubApiError::Unauthorized);
+    };
+    let token = state
+        .auth
+        .as_ref()
+        .ok_or(HubApiError::Unauthorized)?
+        .provider()
+        .mint_token(ctx.claims())
+        .map_err(|_| HubApiError::InvalidToken)?;
+    Ok(Json(TokenExchangeResponse { token }))
 }
 
 async fn xet_write_token(
@@ -155,10 +174,19 @@ async fn xet_write_token(
 ) -> Result<Json<TokenExchangeResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("xet_write_token", "GET", 200);
     let state = crate::state::get();
-    authorize(state, &headers, TokenScope::Write)?;
-    Ok(Json(TokenExchangeResponse {
-        token: "hub-api-placeholder-token".to_owned(),
-    }))
+    let ctx = if let Some(auth) = &state.auth {
+        auth.authorize(&headers, TokenScope::Write)?
+    } else {
+        return Err(HubApiError::Unauthorized);
+    };
+    let token = state
+        .auth
+        .as_ref()
+        .ok_or(HubApiError::Unauthorized)?
+        .provider()
+        .mint_token(ctx.claims())
+        .map_err(|_| HubApiError::InvalidToken)?;
+    Ok(Json(TokenExchangeResponse { token }))
 }
 
 // ---- Repo create (generic, requires Write) ----
@@ -226,6 +254,124 @@ fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> RepoResponse 
     }
 }
 
+// ---- Repo list (requires Read) ----
+
+async fn repo_list(
+    headers: axum::http::HeaderMap,
+) -> Result<Json<RepoListResponse>, HubApiError> {
+    shardline_metrics::record_hub_api_request("repo_list", "GET", 200);
+    let state = crate::state::get();
+    authorize(state, &headers, TokenScope::Read)?;
+    let repos = state
+        .store
+        .list_repos()
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let response = RepoListResponse {
+        repos: repos.iter().map(repo_response_from_hub).collect(),
+    };
+    Ok(Json(response))
+}
+
+// ---- Repo search (requires Read) ----
+
+async fn repo_search(
+    headers: axum::http::HeaderMap,
+    Path(repo_type): Path<String>,
+    Query(query): Query<RepoSearchQuery>,
+) -> Result<Json<RepoListResponse>, HubApiError> {
+    shardline_metrics::record_hub_api_request("repo_search", "GET", 200);
+    let state = crate::state::get();
+    authorize(state, &headers, TokenScope::Read)?;
+    let rt = HubRepoType::from_str(&repo_type)
+        .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
+    let limit = query.limit.min(200);
+    let repos = state
+        .store
+        .search_repos(Some(rt), &query.q, limit)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let response = RepoListResponse {
+        repos: repos.iter().map(repo_response_from_hub).collect(),
+    };
+    Ok(Json(response))
+}
+
+// ---- Repo modelcard (requires Read) ----
+
+async fn repo_modelcard(
+    headers: axum::http::HeaderMap,
+    Path((_repo_type, ns, repo)): Path<(String, String, String)>,
+) -> Result<Response, HubApiError> {
+    shardline_metrics::record_hub_api_request("repo_modelcard", "GET", 200);
+    let state = crate::state::get();
+    authorize(state, &headers, TokenScope::Read)?;
+    let name = format!("{ns}/{repo}");
+    let entry = state
+        .store
+        .get_repo(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RepoNotFound)?;
+    let commit_sha = state
+        .store
+        .resolve_revision(&name, &entry.default_branch)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RevisionNotFound)?;
+    let files = state
+        .store
+        .get_files(&commit_sha)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let readme = files
+        .iter()
+        .find(|f| f.path == "README.md")
+        .ok_or(HubApiError::NotFound)?;
+    match &readme.inline_content {
+        Some(content) => {
+            let headers = [
+                ("Content-Type", "text/markdown; charset=utf-8"),
+                ("X-Shardline-SHA", readme.sha.as_str()),
+            ];
+            Ok((headers, content.clone()).into_response())
+        }
+        None => {
+            let headers = [
+                ("Content-Type", "text/markdown; charset=utf-8"),
+                ("X-Shardline-SHA", readme.sha.as_str()),
+            ];
+            Ok((headers, format!("model card {} bytes", readme.size)).into_response())
+        }
+    }
+}
+
+// ---- Repo revisions (requires Read) ----
+
+async fn repo_revisions(
+    headers: axum::http::HeaderMap,
+    Path((_repo_type, ns, repo)): Path<(String, String, String)>,
+) -> Result<Json<RevisionListResponse>, HubApiError> {
+    shardline_metrics::record_hub_api_request("repo_revisions", "GET", 200);
+    let state = crate::state::get();
+    authorize(state, &headers, TokenScope::Read)?;
+    let name = format!("{ns}/{repo}");
+    let _ = state
+        .store
+        .get_repo(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RepoNotFound)?;
+    let revisions = state
+        .store
+        .list_revisions(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let response = RevisionListResponse {
+        revisions: revisions
+            .iter()
+            .map(|r| RevisionResponse {
+                ref_name: r.ref_name.clone(),
+                sha: r.sha.clone(),
+            })
+            .collect(),
+    };
+    Ok(Json(response))
+}
+
 // ---- Repo info (requires Read) ----
 
 async fn repo_info(
@@ -258,18 +404,23 @@ async fn preupload(
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Write)?;
     let name = format!("{ns}/{repo}");
-    let _commit_sha = state
+    let commit_sha = state
         .store
         .resolve_revision(&name, &rev)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RevisionNotFound)?;
 
+    let existing_files = state
+        .store
+        .get_files(&commit_sha)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+
     let result: Vec<PreuploadResult> = request
         .files
         .into_iter()
         .map(|f| PreuploadResult {
+            exists: existing_files.iter().any(|ef| ef.path == f.path),
             path: f.path,
-            exists: false,
         })
         .collect();
 
@@ -327,6 +478,7 @@ async fn apply_commit(
                     size,
                     sha: sha.clone(),
                     is_lfs: false,
+                    inline_content: Some(content.clone()),
                 });
                 file_hashes.push(sha);
             }
@@ -338,6 +490,7 @@ async fn apply_commit(
                     size: *size,
                     sha: oid.clone(),
                     is_lfs: true,
+                    inline_content: None,
                 });
                 file_hashes.push(oid.clone());
             }
@@ -467,12 +620,15 @@ async fn resolve_file(
     let result = resolve::resolve_file_from_store(state, &commit_sha, &file_path)?;
 
     match result {
-        resolve::DownloadResult::Inline { size, sha } => {
+        resolve::DownloadResult::Inline { size, sha, content } => {
             let headers = [
                 ("Content-Type", "application/octet-stream"),
                 ("X-Shardline-SHA", sha.as_str()),
             ];
-            Ok((headers, format!("inline file {size} bytes")).into_response())
+            match content {
+                Some(data) => Ok((headers, data).into_response()),
+                None => Ok((headers, format!("inline file {size} bytes")).into_response()),
+            }
         }
         resolve::DownloadResult::LfsRedirect { oid, .. } => {
             let redirect_url = format!("/lfs/objects/{oid}");

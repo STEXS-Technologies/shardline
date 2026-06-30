@@ -42,8 +42,7 @@
 
 ## Hub API — Known Limitations
 
-- **No model card or metadata search** — repository README, model card, and search
-  endpoints are not yet implemented.
+- **No model card or metadata search** — ✅ Added: model card endpoint (`GET /api/{type}/{ns}/{repo}/modelcard`), repo search (`GET /api/{type}/search?q=...`), revisions list (`GET /api/{type}/{ns}/{repo}/revisions`). Model card content served via inline_content storage.
 - **No dataset viewer** — dataset-specific preview and streaming endpoints are not yet
   implemented.
 - **No webhooks or callbacks** — repository event notifications are not implemented.

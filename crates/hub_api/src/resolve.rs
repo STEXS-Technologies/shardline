@@ -30,6 +30,7 @@ pub fn resolve_file_from_store(
         Ok(DownloadResult::Inline {
             size: file.size,
             sha: file.sha.clone(),
+            content: file.inline_content.clone(),
         })
     } else if file.is_lfs {
         Ok(DownloadResult::LfsRedirect {
@@ -40,6 +41,7 @@ pub fn resolve_file_from_store(
         Ok(DownloadResult::Inline {
             size: file.size,
             sha: file.sha.clone(),
+            content: file.inline_content.clone(),
         })
     }
 }
@@ -53,6 +55,8 @@ pub enum DownloadResult {
         size: u64,
         /// File SHA.
         sha: String,
+        /// File content (if stored).
+        content: Option<Vec<u8>>,
     },
     /// File should be redirected to the LFS endpoint.
     LfsRedirect {
