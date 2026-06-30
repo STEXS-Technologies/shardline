@@ -62,7 +62,8 @@ pub use artifact::{CliArtifactError, render_completion, render_manpage};
 pub use backup::{BackupRuntimeError, run_backup_manifest};
 pub use bench::{
     BenchConfig, BenchDeploymentTarget, BenchInventoryScope, BenchReport, BenchRuntimeError,
-    BenchScenario, IngestBenchReport, run_bench, run_ingest_bench,
+    BenchScenario, ByteMetrics, ChunkMetrics, IngestBenchReport, InventoryMetrics,
+    LatencyMetrics, TimingMetrics, run_bench, run_ingest_bench,
 };
 pub use command::{BenchMode, CliCommand, CliParseError, CompletionShell, RedactedDbUrl};
 pub use config::{

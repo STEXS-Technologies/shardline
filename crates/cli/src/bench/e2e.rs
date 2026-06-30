@@ -4,6 +4,7 @@ use shardline_server::ReconstructionCacheBenchReport;
 
 use super::{
     BenchBackendSetup, BenchFixture, BenchIterationReport, BenchRuntimeError, BenchScenario,
+    ByteMetrics, ChunkMetrics, InventoryMetrics, LatencyMetrics, TimingMetrics,
     available_parallelism_u64, build_iteration_repository_scopes, capture_process_cpu_micros,
     checked_add_u64, duration_micros, host_utilization_per_mille, iteration_namespace,
     namespaced_file_id, ratio_per_mille,
@@ -305,108 +306,118 @@ pub(crate) async fn run_bench_iteration(
         BenchIterationReport {
             iteration,
             storage_dir,
-            initial_upload_micros: initial.1,
-            sparse_update_upload_micros: sparse_update.1,
-            latest_download_micros,
-            previous_download_micros,
-            ranged_reconstruction_micros,
-            concurrent_latest_download_micros,
-            concurrent_upload_micros,
-            cross_repository_upload_micros,
-            cached_latest_reconstruction_cold_micros: cached_reconstruction.cold_load_micros,
-            cached_latest_reconstruction_hot_micros: cached_reconstruction.hot_load_micros,
-            uploaded_bytes,
-            downloaded_bytes,
-            cached_reconstruction_response_bytes: cached_reconstruction.response_bytes,
-            cached_latest_reconstruction_cache_hit: cached_reconstruction.cache_hit,
-            concurrent_downloaded_bytes,
-            concurrent_uploaded_bytes,
-            concurrent_newly_stored_bytes,
-            newly_stored_bytes,
-            initial_inserted_chunks: match scenario {
-                BenchScenario::Full | BenchScenario::InitialUpload => initial.0.inserted_chunks,
-                BenchScenario::SparseUpdateUpload
-                | BenchScenario::LatestDownload
-                | BenchScenario::PreviousDownload
-                | BenchScenario::RangedReconstruction
-                | BenchScenario::ConcurrentLatestDownload
-                | BenchScenario::ConcurrentUpload
-                | BenchScenario::CrossRepositoryUpload
-                | BenchScenario::CachedLatestReconstruction => 0,
+            latency: LatencyMetrics {
+                initial_upload_micros: initial.1,
+                sparse_update_upload_micros: sparse_update.1,
+                latest_download_micros,
+                previous_download_micros,
+                ranged_reconstruction_micros,
+                concurrent_latest_download_micros,
+                concurrent_upload_micros,
+                cross_repository_upload_micros,
+                cached_latest_reconstruction_cold_micros: cached_reconstruction.cold_load_micros,
+                cached_latest_reconstruction_hot_micros: cached_reconstruction.hot_load_micros,
             },
-            sparse_update_inserted_chunks: match scenario {
-                BenchScenario::Full | BenchScenario::SparseUpdateUpload => {
-                    sparse_update.0.inserted_chunks
-                }
-                BenchScenario::InitialUpload
-                | BenchScenario::LatestDownload
-                | BenchScenario::PreviousDownload
-                | BenchScenario::RangedReconstruction
-                | BenchScenario::ConcurrentLatestDownload
-                | BenchScenario::ConcurrentUpload
-                | BenchScenario::CrossRepositoryUpload
-                | BenchScenario::CachedLatestReconstruction => 0,
+            bytes: ByteMetrics {
+                uploaded_bytes,
+                downloaded_bytes,
+                cached_reconstruction_response_bytes: cached_reconstruction.response_bytes,
+                cached_latest_reconstruction_cache_hit: cached_reconstruction.cache_hit,
+                concurrent_downloaded_bytes,
+                concurrent_uploaded_bytes,
+                concurrent_newly_stored_bytes,
+                newly_stored_bytes,
+                cross_repository_newly_stored_bytes: match scenario {
+                    BenchScenario::Full | BenchScenario::CrossRepositoryUpload => {
+                        cross_repository.stored_bytes
+                    }
+                    BenchScenario::InitialUpload
+                    | BenchScenario::SparseUpdateUpload
+                    | BenchScenario::LatestDownload
+                    | BenchScenario::PreviousDownload
+                    | BenchScenario::RangedReconstruction
+                    | BenchScenario::ConcurrentLatestDownload
+                    | BenchScenario::ConcurrentUpload
+                    | BenchScenario::CachedLatestReconstruction => 0,
+                },
             },
-            sparse_update_reused_chunks: match scenario {
-                BenchScenario::Full | BenchScenario::SparseUpdateUpload => {
-                    sparse_update.0.reused_chunks
-                }
-                BenchScenario::InitialUpload
-                | BenchScenario::LatestDownload
-                | BenchScenario::PreviousDownload
-                | BenchScenario::RangedReconstruction
-                | BenchScenario::ConcurrentLatestDownload
-                | BenchScenario::ConcurrentUpload
-                | BenchScenario::CrossRepositoryUpload
-                | BenchScenario::CachedLatestReconstruction => 0,
+            chunks: ChunkMetrics {
+                initial_inserted_chunks: match scenario {
+                    BenchScenario::Full | BenchScenario::InitialUpload => initial.0.inserted_chunks,
+                    BenchScenario::SparseUpdateUpload
+                    | BenchScenario::LatestDownload
+                    | BenchScenario::PreviousDownload
+                    | BenchScenario::RangedReconstruction
+                    | BenchScenario::ConcurrentLatestDownload
+                    | BenchScenario::ConcurrentUpload
+                    | BenchScenario::CrossRepositoryUpload
+                    | BenchScenario::CachedLatestReconstruction => 0,
+                },
+                sparse_update_inserted_chunks: match scenario {
+                    BenchScenario::Full | BenchScenario::SparseUpdateUpload => {
+                        sparse_update.0.inserted_chunks
+                    }
+                    BenchScenario::InitialUpload
+                    | BenchScenario::LatestDownload
+                    | BenchScenario::PreviousDownload
+                    | BenchScenario::RangedReconstruction
+                    | BenchScenario::ConcurrentLatestDownload
+                    | BenchScenario::ConcurrentUpload
+                    | BenchScenario::CrossRepositoryUpload
+                    | BenchScenario::CachedLatestReconstruction => 0,
+                },
+                sparse_update_reused_chunks: match scenario {
+                    BenchScenario::Full | BenchScenario::SparseUpdateUpload => {
+                        sparse_update.0.reused_chunks
+                    }
+                    BenchScenario::InitialUpload
+                    | BenchScenario::LatestDownload
+                    | BenchScenario::PreviousDownload
+                    | BenchScenario::RangedReconstruction
+                    | BenchScenario::ConcurrentLatestDownload
+                    | BenchScenario::ConcurrentUpload
+                    | BenchScenario::CrossRepositoryUpload
+                    | BenchScenario::CachedLatestReconstruction => 0,
+                },
+                concurrent_upload_inserted_chunks,
+                concurrent_upload_reused_chunks,
+                cross_repository_inserted_chunks: match scenario {
+                    BenchScenario::Full | BenchScenario::CrossRepositoryUpload => {
+                        cross_repository.inserted_chunks
+                    }
+                    BenchScenario::InitialUpload
+                    | BenchScenario::SparseUpdateUpload
+                    | BenchScenario::LatestDownload
+                    | BenchScenario::PreviousDownload
+                    | BenchScenario::RangedReconstruction
+                    | BenchScenario::ConcurrentLatestDownload
+                    | BenchScenario::ConcurrentUpload
+                    | BenchScenario::CachedLatestReconstruction => 0,
+                },
+                cross_repository_reused_chunks: match scenario {
+                    BenchScenario::Full | BenchScenario::CrossRepositoryUpload => {
+                        cross_repository.reused_chunks
+                    }
+                    BenchScenario::InitialUpload
+                    | BenchScenario::SparseUpdateUpload
+                    | BenchScenario::LatestDownload
+                    | BenchScenario::PreviousDownload
+                    | BenchScenario::RangedReconstruction
+                    | BenchScenario::ConcurrentLatestDownload
+                    | BenchScenario::ConcurrentUpload
+                    | BenchScenario::CachedLatestReconstruction => 0,
+                },
             },
-            concurrent_upload_inserted_chunks,
-            concurrent_upload_reused_chunks,
-            cross_repository_inserted_chunks: match scenario {
-                BenchScenario::Full | BenchScenario::CrossRepositoryUpload => {
-                    cross_repository.inserted_chunks
-                }
-                BenchScenario::InitialUpload
-                | BenchScenario::SparseUpdateUpload
-                | BenchScenario::LatestDownload
-                | BenchScenario::PreviousDownload
-                | BenchScenario::RangedReconstruction
-                | BenchScenario::ConcurrentLatestDownload
-                | BenchScenario::ConcurrentUpload
-                | BenchScenario::CachedLatestReconstruction => 0,
+            timing: TimingMetrics {
+                process_cpu_micros,
+                process_cpu_cores_per_mille,
+                process_host_utilization_per_mille,
             },
-            cross_repository_reused_chunks: match scenario {
-                BenchScenario::Full | BenchScenario::CrossRepositoryUpload => {
-                    cross_repository.reused_chunks
-                }
-                BenchScenario::InitialUpload
-                | BenchScenario::SparseUpdateUpload
-                | BenchScenario::LatestDownload
-                | BenchScenario::PreviousDownload
-                | BenchScenario::RangedReconstruction
-                | BenchScenario::ConcurrentLatestDownload
-                | BenchScenario::ConcurrentUpload
-                | BenchScenario::CachedLatestReconstruction => 0,
+            inventory: InventoryMetrics {
+                chunk_objects: stats.chunks,
+                chunk_bytes: stats.chunk_bytes,
+                visible_files: stats.files,
             },
-            cross_repository_newly_stored_bytes: match scenario {
-                BenchScenario::Full | BenchScenario::CrossRepositoryUpload => {
-                    cross_repository.stored_bytes
-                }
-                BenchScenario::InitialUpload
-                | BenchScenario::SparseUpdateUpload
-                | BenchScenario::LatestDownload
-                | BenchScenario::PreviousDownload
-                | BenchScenario::RangedReconstruction
-                | BenchScenario::ConcurrentLatestDownload
-                | BenchScenario::ConcurrentUpload
-                | BenchScenario::CachedLatestReconstruction => 0,
-            },
-            chunk_objects: stats.chunks,
-            chunk_bytes: stats.chunk_bytes,
-            visible_files: stats.files,
-            process_cpu_micros,
-            process_cpu_cores_per_mille,
-            process_host_utilization_per_mille,
         },
         metadata_backend,
         object_backend,

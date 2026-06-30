@@ -29,13 +29,9 @@ pub(crate) use sparse::{
 #[cfg(test)]
 pub(crate) const DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS: usize = 64;
 
-/// One benchmark iteration report.
+/// Latency measurements for a single benchmark iteration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BenchIterationReport {
-    /// Iteration number starting at one.
-    pub iteration: u32,
-    /// Storage root used for this isolated iteration.
-    pub storage_dir: PathBuf,
+pub struct LatencyMetrics {
     /// Initial upload latency in microseconds.
     pub initial_upload_micros: u64,
     /// Sparse-update upload latency in microseconds.
@@ -56,6 +52,11 @@ pub struct BenchIterationReport {
     pub cached_latest_reconstruction_cold_micros: u64,
     /// Hot reconstruction-cache hit latency in microseconds.
     pub cached_latest_reconstruction_hot_micros: u64,
+}
+
+/// Byte-count measurements for a single benchmark iteration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ByteMetrics {
     /// Total bytes uploaded in this iteration.
     pub uploaded_bytes: u64,
     /// Total bytes downloaded in this iteration.
@@ -72,6 +73,13 @@ pub struct BenchIterationReport {
     pub concurrent_newly_stored_bytes: u64,
     /// New bytes written to storage in this iteration.
     pub newly_stored_bytes: u64,
+    /// New bytes written during the cross-repository upload.
+    pub cross_repository_newly_stored_bytes: u64,
+}
+
+/// Chunk-count measurements for a single benchmark iteration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChunkMetrics {
     /// Number of chunks inserted during the initial upload.
     pub initial_inserted_chunks: u64,
     /// Number of chunks inserted during the sparse update.
@@ -86,20 +94,47 @@ pub struct BenchIterationReport {
     pub cross_repository_inserted_chunks: u64,
     /// Number of chunks reused during the cross-repository upload.
     pub cross_repository_reused_chunks: u64,
-    /// New bytes written during the cross-repository upload.
-    pub cross_repository_newly_stored_bytes: u64,
-    /// Chunk object count after the iteration completes.
-    pub chunk_objects: u64,
-    /// Chunk object bytes after the iteration completes.
-    pub chunk_bytes: u64,
-    /// Visible file-record count after the iteration completes.
-    pub visible_files: u64,
+}
+
+/// Process timing measurements for a single benchmark iteration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimingMetrics {
     /// Total process CPU time consumed while executing this iteration workload.
     pub process_cpu_micros: u64,
     /// Average CPU cores consumed during this iteration, in per-mille cores.
     pub process_cpu_cores_per_mille: u64,
     /// Fraction of host CPU capacity consumed during this iteration, in per-mille.
     pub process_host_utilization_per_mille: u64,
+}
+
+/// Inventory snapshot at the end of a single benchmark iteration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryMetrics {
+    /// Chunk object count after the iteration completes.
+    pub chunk_objects: u64,
+    /// Chunk object bytes after the iteration completes.
+    pub chunk_bytes: u64,
+    /// Visible file-record count after the iteration completes.
+    pub visible_files: u64,
+}
+
+/// One benchmark iteration report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchIterationReport {
+    /// Iteration number starting at one.
+    pub iteration: u32,
+    /// Storage root used for this isolated iteration.
+    pub storage_dir: PathBuf,
+    /// Latency measurements for this iteration.
+    pub latency: LatencyMetrics,
+    /// Byte-count measurements for this iteration.
+    pub bytes: ByteMetrics,
+    /// Chunk-count measurements for this iteration.
+    pub chunks: ChunkMetrics,
+    /// Process timing measurements for this iteration.
+    pub timing: TimingMetrics,
+    /// Inventory snapshot at the end of this iteration.
+    pub inventory: InventoryMetrics,
 }
 
 /// Aggregate benchmark report.
@@ -131,26 +166,21 @@ pub struct BenchReport {
     pub mutated_bytes: u64,
     /// CPU threads available to the benchmark process.
     pub available_parallelism: u64,
-    /// Average initial upload latency in microseconds.
-    pub average_initial_upload_micros: u64,
-    /// Average sparse-update upload latency in microseconds.
-    pub average_sparse_update_upload_micros: u64,
-    /// Average latest-version download latency in microseconds.
-    pub average_latest_download_micros: u64,
-    /// Average previous-version download latency in microseconds.
-    pub average_previous_download_micros: u64,
-    /// Average ranged reconstruction-planning latency in microseconds.
-    pub average_ranged_reconstruction_micros: u64,
-    /// Average concurrent latest-download latency in microseconds.
-    pub average_concurrent_latest_download_micros: u64,
-    /// Average concurrent upload latency in microseconds.
-    pub average_concurrent_upload_micros: u64,
-    /// Average cross-repository upload latency in microseconds.
-    pub average_cross_repository_upload_micros: u64,
-    /// Average cold reconstruction-cache fill latency in microseconds.
-    pub average_cached_latest_reconstruction_cold_micros: u64,
-    /// Average hot reconstruction-cache hit latency in microseconds.
-    pub average_cached_latest_reconstruction_hot_micros: u64,
+    /// Average latency measurements across iterations.
+    pub latency: LatencyMetrics,
+    /// Average throughput measurements across iterations.
+    pub throughput: BenchThroughputMetrics,
+    /// Average process timing measurements across iterations.
+    pub timing: TimingMetrics,
+    /// Inventory totals across all iterations.
+    pub totals: BenchTotals,
+    /// Per-iteration detail.
+    pub iterations_detail: Vec<BenchIterationReport>,
+}
+
+/// Average throughput measurements in the aggregate report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchThroughputMetrics {
     /// Average initial upload throughput in bytes per second.
     pub average_initial_upload_bytes_per_second: u64,
     /// Average sparse-update upload throughput in bytes per second.
@@ -167,12 +197,11 @@ pub struct BenchReport {
     pub average_cross_repository_upload_bytes_per_second: u64,
     /// Average hot cached-reconstruction throughput in bytes per second.
     pub average_cached_latest_reconstruction_hit_bytes_per_second: u64,
-    /// Average process CPU time consumed per iteration.
-    pub average_process_cpu_micros: u64,
-    /// Average CPU cores consumed per iteration, in per-mille cores.
-    pub average_process_cpu_cores_per_mille: u64,
-    /// Average fraction of host CPU capacity consumed per iteration, in per-mille.
-    pub average_process_host_utilization_per_mille: u64,
+}
+
+/// Totals across all iterations in the aggregate report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchTotals {
     /// Concurrent latest-download scaling efficiency in per-mille, where 1000 is ideal linear scaling.
     pub concurrent_latest_download_scaling_per_mille: u64,
     /// Concurrent upload scaling efficiency in per-mille, where 1000 is ideal linear scaling.
@@ -209,8 +238,6 @@ pub struct BenchReport {
     pub total_cross_repository_reused_chunks: u64,
     /// Total newly stored bytes across all cross-repository upload runs.
     pub total_cross_repository_newly_stored_bytes: u64,
-    /// Per-iteration detail.
-    pub iterations_detail: Vec<BenchIterationReport>,
 }
 
 impl BenchReport {
@@ -241,155 +268,173 @@ impl BenchReport {
         println!("available_parallelism: {}", self.available_parallelism);
         println!(
             "average_initial_upload_micros: {}",
-            self.average_initial_upload_micros
+            self.latency.initial_upload_micros
         );
         println!(
             "average_sparse_update_upload_micros: {}",
-            self.average_sparse_update_upload_micros
+            self.latency.sparse_update_upload_micros
         );
         println!(
             "average_latest_download_micros: {}",
-            self.average_latest_download_micros
+            self.latency.latest_download_micros
         );
         println!(
             "average_previous_download_micros: {}",
-            self.average_previous_download_micros
+            self.latency.previous_download_micros
         );
         println!(
             "average_ranged_reconstruction_micros: {}",
-            self.average_ranged_reconstruction_micros
+            self.latency.ranged_reconstruction_micros
         );
         println!(
             "average_concurrent_latest_download_micros: {}",
-            self.average_concurrent_latest_download_micros
+            self.latency.concurrent_latest_download_micros
         );
         println!(
             "average_concurrent_upload_micros: {}",
-            self.average_concurrent_upload_micros
+            self.latency.concurrent_upload_micros
         );
         println!(
             "average_cross_repository_upload_micros: {}",
-            self.average_cross_repository_upload_micros
+            self.latency.cross_repository_upload_micros
         );
         println!(
             "average_cached_latest_reconstruction_cold_micros: {}",
-            self.average_cached_latest_reconstruction_cold_micros
+            self.latency.cached_latest_reconstruction_cold_micros
         );
         println!(
             "average_cached_latest_reconstruction_hot_micros: {}",
-            self.average_cached_latest_reconstruction_hot_micros
+            self.latency.cached_latest_reconstruction_hot_micros
         );
         println!(
             "average_process_cpu_micros: {}",
-            self.average_process_cpu_micros
+            self.timing.process_cpu_micros
         );
         println!(
             "average_process_cpu_cores_per_mille: {}",
-            self.average_process_cpu_cores_per_mille
+            self.timing.process_cpu_cores_per_mille
         );
         println!(
             "average_process_host_utilization_per_mille: {}",
-            self.average_process_host_utilization_per_mille
+            self.timing.process_host_utilization_per_mille
         );
         println!(
             "average_initial_upload_bytes_per_second: {}",
-            self.average_initial_upload_bytes_per_second
+            self.throughput.average_initial_upload_bytes_per_second
         );
         println!(
             "average_sparse_update_upload_bytes_per_second: {}",
-            self.average_sparse_update_upload_bytes_per_second
+            self.throughput.average_sparse_update_upload_bytes_per_second
         );
         println!(
             "average_latest_download_bytes_per_second: {}",
-            self.average_latest_download_bytes_per_second
+            self.throughput.average_latest_download_bytes_per_second
         );
         println!(
             "average_previous_download_bytes_per_second: {}",
-            self.average_previous_download_bytes_per_second
+            self.throughput.average_previous_download_bytes_per_second
         );
         println!(
             "average_concurrent_latest_download_bytes_per_second: {}",
-            self.average_concurrent_latest_download_bytes_per_second
+            self.throughput
+                .average_concurrent_latest_download_bytes_per_second
         );
         println!(
             "average_concurrent_upload_bytes_per_second: {}",
-            self.average_concurrent_upload_bytes_per_second
+            self.throughput.average_concurrent_upload_bytes_per_second
         );
         println!(
             "average_cross_repository_upload_bytes_per_second: {}",
-            self.average_cross_repository_upload_bytes_per_second
+            self.throughput
+                .average_cross_repository_upload_bytes_per_second
         );
         println!(
             "average_cached_latest_reconstruction_hit_bytes_per_second: {}",
-            self.average_cached_latest_reconstruction_hit_bytes_per_second
+            self.throughput
+                .average_cached_latest_reconstruction_hit_bytes_per_second
         );
         println!(
             "concurrent_latest_download_scaling_per_mille: {}",
-            self.concurrent_latest_download_scaling_per_mille
+            self.totals.concurrent_latest_download_scaling_per_mille
         );
         println!(
             "concurrent_upload_scaling_per_mille: {}",
-            self.concurrent_upload_scaling_per_mille
+            self.totals.concurrent_upload_scaling_per_mille
         );
-        println!("total_uploaded_bytes: {}", self.total_uploaded_bytes);
-        println!("total_downloaded_bytes: {}", self.total_downloaded_bytes);
+        println!("total_uploaded_bytes: {}", self.totals.total_uploaded_bytes);
+        println!(
+            "total_downloaded_bytes: {}",
+            self.totals.total_downloaded_bytes
+        );
         println!(
             "total_cached_reconstruction_response_bytes: {}",
-            self.total_cached_reconstruction_response_bytes
+            self.totals.total_cached_reconstruction_response_bytes
         );
-        println!("cache_hit_iterations: {}", self.cache_hit_iterations);
+        println!(
+            "cache_hit_iterations: {}",
+            self.totals.cache_hit_iterations
+        );
         println!(
             "total_concurrent_downloaded_bytes: {}",
-            self.total_concurrent_downloaded_bytes
+            self.totals.total_concurrent_downloaded_bytes
         );
         println!(
             "total_concurrent_uploaded_bytes: {}",
-            self.total_concurrent_uploaded_bytes
+            self.totals.total_concurrent_uploaded_bytes
         );
         println!(
             "total_newly_stored_bytes: {}",
-            self.total_newly_stored_bytes
+            self.totals.total_newly_stored_bytes
         );
         println!(
             "total_concurrent_newly_stored_bytes: {}",
-            self.total_concurrent_newly_stored_bytes
+            self.totals.total_concurrent_newly_stored_bytes
         );
         println!(
             "total_cross_repository_newly_stored_bytes: {}",
-            self.total_cross_repository_newly_stored_bytes
+            self.totals.total_cross_repository_newly_stored_bytes
         );
         println!(
             "total_initial_inserted_chunks: {}",
-            self.total_initial_inserted_chunks
+            self.totals.total_initial_inserted_chunks
         );
         println!(
             "total_sparse_update_inserted_chunks: {}",
-            self.total_sparse_update_inserted_chunks
+            self.totals.total_sparse_update_inserted_chunks
         );
         println!(
             "total_sparse_update_reused_chunks: {}",
-            self.total_sparse_update_reused_chunks
+            self.totals.total_sparse_update_reused_chunks
         );
         println!(
             "total_concurrent_upload_inserted_chunks: {}",
-            self.total_concurrent_upload_inserted_chunks
+            self.totals.total_concurrent_upload_inserted_chunks
         );
         println!(
             "total_concurrent_upload_reused_chunks: {}",
-            self.total_concurrent_upload_reused_chunks
+            self.totals.total_concurrent_upload_reused_chunks
         );
         println!(
             "total_cross_repository_inserted_chunks: {}",
-            self.total_cross_repository_inserted_chunks
+            self.totals.total_cross_repository_inserted_chunks
         );
         println!(
             "total_cross_repository_reused_chunks: {}",
-            self.total_cross_repository_reused_chunks
+            self.totals.total_cross_repository_reused_chunks
         );
         if let Some(last) = self.iterations_detail.last() {
-            println!("last_iteration_chunk_objects: {}", last.chunk_objects);
-            println!("last_iteration_chunk_bytes: {}", last.chunk_bytes);
-            println!("last_iteration_visible_files: {}", last.visible_files);
+            println!(
+                "last_iteration_chunk_objects: {}",
+                last.inventory.chunk_objects
+            );
+            println!(
+                "last_iteration_chunk_bytes: {}",
+                last.inventory.chunk_bytes
+            );
+            println!(
+                "last_iteration_visible_files: {}",
+                last.inventory.visible_files
+            );
         }
     }
 }
@@ -1030,106 +1075,110 @@ pub async fn run_bench(
         }
 
         total_initial_upload_micros =
-            checked_add_u64(total_initial_upload_micros, report.initial_upload_micros)?;
+            checked_add_u64(total_initial_upload_micros, report.latency.initial_upload_micros)?;
         total_sparse_update_upload_micros = checked_add_u64(
             total_sparse_update_upload_micros,
-            report.sparse_update_upload_micros,
+            report.latency.sparse_update_upload_micros,
         )?;
-        total_latest_download_micros =
-            checked_add_u64(total_latest_download_micros, report.latest_download_micros)?;
+        total_latest_download_micros = checked_add_u64(
+            total_latest_download_micros,
+            report.latency.latest_download_micros,
+        )?;
         total_previous_download_micros = checked_add_u64(
             total_previous_download_micros,
-            report.previous_download_micros,
+            report.latency.previous_download_micros,
         )?;
         total_ranged_reconstruction_micros = checked_add_u64(
             total_ranged_reconstruction_micros,
-            report.ranged_reconstruction_micros,
+            report.latency.ranged_reconstruction_micros,
         )?;
         total_concurrent_latest_download_micros = checked_add_u64(
             total_concurrent_latest_download_micros,
-            report.concurrent_latest_download_micros,
+            report.latency.concurrent_latest_download_micros,
         )?;
         total_concurrent_upload_micros = checked_add_u64(
             total_concurrent_upload_micros,
-            report.concurrent_upload_micros,
+            report.latency.concurrent_upload_micros,
         )?;
         total_cross_repository_upload_micros = checked_add_u64(
             total_cross_repository_upload_micros,
-            report.cross_repository_upload_micros,
+            report.latency.cross_repository_upload_micros,
         )?;
         total_cached_latest_reconstruction_cold_micros = checked_add_u64(
             total_cached_latest_reconstruction_cold_micros,
-            report.cached_latest_reconstruction_cold_micros,
+            report.latency.cached_latest_reconstruction_cold_micros,
         )?;
         total_cached_latest_reconstruction_hot_micros = checked_add_u64(
             total_cached_latest_reconstruction_hot_micros,
-            report.cached_latest_reconstruction_hot_micros,
+            report.latency.cached_latest_reconstruction_hot_micros,
         )?;
-        total_uploaded_bytes = checked_add_u64(total_uploaded_bytes, report.uploaded_bytes)?;
-        total_downloaded_bytes = checked_add_u64(total_downloaded_bytes, report.downloaded_bytes)?;
+        total_uploaded_bytes =
+            checked_add_u64(total_uploaded_bytes, report.bytes.uploaded_bytes)?;
+        total_downloaded_bytes =
+            checked_add_u64(total_downloaded_bytes, report.bytes.downloaded_bytes)?;
         total_cached_reconstruction_response_bytes = checked_add_u64(
             total_cached_reconstruction_response_bytes,
-            report.cached_reconstruction_response_bytes,
+            report.bytes.cached_reconstruction_response_bytes,
         )?;
         total_concurrent_downloaded_bytes = checked_add_u64(
             total_concurrent_downloaded_bytes,
-            report.concurrent_downloaded_bytes,
+            report.bytes.concurrent_downloaded_bytes,
         )?;
         total_concurrent_uploaded_bytes = checked_add_u64(
             total_concurrent_uploaded_bytes,
-            report.concurrent_uploaded_bytes,
+            report.bytes.concurrent_uploaded_bytes,
         )?;
         total_concurrent_newly_stored_bytes = checked_add_u64(
             total_concurrent_newly_stored_bytes,
-            report.concurrent_newly_stored_bytes,
+            report.bytes.concurrent_newly_stored_bytes,
         )?;
         total_cross_repository_newly_stored_bytes = checked_add_u64(
             total_cross_repository_newly_stored_bytes,
-            report.cross_repository_newly_stored_bytes,
+            report.bytes.cross_repository_newly_stored_bytes,
         )?;
         total_newly_stored_bytes =
-            checked_add_u64(total_newly_stored_bytes, report.newly_stored_bytes)?;
+            checked_add_u64(total_newly_stored_bytes, report.bytes.newly_stored_bytes)?;
         total_initial_inserted_chunks = checked_add_u64(
             total_initial_inserted_chunks,
-            report.initial_inserted_chunks,
+            report.chunks.initial_inserted_chunks,
         )?;
         total_sparse_update_inserted_chunks = checked_add_u64(
             total_sparse_update_inserted_chunks,
-            report.sparse_update_inserted_chunks,
+            report.chunks.sparse_update_inserted_chunks,
         )?;
         total_sparse_update_reused_chunks = checked_add_u64(
             total_sparse_update_reused_chunks,
-            report.sparse_update_reused_chunks,
+            report.chunks.sparse_update_reused_chunks,
         )?;
         total_concurrent_upload_inserted_chunks = checked_add_u64(
             total_concurrent_upload_inserted_chunks,
-            report.concurrent_upload_inserted_chunks,
+            report.chunks.concurrent_upload_inserted_chunks,
         )?;
         total_concurrent_upload_reused_chunks = checked_add_u64(
             total_concurrent_upload_reused_chunks,
-            report.concurrent_upload_reused_chunks,
+            report.chunks.concurrent_upload_reused_chunks,
         )?;
         total_cross_repository_inserted_chunks = checked_add_u64(
             total_cross_repository_inserted_chunks,
-            report.cross_repository_inserted_chunks,
+            report.chunks.cross_repository_inserted_chunks,
         )?;
         total_cross_repository_reused_chunks = checked_add_u64(
             total_cross_repository_reused_chunks,
-            report.cross_repository_reused_chunks,
+            report.chunks.cross_repository_reused_chunks,
         )?;
         total_process_cpu_micros =
-            checked_add_u64(total_process_cpu_micros, report.process_cpu_micros)?;
+            checked_add_u64(total_process_cpu_micros, report.timing.process_cpu_micros)?;
         total_process_cpu_cores_per_mille = checked_add_u64(
             total_process_cpu_cores_per_mille,
-            report.process_cpu_cores_per_mille,
+            report.timing.process_cpu_cores_per_mille,
         )?;
         total_process_host_utilization_per_mille = checked_add_u64(
             total_process_host_utilization_per_mille,
-            report.process_host_utilization_per_mille,
+            report.timing.process_host_utilization_per_mille,
         )?;
         cache_hit_iterations = checked_add_u64(
             cache_hit_iterations,
-            if report.cached_latest_reconstruction_cache_hit {
+            if report.bytes.cached_latest_reconstruction_cache_hit {
                 1
             } else {
                 0
@@ -1195,99 +1244,107 @@ pub async fn run_bench(
         base_bytes: base_bytes_u64,
         mutated_bytes: u64::try_from(mutated_bytes)?,
         available_parallelism,
-        average_initial_upload_micros: checked_average_u64(
-            total_initial_upload_micros,
-            iterations_u64,
-        )?,
-        average_sparse_update_upload_micros: checked_average_u64(
-            total_sparse_update_upload_micros,
-            iterations_u64,
-        )?,
-        average_latest_download_micros: checked_average_u64(
-            total_latest_download_micros,
-            iterations_u64,
-        )?,
-        average_previous_download_micros: checked_average_u64(
-            total_previous_download_micros,
-            iterations_u64,
-        )?,
-        average_ranged_reconstruction_micros: checked_average_u64(
-            total_ranged_reconstruction_micros,
-            iterations_u64,
-        )?,
-        average_concurrent_latest_download_micros: checked_average_u64(
-            total_concurrent_latest_download_micros,
-            iterations_u64,
-        )?,
-        average_concurrent_upload_micros: checked_average_u64(
-            total_concurrent_upload_micros,
-            iterations_u64,
-        )?,
-        average_cross_repository_upload_micros: checked_average_u64(
-            total_cross_repository_upload_micros,
-            iterations_u64,
-        )?,
-        average_cached_latest_reconstruction_cold_micros: checked_average_u64(
-            total_cached_latest_reconstruction_cold_micros,
-            iterations_u64,
-        )?,
-        average_cached_latest_reconstruction_hot_micros: checked_average_u64(
-            total_cached_latest_reconstruction_hot_micros,
-            iterations_u64,
-        )?,
-        average_initial_upload_bytes_per_second: initial_upload_bytes_per_second,
-        average_sparse_update_upload_bytes_per_second: sparse_update_upload_bytes_per_second,
-        average_latest_download_bytes_per_second: latest_download_bytes_per_second,
-        average_previous_download_bytes_per_second: throughput_bytes_per_second(
-            measured_previous_download_bytes,
-            total_previous_download_micros,
-        ),
-        average_concurrent_latest_download_bytes_per_second:
-            concurrent_latest_download_bytes_per_second,
-        average_concurrent_upload_bytes_per_second: concurrent_upload_bytes_per_second,
-        average_cross_repository_upload_bytes_per_second: throughput_bytes_per_second(
-            measured_cross_repository_upload_bytes,
-            total_cross_repository_upload_micros,
-        ),
-        average_cached_latest_reconstruction_hit_bytes_per_second: throughput_bytes_per_second(
+        latency: LatencyMetrics {
+            initial_upload_micros: checked_average_u64(
+                total_initial_upload_micros,
+                iterations_u64,
+            )?,
+            sparse_update_upload_micros: checked_average_u64(
+                total_sparse_update_upload_micros,
+                iterations_u64,
+            )?,
+            latest_download_micros: checked_average_u64(
+                total_latest_download_micros,
+                iterations_u64,
+            )?,
+            previous_download_micros: checked_average_u64(
+                total_previous_download_micros,
+                iterations_u64,
+            )?,
+            ranged_reconstruction_micros: checked_average_u64(
+                total_ranged_reconstruction_micros,
+                iterations_u64,
+            )?,
+            concurrent_latest_download_micros: checked_average_u64(
+                total_concurrent_latest_download_micros,
+                iterations_u64,
+            )?,
+            concurrent_upload_micros: checked_average_u64(
+                total_concurrent_upload_micros,
+                iterations_u64,
+            )?,
+            cross_repository_upload_micros: checked_average_u64(
+                total_cross_repository_upload_micros,
+                iterations_u64,
+            )?,
+            cached_latest_reconstruction_cold_micros: checked_average_u64(
+                total_cached_latest_reconstruction_cold_micros,
+                iterations_u64,
+            )?,
+            cached_latest_reconstruction_hot_micros: checked_average_u64(
+                total_cached_latest_reconstruction_hot_micros,
+                iterations_u64,
+            )?,
+        },
+        throughput: BenchThroughputMetrics {
+            average_initial_upload_bytes_per_second: initial_upload_bytes_per_second,
+            average_sparse_update_upload_bytes_per_second: sparse_update_upload_bytes_per_second,
+            average_latest_download_bytes_per_second: latest_download_bytes_per_second,
+            average_previous_download_bytes_per_second: throughput_bytes_per_second(
+                measured_previous_download_bytes,
+                total_previous_download_micros,
+            ),
+            average_concurrent_latest_download_bytes_per_second:
+                concurrent_latest_download_bytes_per_second,
+            average_concurrent_upload_bytes_per_second: concurrent_upload_bytes_per_second,
+            average_cross_repository_upload_bytes_per_second: throughput_bytes_per_second(
+                measured_cross_repository_upload_bytes,
+                total_cross_repository_upload_micros,
+            ),
+            average_cached_latest_reconstruction_hit_bytes_per_second: throughput_bytes_per_second(
+                total_cached_reconstruction_response_bytes,
+                total_cached_latest_reconstruction_hot_micros,
+            ),
+        },
+        timing: TimingMetrics {
+            process_cpu_micros: checked_average_u64(total_process_cpu_micros, iterations_u64)?,
+            process_cpu_cores_per_mille: checked_average_u64(
+                total_process_cpu_cores_per_mille,
+                iterations_u64,
+            )?,
+            process_host_utilization_per_mille: checked_average_u64(
+                total_process_host_utilization_per_mille,
+                iterations_u64,
+            )?,
+        },
+        totals: BenchTotals {
+            concurrent_latest_download_scaling_per_mille: scaling_per_mille(
+                concurrent_latest_download_bytes_per_second,
+                latest_download_bytes_per_second,
+                concurrency,
+            ),
+            concurrent_upload_scaling_per_mille: scaling_per_mille(
+                concurrent_upload_bytes_per_second,
+                sparse_update_upload_bytes_per_second,
+                concurrency,
+            ),
+            total_uploaded_bytes,
+            total_downloaded_bytes,
             total_cached_reconstruction_response_bytes,
-            total_cached_latest_reconstruction_hot_micros,
-        ),
-        average_process_cpu_micros: checked_average_u64(total_process_cpu_micros, iterations_u64)?,
-        average_process_cpu_cores_per_mille: checked_average_u64(
-            total_process_cpu_cores_per_mille,
-            iterations_u64,
-        )?,
-        average_process_host_utilization_per_mille: checked_average_u64(
-            total_process_host_utilization_per_mille,
-            iterations_u64,
-        )?,
-        concurrent_latest_download_scaling_per_mille: scaling_per_mille(
-            concurrent_latest_download_bytes_per_second,
-            latest_download_bytes_per_second,
-            concurrency,
-        ),
-        concurrent_upload_scaling_per_mille: scaling_per_mille(
-            concurrent_upload_bytes_per_second,
-            sparse_update_upload_bytes_per_second,
-            concurrency,
-        ),
-        total_uploaded_bytes,
-        total_downloaded_bytes,
-        total_cached_reconstruction_response_bytes,
-        cache_hit_iterations,
-        total_concurrent_downloaded_bytes,
-        total_concurrent_uploaded_bytes,
-        total_concurrent_newly_stored_bytes,
-        total_cross_repository_newly_stored_bytes,
-        total_newly_stored_bytes,
-        total_initial_inserted_chunks,
-        total_sparse_update_inserted_chunks,
-        total_sparse_update_reused_chunks,
-        total_concurrent_upload_inserted_chunks,
-        total_concurrent_upload_reused_chunks,
-        total_cross_repository_inserted_chunks,
-        total_cross_repository_reused_chunks,
+            cache_hit_iterations,
+            total_concurrent_downloaded_bytes,
+            total_concurrent_uploaded_bytes,
+            total_concurrent_newly_stored_bytes,
+            total_cross_repository_newly_stored_bytes,
+            total_newly_stored_bytes,
+            total_initial_inserted_chunks,
+            total_sparse_update_inserted_chunks,
+            total_sparse_update_reused_chunks,
+            total_concurrent_upload_inserted_chunks,
+            total_concurrent_upload_reused_chunks,
+            total_cross_repository_inserted_chunks,
+            total_cross_repository_reused_chunks,
+        },
         iterations_detail: detail,
     })
 }
@@ -1806,31 +1863,35 @@ mod tests {
         let Some(iteration) = iteration else {
             return;
         };
-        assert_eq!(iteration.initial_inserted_chunks, 3);
-        assert_eq!(iteration.sparse_update_inserted_chunks, 1);
-        assert_eq!(iteration.sparse_update_reused_chunks, 2);
-        assert_eq!(iteration.concurrent_upload_inserted_chunks, 2);
-        assert_eq!(iteration.concurrent_upload_reused_chunks, 4);
-        assert_eq!(iteration.concurrent_newly_stored_bytes, 8);
-        assert_eq!(iteration.concurrent_uploaded_bytes, 24);
-        assert_eq!(iteration.concurrent_downloaded_bytes, 24);
-        assert_eq!(iteration.cross_repository_inserted_chunks, 1);
-        assert_eq!(iteration.cross_repository_reused_chunks, 2);
-        assert_eq!(iteration.cross_repository_newly_stored_bytes, 4);
-        assert_eq!(iteration.newly_stored_bytes, 40);
-        assert_eq!(report.total_sparse_update_reused_chunks, 2);
-        assert_eq!(report.total_concurrent_upload_inserted_chunks, 2);
-        assert_eq!(report.total_concurrent_upload_reused_chunks, 4);
-        assert_eq!(report.total_concurrent_newly_stored_bytes, 8);
-        assert_eq!(report.total_cross_repository_inserted_chunks, 1);
-        assert_eq!(report.total_cross_repository_reused_chunks, 2);
-        assert_eq!(report.total_cross_repository_newly_stored_bytes, 4);
-        assert!(
-            iteration.process_cpu_cores_per_mille >= iteration.process_host_utilization_per_mille
+        assert_eq!(iteration.chunks.initial_inserted_chunks, 3);
+        assert_eq!(iteration.chunks.sparse_update_inserted_chunks, 1);
+        assert_eq!(iteration.chunks.sparse_update_reused_chunks, 2);
+        assert_eq!(iteration.chunks.concurrent_upload_inserted_chunks, 2);
+        assert_eq!(iteration.chunks.concurrent_upload_reused_chunks, 4);
+        assert_eq!(iteration.bytes.concurrent_newly_stored_bytes, 8);
+        assert_eq!(iteration.bytes.concurrent_uploaded_bytes, 24);
+        assert_eq!(iteration.bytes.concurrent_downloaded_bytes, 24);
+        assert_eq!(iteration.chunks.cross_repository_inserted_chunks, 1);
+        assert_eq!(iteration.chunks.cross_repository_reused_chunks, 2);
+        assert_eq!(iteration.bytes.cross_repository_newly_stored_bytes, 4);
+        assert_eq!(iteration.bytes.newly_stored_bytes, 40);
+        assert_eq!(report.totals.total_sparse_update_reused_chunks, 2);
+        assert_eq!(report.totals.total_concurrent_upload_inserted_chunks, 2);
+        assert_eq!(report.totals.total_concurrent_upload_reused_chunks, 4);
+        assert_eq!(report.totals.total_concurrent_newly_stored_bytes, 8);
+        assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
+        assert_eq!(report.totals.total_cross_repository_reused_chunks, 2);
+        assert_eq!(
+            report.totals.total_cross_repository_newly_stored_bytes,
+            4
         );
         assert!(
-            report.average_process_cpu_cores_per_mille
-                >= report.average_process_host_utilization_per_mille
+            iteration.timing.process_cpu_cores_per_mille
+                >= iteration.timing.process_host_utilization_per_mille
+        );
+        assert!(
+            report.timing.process_cpu_cores_per_mille
+                >= report.timing.process_host_utilization_per_mille
         );
     }
 
@@ -1996,15 +2057,18 @@ mod tests {
         };
 
         assert_eq!(report.scenario, BenchScenario::CrossRepositoryUpload);
-        assert_eq!(report.average_initial_upload_micros, 0);
-        assert_eq!(report.average_sparse_update_upload_micros, 0);
-        assert_eq!(report.average_latest_download_micros, 0);
-        assert_eq!(report.average_previous_download_micros, 0);
-        assert_eq!(report.average_concurrent_upload_micros, 0);
-        assert_eq!(report.total_uploaded_bytes, 12);
-        assert_eq!(report.total_cross_repository_inserted_chunks, 1);
-        assert_eq!(report.total_cross_repository_reused_chunks, 2);
-        assert_eq!(report.total_cross_repository_newly_stored_bytes, 4);
+        assert_eq!(report.latency.initial_upload_micros, 0);
+        assert_eq!(report.latency.sparse_update_upload_micros, 0);
+        assert_eq!(report.latency.latest_download_micros, 0);
+        assert_eq!(report.latency.previous_download_micros, 0);
+        assert_eq!(report.latency.concurrent_upload_micros, 0);
+        assert_eq!(report.totals.total_uploaded_bytes, 12);
+        assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
+        assert_eq!(report.totals.total_cross_repository_reused_chunks, 2);
+        assert_eq!(
+            report.totals.total_cross_repository_newly_stored_bytes,
+            4
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
