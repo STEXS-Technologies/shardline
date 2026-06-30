@@ -28,6 +28,7 @@ use super::{
     scope_from_auth,
 };
 
+#[tracing::instrument(skip(state, headers, request))]
 pub(crate) async fn lfs_batch(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -148,6 +149,7 @@ pub(crate) async fn lfs_batch(
         .into_response())
 }
 
+#[tracing::instrument(skip(state, headers), fields(oid))]
 pub(crate) async fn lfs_get_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
@@ -165,6 +167,7 @@ pub(crate) async fn lfs_get_object(
     .await
 }
 
+#[tracing::instrument(skip(state, headers), fields(oid))]
 pub(crate) async fn lfs_head_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,
@@ -176,6 +179,7 @@ pub(crate) async fn lfs_head_object(
     Ok((StatusCode::OK, [(CONTENT_LENGTH, total_length.to_string())]))
 }
 
+#[tracing::instrument(skip(state, headers, body), fields(oid))]
 pub(crate) async fn lfs_put_object(
     State(state): State<Arc<AppState>>,
     Path(oid): Path<String>,

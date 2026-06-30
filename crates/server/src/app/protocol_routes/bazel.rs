@@ -22,6 +22,7 @@ use super::{
     scope_from_auth,
 };
 
+#[tracing::instrument(skip(state, headers), fields(hash))]
 pub(crate) async fn bazel_get_ac(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
@@ -43,6 +44,7 @@ pub(crate) async fn bazel_get_ac(
     .await
 }
 
+#[tracing::instrument(skip(state, headers, body), fields(hash))]
 pub(crate) async fn bazel_put_ac(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
@@ -63,6 +65,7 @@ pub(crate) async fn bazel_put_ac(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(skip(state, headers), fields(hash))]
 pub(crate) async fn bazel_get_cas(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
@@ -84,6 +87,7 @@ pub(crate) async fn bazel_get_cas(
     .await
 }
 
+#[tracing::instrument(skip(state, headers, body), fields(hash))]
 pub(crate) async fn bazel_put_cas(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,

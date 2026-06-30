@@ -14,7 +14,8 @@ use shardline_index::{
 };
 use shardline_protocol::{HashParseError, HttpRangeParseError, TokenCodecError};
 pub use shardline_server_core::{
-    InvalidLifecycleMetadataError, InvalidReconstructionResponseError, InvalidSerializedShardError,
+    InvalidLifecycleMetadataError, InvalidReconstructionResponseError,
+    InvalidSerializedShardError, ParseStoredFileRecordError,
 };
 use shardline_storage::{LocalObjectStoreError, ObjectPrefixError, S3ObjectStoreError};
 use thiserror::Error;
@@ -603,6 +604,21 @@ impl From<InvalidLifecycleMetadataError> for ServerError {
 impl From<InvalidReconstructionResponseError> for ServerError {
     fn from(e: InvalidReconstructionResponseError) -> Self {
         Self::Index(IndexError::InvalidReconstructionResponse(e))
+    }
+}
+
+impl From<ParseStoredFileRecordError> for ServerError {
+    fn from(e: ParseStoredFileRecordError) -> Self {
+        match e {
+            ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+                observed_bytes,
+                maximum_bytes,
+            } => Self::StoredFileMetadataTooLarge {
+                observed_bytes,
+                maximum_bytes,
+            },
+            ParseStoredFileRecordError::Json(e) => Self::Json(e),
+        }
     }
 }
 

@@ -400,6 +400,11 @@ async fn repo_search(
     authorize(state, &headers, TokenScope::Read)?;
     let rt = HubRepoType::parse_str(&repo_type)
         .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
+    if query.q.len() < 2 {
+        return Err(HubApiError::PathValidation(
+            "search query must be at least 2 characters".to_owned(),
+        ));
+    }
     let limit = query.limit.min(200);
     let repos = state
         .store
@@ -519,6 +524,12 @@ async fn preupload(
     Json(request): Json<PreuploadRequest>,
 ) -> Result<Json<PreuploadResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("preupload", "POST", 200);
+    const MAX_PREUPLOAD_FILES: usize = 10_000;
+    if request.files.len() > MAX_PREUPLOAD_FILES {
+        return Err(HubApiError::PathValidation(format!(
+            "preupload request exceeds maximum of {MAX_PREUPLOAD_FILES} files"
+        )));
+    }
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Write)?;
     let name = format!("{ns}/{repo}");
@@ -1181,6 +1192,9 @@ fn parse_csv_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<Dataset
 /// Maximum allowed webhook URL length.
 const MAX_WEBHOOK_URL_LEN: usize = 2048;
 
+/// Maximum number of events per webhook.
+const MAX_WEBHOOK_EVENTS: usize = 50;
+
 /// Validates a webhook URL to prevent SSRF attacks.
 ///
 /// Checks:
@@ -1260,6 +1274,11 @@ async fn webhook_create(
     shardline_metrics::record_hub_api_request("webhook_create", "POST", 201);
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Write)?;
+    if request.events.len() > MAX_WEBHOOK_EVENTS {
+        return Err(HubApiError::PathValidation(format!(
+            "webhook events exceeds maximum of {MAX_WEBHOOK_EVENTS}"
+        )));
+    }
     validate_webhook_url(&request.url)?;
     let name = format!("{ns}/{repo}");
     let _ = state
