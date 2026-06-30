@@ -207,6 +207,7 @@ pub struct LfsBatchRequest {
     /// Transfer adapter operations.
     pub operation: LfsBatchOperation,
     /// Objects to operate on.
+    #[serde(rename = "ref")]
     pub ref_: LfsBatchRef,
     /// Objects.
     pub objects: Vec<LfsObjectRequest>,

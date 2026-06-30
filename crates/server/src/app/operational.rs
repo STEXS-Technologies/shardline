@@ -101,6 +101,7 @@ pub(super) async fn upload_xorb(
     Ok(Json(state.backend.upload_xorb_stream(&hash, body).await?))
 }
 
+#[tracing::instrument(skip(state, headers), fields(hash = %hash))]
 pub(super) async fn head_xorb(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
@@ -121,6 +122,7 @@ pub(super) async fn head_xorb(
     Ok((StatusCode::OK, [(CONTENT_LENGTH, total_length.to_string())]))
 }
 
+#[tracing::instrument(skip(state, headers), fields(hash = %hash))]
 pub(super) async fn read_xorb_transfer(
     State(state): State<Arc<AppState>>,
     Path((prefix, hash)): Path<(String, String)>,
@@ -174,6 +176,7 @@ pub(super) async fn upload_shard(
     ))
 }
 
+#[tracing::instrument(skip(state, headers))]
 pub(super) async fn stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -193,18 +196,6 @@ pub(super) async fn metrics(
     let auth_enabled = state.auth.is_some();
     let provider_tokens_enabled = state.provider_tokens.is_some();
     let metrics_auth_enabled = state.config.metrics_token().is_some();
-    let oci_registry_token_requests_total = state
-        .protocol_metrics
-        .oci_registry_token_requests_total
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let oci_registry_token_rate_limited_total = state
-        .protocol_metrics
-        .oci_registry_token_rate_limited_total
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let oci_registry_token_active_requests = state
-        .protocol_metrics
-        .oci_registry_token_active_requests
-        .load(std::sync::atomic::Ordering::Relaxed);
     let frontend_labels = state
         .config
         .server_frontends()
@@ -212,7 +203,7 @@ pub(super) async fn metrics(
         .map(|frontend| frontend.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let body = format!(
+    let mut body = format!(
         concat!(
             "# HELP shardline_up Whether the Shardline process is serving requests.\n",
             "# TYPE shardline_up gauge\n",
@@ -247,15 +238,6 @@ pub(super) async fn metrics(
             "# HELP shardline_oci_registry_token_max_in_flight_requests Configured OCI registry token concurrency limit.\n",
             "# TYPE shardline_oci_registry_token_max_in_flight_requests gauge\n",
             "shardline_oci_registry_token_max_in_flight_requests {}\n",
-            "# HELP shardline_oci_registry_token_requests_total Total OCI registry token requests.\n",
-            "# TYPE shardline_oci_registry_token_requests_total counter\n",
-            "shardline_oci_registry_token_requests_total {}\n",
-            "# HELP shardline_oci_registry_token_rate_limited_total Total OCI registry token requests rejected by the in-flight limit.\n",
-            "# TYPE shardline_oci_registry_token_rate_limited_total counter\n",
-            "shardline_oci_registry_token_rate_limited_total {}\n",
-            "# HELP shardline_oci_registry_token_active_requests Current in-flight OCI registry token requests.\n",
-            "# TYPE shardline_oci_registry_token_active_requests gauge\n",
-            "shardline_oci_registry_token_active_requests {}\n"
         ),
         state.role.as_str(),
         frontend_labels,
@@ -274,10 +256,9 @@ pub(super) async fn metrics(
             .config
             .oci_registry_token_max_in_flight_requests()
             .get(),
-        oci_registry_token_requests_total,
-        oci_registry_token_rate_limited_total,
-        oci_registry_token_active_requests,
     );
+    // Append Prometheus registry metrics (includes OCI registry token counters).
+    body.push_str(&shardline_metrics::encode_metrics());
 
     Ok((
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
@@ -320,5 +301,14 @@ mod tests {
                 "metric value must be a number: {trimmed}"
             );
         }
+    }
+
+    #[test]
+    fn encode_metrics_returns_prometheus_text() {
+        // Ensure the global metrics are initialized.
+        let _ = shardline_metrics::metrics();
+        let encoded = shardline_metrics::encode_metrics();
+        assert!(!encoded.is_empty());
+        assert!(encoded.contains("# HELP") || encoded.contains("# TYPE"));
     }
 }

@@ -73,6 +73,7 @@ pub(super) async fn git_lfs_authenticate(
     }))
 }
 
+#[tracing::instrument(skip(state, headers, query))]
 pub(super) async fn issue_xet_read_token(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
@@ -94,6 +95,7 @@ pub(super) async fn issue_xet_read_token(
     .await
 }
 
+#[tracing::instrument(skip(state, headers, query))]
 pub(super) async fn issue_xet_write_token(
     State(state): State<Arc<AppState>>,
     Path((provider, owner, repo, rev)): Path<(String, String, String, String)>,
@@ -115,6 +117,7 @@ pub(super) async fn issue_xet_write_token(
     .await
 }
 
+#[tracing::instrument(skip(state, headers, body), fields(provider))]
 pub(super) async fn handle_provider_webhook(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,

@@ -286,12 +286,6 @@ async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
                     sha1: rev.sha.clone(),
                 });
             }
-            if seen_refs.insert("refs/heads/main".to_owned()) {
-                refs.push(GitRef {
-                    name: "refs/heads/main".to_owned(),
-                    sha1: rev.sha.clone(),
-                });
-            }
         } else if rev.ref_name.starts_with("refs/") {
             if seen_refs.insert(rev.ref_name.clone()) {
                 refs.push(GitRef {

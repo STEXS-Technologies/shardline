@@ -32,6 +32,7 @@ pub(crate) async fn oci_registry_token(
     state
         .protocol_metrics
         .increment_oci_registry_token_requests();
+    shardline_metrics::metrics().protocol.record_oci_registry_token_request();
     let _permit = state
         .oci_registry_token_limiter
         .clone()
@@ -40,9 +41,12 @@ pub(crate) async fn oci_registry_token(
             state
                 .protocol_metrics
                 .increment_oci_registry_token_rate_limited();
+            shardline_metrics::metrics().protocol.record_oci_registry_token_rate_limited();
             ServerError::TooManyRegistryTokenRequests
         })?;
     let _active_request = state.protocol_metrics.begin_oci_registry_token_request();
+    shardline_metrics::metrics().protocol.begin_oci_registry_token_request();
+    let _prom_active = PromActiveRequestGuard;
     let signer = TokenSigner::new(
         state
             .config
@@ -320,5 +324,13 @@ pub(super) fn scope_allows_oci_exchange(
     match requested_scope.unwrap_or(actual_scope) {
         TokenScope::Read => actual_scope.allows_read(),
         TokenScope::Write => actual_scope.allows_write(),
+    }
+}
+
+struct PromActiveRequestGuard;
+
+impl Drop for PromActiveRequestGuard {
+    fn drop(&mut self) {
+        shardline_metrics::metrics().protocol.end_oci_registry_token_request();
     }
 }

@@ -32,6 +32,7 @@ pub(super) struct FileVersionQuery {
     content_hash: Option<String>,
 }
 
+#[tracing::instrument(skip(state, headers), fields(file_id))]
 pub(super) async fn reconstruction(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
@@ -63,7 +64,6 @@ pub(super) async fn reconstruction(
         Ok(response) => {
             let chunks = u64::try_from(response.terms.len()).unwrap_or(0);
             shardline_metrics::record_reconstruction(true, elapsed, chunks);
-            shardline_metrics::metrics().xet.record_reconstruction(true, elapsed, chunks);
         }
         Err(_) => {
             shardline_metrics::record_reconstruction(false, elapsed, 0);
@@ -72,6 +72,7 @@ pub(super) async fn reconstruction(
     Ok(Json(result?))
 }
 
+#[tracing::instrument(skip(state, headers), fields(file_id))]
 pub(super) async fn reconstruction_v2(
     State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
@@ -103,7 +104,6 @@ pub(super) async fn reconstruction_v2(
         Ok(response) => {
             let chunks = u64::try_from(response.terms.len()).unwrap_or(0);
             shardline_metrics::record_reconstruction(true, elapsed, chunks);
-            shardline_metrics::metrics().xet.record_reconstruction(true, elapsed, chunks);
         }
         Err(_) => {
             shardline_metrics::record_reconstruction(false, elapsed, 0);
@@ -138,7 +138,6 @@ pub(super) async fn batch_reconstruction(
         .map(|(_, r)| u64::try_from(r.terms.len()).unwrap_or(0))
         .sum();
     shardline_metrics::record_reconstruction(true, elapsed, total_chunks);
-    shardline_metrics::metrics().xet.record_reconstruction(true, elapsed, total_chunks);
 
     Ok(Json(build_batch_reconstruction_response(responses)))
 }
