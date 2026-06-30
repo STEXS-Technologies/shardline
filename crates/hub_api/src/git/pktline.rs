@@ -5,37 +5,66 @@
 //! the 4-byte prefix itself). The flush packet `0000` signals end of a
 //! section.
 
+/// Maximum pkt-line payload size (65516 bytes).
+const MAX_PAYLOAD: usize = 0xFFFF - 4;
+
 /// Encodes a single pkt-line: 4-hex length + content.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `line` exceeds 65516 bytes (pkt-line max payload).
-pub fn encode_line(line: &str) -> String {
+/// Returns `Err` if `line` exceeds 65516 bytes (pkt-line max payload).
+pub fn encode_line(line: &str) -> Result<String, PktLineError> {
+    if line.len() > MAX_PAYLOAD {
+        return Err(PktLineError::PayloadTooLarge {
+            size: line.len(),
+            max: MAX_PAYLOAD,
+        });
+    }
     let len = line.len() + 4;
-    assert!(
-        len <= 0xFFFF,
-        "pkt-line payload too large: {} bytes",
-        line.len()
-    );
-    format!("{len:04x}{line}")
+    Ok(format!("{len:04x}{line}"))
 }
 
 /// Encodes a pkt-line with raw bytes (for binary content like SHA1 hashes).
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `data` exceeds 65516 bytes.
-pub fn encode_line_bytes(data: &[u8]) -> String {
+/// Returns `Err` if `data` exceeds 65516 bytes.
+pub fn encode_line_bytes(data: &[u8]) -> Result<String, PktLineError> {
+    if data.len() > MAX_PAYLOAD {
+        return Err(PktLineError::PayloadTooLarge {
+            size: data.len(),
+            max: MAX_PAYLOAD,
+        });
+    }
     let len = data.len() + 4;
-    assert!(
-        len <= 0xFFFF,
-        "pkt-line payload too large: {} bytes",
-        data.len()
-    );
     let mut out = format!("{len:04x}");
     out.push_str(&String::from_utf8_lossy(data));
-    out
+    Ok(out)
 }
+
+/// Pkt-line encoding error.
+#[derive(Debug, Clone)]
+pub enum PktLineError {
+    /// Payload exceeds the 65516-byte pkt-line limit.
+    PayloadTooLarge {
+        /// Actual payload size.
+        size: usize,
+        /// Maximum allowed size.
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for PktLineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PayloadTooLarge { size, max } => {
+                write!(f, "pkt-line payload too large: {size} bytes (max {max})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PktLineError {}
 
 /// Encodes a flush packet (`0000`).
 pub const FLUSH: &str = "0000";
@@ -167,7 +196,7 @@ mod tests {
 
     #[test]
     fn encode_simple_line() {
-        let encoded = encode_line("hello\n");
+        let encoded = encode_line("hello\n").expect("short line should not fail");
         assert_eq!(encoded, "000ahello\n");
     }
 

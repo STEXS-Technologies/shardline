@@ -513,15 +513,48 @@ fn read_text_file_with_limit(
     Ok(contents)
 }
 
+/// Resolves well-known platform symlinks in the path.
+///
+/// On macOS, `/etc` and `/var` are symlinks to `/private/etc` and `/private/var`.
+/// Opening files under these paths with `O_NOFOLLOW` fails because the symlink
+/// component is not followed. This resolves the known platform symlinks so
+/// `O_NOFOLLOW` applies only to the final path component.
+#[cfg(target_os = "macos")]
+fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let components: Vec<_> = path.components().collect();
+    if let [Component::RootDir, Component::Normal(first), rest @ ..] = components.as_slice() {
+        let resolved_prefix = match first.as_encoded_bytes() {
+            b"var" | b"etc" | b"tmp" => Some("/private"),
+            _ => None,
+        };
+        if let Some(prefix) = resolved_prefix {
+            let mut resolved = PathBuf::from(prefix);
+            resolved.push(first);
+            for component in rest {
+                resolved.push(component.as_os_str());
+            }
+            return resolved;
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 #[cfg(unix)]
 fn open_local_text_file(path: &Path) -> Result<File, GcScheduleError> {
     use std::os::unix::fs::OpenOptionsExt;
 
     ensure_regular_local_file_path(path)?;
+    let resolved = resolve_platform_symlinks(path);
     Ok(OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?)
+        .open(&resolved)?)
 }
 
 #[cfg(not(unix))]
@@ -684,6 +717,7 @@ mod tests {
         read_text_file_with_limit, set_before_local_text_file_read_hook, uninstall_gc_schedule,
     };
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_writes_systemd_units() {
         let sandbox = tempfile::tempdir();
@@ -738,6 +772,7 @@ mod tests {
         assert!(timer.contains("OnCalendar=hourly"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn uninstall_gc_schedule_removes_both_units() {
         let sandbox = tempfile::tempdir();
@@ -805,6 +840,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_uses_root_dir_from_env_file() {
         let sandbox = tempfile::tempdir();
@@ -841,6 +877,7 @@ mod tests {
         assert_eq!(report.working_directory, configured_root);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_rejects_missing_referenced_secret() {
         let sandbox = tempfile::tempdir();
@@ -1004,7 +1041,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn install_gc_schedule_rejects_symlinked_referenced_secret() {
         let sandbox = tempfile::tempdir();

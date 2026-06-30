@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     io::{Error as IoError, ErrorKind},
     ops::Deref,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use rusqlite::{
@@ -480,6 +480,9 @@ pub enum LocalIndexStoreError {
     /// The local metadata database had inconsistent import state.
     #[error("local metadata database had inconsistent legacy import state")]
     InvalidLegacyImportState,
+    /// An invalid repository type string was encountered.
+    #[error("invalid repository type: {0}")]
+    InvalidRepoType(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -565,12 +568,40 @@ impl DedupeShardRecord {
 }
 
 fn normalize_local_root(root: PathBuf) -> PathBuf {
+    let mut root = root;
     if root.file_name() == Some(OsStr::new("gc")) {
-        return root
+        root = root
             .parent()
             .map_or_else(|| root.clone(), Path::to_path_buf);
     }
-    root
+    resolve_platform_symlinks(&root)
+}
+
+/// Resolves well-known platform symlinks in the path.
+///
+/// On macOS, `/var` is a symlink to `/private/var`. SQLite with `NOFOLLOW` refuses
+/// to open database files under `/var/folders/...` because the path contains a
+/// symlink. This function resolves the known platform symlink so SQLite can open
+/// the database safely.
+#[cfg(target_os = "macos")]
+fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+    let components: Vec<_> = path.components().collect();
+    if let [Component::RootDir, Component::Normal(first), rest @ ..] = components.as_slice() {
+        if first.as_encoded_bytes() == b"var" {
+            let mut resolved = PathBuf::from("/private");
+            resolved.push("var");
+            for component in rest {
+                resolved.push(component.as_os_str());
+            }
+            return resolved;
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 pub(super) fn u64_to_i64(value: u64) -> Result<i64, LocalIndexStoreError> {

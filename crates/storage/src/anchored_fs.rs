@@ -320,6 +320,73 @@ pub fn fd_child_path(directory: &File, child: &OsStr) -> PathBuf {
     path
 }
 
+/// Atomically renames a file within the same parent directory using FD-relative
+/// operations on macOS.
+///
+/// On Linux, `/proc/self/fd/N/child` paths resolve through the FD, so `std::fs::rename`
+/// works even after the parent directory is renamed. On macOS, `/dev/fd/N` cannot traverse
+/// children, so this uses `renameat` with the parent FD instead.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsRawFd;
+
+    let old_cstr = CString::new(old_name.as_encoded_bytes())
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name contains null byte"))?;
+    let new_cstr = CString::new(new_name.as_encoded_bytes())
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name contains null byte"))?;
+
+    let result = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            old_cstr.as_ptr(),
+            parent.as_raw_fd(),
+            new_cstr.as_ptr(),
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Renames a file. On non-macOS platforms, this delegates to `std::fs::rename`.
+#[cfg(not(target_os = "macos"))]
+pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Result<()> {
+    let old_path = fd_child_path(parent, old_name);
+    let new_path = fd_child_path(parent, new_name);
+    std::fs::rename(old_path, new_path)
+}
+
+/// Removes a file within a directory using FD-relative operations.
+///
+/// On macOS, `/dev/fd/N` cannot traverse children, so this uses `unlinkat`.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsRawFd;
+
+    let cstr = CString::new(name.as_encoded_bytes())
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "name contains null byte"))?;
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), cstr.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Removes a file. On non-macOS, delegates to `std::fs::remove_file`.
+#[cfg(not(target_os = "macos"))]
+pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
+    let path = fd_child_path(parent, name);
+    std::fs::remove_file(path)
+}
+
 /// Removes a file when it exists.
 ///
 /// # Errors
@@ -333,11 +400,33 @@ pub fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn macos_fd_real_path(fd: std::os::unix::io::RawFd) -> PathBuf {
+    let mut buf = [0i8; 1024];
+    let result = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+    if result < 0 {
+        return PathBuf::from(format!("/dev/fd/{fd}"));
+    }
+    let c_str = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    PathBuf::from(c_str.to_string_lossy().as_ref())
+}
+
 fn fd_base_path(directory: &File) -> PathBuf {
     #[cfg(target_os = "linux")]
-    let prefix = "/proc/self/fd";
+    {
+        PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, /dev/fd/N is a fescfs virtual directory entry, NOT a symlink.
+        // You cannot traverse children through it (open("/dev/fd/3/var") fails with ENOENT).
+        // Use fcntl(F_GETPATH) to resolve the real path from the file descriptor.
+        macos_fd_real_path(directory.as_raw_fd())
+    }
     #[cfg(not(target_os = "linux"))]
-    let prefix = "/dev/fd";
-
-    PathBuf::from(format!("{prefix}/{}", directory.as_raw_fd()))
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd()))
+    }
 }

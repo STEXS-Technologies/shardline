@@ -9,6 +9,29 @@ use flate2::Compression;
 use sha1::{Digest, Sha1};
 use std::io::Write;
 
+/// Pack file generation error.
+#[derive(Debug)]
+pub enum PackError {
+    /// Zlib compression failed.
+    Zlib(std::io::Error),
+}
+
+impl std::fmt::Display for PackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Zlib(e) => write!(f, "zlib compression failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PackError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Zlib(e) => Some(e),
+        }
+    }
+}
+
 /// Git object types used in pack encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -72,7 +95,11 @@ impl GitObject {
 /// Generates a Git pack file from a list of objects.
 ///
 /// Returns the raw bytes of the pack file (header + objects + tail checksum).
-pub fn generate_pack(objects: &[GitObject]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns [`PackError`] if zlib compression fails.
+pub fn generate_pack(objects: &[GitObject]) -> Result<Vec<u8>, PackError> {
     let mut out = Vec::new();
 
     // Pack header: "PACK" + version(4) + num_objects(4)
@@ -82,7 +109,7 @@ pub fn generate_pack(objects: &[GitObject]) -> Vec<u8> {
 
     // Write each object
     for obj in objects {
-        write_object(&mut out, obj);
+        write_object(&mut out, obj)?;
     }
 
     // Tail checksum: SHA1 of everything so far
@@ -91,11 +118,11 @@ pub fn generate_pack(objects: &[GitObject]) -> Vec<u8> {
     let checksum: [u8; 20] = hasher.finalize().into();
     out.extend_from_slice(&checksum);
 
-    out
+    Ok(out)
 }
 
 /// Writes a single object to the pack stream.
-fn write_object(out: &mut Vec<u8>, obj: &GitObject) {
+fn write_object(out: &mut Vec<u8>, obj: &GitObject) -> Result<(), PackError> {
     // Object header: type (3 bits) + size (4+ bits), varint-encoded.
     //
     // Git pack format (MSB-first varint):
@@ -129,9 +156,10 @@ fn write_object(out: &mut Vec<u8>, obj: &GitObject) {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder
         .write_all(&obj.data)
-        .expect("zlib write failed");
-    let compressed = encoder.finish().expect("zlib finish failed");
+        .map_err(PackError::Zlib)?;
+    let compressed = encoder.finish().map_err(PackError::Zlib)?;
     out.extend_from_slice(&compressed);
+    Ok(())
 }
 
 /// Creates a minimal commit object for a tree with given entries.
@@ -188,7 +216,11 @@ pub fn create_blob_object(content: &[u8]) -> GitObject {
 /// Generates a "no-op" pack (empty pack with 0 objects).
 ///
 /// Used when a client asks for objects but the repository has none yet.
-pub fn empty_pack() -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns [`PackError`] if zlib compression fails.
+pub fn empty_pack() -> Result<Vec<u8>, PackError> {
     generate_pack(&[])
 }
 
@@ -208,7 +240,7 @@ mod tests {
 
     #[test]
     fn pack_header_is_valid() {
-        let pack = empty_pack();
+        let pack = empty_pack().expect("empty pack should not fail");
         assert_eq!(&pack[0..4], b"PACK");
         assert_eq!(&pack[4..8], &2u32.to_be_bytes()); // version 2
         assert_eq!(&pack[8..12], &0u32.to_be_bytes()); // 0 objects
@@ -219,7 +251,7 @@ mod tests {
     #[test]
     fn pack_with_blob_object() {
         let blob = create_blob_object(b"test content");
-        let pack = generate_pack(&[blob]);
+        let pack = generate_pack(&[blob]).expect("pack generation should not fail");
         // Header (12) + object data + checksum (20)
         assert!(pack.len() > 32);
         assert_eq!(&pack[0..4], b"PACK");

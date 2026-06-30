@@ -3,7 +3,7 @@ use std::fs;
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
-    fs::{File, remove_file, rename, symlink_metadata},
+    fs::{self, File, remove_file, symlink_metadata},
     io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
 };
@@ -18,7 +18,7 @@ use shardline_storage::anchored_fs::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared, fd_child_path,
     open_directory_chain as open_directory_chain_shared, open_new_file as open_new_file_shared,
-    remove_if_present, temporary_file_name,
+    remove_at, remove_if_present, rename_at, temporary_file_name,
 };
 
 #[cfg(test)]
@@ -177,9 +177,17 @@ impl AtomicOutputFile {
         self.file.flush()?;
         run_before_local_write_hook(&self.anchored.logical_path());
         ensure_existing_target_is_regular_or_missing(&self.final_path)?;
-        rename(&self.temporary_path, &self.final_path)?;
+        let temp_name = self
+            .temporary_path
+            .file_name()
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "temp path has no file name"))?;
+        rename_at(
+            self.anchored.parent_dir(),
+            temp_name,
+            self.anchored.file_name(),
+        )?;
         if let Err(error) = ensure_parent_path_matches_anchor(&self.anchored) {
-            remove_if_present(&self.final_path)?;
+            let _ = remove_at(self.anchored.parent_dir(), self.anchored.file_name());
             return Err(error);
         }
         self.committed = true;
@@ -223,6 +231,17 @@ fn remove_output_file_if_present_unix(path: &Path) -> io::Result<bool> {
 fn open_anchored_target(path: &Path, create_parent: bool) -> io::Result<AnchoredTarget> {
     let file_name = path.file_name().ok_or_else(invalid_output_path_error)?;
     let parent_path = effective_parent_path(path).to_path_buf();
+
+    // Reject symlinked parent directories to prevent write-through-symlink attacks.
+    if let Ok(metadata) = fs::symlink_metadata(&parent_path) {
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "local output parent directory must not be a symlink",
+            ));
+        }
+    }
+
     let parent_dir = open_directory_chain(&parent_path, create_parent)?;
     Ok(AnchoredTarget::new(
         parent_dir,

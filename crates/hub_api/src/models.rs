@@ -289,6 +289,35 @@ pub struct LfsObjectAction {
     pub ssh: Option<bool>,
 }
 
+/// Repository list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoListResponse {
+    /// List of repositories.
+    pub repos: Vec<RepoResponse>,
+}
+
+/// Repository search query parameters.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoSearchQuery {
+    /// Search query (name prefix match).
+    #[serde(default)]
+    pub q: String,
+    /// Maximum number of results (default 50, max 200).
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+}
+
+fn default_search_limit() -> usize {
+    50
+}
+
+/// Revision list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionListResponse {
+    /// List of revisions.
+    pub revisions: Vec<RevisionResponse>,
+}
+
 /// LFS object error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LfsObjectError {

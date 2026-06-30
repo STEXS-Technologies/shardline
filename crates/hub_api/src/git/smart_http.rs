@@ -92,20 +92,20 @@ pub async fn info_refs(
     };
 
     let mut body = String::new();
-    body.push_str(&pktline::encode_line(&format!("# service={service}\n")));
+    body.push_str(&pktline::encode_line(&format!("# service={service}\n"))?);
     body.push_str(FLUSH);
     if refs.is_empty() {
         body.push_str(&pktline::encode_line(&format!(
             "0000000000000000000000000000000000000000 capabilities^{{}}\x00{capabilities}\n",
-        )));
+        ))?);
     } else {
         let first = &refs[0];
         body.push_str(&pktline::encode_line(&format!(
             "{} {} capabilities^{{}}\x00{capabilities}\n",
             first.sha1, first.name
-        )));
+        ))?);
         for r in &refs[1..] {
-            body.push_str(&pktline::encode_line(&format!("{} {}\n", r.sha1, r.name)));
+            body.push_str(&pktline::encode_line(&format!("{} {}\n", r.sha1, r.name))?);
         }
     }
     body.push_str(FLUSH);
@@ -169,9 +169,9 @@ pub async fn upload_pack(
     let refs = collect_refs(&repo_id).await?;
 
     let pack_data = if refs.is_empty() {
-        empty_pack()
+        empty_pack()?
     } else {
-        generate_pack_for_refs(&refs).await
+        generate_pack_for_refs(&refs).await?
     };
 
     let mut response_body = pktline::sideband_data(&pack_data);
@@ -332,7 +332,7 @@ fn parse_haves(lines: &[Vec<u8>]) -> Vec<String> {
 /// 3. Generates blob objects — LFS pointer blobs for LFS files, or
 ///    content-bearing blobs for inline files.
 /// 4. Creates a commit object referencing the root tree.
-async fn generate_pack_for_refs(refs: &[GitRef]) -> Vec<u8> {
+async fn generate_pack_for_refs(refs: &[GitRef]) -> Result<Vec<u8>, HubApiError> {
     let state = crate::state::get();
     let mut all_objects: Vec<GitObject> = Vec::new();
     let mut seen_trees: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
@@ -401,10 +401,10 @@ async fn generate_pack_for_refs(refs: &[GitRef]) -> Vec<u8> {
     }
 
     if all_objects.is_empty() {
-        return empty_pack();
+        return empty_pack().map_err(Into::into);
     }
 
-    generate_pack(&all_objects)
+    generate_pack(&all_objects).map_err(Into::into)
 }
 
 /// Builds Git tree objects (root + all sub-trees) from a flat list of
@@ -707,15 +707,15 @@ fn build_report_response(
     let mut body = String::new();
 
     if results.is_empty() {
-        body.push_str(&pktline::encode_line("unpack ok\n"));
+        body.push_str(&pktline::encode_line("unpack ok\n")?);
     } else {
-        body.push_str(&pktline::encode_line("unpack ok\n"));
+        body.push_str(&pktline::encode_line("unpack ok\n")?);
         for (refname, ok, error) in results {
             if *ok {
-                body.push_str(&pktline::encode_line(&format!("ok {refname}\n")));
+                body.push_str(&pktline::encode_line(&format!("ok {refname}\n"))?);
             } else {
                 let msg = error.as_deref().unwrap_or("failed");
-                body.push_str(&pktline::encode_line(&format!("ng {refname} {msg}\n")));
+                body.push_str(&pktline::encode_line(&format!("ng {refname} {msg}\n"))?);
             }
         }
     }
@@ -774,6 +774,7 @@ mod tests {
             size: 11,
             sha: "aabbccdd".to_owned(),
             is_lfs: false,
+            inline_content: None,
         };
         let b1 = build_inline_blob(&file);
         let b2 = build_inline_blob(&file);
@@ -793,6 +794,7 @@ mod tests {
             size: 13,
             sha: "deadbeef".to_owned(),
             is_lfs: false,
+            inline_content: None,
         }];
         let (tree, sub_trees) = build_git_tree_objects(&files);
         let tree_sha = tree.sha1();
@@ -808,12 +810,14 @@ mod tests {
                 size: 100,
                 sha: "aaaa".to_owned(),
                 is_lfs: false,
+                inline_content: None,
             },
             HubFileEntry {
                 path: "Cargo.toml".to_owned(),
                 size: 200,
                 sha: "bbbb".to_owned(),
                 is_lfs: false,
+                inline_content: None,
             },
         ];
         let (tree, sub_trees) = build_git_tree_objects(&files);
@@ -831,12 +835,14 @@ mod tests {
                 size: 1024,
                 sha: "oid1".to_owned(),
                 is_lfs: true,
+                inline_content: None,
             },
             HubFileEntry {
                 path: "README.md".to_owned(),
                 size: 100,
                 sha: "oid2".to_owned(),
                 is_lfs: false,
+                inline_content: None,
             },
         ];
         let blob = build_gitattributes_blob(&files);
@@ -853,6 +859,7 @@ mod tests {
             size: 100,
             sha: "oid2".to_owned(),
             is_lfs: false,
+            inline_content: None,
         }];
         assert!(build_gitattributes_blob(&files).is_none());
     }

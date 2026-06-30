@@ -31,10 +31,6 @@ fn repo_type_to_str(t: HubRepoType) -> &'static str {
     t.as_str()
 }
 
-fn repo_type_from_str(s: &str) -> HubRepoType {
-    HubRepoType::from_str(s).unwrap_or(HubRepoType::Model)
-}
-
 impl HubStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
 
@@ -75,9 +71,12 @@ impl HubStore for LocalIndexStore {
                  FROM shardline_hub_repos WHERE repo_id = ?1",
                 params![repo_id],
                 |row| {
+                    let rt_str: String = row.get(1)?;
+                    let repo_type = HubRepoType::from_str(&rt_str)
+                        .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
                     Ok(HubRepo {
                         repo_id: row.get(0)?,
-                        repo_type: repo_type_from_str(&row.get::<_, String>(1)?),
+                        repo_type,
                         private: row.get::<_, i64>(2)? != 0,
                         default_branch: row.get(3)?,
                         created_at_unix_seconds: row.get::<_, i64>(4)? as u64,
@@ -95,9 +94,12 @@ impl HubStore for LocalIndexStore {
              FROM shardline_hub_repos ORDER BY repo_id",
         )?;
         let rows = stmt.query_map([], |row| {
+            let rt_str: String = row.get(1)?;
+            let repo_type = HubRepoType::from_str(&rt_str)
+                .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
             Ok(HubRepo {
                 repo_id: row.get(0)?,
-                repo_type: repo_type_from_str(&row.get::<_, String>(1)?),
+                repo_type,
                 private: row.get::<_, i64>(2)? != 0,
                 default_branch: row.get(3)?,
                 created_at_unix_seconds: row.get::<_, i64>(4)? as u64,
@@ -106,6 +108,64 @@ impl HubStore for LocalIndexStore {
         let mut repos = Vec::new();
         for row in rows {
             repos.push(row?);
+        }
+        Ok(repos)
+    }
+
+    fn search_repos(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRepo>, Self::Error> {
+        let conn = open_hub_connection(self.root())?;
+        let pattern = format!("{name_prefix}%");
+        let mut repos = Vec::new();
+        if let Some(rt) = repo_type {
+            let rt_str = rt.as_str();
+            let mut stmt = conn.prepare(
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                 FROM shardline_hub_repos
+                 WHERE repo_id LIKE ?1 AND repo_type = ?2
+                 ORDER BY repo_id LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![pattern, rt_str, limit as i64], |row| {
+                let rt_str: String = row.get(1)?;
+                let repo_type = HubRepoType::from_str(&rt_str)
+                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
+                Ok(HubRepo {
+                    repo_id: row.get(0)?,
+                    repo_type,
+                    private: row.get::<_, i64>(2)? != 0,
+                    default_branch: row.get(3)?,
+                    created_at_unix_seconds: row.get::<_, i64>(4)? as u64,
+                })
+            })?;
+            for row in rows {
+                repos.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                 FROM shardline_hub_repos
+                 WHERE repo_id LIKE ?1
+                 ORDER BY repo_id LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![pattern, limit as i64], |row| {
+                let rt_str: String = row.get(1)?;
+                let repo_type = HubRepoType::from_str(&rt_str)
+                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
+                Ok(HubRepo {
+                    repo_id: row.get(0)?,
+                    repo_type,
+                    private: row.get::<_, i64>(2)? != 0,
+                    default_branch: row.get(3)?,
+                    created_at_unix_seconds: row.get::<_, i64>(4)? as u64,
+                })
+            })?;
+            for row in rows {
+                repos.push(row?);
+            }
         }
         Ok(repos)
     }
@@ -229,8 +289,8 @@ impl HubStore for LocalIndexStore {
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
         let conn = open_hub_connection_rw(self.root())?;
         let mut stmt = conn.prepare(
-            "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         for file in files {
             stmt.execute(params![
@@ -239,6 +299,7 @@ impl HubStore for LocalIndexStore {
                 file.size as i64,
                 file.sha,
                 file.is_lfs as i64,
+                file.inline_content,
             ])?;
         }
         Ok(())
@@ -247,7 +308,7 @@ impl HubStore for LocalIndexStore {
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
         let conn = open_hub_connection(self.root())?;
         let mut stmt = conn.prepare(
-            "SELECT path, size, sha, is_lfs FROM shardline_hub_file_entries
+            "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
              WHERE commit_sha = ?1 ORDER BY path",
         )?;
         let rows = stmt.query_map(params![commit_sha], |row| {
@@ -256,6 +317,7 @@ impl HubStore for LocalIndexStore {
                 size: row.get::<_, i64>(1)? as u64,
                 sha: row.get(2)?,
                 is_lfs: row.get::<_, i64>(3)? != 0,
+                inline_content: row.get(4)?,
             })
         })?;
         let mut entries = Vec::new();
@@ -343,6 +405,7 @@ mod tests {
                 size INTEGER NOT NULL CHECK (size >= 0),
                 sha TEXT NOT NULL,
                 is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
+                inline_content BLOB,
                 PRIMARY KEY (commit_sha, path)
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
@@ -404,6 +467,44 @@ mod tests {
         assert_eq!(repos[0].repo_id, "a/model");
         assert_eq!(repos[1].repo_id, "m/dataset");
         assert_eq!(repos[2].repo_id, "z/space");
+    }
+
+    #[test]
+    fn search_repos_by_name_prefix() {
+        let (_tmp, store) = make_store();
+        store.create_repo(HubRepoType::Model, "org/model-a", false).unwrap();
+        store.create_repo(HubRepoType::Model, "org/model-b", false).unwrap();
+        store.create_repo(HubRepoType::Dataset, "org/dataset", false).unwrap();
+        store.create_repo(HubRepoType::Model, "other/model", false).unwrap();
+
+        let results = store.search_repos(None, "org/", 10).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|r| r.repo_id.starts_with("org/")));
+    }
+
+    #[test]
+    fn search_repos_by_type_filter() {
+        let (_tmp, store) = make_store();
+        store.create_repo(HubRepoType::Model, "a/model", false).unwrap();
+        store.create_repo(HubRepoType::Dataset, "b/dataset", false).unwrap();
+        store.create_repo(HubRepoType::Model, "c/model", false).unwrap();
+
+        let results = store.search_repos(Some(HubRepoType::Model), "", 10).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.repo_type == HubRepoType::Model));
+    }
+
+    #[test]
+    fn search_repos_respects_limit() {
+        let (_tmp, store) = make_store();
+        for i in 0..10 {
+            store.create_repo(HubRepoType::Model, &format!("repo-{i:02}"), false).unwrap();
+        }
+
+        let results = store.search_repos(None, "repo-", 3).unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].repo_id, "repo-00");
+        assert_eq!(results[2].repo_id, "repo-02");
     }
 
     #[test]
@@ -575,9 +676,9 @@ mod tests {
         let (_tmp, store) = make_store();
 
         let files = vec![
-            HubFileEntry { path: "a.txt".into(), size: 100, sha: "sha_a".into(), is_lfs: false },
-            HubFileEntry { path: "b.bin".into(), size: 2048, sha: "sha_b".into(), is_lfs: true },
-            HubFileEntry { path: "c/d.txt".into(), size: 50, sha: "sha_c".into(), is_lfs: false },
+            HubFileEntry { path: "a.txt".into(), size: 100, sha: "sha_a".into(), is_lfs: false, inline_content: None },
+            HubFileEntry { path: "b.bin".into(), size: 2048, sha: "sha_b".into(), is_lfs: true, inline_content: None },
+            HubFileEntry { path: "c/d.txt".into(), size: 50, sha: "sha_c".into(), is_lfs: false, inline_content: None },
         ];
 
         store.store_files("commit1", &files).expect("store_files");
@@ -606,10 +707,10 @@ mod tests {
         let (_tmp, store) = make_store();
 
         let v1 = vec![HubFileEntry {
-            path: "f.txt".into(), size: 10, sha: "old".into(), is_lfs: false,
+            path: "f.txt".into(), size: 10, sha: "old".into(), is_lfs: false, inline_content: None,
         }];
         let v2 = vec![HubFileEntry {
-            path: "f.txt".into(), size: 20, sha: "new".into(), is_lfs: true,
+            path: "f.txt".into(), size: 20, sha: "new".into(), is_lfs: true, inline_content: None,
         }];
 
         store.store_files("c1", &v1).unwrap();
@@ -691,8 +792,8 @@ mod tests {
 
         // Store files at initial commit
         let files = vec![
-            HubFileEntry { path: "README.md".into(), size: 256, sha: "sha_readme".into(), is_lfs: false },
-            HubFileEntry { path: "model.bin".into(), size: 5_000_000, sha: "sha_model".into(), is_lfs: true },
+            HubFileEntry { path: "README.md".into(), size: 256, sha: "sha_readme".into(), is_lfs: false, inline_content: None },
+            HubFileEntry { path: "model.bin".into(), size: 5_000_000, sha: "sha_model".into(), is_lfs: true, inline_content: None },
         ];
         store.store_files(&initial_sha, &files).unwrap();
 
@@ -777,7 +878,7 @@ mod tests {
 
         // Store files via boxed
         let files = vec![HubFileEntry {
-            path: "test.py".into(), size: 42, sha: "sha_py".into(), is_lfs: false,
+            path: "test.py".into(), size: 42, sha: "sha_py".into(), is_lfs: false, inline_content: None,
         }];
         boxed.store_files("rev1", &files).unwrap();
 

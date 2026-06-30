@@ -81,6 +81,8 @@ pub struct HubFileEntry {
     pub size: u64,
     pub sha: String,
     pub is_lfs: bool,
+    /// Inline file content (only set for non-LFS files ≤1 MiB).
+    pub inline_content: Option<Vec<u8>>,
 }
 
 /// Hub API persistence contract.
@@ -105,6 +107,17 @@ pub trait HubStore: Send + Sync {
 
     /// Lists all repositories.
     fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error>;
+
+    /// Searches repositories by name prefix and optional type filter.
+    ///
+    /// Returns up to `limit` repositories whose `repo_id` starts with `name_prefix`,
+    /// optionally filtered by `repo_type`. Results are ordered by `repo_id`.
+    fn search_repos(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRepo>, Self::Error>;
 
     /// Creates a new revision (commit) in a repository.
     ///
@@ -166,6 +179,13 @@ trait ErasedHubStore: Send + Sync {
     ) -> Result<Option<HubRepo>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn search_repos(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn create_revision(
         &self,
@@ -236,6 +256,16 @@ impl<T: HubStore> ErasedHubStore for T {
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         T::list_repos(self)
+            .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
+    }
+
+    fn search_repos(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        T::search_repos(self, repo_type, name_prefix, limit)
             .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as _)
     }
 
@@ -351,6 +381,16 @@ impl BoxedHubStore {
         self.inner.list_repos()
     }
 
+    /// Searches repositories by name prefix and optional type filter.
+    pub fn search_repos(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.search_repos(repo_type, name_prefix, limit)
+    }
+
     /// Creates a new revision.
     pub fn create_revision(
         &self,
@@ -448,6 +488,15 @@ where
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         T::list_repos(&self.0).map_err(Into::into)
+    }
+
+    fn search_repos(
+        &self,
+        repo_type: Option<HubRepoType>,
+        name_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+        T::search_repos(&self.0, repo_type, name_prefix, limit).map_err(Into::into)
     }
 
     fn create_revision(
