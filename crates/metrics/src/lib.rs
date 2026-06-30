@@ -1,3 +1,16 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use,
+        clippy::format_push_string
+    )
+)]
+
 pub mod storage;
 pub mod transfer;
 pub mod xet;

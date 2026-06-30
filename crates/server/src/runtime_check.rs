@@ -24,19 +24,6 @@ pub struct ConfigCheckReport {
     pub provider_tokens_enabled: bool,
 }
 
-impl ConfigCheckReport {
-    pub fn print_summary(&self) {
-        println!("status: {}", self.status);
-        println!("server_role: {}", self.server_role);
-        println!("server_frontends: {}", self.server_frontends.join(","));
-        println!("metadata_backend: {}", self.metadata_backend);
-        println!("object_backend: {}", self.object_backend);
-        println!("cache_backend: {}", self.cache_backend);
-        println!("auth_enabled: {}", self.auth_enabled);
-        println!("provider_tokens_enabled: {}", self.provider_tokens_enabled);
-    }
-}
-
 /// Validates the selected runtime configuration and backend reachability.
 ///
 /// # Errors

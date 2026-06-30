@@ -675,14 +675,17 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
 }
 
 fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterError {
+    use crate::error::{IndexError, ObjectStoreError};
     use shardline_oci_adapter::OciAdapterError;
     match error {
         ServerError::Io(e) => OciAdapterError::Io(e),
         ServerError::Json(e) => OciAdapterError::Json(e),
         ServerError::NumericConversion(e) => OciAdapterError::NumericConversion(e),
-        ServerError::ObjectStore(e) => OciAdapterError::LocalObjectStore(e),
-        ServerError::S3ObjectStore(e) => OciAdapterError::S3ObjectStore(e),
-        ServerError::ObjectPrefix(e) => OciAdapterError::ObjectPrefix(e),
+        ServerError::ObjectStore(ObjectStoreError::Local(e)) => {
+            OciAdapterError::LocalObjectStore(e)
+        }
+        ServerError::ObjectStore(ObjectStoreError::S3(e)) => OciAdapterError::S3ObjectStore(e),
+        ServerError::ObjectStore(ObjectStoreError::Prefix(e)) => OciAdapterError::ObjectPrefix(e),
         ServerError::NotFound => OciAdapterError::NotFound,
         ServerError::Overflow => OciAdapterError::Overflow,
         ServerError::InvalidContentHash => OciAdapterError::InvalidContentHash,
@@ -699,20 +702,15 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
             | ServerError::RequestQueryTooLarge
             | ServerError::RequestBodyFrameOutOfBounds
             | ServerError::HashParse(_)
-            | ServerError::MissingS3ObjectStoreConfig
-            | ServerError::IndexStore(_)
-            | ServerError::MemoryIndexStore(_)
-            | ServerError::MemoryRecordStore(_)
-            | ServerError::PostgresMetadata(_)
-            | ServerError::RetentionHold(_)
-            | ServerError::QuarantineCandidate(_)
-            | ServerError::WebhookDelivery(_)
-            | ServerError::FileRecordInvariant(_)
+            | ServerError::ObjectStore(
+                ObjectStoreError::MissingS3Config
+                | ObjectStoreError::StoredLengthMismatch
+                | ObjectStoreError::MigrationSourceHashMismatch { .. },
+            )
+            | ServerError::Index(_)
             | ServerError::StoredFileMetadataTooLarge { .. }
             | ServerError::StoredFileMetadataLengthMismatch
-            | ServerError::InvalidLifecycleMetadata(_)
             | ServerError::InvalidFileId
-            | ServerError::MissingRequiredMetadataTable(_)
             | ServerError::InvalidXorbPrefix
             | ServerError::XorbHashMismatch
             | ServerError::InvalidSerializedXorb
@@ -744,10 +742,6 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
             | ServerError::TooManyRegistryTokenRequests
             | ServerError::MissingReconstructionCacheRedisUrl
             | ServerError::TransferLimiterClosed
-            | ServerError::StoredObjectLengthMismatch
-            | ServerError::StorageMigrationSourceHashMismatch { .. }
-            | ServerError::ConflictingRenameTargetRecord
-            | ServerError::InvalidReconstructionResponse(_)
         ) => OciAdapterError::Io(std::io::Error::other(other.to_string())),
     }
 }

@@ -1,4 +1,16 @@
 #![deny(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use,
+        clippy::format_push_string
+    )
+)]
 
 //! Garbage collection for Shardline chunk storage.
 //!
@@ -257,53 +269,6 @@ pub struct LocalGcReport {
     pub deleted_chunks: u64,
     /// Number of bytes reclaimed during this run.
     pub deleted_bytes: u64,
-}
-
-impl LocalGcReport {
-    pub fn print_summary(&self) {
-        println!("scanned_records: {}", self.scanned_records);
-        println!("referenced_chunks: {}", self.referenced_chunks);
-        println!("orphan_chunks: {}", self.orphan_chunks);
-        println!("orphan_chunk_bytes: {}", self.orphan_chunk_bytes);
-        println!(
-            "active_quarantine_candidates: {}",
-            self.active_quarantine_candidates
-        );
-        println!("new_quarantine_candidates: {}", self.new_quarantine_candidates);
-        println!(
-            "retained_quarantine_candidates: {}",
-            self.retained_quarantine_candidates
-        );
-        println!(
-            "released_quarantine_candidates: {}",
-            self.released_quarantine_candidates
-        );
-        println!("deleted_chunks: {}", self.deleted_chunks);
-        println!("deleted_bytes: {}", self.deleted_bytes);
-    }
-
-    pub fn print_cli_summary(
-        &self,
-        mode: &str,
-        root: &std::path::Path,
-        retention_seconds: u64,
-        mark: bool,
-        retention_report: Option<&std::path::Path>,
-        orphan_inventory: Option<&std::path::Path>,
-    ) {
-        println!("mode: {}", mode);
-        println!("root: {}", root.display());
-        if mark {
-            println!("retention_seconds: {}", retention_seconds);
-        }
-        if let Some(path) = retention_report {
-            println!("retention_report: {}", path.display());
-        }
-        if let Some(path) = orphan_inventory {
-            println!("orphan_inventory: {}", path.display());
-        }
-        self.print_summary();
-    }
 }
 
 /// One active retention-window entry after a GC run.

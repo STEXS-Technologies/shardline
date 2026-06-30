@@ -93,25 +93,6 @@ pub struct DatabaseMigrationReport {
     pub migrations: Vec<DatabaseMigrationStatusEntry>,
 }
 
-impl DatabaseMigrationReport {
-    pub fn print_summary(&self) {
-        println!("backend: {}", self.backend);
-        println!("applied_count: {}", self.applied_count);
-        println!("reverted_count: {}", self.reverted_count);
-        println!("applied_total_count: {}", self.applied_total_count);
-        println!("pending_count: {}", self.pending_count);
-        for migration in &self.migrations {
-            println!(
-                "migration: version={} name={} applied={} applied_at_utc={}",
-                migration.version,
-                migration.name,
-                migration.applied,
-                migration.applied_at_utc.as_deref().unwrap_or("-")
-            );
-        }
-    }
-}
-
 /// Database-migration failure.
 #[derive(Debug, Error)]
 pub enum DatabaseMigrationError {

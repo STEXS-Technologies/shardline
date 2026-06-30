@@ -8,6 +8,7 @@ use shardline_vcs::RepositoryRef;
 use crate::{
     ServerError,
     chunk_store::chunk_object_key,
+    error::IndexError,
     object_store::ServerObjectStore,
     record_store::parse_stored_file_record_bytes,
     repository_scope_path::provider_directory,
@@ -38,7 +39,7 @@ where
         return Ok(());
     }
 
-    Err(ServerError::ConflictingRenameTargetRecord)
+    Err(ServerError::Index(IndexError::ConflictingRenameTargetRecord))
 }
 
 pub(super) fn collect_deleted_repository_record_references(

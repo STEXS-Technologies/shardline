@@ -26,6 +26,7 @@ use super::{ProviderWebhookOutcomeKind, apply_provider_webhook_with_stores};
 use crate::{
     ServerError,
     chunk_store::chunk_object_key,
+    error::IndexError,
     object_store::ServerObjectStore,
     record_store::LocalRecordStore,
     test_invariant_error::ServerTestInvariantError,
@@ -884,9 +885,9 @@ async fn exercise_failed_webhook_application_can_retry_same_delivery() -> Result
             .await;
     assert!(matches!(
         first,
-        Err(ServerError::IndexStore(
+        Err(ServerError::Index(IndexError::Local(
             LocalIndexStoreError::InvalidLegacyImportState
-        ))
+        )))
     ));
 
     let second =
@@ -1233,7 +1234,7 @@ async fn exercise_repository_rename_rejects_conflicting_target_metadata()
             .await;
     assert!(matches!(
         outcome,
-        Err(ServerError::ConflictingRenameTargetRecord)
+        Err(ServerError::Index(IndexError::ConflictingRenameTargetRecord))
     ));
     assert!(local_version_record_exists(&record_store, &source_record).await?);
     assert!(local_latest_record_exists(&record_store, &source_record).await?);
