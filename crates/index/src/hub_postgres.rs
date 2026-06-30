@@ -552,7 +552,7 @@ impl HubStore for PostgresIndexStore {
                 let mut rows = sqlx::query(
                     "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
                      FROM shardline_hub_webhooks
-                     WHERE repo_id = $1 AND (',' || events || ',') LIKE ('%' || $2 || '%')",
+                     WHERE repo_id = $1 AND active = true AND (',' || events || ',') LIKE ('%' || $2 || '%')",
                 )
                 .bind(&repo_id)
                 .bind(&event)

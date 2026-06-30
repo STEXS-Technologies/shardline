@@ -441,7 +441,7 @@ impl HubStore for LocalIndexStore {
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
              FROM shardline_hub_webhooks
-             WHERE repo_id = ?1 AND (',' || events || ',') LIKE ('%' || ?2 || '%')",
+             WHERE repo_id = ?1 AND active = 1 AND (',' || events || ',') LIKE ('%' || ?2 || '%')",
         )?;
         let rows = stmt.query_map(params![repo_id, event], |row| {
             let events_str: String = row.get(3)?;

@@ -14,12 +14,15 @@ use std::io::Write;
 pub enum PackError {
     /// Zlib compression failed.
     Zlib(std::io::Error),
+    /// Too many objects to fit in the pack header (exceeds u32::MAX).
+    TooManyObjects,
 }
 
 impl std::fmt::Display for PackError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Zlib(e) => write!(f, "zlib compression failed: {e}"),
+            Self::TooManyObjects => write!(f, "too many objects for pack file"),
         }
     }
 }
@@ -28,6 +31,7 @@ impl std::error::Error for PackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Zlib(e) => Some(e),
+            Self::TooManyObjects => None,
         }
     }
 }
@@ -102,14 +106,17 @@ impl GitObject {
 ///
 /// # Errors
 ///
-/// Returns [`PackError`] if zlib compression fails.
+/// Returns [`PackError`] if zlib compression fails or if there are too many
+/// objects to fit in the pack header.
 pub fn generate_pack(objects: &[GitObject]) -> Result<Vec<u8>, PackError> {
     let mut out = Vec::new();
 
     // Pack header: "PACK" + version(4) + num_objects(4)
+    let num_objects =
+        u32::try_from(objects.len()).map_err(|_overflow| PackError::TooManyObjects)?;
     out.extend_from_slice(b"PACK");
     out.extend_from_slice(&2u32.to_be_bytes()); // version 2
-    out.extend_from_slice(&(objects.len() as u32).to_be_bytes());
+    out.extend_from_slice(&num_objects.to_be_bytes());
 
     // Write each object
     for obj in objects {
