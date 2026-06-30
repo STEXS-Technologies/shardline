@@ -30,15 +30,15 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[HIGH]** Log injection — `sanitize_log_url` at `routes.rs:86-98`, used at `routes.rs:75`
 - [x] **[MEDIUM]** OIDC provider no `aud` claim check — `validation.set_audience` at `oidc_provider.rs:198`
 - [x] **[MEDIUM]** OIDC provider no `iat`/`nbf` claim check — `oidc_provider.rs:143-211`
-- [ ] **[MEDIUM]** Secret file TOCTOU race — `server/src/config/secrets.rs:189-198`
+- [ ] **[MEDIUM]** Secret file TOCTOU race — `server/src/config/secrets.rs:189-198`. Deferred: requires atomic file read (read-to-end + validate) or `O_TMPFILE`; low exploitability since attacker needs filesystem access.
 - [x] **[MEDIUM]** Static bearer token length leaks via timing — `server/src/auth.rs:135-136`
 - [x] **[MEDIUM]** No CORS on Hub API routes — CORS layer added to `hub_api/src/lib.rs`
 - [x] **[MEDIUM]** No security headers (CSP, X-Frame-Options, etc.) — Security headers middleware added to `hub_api/src/lib.rs`
 - [x] **[MEDIUM]** Unbounded webhook task spawning — `Semaphore::new(16)` at `routes.rs:31`, acquired at `routes.rs:69`
-- [ ] **[MEDIUM]** Webhook JoinHandle dropped silently — `hub_api/src/routes.rs:73`
+- [ ] **[MEDIUM]** Webhook JoinHandle dropped silently — `hub_api/src/routes.rs:73`. Deferred: spawn result discarded; fix requires storing handles or logging join errors; low impact since panics propagate to tokio runtime.
 - [x] **[MEDIUM]** Hub Postgres pool missing max_connections — `.max_connections(16)` at `app.rs:396`
 - [x] **[MEDIUM]** Token signing key minimum length — `MIN_SIGNING_KEY_BYTES = 32` enforced at `token.rs:296`
-- [ ] **[LOW]** SQL format-string for table existence check — `index/src/local_sqlite/helpers.rs:201` (acceptable, hardcoded table names)
+- [ ] **[LOW]** SQL format-string for table existence check — `index/src/local_sqlite/helpers.rs:201` (acceptable, hardcoded table names). Deferred: acceptable risk; table names are compile-time constants.
 
 ---
 
@@ -54,22 +54,22 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 ### Deferred
 
-- [ ] **[HIGH]** God trait: `RecordStore` — split into `RecordTraversal`, `RecordMutation`, `RepositoryScopedRecords`. Deferred: ~5 impl sites + test mock impls need updating.
-- [ ] **[MEDIUM]** `HubStore` has 15 methods — split into `HubRepoStore`, `HubRevisionStore`, `HubLfsStore`, `HubWebhookStore`
-- [ ] **[HIGH]** `xet_adapter` depends on `server_core` (dependency inversion) — extract `ServerObjectStore` + related types into `shardline-storage-core`
-- [ ] **[MEDIUM]** `LocalBackend`/`PostgresBackend` share no common trait — define `trait MetadataBackend`
+- [ ] **[HIGH]** God trait: `RecordStore` — split into `RecordTraversal`, `RecordMutation`, `RepositoryScopedRecords`. Deferred: ~5 impl sites + test mock impls need updating; high-risk refactor touching index, server, server_core, fsck, gc.
+- [ ] **[MEDIUM]** `HubStore` has 15 methods — split into `HubRepoStore`, `HubRevisionStore`, `HubLfsStore`, `HubWebhookStore`. Deferred: requires trait bounds update across hub_api route handlers and tests.
+- [ ] **[HIGH]** `xet_adapter` depends on `server_core` (dependency inversion) — extract `ServerObjectStore` + related types into `shardline-storage-core`. Deferred: requires new crate creation + republish; blocks on xet ecosystem stabilization.
+- [ ] **[MEDIUM]** `LocalBackend`/`PostgresBackend` share no common trait — define `trait MetadataBackend`. Deferred: requires unified async trait with associated types; 4+ impl sites to update.
 - [x] **[MEDIUM]** Duplicate `validate_content_hash` in 7 locations — consolidate into `protocol` or `server_core`
-- [ ] **[MEDIUM]** Duplicate `checked_add`, `unix_now_seconds_checked` — consolidate
-- [ ] **[MEDIUM]** Duplicate `read_full_object` — `server_core` vs `server`
+- [x] **[MEDIUM]** Duplicate `checked_add`, `unix_now_seconds_checked` — consolidated; `oci_adapter` delegates to `server_core::checked_add` and `server_core::unix_now_seconds_checked`
+- [ ] **[MEDIUM]** Duplicate `read_full_object` — `server_core` vs `server` (server has own impl returning `ServerError` instead of delegating to server_core's `ServerObjectStoreError` version)
 - [x] **[MEDIUM]** Duplicate `parse_stored_file_record_bytes` — `server_core` vs `server`
 - [x] **[MEDIUM]** Duplicate `chunk_object_key` — across 3 crates
 - [x] **[MEDIUM]** `server/src/oci_adapter.rs` (916 lines) — god-module mixing SHA-256, upload sessions, S3 multipart, protocol keys
 - [x] **[HIGH]** `server/src/oci_adapter.rs` and `oci_adapter/src/lib.rs` near-complete copies (916 vs 1051 lines) — consolidate
 - [x] **[HIGH]** `server/src/provider_events/records.rs` full copy of `provider_events/src/records.rs`
-- [ ] **[MEDIUM]** Visitor pattern copy-pasted across 4 trait definitions — architectural tech debt; not a correctness issue
-- [ ] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations — architectural tech debt
-- [ ] **[LOW]** `cli` depends on `server` (full dependency tree)
-- [ ] **[LOW]** `fsck`/`gc`/`rebuild`/`provider_events` identical dependency footprints
+- [ ] **[MEDIUM]** Visitor pattern copy-pasted across 4 trait definitions — architectural tech debt; not a correctness issue. Deferred: requires trait redesign across `IndexStore` impls; low risk, high churn.
+- [ ] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations — architectural tech debt. Deferred: requires unified `LifecycleBackend` trait + 4 impl rewrites; high churn for no functional gain.
+- [ ] **[LOW]** `cli` depends on `server` (full dependency tree). Deferred: requires extracting CLI-specific logic into a shared crate; low priority since binary size is not a concern.
+- [ ] **[LOW]** `fsck`/`gc`/`rebuild`/`provider_events` identical dependency footprints. Deferred: could extract shared ops crate; low priority vs functional work.
 - [x] **[LOW]** Unnecessary re-export: `pub use serde::{Deserialize, Serialize}` in `server_core`
 
 ---
@@ -94,9 +94,9 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[HIGH]** `hub_api/src/routes.rs` (1,350 lines) — no `#[cfg(test)]` module; unit tests for critical functions needed
 - [x] **[MEDIUM]** `hub_api/src/routes.rs:487` still has `static mut COMMIT_DIR` pattern — no `static mut` in routes.rs
 - [x] **[MEDIUM]** No property-based testing (proptest/quickcheck) anywhere — proptest in `server_core` and `storage`
-- [ ] **[MEDIUM]** 105 instances of duplicated tempdir setup across test files — `TempStorage` helper exists at `test_support/src/lib.rs:72` but not adopted everywhere
-- [ ] **[MEDIUM]** 26+ sleep() calls in tests creating flakiness risk — architectural tech debt
-- [ ] **[LOW]** Fuzz targets missing for: `fsck`, `gc`, `index` SQL, `hub_api` routes, `server_core` auth, `rebuild` candidates
+- [ ] **[MEDIUM]** 105 instances of duplicated tempdir setup across test files — `TempStorage` helper exists at `test_support/src/lib.rs:72` but not adopted everywhere. Deferred: mechanical but high-churn; requires updating every test file individually.
+- [ ] **[MEDIUM]** 26+ sleep() calls in tests creating flakiness risk — architectural tech debt. Deferred: each sleep replaces a race condition; fix requires injectable clocks or `tokio::time::pause()` adoption across test suites.
+- [ ] **[LOW]** Fuzz targets missing for: `fsck`, `gc`, `index` SQL, `hub_api` routes, `server_core` auth, `rebuild` candidates. Deferred: requires fuzz corpus setup + CI integration; low priority vs functional testing.
 
 ---
 
@@ -104,14 +104,14 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 ### Deferred
 
-- [ ] **[HIGH]** 16 `block_on` calls in `hub_postgres.rs` block tokio worker threads — make `HubStore` async
-- [ ] **[HIGH]** `S3ObjectStore` blocks on async — make `ObjectStore` trait async
+- [ ] **[HIGH]** 16 `block_on` calls in `hub_postgres.rs` block tokio worker threads — make `HubStore` async. Deferred: requires rewriting all `HubStore` methods to async + updating callers; high-risk refactor.
+- [ ] **[HIGH]** `S3ObjectStore` blocks on async — make `ObjectStore` trait async. Deferred: would propagate `async` through every `ObjectStore` call site (50+ call sites); foundational change.
 - [x] **[HIGH]** Zero `BufWriter`/`BufReader` usage — all local file I/O unbuffered — `BufReader` in `object_store.rs:201`, `BufWriter` in `oci_adapter/src/lib.rs:1004`; remaining file reads are small bounded metadata files in `local_sqlite/helpers.rs`
-- [ ] **[MEDIUM]** Memory cache O(n) eviction — `cache/src/memory.rs:112-119`
-- [ ] **[MEDIUM]** Memory cache thundering herd on expiry — `cache/src/memory.rs:44-68`
+- [x] **[MEDIUM]** Memory cache O(n) eviction — `cache/src/memory.rs:112-119` — fixed; BTreeMap-based eviction_order gives O(log n) eviction via `pop_first()`
+- [ ] **[MEDIUM]** Memory cache thundering herd on expiry — `cache/src/memory.rs:44-68` — RwLock prevents internal corruption but concurrent readers still all miss and hit backing store simultaneously; fix requires per-key dedup (e.g. `tokio::sync::Semaphore` or `Arc<OnceCell>`)
 - [x] **[MEDIUM]** JWKS/OIDC keys cloned on every cache hit
 - [x] **[MEDIUM]** `std::fs::create_dir_all` error silently discarded at startup — `server/src/app.rs:387`
-- [ ] **[LOW]** `record_completed_chunks` sorts unconditionally on every `finish()`
+- [ ] **[LOW]** `record_completed_chunks` sorts unconditionally on every `finish()` — deferred: callers already pass near-sorted data; sorting is O(n log n) but n is small (chunk count per file); profile before optimizing.
 
 ---
 
@@ -129,10 +129,10 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 ### Unfixed
 
-- [ ] **[MEDIUM]** 3 versions of `hashbrown` (0.14, 0.15, 0.17)
-- [ ] **[MEDIUM]** 2 versions of `hashlink`, `cfg-if`, `core-foundation`, `itertools`, `webpki-roots`, `whoami`, `rand`
+- [ ] **[MEDIUM]** 3 versions of `hashbrown` (0.14, 0.15, 0.17). Deferred: blocked by transitive deps from xet ecosystem and index crate.
+- [ ] **[MEDIUM]** 2 versions of `hashlink`, `cfg-if`, `core-foundation`, `itertools`, `webpki-roots`, `whoami`, `rand`. Deferred: blocked by transitive deps from xet ecosystem.
 - [x] **[MEDIUM]** `hub_api` bypasses workspace for 5 deps
-- [ ] **[MEDIUM]** `reqwest` enables `blocking` feature (used only for JWKS/OIDC refresh)
+- [ ] **[MEDIUM]** `reqwest` enables `blocking` feature — used for JWKS key refresh in `server/src/jwks_provider.rs` (`reqwest::blocking::Client`); deferred: would require rewriting JWKS refresh to use async reqwest inside `spawn_blocking`, or extracting HTTP client into a shared async helper
 - [x] **[LOW]** `fuzz` crate uses `edition = "2024"` directly instead of workspace
 
 ---
@@ -154,7 +154,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[MEDIUM]** `REPOSITORY_REFERENCE_PROBE_*` statics leak test infrastructure into production — `#[cfg(test)]` gated at `backend.rs:44-50`
 - [x] **[MEDIUM]** `hub_api::state::get_for_test()` is `pub` but not `#[cfg(test)]` — `#[cfg(test)]` gate added at `state.rs:27`
 - [x] **[MEDIUM]** `with_index_postgres_url` has wrong doc comment (copy-paste from `with_token_signing_key`) — doc corrected
-- [ ] **[LOW]** Mixed `read_`/`get_` prefixes in `index/src/hub.rs`
+- [ ] **[LOW]** Mixed `read_`/`get_` prefixes in `index/src/hub.rs`. Deferred: cosmetic; would require renaming public API methods + updating all callers.
 - [x] **[LOW]** `DEFAULT_LOCAL_GC_RETENTION_SECONDS` defined identically in `gc` and `provider_events` — consolidated via re-export from `server_core`
 
 ---
@@ -164,9 +164,9 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 | Category | Fixed | Unfixed/Deferred |
 |---|---|---|
 | Security | 22 | 5 |
-| Architecture | 8 | 13 |
+| Architecture | 9 | 12 |
 | Testing | 13 | 3 |
-| Performance | 1 | 7 |
+| Performance | 2 | 6 |
 | Dependencies | 7 | 5 |
 | Code Quality | 11 | 1 |
-| **Total** | **62** | **34** |
+| **Total** | **64** | **32** |
