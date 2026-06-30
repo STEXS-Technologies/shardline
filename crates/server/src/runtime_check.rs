@@ -73,11 +73,11 @@ mod tests {
 
     #[tokio::test]
     async fn config_check_reports_local_backend_for_initialized_storage() {
-        let storage = tempfile::tempdir().unwrap();
+        let storage = shardline_test_support::TempStorage::new();
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
-            storage.path().to_path_buf(),
+            storage.path_buf(),
             NonZeroUsize::MIN,
         )
         .with_token_signing_key(b"signing-key".to_vec())
@@ -97,11 +97,11 @@ mod tests {
 
     #[tokio::test]
     async fn transfer_role_config_check_disables_reconstruction_cache() {
-        let storage = tempfile::tempdir().unwrap();
+        let storage = shardline_test_support::TempStorage::new();
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
-            storage.path().to_path_buf(),
+            storage.path_buf(),
             NonZeroUsize::MIN,
         )
         .with_server_role(ServerRole::Transfer)
@@ -119,11 +119,11 @@ mod tests {
 
     #[tokio::test]
     async fn config_check_rejects_missing_signing_key_for_served_routes() {
-        let storage = tempfile::tempdir().unwrap();
+        let storage = shardline_test_support::TempStorage::new();
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
-            storage.path().to_path_buf(),
+            storage.path_buf(),
             NonZeroUsize::MIN,
         );
 

@@ -178,12 +178,8 @@ mod tests {
     use crate::ServerError;
     #[tokio::test]
     async fn local_object_byte_stream_reads_object_in_segments() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let object_store = LocalObjectStore::new(storage.path().to_path_buf());
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf());
         assert!(object_store.is_ok());
         let Ok(object_store) = object_store else {
             return;
@@ -226,12 +222,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_object_byte_stream_rejects_index_length_mismatch() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let object_store = LocalObjectStore::new(storage.path().to_path_buf());
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf());
         assert!(object_store.is_ok());
         let Ok(object_store) = object_store else {
             return;
@@ -259,12 +251,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_object_byte_range_stream_reads_only_requested_range() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let object_store = LocalObjectStore::new(storage.path().to_path_buf());
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf());
         assert!(object_store.is_ok());
         let Ok(object_store) = object_store else {
             return;

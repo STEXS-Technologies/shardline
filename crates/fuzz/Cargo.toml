@@ -21,9 +21,11 @@ hex.workspace = true
 libfuzzer-sys.workspace = true
 object_store = { workspace = true, default-features = true }
 shardline.workspace = true
+shardline-hub-api.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-server.workspace = true
+shardline-server-core.workspace = true
 shardline-storage.workspace = true
 shardline-vcs.workspace = true
 tempfile.workspace = true
@@ -123,6 +125,30 @@ doc = false
 [[bin]]
 name = "shardline_async_storage_races"
 path = "fuzz_targets/shardline/async_storage_races.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_index_hub"
+path = "fuzz_targets/shardline/index_hub.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_server_core_auth"
+path = "fuzz_targets/shardline/server_core_auth.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_index_record"
+path = "fuzz_targets/shardline/index_record.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_hub_api_commit"
+path = "fuzz_targets/shardline/hub_api_commit.rs"
 test = false
 doc = false
 

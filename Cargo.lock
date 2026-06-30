@@ -3024,9 +3024,11 @@ dependencies = [
  "libfuzzer-sys",
  "object_store",
  "shardline",
+ "shardline-hub-api",
  "shardline-index",
  "shardline-protocol",
  "shardline-server",
+ "shardline-server-core",
  "shardline-storage",
  "shardline-vcs",
  "tempfile",
@@ -3094,6 +3096,7 @@ dependencies = [
  "serde_json",
  "shardline-protocol",
  "shardline-storage",
+ "shardline-test-support",
  "sqlx",
  "tempfile",
  "thiserror",
@@ -3266,6 +3269,7 @@ dependencies = [
 name = "shardline-storage"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "bytes",
  "futures-util",
@@ -3275,6 +3279,7 @@ dependencies = [
  "proptest",
  "sha2",
  "shardline-protocol",
+ "shardline-test-support",
  "tempfile",
  "thiserror",
  "tokio",

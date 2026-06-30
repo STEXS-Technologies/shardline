@@ -732,12 +732,8 @@ mod tests {
 
     #[test]
     fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let store = LocalObjectStore::new(storage.path().to_path_buf());
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf());
         assert!(store.is_ok());
         let Ok(store) = store else {
             return;
@@ -811,12 +807,8 @@ mod tests {
 
     #[test]
     fn local_object_store_rejects_integrity_mismatch_and_out_of_bounds_range() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
-        let store = LocalObjectStore::new(storage.path().to_path_buf());
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf());
         assert!(store.is_ok());
         let Ok(store) = store else {
             return;
@@ -850,11 +842,7 @@ mod tests {
 
     #[test]
     fn local_object_store_installs_temporary_file_without_buffering() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
@@ -885,11 +873,7 @@ mod tests {
 
     #[test]
     fn local_object_store_temporary_file_duplicate_is_idempotent() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
@@ -916,11 +900,7 @@ mod tests {
 
     #[test]
     fn local_object_store_temporary_file_rejects_conflicting_existing_object() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
@@ -956,11 +936,7 @@ mod tests {
 
     #[test]
     fn local_object_store_open_is_non_mutating_until_write() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let root = storage.path().join("objects");
         let store = LocalObjectStore::open(root.clone());
 
@@ -980,11 +956,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_new_rejects_symlinked_root_ancestor() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let target = storage.path().join("target");
         let created = fs::create_dir_all(&target);
         assert!(created.is_ok());
@@ -1003,11 +975,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_list_prefix_rejects_symlinked_root_ancestor() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let target = storage.path().join("target");
         let object_root = target.join("objects");
         let parent = object_root.join("aa");
@@ -1036,11 +1004,7 @@ mod tests {
 
     #[test]
     fn local_object_store_maps_validated_key_under_root() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let root = storage.path().join("objects");
         let store = LocalObjectStore::open(root.clone());
         let key = ObjectKey::parse("aa/hash");
@@ -1056,11 +1020,7 @@ mod tests {
 
     #[test]
     fn local_object_store_rejects_corrupted_existing_object_under_same_key() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
@@ -1097,11 +1057,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_rejects_symlinked_object_path() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
@@ -1148,11 +1104,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_rejects_symlinked_parent_directory_reads() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
@@ -1210,11 +1162,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_rejects_symlinked_parent_directory_writes() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
@@ -1264,11 +1212,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_rejects_parent_swap_race() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let outside = tempfile::tempdir();
         assert!(outside.is_ok());
         let Ok(outside) = outside else {
@@ -1323,11 +1267,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_rejects_symlinked_parent_directory_deletes() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
         assert!(store.is_ok());
         let Ok(store) = store else {
