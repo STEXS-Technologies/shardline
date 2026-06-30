@@ -65,7 +65,7 @@ xet-client = "1.5.1"
 xet-core-structures = "1.5.1"
 xet-data = "1.5.1"
 xet-runtime = "1.5.1"
-prometheus = { version = "0.13", default-features = false }
+prometheus = { version = "0.14", default-features = false }
 tower = "0.5"
 tower-http = { version = "0.6", default-features = false }
 tracing = "0.1"
