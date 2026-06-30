@@ -44,76 +44,82 @@ impl HubStore for LocalIndexStore {
         name: &str,
         private: bool,
     ) -> Result<HubRepo, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let now = unix_now_seconds_lossy();
-        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
-        conn.execute(
-            "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![name, repo_type_to_str(repo_type), private as i64, initial_sha, u64_to_i64(now)?, u64_to_i64(now)?],
-        )?;
-        // Insert initial revision
-        conn.execute(
-            "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-             VALUES (?1, 'main', ?2, NULL, NULL, ?3)",
-            params![name, initial_sha, u64_to_i64(now)?],
-        )?;
-        Ok(HubRepo {
-            repo_id: name.to_owned(),
-            repo_type,
-            private,
-            default_branch: initial_sha,
-            created_at_unix_seconds: now,
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection_rw(self.root())?;
+            let now = unix_now_seconds_lossy();
+            let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
+            conn.execute(
+                "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![name, repo_type_to_str(repo_type), private as i64, initial_sha, u64_to_i64(now)?, u64_to_i64(now)?],
+            )?;
+            // Insert initial revision
+            conn.execute(
+                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+                 VALUES (?1, 'main', ?2, NULL, NULL, ?3)",
+                params![name, initial_sha, u64_to_i64(now)?],
+            )?;
+            Ok(HubRepo {
+                repo_id: name.to_owned(),
+                repo_type,
+                private,
+                default_branch: initial_sha,
+                created_at_unix_seconds: now,
+            })
         })
     }
 
     fn get_repo(&self, repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let result = conn
-            .query_row(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                 FROM shardline_hub_repos WHERE repo_id = ?1",
-                params![repo_id],
-                |row| {
-                    let rt_str: String = row.get(1)?;
-                    let repo_type = HubRepoType::parse_str(&rt_str)
-                        .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
-                    Ok(HubRepo {
-                        repo_id: row.get(0)?,
-                        repo_type,
-                        private: row.get::<_, i64>(2)? != 0,
-                        default_branch: row.get(3)?,
-                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(result)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let result = conn
+                .query_row(
+                    "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                     FROM shardline_hub_repos WHERE repo_id = ?1",
+                    params![repo_id],
+                    |row| {
+                        let rt_str: String = row.get(1)?;
+                        let repo_type = HubRepoType::parse_str(&rt_str)
+                            .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
+                        Ok(HubRepo {
+                            repo_id: row.get(0)?,
+                            repo_type,
+                            private: row.get::<_, i64>(2)? != 0,
+                            default_branch: row.get(3)?,
+                            created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(result)
+        })
     }
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let mut stmt = conn.prepare(
-            "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-             FROM shardline_hub_repos ORDER BY repo_id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let rt_str: String = row.get(1)?;
-            let repo_type = HubRepoType::parse_str(&rt_str)
-                .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
-            Ok(HubRepo {
-                repo_id: row.get(0)?,
-                repo_type,
-                private: row.get::<_, i64>(2)? != 0,
-                default_branch: row.get(3)?,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
-        let mut repos = Vec::new();
-        for row in rows {
-            repos.push(row?);
-        }
-        Ok(repos)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let mut stmt = conn.prepare(
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                 FROM shardline_hub_repos ORDER BY repo_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let rt_str: String = row.get(1)?;
+                let repo_type = HubRepoType::parse_str(&rt_str)
+                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(rt_str.clone()))?;
+                Ok(HubRepo {
+                    repo_id: row.get(0)?,
+                    repo_type,
+                    private: row.get::<_, i64>(2)? != 0,
+                    default_branch: row.get(3)?,
+                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
+                })
+            })?;
+            let mut repos = Vec::new();
+            for row in rows {
+                repos.push(row?);
+            }
+            Ok(repos)
+        })
     }
 
     fn search_repos(
@@ -122,56 +128,58 @@ impl HubStore for LocalIndexStore {
         name_prefix: &str,
         limit: usize,
     ) -> Result<Vec<HubRepo>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let pattern = format!("{name_prefix}%");
-        let mut repos = Vec::new();
-        if let Some(rt) = repo_type {
-            let rt_str = rt.as_str();
-            let mut stmt = conn.prepare(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                 FROM shardline_hub_repos
-                 WHERE repo_id LIKE ?1 AND repo_type = ?2
-                 ORDER BY repo_id LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(params![pattern, rt_str, limit as i64], |row| {
-                let repo_type_str: String = row.get(1)?;
-                let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
-                Ok(HubRepo {
-                    repo_id: row.get(0)?,
-                    repo_type: parsed_repo_type,
-                    private: row.get::<_, i64>(2)? != 0,
-                    default_branch: row.get(3)?,
-                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
-                })
-            })?;
-            for row in rows {
-                repos.push(row?);
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let pattern = format!("{name_prefix}%");
+            let mut repos = Vec::new();
+            if let Some(rt) = repo_type {
+                let rt_str = rt.as_str();
+                let mut stmt = conn.prepare(
+                    "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                     FROM shardline_hub_repos
+                     WHERE repo_id LIKE ?1 AND repo_type = ?2
+                     ORDER BY repo_id LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(params![pattern, rt_str, limit as i64], |row| {
+                    let repo_type_str: String = row.get(1)?;
+                    let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
+                        .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
+                    Ok(HubRepo {
+                        repo_id: row.get(0)?,
+                        repo_type: parsed_repo_type,
+                        private: row.get::<_, i64>(2)? != 0,
+                        default_branch: row.get(3)?,
+                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
+                    })
+                })?;
+                for row in rows {
+                    repos.push(row?);
+                }
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                     FROM shardline_hub_repos
+                     WHERE repo_id LIKE ?1
+                     ORDER BY repo_id LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![pattern, limit as i64], |row| {
+                    let repo_type_str: String = row.get(1)?;
+                    let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
+                        .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
+                    Ok(HubRepo {
+                        repo_id: row.get(0)?,
+                        repo_type: parsed_repo_type,
+                        private: row.get::<_, i64>(2)? != 0,
+                        default_branch: row.get(3)?,
+                        created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
+                    })
+                })?;
+                for row in rows {
+                    repos.push(row?);
+                }
             }
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                 FROM shardline_hub_repos
-                 WHERE repo_id LIKE ?1
-                 ORDER BY repo_id LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![pattern, limit as i64], |row| {
-                let repo_type_str: String = row.get(1)?;
-                let parsed_repo_type = HubRepoType::parse_str(&repo_type_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(repo_type_str.clone()))?;
-                Ok(HubRepo {
-                    repo_id: row.get(0)?,
-                    repo_type: parsed_repo_type,
-                    private: row.get::<_, i64>(2)? != 0,
-                    default_branch: row.get(3)?,
-                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(4)?).map_err(|e| sqlite_store_error(&e))?,
-                })
-            })?;
-            for row in rows {
-                repos.push(row?);
-            }
-        }
-        Ok(repos)
+            Ok(repos)
+        })
     }
 
     fn create_revision(
@@ -182,186 +190,202 @@ impl HubStore for LocalIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection_rw(self.root())?;
 
-        // Optimistic concurrency check
-        if let Some(parent) = parent_sha {
-            let current_head: Option<String> = conn
-                .query_row(
-                    "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = ?1",
-                    params![repo_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            match current_head {
-                Some(head) if head != parent => {
-                    return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            // Optimistic concurrency check
+            if let Some(parent) = parent_sha {
+                let current_head: Option<String> = conn
+                    .query_row(
+                        "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = ?1",
+                        params![repo_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                match current_head {
+                    Some(head) if head != parent => {
+                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                    }
+                    None => {
+                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                    }
+                    _ => {}
                 }
-                None => {
-                    return Err(rusqlite::Error::QueryReturnedNoRows.into());
-                }
-                _ => {}
             }
-        }
 
-        let now = unix_now_seconds_lossy();
+            let now = unix_now_seconds_lossy();
 
-        // Update repo HEAD
-        conn.execute(
-            "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
-             WHERE repo_id = ?3",
-            params![new_sha, u64_to_i64(now)?, repo_id],
-        )?;
+            // Update repo HEAD
+            conn.execute(
+                "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
+                 WHERE repo_id = ?3",
+                params![new_sha, u64_to_i64(now)?, repo_id],
+            )?;
 
-        // Insert revision
-        conn.execute(
-            "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
-        )?;
+            // Insert revision
+            conn.execute(
+                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
+            )?;
 
-        Ok(HubRevision {
-            repo_id: repo_id.to_owned(),
-            ref_name: ref_name.to_owned(),
-            sha: new_sha.to_owned(),
-            parent_sha: parent_sha.map(ToOwned::to_owned),
-            message: Some(message.to_owned()),
-            created_at_unix_seconds: now,
+            Ok(HubRevision {
+                repo_id: repo_id.to_owned(),
+                ref_name: ref_name.to_owned(),
+                sha: new_sha.to_owned(),
+                parent_sha: parent_sha.map(ToOwned::to_owned),
+                message: Some(message.to_owned()),
+                created_at_unix_seconds: now,
+            })
         })
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let mut stmt = conn.prepare(
-            "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
-             FROM shardline_hub_revisions WHERE repo_id = ?1 ORDER BY created_at_unix_seconds DESC, rowid DESC",
-        )?;
-        let rows = stmt.query_map(params![repo_id], |row| {
-            Ok(HubRevision {
-                repo_id: row.get(0)?,
-                ref_name: row.get(1)?,
-                sha: row.get(2)?,
-                parent_sha: row.get(3)?,
-                message: row.get(4)?,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?).map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
-        let mut revisions = Vec::new();
-        for row in rows {
-            revisions.push(row?);
-        }
-        Ok(revisions)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let mut stmt = conn.prepare(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = ?1 ORDER BY created_at_unix_seconds DESC, rowid DESC",
+            )?;
+            let rows = stmt.query_map(params![repo_id], |row| {
+                Ok(HubRevision {
+                    repo_id: row.get(0)?,
+                    ref_name: row.get(1)?,
+                    sha: row.get(2)?,
+                    parent_sha: row.get(3)?,
+                    message: row.get(4)?,
+                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(5)?).map_err(|e| sqlite_store_error(&e))?,
+                })
+            })?;
+            let mut revisions = Vec::new();
+            for row in rows {
+                revisions.push(row?);
+            }
+            Ok(revisions)
+        })
     }
 
     fn resolve_revision(&self, repo_id: &str, revision: &str) -> Result<Option<String>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
 
-        if revision.is_empty() || revision == "main" {
-            let head: Option<String> = conn
+            if revision.is_empty() || revision == "main" {
+                let head: Option<String> = conn
+                    .query_row(
+                        "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = ?1",
+                        params![repo_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                return Ok(head);
+            }
+
+            // Direct SHA match
+            let exists: bool = conn
                 .query_row(
-                    "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = ?1",
-                    params![repo_id],
+                    "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
+                    params![repo_id, revision],
+                    |row| row.get(0),
+                )?;
+            if exists {
+                return Ok(Some(revision.to_owned()));
+            }
+
+            // Ref name match
+            let sha: Option<String> = conn
+                .query_row(
+                    "SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1 AND ref_name = ?2
+                     ORDER BY created_at_unix_seconds DESC LIMIT 1",
+                    params![repo_id, revision],
                     |row| row.get(0),
                 )
                 .optional()?;
-            return Ok(head);
-        }
-
-        // Direct SHA match
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
-                params![repo_id, revision],
-                |row| row.get(0),
-            )?;
-        if exists {
-            return Ok(Some(revision.to_owned()));
-        }
-
-        // Ref name match
-        let sha: Option<String> = conn
-            .query_row(
-                "SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1 AND ref_name = ?2
-                 ORDER BY created_at_unix_seconds DESC LIMIT 1",
-                params![repo_id, revision],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(sha)
+            Ok(sha)
+        })
     }
 
     fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let mut stmt = conn.prepare(
-            "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
-        for file in files {
-            stmt.execute(params![
-                commit_sha,
-                file.path,
-                u64_to_i64(file.size)?,
-                file.sha,
-                file.is_lfs as i64,
-                file.inline_content,
-            ])?;
-        }
-        Ok(())
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection_rw(self.root())?;
+            let mut stmt = conn.prepare(
+                "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for file in files {
+                stmt.execute(params![
+                    commit_sha,
+                    file.path,
+                    u64_to_i64(file.size)?,
+                    file.sha,
+                    file.is_lfs as i64,
+                    file.inline_content,
+                ])?;
+            }
+            Ok(())
+        })
     }
 
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let mut stmt = conn.prepare(
-            "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
-             WHERE commit_sha = ?1 ORDER BY path",
-        )?;
-        let rows = stmt.query_map(params![commit_sha], |row| {
-            Ok(HubFileEntry {
-                path: row.get(0)?,
-                size: i64_to_u64(row.get::<_, i64>(1)?).map_err(|e| sqlite_store_error(&e))?,
-                sha: row.get(2)?,
-                is_lfs: row.get::<_, i64>(3)? != 0,
-                inline_content: row.get(4)?,
-            })
-        })?;
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row?);
-        }
-        Ok(entries)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let mut stmt = conn.prepare(
+                "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
+                 WHERE commit_sha = ?1 ORDER BY path",
+            )?;
+            let rows = stmt.query_map(params![commit_sha], |row| {
+                Ok(HubFileEntry {
+                    path: row.get(0)?,
+                    size: i64_to_u64(row.get::<_, i64>(1)?).map_err(|e| sqlite_store_error(&e))?,
+                    sha: row.get(2)?,
+                    is_lfs: row.get::<_, i64>(3)? != 0,
+                    inline_content: row.get(4)?,
+                })
+            })?;
+            let mut entries = Vec::new();
+            for row in rows {
+                entries.push(row?);
+            }
+            Ok(entries)
+        })
     }
 
     fn put_lfs_object(&self, oid: &str, data: &[u8]) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let now = unix_now_seconds_lossy();
-        conn.execute(
-            "INSERT OR REPLACE INTO shardline_hub_lfs_objects (oid, data, size, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![oid, data, i64::try_from(data.len()).map_err(|_e| LocalIndexStoreError::IntegerOutOfRange)?, u64_to_i64(now)?],
-        )?;
-        Ok(())
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection_rw(self.root())?;
+            let now = unix_now_seconds_lossy();
+            conn.execute(
+                "INSERT OR REPLACE INTO shardline_hub_lfs_objects (oid, data, size, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![oid, data, i64::try_from(data.len()).map_err(|_e| LocalIndexStoreError::IntegerOutOfRange)?, u64_to_i64(now)?],
+            )?;
+            Ok(())
+        })
     }
 
     fn get_lfs_object(&self, oid: &str) -> Result<Option<Vec<u8>>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let result = conn
-            .query_row(
-                "SELECT data FROM shardline_hub_lfs_objects WHERE oid = ?1",
-                params![oid],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()?;
-        Ok(result)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let result = conn
+                .query_row(
+                    "SELECT data FROM shardline_hub_lfs_objects WHERE oid = ?1",
+                    params![oid],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            Ok(result)
+        })
     }
 
     fn has_lfs_object(&self, oid: &str) -> Result<bool, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM shardline_hub_lfs_objects WHERE oid = ?1)",
-            params![oid],
-            |row| row.get(0),
-        )?;
-        Ok(exists)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_lfs_objects WHERE oid = ?1)",
+                params![oid],
+                |row| row.get(0),
+            )?;
+            Ok(exists)
+        })
     }
 
     fn create_webhook(
@@ -371,96 +395,104 @@ impl HubStore for LocalIndexStore {
         events: &[String],
         secret: Option<&str>,
     ) -> Result<HubWebhook, Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let now = unix_now_seconds_lossy();
-        let counter: u64 = {
-            let row: Option<u64> = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM shardline_hub_webhooks WHERE repo_id = ?1",
-                    params![repo_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            row.unwrap_or(0)
-        };
-        let id = format!("wh-{}-{}", now, counter);
-        let events_str = events.join(",");
-        conn.execute(
-            "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
-            params![id, repo_id, url, events_str, secret, u64_to_i64(now)?],
-        )?;
-        Ok(HubWebhook {
-            id,
-            repo_id: repo_id.to_owned(),
-            url: url.to_owned(),
-            events: events.to_vec(),
-            secret: secret.map(ToOwned::to_owned),
-            active: true,
-            created_at_unix_seconds: now,
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection_rw(self.root())?;
+            let now = unix_now_seconds_lossy();
+            let counter: u64 = {
+                let row: Option<u64> = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM shardline_hub_webhooks WHERE repo_id = ?1",
+                        params![repo_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                row.unwrap_or(0)
+            };
+            let id = format!("wh-{}-{}", now, counter);
+            let events_str = events.join(",");
+            conn.execute(
+                "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+                params![id, repo_id, url, events_str, secret, u64_to_i64(now)?],
+            )?;
+            Ok(HubWebhook {
+                id,
+                repo_id: repo_id.to_owned(),
+                url: url.to_owned(),
+                events: events.to_vec(),
+                secret: secret.map(ToOwned::to_owned),
+                active: true,
+                created_at_unix_seconds: now,
+            })
         })
     }
 
     fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let mut stmt = conn.prepare(
-            "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
-             FROM shardline_hub_webhooks WHERE repo_id = ?1",
-        )?;
-        let rows = stmt.query_map(params![repo_id], |row| {
-            let events_str: String = row.get(3)?;
-            let active: i64 = row.get(5)?;
-            Ok(HubWebhook {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                url: row.get(2)?,
-                events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                secret: row.get(4)?,
-                active: active != 0,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?).map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
-        let mut webhooks = Vec::new();
-        for row in rows {
-            webhooks.push(row?);
-        }
-        Ok(webhooks)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let mut stmt = conn.prepare(
+                "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
+                 FROM shardline_hub_webhooks WHERE repo_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![repo_id], |row| {
+                let events_str: String = row.get(3)?;
+                let active: i64 = row.get(5)?;
+                Ok(HubWebhook {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    url: row.get(2)?,
+                    events: events_str.split(',').map(ToOwned::to_owned).collect(),
+                    secret: row.get(4)?,
+                    active: active != 0,
+                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?).map_err(|e| sqlite_store_error(&e))?,
+                })
+            })?;
+            let mut webhooks = Vec::new();
+            for row in rows {
+                webhooks.push(row?);
+            }
+            Ok(webhooks)
+        })
     }
 
     fn delete_webhook(&self, repo_id: &str, webhook_id: &str) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        conn.execute(
-            "DELETE FROM shardline_hub_webhooks WHERE repo_id = ?1 AND id = ?2",
-            params![repo_id, webhook_id],
-        )?;
-        Ok(())
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection_rw(self.root())?;
+            conn.execute(
+                "DELETE FROM shardline_hub_webhooks WHERE repo_id = ?1 AND id = ?2",
+                params![repo_id, webhook_id],
+            )?;
+            Ok(())
+        })
     }
 
     fn webhooks_for_event(&self, repo_id: &str, event: &str) -> Result<Vec<HubWebhook>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let mut stmt = conn.prepare(
-            "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
-             FROM shardline_hub_webhooks
-             WHERE repo_id = ?1 AND active = 1 AND (',' || events || ',') LIKE ('%' || ?2 || '%')",
-        )?;
-        let rows = stmt.query_map(params![repo_id, event], |row| {
-            let events_str: String = row.get(3)?;
-            let active: i64 = row.get(5)?;
-            Ok(HubWebhook {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                url: row.get(2)?,
-                events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                secret: row.get(4)?,
-                active: active != 0,
-                created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?).map_err(|e| sqlite_store_error(&e))?,
-            })
-        })?;
-        let mut webhooks = Vec::new();
-        for row in rows {
-            webhooks.push(row?);
-        }
-        Ok(webhooks)
+        tokio::task::block_in_place(|| {
+            let conn = open_hub_connection(self.root())?;
+            let mut stmt = conn.prepare(
+                "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
+                 FROM shardline_hub_webhooks
+                 WHERE repo_id = ?1 AND active = 1 AND (',' || events || ',') LIKE ('%' || ?2 || '%')",
+            )?;
+            let rows = stmt.query_map(params![repo_id, event], |row| {
+                let events_str: String = row.get(3)?;
+                let active: i64 = row.get(5)?;
+                Ok(HubWebhook {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    url: row.get(2)?,
+                    events: events_str.split(',').map(ToOwned::to_owned).collect(),
+                    secret: row.get(4)?,
+                    active: active != 0,
+                    created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?).map_err(|e| sqlite_store_error(&e))?,
+                })
+            })?;
+            let mut webhooks = Vec::new();
+            for row in rows {
+                webhooks.push(row?);
+            }
+            Ok(webhooks)
+        })
     }
 }
 

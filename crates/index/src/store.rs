@@ -7,6 +7,8 @@ use crate::{
     DedupeShardMapping, FileId, FileReconstruction, ProviderRepositoryState, QuarantineCandidate,
     RetentionHold, StoredObjectId, WebhookDelivery, XorbId,
 };
+use crate::hub::HubStore;
+use crate::record::RecordStore;
 
 macro_rules! visit_items {
     ($visit:ident, $list:ident, $item:ty) => {
@@ -57,13 +59,13 @@ macro_rules! impl_async_lifecycle_delegation {
             &'operation self,
             object_key: &'operation ObjectKey,
         ) -> IndexStoreFuture<'operation, Option<QuarantineCandidate>, Self::Error> {
-            Box::pin(async move { LifecycleStore::quarantine_candidate(self, object_key) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::quarantine_candidate(self, object_key)) })
         }
 
         fn list_quarantine_candidates(
             &self,
         ) -> IndexStoreFuture<'_, Vec<QuarantineCandidate>, Self::Error> {
-            Box::pin(async move { LifecycleStore::list_quarantine_candidates(self) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::list_quarantine_candidates(self)) })
         }
 
         fn visit_quarantine_candidates<'operation, Visitor, VisitorError>(
@@ -75,32 +77,32 @@ macro_rules! impl_async_lifecycle_delegation {
             Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError> + Send + 'operation,
             VisitorError: Send + 'operation,
         {
-            Box::pin(async move { LifecycleStore::visit_quarantine_candidates(self, visitor) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::visit_quarantine_candidates(self, visitor)) })
         }
 
         fn upsert_quarantine_candidate<'operation>(
             &'operation self,
             candidate: &'operation QuarantineCandidate,
         ) -> IndexStoreFuture<'operation, (), Self::Error> {
-            Box::pin(async move { LifecycleStore::upsert_quarantine_candidate(self, candidate) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::upsert_quarantine_candidate(self, candidate)) })
         }
 
         fn delete_quarantine_candidate<'operation>(
             &'operation self,
             object_key: &'operation ObjectKey,
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-            Box::pin(async move { LifecycleStore::delete_quarantine_candidate(self, object_key) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::delete_quarantine_candidate(self, object_key)) })
         }
 
         fn retention_hold<'operation>(
             &'operation self,
             object_key: &'operation ObjectKey,
         ) -> IndexStoreFuture<'operation, Option<RetentionHold>, Self::Error> {
-            Box::pin(async move { LifecycleStore::retention_hold(self, object_key) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::retention_hold(self, object_key)) })
         }
 
         fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
-            Box::pin(async move { LifecycleStore::list_retention_holds(self) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::list_retention_holds(self)) })
         }
 
         fn visit_retention_holds<'operation, Visitor, VisitorError>(
@@ -112,39 +114,39 @@ macro_rules! impl_async_lifecycle_delegation {
             Visitor: FnMut(RetentionHold) -> Result<(), VisitorError> + Send + 'operation,
             VisitorError: Send + 'operation,
         {
-            Box::pin(async move { LifecycleStore::visit_retention_holds(self, visitor) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::visit_retention_holds(self, visitor)) })
         }
 
         fn upsert_retention_hold<'operation>(
             &'operation self,
             hold: &'operation RetentionHold,
         ) -> IndexStoreFuture<'operation, (), Self::Error> {
-            Box::pin(async move { LifecycleStore::upsert_retention_hold(self, hold) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::upsert_retention_hold(self, hold)) })
         }
 
         fn delete_retention_hold<'operation>(
             &'operation self,
             object_key: &'operation ObjectKey,
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-            Box::pin(async move { LifecycleStore::delete_retention_hold(self, object_key) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::delete_retention_hold(self, object_key)) })
         }
 
         fn record_webhook_delivery<'operation>(
             &'operation self,
             delivery: &'operation WebhookDelivery,
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-            Box::pin(async move { LifecycleStore::record_webhook_delivery(self, delivery) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::record_webhook_delivery(self, delivery)) })
         }
 
         fn list_webhook_deliveries(&self) -> IndexStoreFuture<'_, Vec<WebhookDelivery>, Self::Error> {
-            Box::pin(async move { LifecycleStore::list_webhook_deliveries(self) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::list_webhook_deliveries(self)) })
         }
 
         fn delete_webhook_delivery<'operation>(
             &'operation self,
             delivery: &'operation WebhookDelivery,
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
-            Box::pin(async move { LifecycleStore::delete_webhook_delivery(self, delivery) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::delete_webhook_delivery(self, delivery)) })
         }
 
         fn provider_repository_state<'operation>(
@@ -153,20 +155,20 @@ macro_rules! impl_async_lifecycle_delegation {
             owner: &'operation str,
             repo: &'operation str,
         ) -> IndexStoreFuture<'operation, Option<ProviderRepositoryState>, Self::Error> {
-            Box::pin(async move { LifecycleStore::provider_repository_state(self, provider, owner, repo) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::provider_repository_state(self, provider, owner, repo)) })
         }
 
         fn list_provider_repository_states(
             &self,
         ) -> IndexStoreFuture<'_, Vec<ProviderRepositoryState>, Self::Error> {
-            Box::pin(async move { LifecycleStore::list_provider_repository_states(self) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::list_provider_repository_states(self)) })
         }
 
         fn upsert_provider_repository_state<'operation>(
             &'operation self,
             state: &'operation ProviderRepositoryState,
         ) -> IndexStoreFuture<'operation, (), Self::Error> {
-            Box::pin(async move { LifecycleStore::upsert_provider_repository_state(self, state) })
+            Box::pin(async move { tokio::task::block_in_place(|| LifecycleStore::upsert_provider_repository_state(self, state)) })
         }
 
         fn delete_provider_repository_state<'operation>(
@@ -176,7 +178,7 @@ macro_rules! impl_async_lifecycle_delegation {
             repo: &'operation str,
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
             Box::pin(async move {
-                LifecycleStore::delete_provider_repository_state(self, provider, owner, repo)
+                tokio::task::block_in_place(|| LifecycleStore::delete_provider_repository_state(self, provider, owner, repo))
             })
         }
     };
@@ -583,4 +585,25 @@ pub trait AsyncIndexStore {
         owner: &'operation str,
         repo: &'operation str,
     ) -> IndexStoreFuture<'operation, bool, Self::Error>;
+}
+
+/// A complete repository providing all storage capabilities.
+///
+/// This supertrait bundles all individual store traits for convenience.
+/// Use specific traits when only a subset of capabilities is needed.
+pub trait Repository:
+    ReconstructionStore
+    + DedupeStore
+    + LifecycleStore
+    + RecordStore
+    + HubStore
+    + Send
+    + Sync
+{
+}
+
+// Blanket impl for any type that implements all the component traits.
+impl<T> Repository for T where
+    T: ReconstructionStore + DedupeStore + LifecycleStore + RecordStore + HubStore + Send + Sync
+{
 }

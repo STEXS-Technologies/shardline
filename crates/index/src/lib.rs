@@ -82,5 +82,6 @@ pub use record::{
 };
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore, ReconstructionStore,
+    Repository,
 };
 pub use xet_hash::{parse_xet_hash_hex, xet_hash_hex_string};
