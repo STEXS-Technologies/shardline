@@ -4,6 +4,7 @@ use shardline_index::{
     AsyncIndexStore, FileRecordStorageLayout, LocalIndexStore, PostgresIndexStore,
     PostgresRecordStore, RecordStore, xet_hash_hex_string,
 };
+use shardline_storage::ObjectStore;
 
 use crate::{
     ServerConfig, ServerError, ServerFrontend,

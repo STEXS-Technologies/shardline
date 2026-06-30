@@ -14,7 +14,7 @@ use shardline_index::{
 use shardline_protocol::ByteRange;
 pub use shardline_server_core::ServerObjectStore;
 pub use shardline_server_core::ServerObjectStoreError;
-use shardline_storage::{ObjectKey, ObjectMetadata, ObjectPrefix};
+use shardline_storage::{ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
 
 use crate::{
     ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, chunk_store::chunk_object_key,

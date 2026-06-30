@@ -77,26 +77,17 @@ pub mod test_fixtures;
 pub mod test_invariant_error;
 
 pub use app::ProtocolMetrics;
-pub use app::{
-    AppState, MAX_BATCH_RECONSTRUCTION_FILE_IDS, MAX_BATCH_RECONSTRUCTION_QUERY_BYTES,
-    MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
-    MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES, MAX_PROVIDER_WEBHOOK_BODY_BYTES,
-    acquire_chunk_transfer_permit, bounded_api_body_limit, extract_provider_subject,
-    full_byte_stream_response, latest_lifecycle_signal_at, parse_batch_reconstruction_query,
-    reconciled_provider_repository_state, validate_provider_name_path,
-};
+pub use app::{AppState, acquire_chunk_transfer_permit, full_byte_stream_response};
 pub use backend::{
-    ServerBackend, clear_repository_reference_probe_filter, lock_repository_reference_probe_test,
-    repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
+    ServerBackend, BenchmarkBackend, clear_repository_reference_probe_filter,
+    lock_repository_reference_probe_test, repository_reference_probe_count,
+    reset_repository_reference_probe_count_for_hash,
 };
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
-pub use shardline_protocol_adapters::{
-    BazelCacheKind, LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError,
-    LfsObjectRequest, LfsObjectResponse, ProtocolError, bazel_cache_object_key, lfs_object_key,
-};
+pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
 pub use local_backend::chunk_hash;
 pub use object_store::ServerObjectStore;
-pub use shardline_oci_adapter as oci_adapter;
+pub(crate) use shardline_oci_adapter as oci_adapter;
 pub use oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 pub use protocol_support::shared_sha256_object_key;
 pub use reconstruction_cache::ReconstructionCacheService;
@@ -108,10 +99,7 @@ mod upload_ingest;
 mod validation;
 pub(crate) use shardline_xet_adapter as xet_adapter;
 
-pub use shardline_gc as gc;
-
-pub use app::{router, serve, serve_with_listener};
-pub use backend::BenchmarkBackend;
+pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
 pub use config::{AuthProviderKind, ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits};
 pub use database_migration::{
@@ -119,10 +107,14 @@ pub use database_migration::{
     DatabaseMigrationReport, DatabaseMigrationStatusEntry, apply_database_migrations,
     bundled_database_migrations, run_database_migration,
 };
-pub use error::{
-    IndexError, InvalidLifecycleMetadataError, InvalidReconstructionResponseError,
-    InvalidSerializedShardError, ObjectStoreError, ServerError,
+pub use error::ServerError;
+pub(crate) use error::{InvalidLifecycleMetadataError, InvalidReconstructionResponseError, InvalidSerializedShardError};
+pub(crate) use shardline_protocol_adapters::{
+    LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
 };
+pub(crate) use shardline_xet_adapter::ShardUploadResponse;
+pub(crate) use postgres_backend::PostgresBackend;
+pub(crate) use shardline_gc as gc;
 pub use fsck::{
     FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,
     LocalFsckIssueKind, LocalFsckReport, ProviderRepositoryStateTimestampField, run_fsck,
@@ -136,35 +128,20 @@ pub use fuzz::{
     fuzz_oci_frontend_summary, fuzz_protocol_frontend_summary,
     fuzz_reconstruction_response_summary, fuzz_retained_shard_chunk_hashes,
 };
-pub use gc::{
-    DEFAULT_LOCAL_GC_RETENTION_SECONDS, GcError, GcOrphanInventoryEntry, GcOrphanQuarantineState,
-    GcRetentionReportEntry, LocalGcDiagnostics, LocalGcOptions, LocalGcReport, run_local_gc,
-    run_local_gc_diagnostics,
-};
-pub use ingest_bench::{ingest_without_storage, ingest_without_storage_with_parallelism};
+pub use gc::{DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport};
+pub use ingest_bench::ingest_without_storage_with_parallelism;
 pub use lifecycle_repair::{
     DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairOptions, LifecycleRepairReport,
     run_lifecycle_repair, run_local_lifecycle_repair,
 };
 pub use local_backend::LocalBackend;
-pub use model::{
-    GitLfsAuthenticateResponse, HealthResponse, ProviderTokenIssueRequest,
-    ProviderTokenIssueResponse, ProviderWebhookResponse, ReadyResponse, ServerStatsResponse,
-    UploadChunkResult, UploadFileResponse, XetCasTokenResponse,
-};
-pub use object_store::ServerObjectStoreError;
-pub use postgres_backend::PostgresBackend;
-pub use provider_events::{
-    ProviderWebhookOutcome, ProviderWebhookOutcomeKind, apply_provider_webhook,
-};
+pub use model::{HealthResponse, ProviderTokenIssueRequest, ProviderTokenIssueResponse, ReadyResponse, ServerStatsResponse};
 pub use rebuild::{
     IndexRebuildIssueDetail, IndexRebuildReconstructionPlanDetail, LocalIndexRebuildIssue,
     LocalIndexRebuildIssueKind, LocalIndexRebuildReport, run_index_rebuild,
     run_local_index_rebuild,
 };
-pub use reconstruction_cache::{
-    ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache,
-};
+pub use reconstruction_cache::{ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache};
 pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
@@ -173,12 +150,11 @@ pub use storage_migration::{
     run_storage_migration,
 };
 pub use xet_adapter::{
-    BatchReconstructionResponse, DecodedXorbChunk, FileReconstructionResponse,
-    FileReconstructionV2Response, ReconstructionChunkRange, ReconstructionFetchInfo,
-    ReconstructionMultiRangeFetch, ReconstructionRangeDescriptor, ReconstructionTerm,
-    ReconstructionUrlRange, ShardUploadResponse, ValidatedXorb, ValidatedXorbChunk, XorbParseError,
-    XorbUploadResponse, XorbVisitError, decode_serialized_xorb_chunks,
+    FileReconstructionResponse, XorbUploadResponse, decode_serialized_xorb_chunks,
     try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+};
+pub(crate) use xet_adapter::{
+    ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm, ReconstructionUrlRange,
 };
 
 use object_store::object_store_from_config;

@@ -12,7 +12,7 @@ use shardline_protocol::RepositoryScope;
 use shardline_server_core::{
     InvalidSerializedShardError, ServerObjectStore, ShardMetadataLimits, chunk_hash, content_hash,
 };
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome};
 use xet_core_structures::{
     merklehash::{MerkleHash, compute_data_hash},
     metadata_shard::{

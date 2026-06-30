@@ -3,7 +3,8 @@ use std::{io::Cursor, path::PathBuf};
 use serde::Serialize;
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_storage::{
-    ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, PutOutcome, S3ObjectStoreConfig,
+    ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome,
+    S3ObjectStoreConfig,
 };
 use xet_core_structures::merklehash::compute_data_hash;
 
@@ -216,7 +217,7 @@ fn endpoint_store(endpoint: &StorageMigrationEndpoint) -> Result<ServerObjectSto
 mod tests {
     use std::fs;
 
-    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
     use super::{StorageMigrationEndpoint, StorageMigrationOptions, run_storage_migration};
     use crate::{

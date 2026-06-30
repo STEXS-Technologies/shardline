@@ -8,7 +8,7 @@ mod xorbs;
 use shardline_index::{
     FileChunkRecord, ReconstructionStore, LocalIndexStore, LocalRecordStore, RecordStore,
 };
-use shardline_storage::ObjectPrefix;
+use shardline_storage::{ObjectPrefix, ObjectStore};
 
 use crate::{
     ServerError, ServerFrontend,

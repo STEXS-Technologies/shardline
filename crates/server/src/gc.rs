@@ -13,6 +13,7 @@ use shardline_index::{
     RecordStore,
 };
 use shardline_protocol::unix_now_seconds_lossy;
+use shardline_storage::ObjectStore;
 
 use crate::{
     InvalidLifecycleMetadataError, ServerConfig, ServerError,

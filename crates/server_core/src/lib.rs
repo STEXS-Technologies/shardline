@@ -600,28 +600,6 @@ impl ServerObjectStore {
         Self::Blackhole
     }
 
-    /// Stores an object only if no object exists at the given key.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerObjectStoreError`] on storage backend failures.
-    pub fn put_if_absent(
-        &self,
-        key: &ObjectKey,
-        body: ObjectBody<'_>,
-        integrity: &ObjectIntegrity,
-    ) -> Result<PutOutcome, ServerObjectStoreError> {
-        match self {
-            Self::Local(store) => store
-                .put_if_absent(key, body, integrity)
-                .map_err(Into::into),
-            Self::S3(store) => store
-                .put_if_absent(key, body, integrity)
-                .map_err(Into::into),
-            Self::Blackhole => Ok(PutOutcome::Inserted),
-        }
-    }
-
     /// Stores an object, overwriting any existing object at the given key.
     ///
     /// # Errors
@@ -641,40 +619,6 @@ impl ServerObjectStore {
                 .put_overwrite(key, body, integrity)
                 .map_err(Into::into),
             Self::Blackhole => Ok(()),
-        }
-    }
-
-    /// Reads a byte range from the stored object.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerObjectStoreError::NotFound`] for blackhole stores or
-    /// [`ServerObjectStoreError::Local`]/[`ServerObjectStoreError::S3`] on backend failures.
-    pub fn read_range(
-        &self,
-        key: &ObjectKey,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, ServerObjectStoreError> {
-        match self {
-            Self::Local(store) => store.read_range(key, range).map_err(Into::into),
-            Self::S3(store) => store.read_range(key, range).map_err(Into::into),
-            Self::Blackhole => Err(ServerObjectStoreError::NotFound),
-        }
-    }
-
-    /// Returns metadata for the stored object, or `None` if it does not exist.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerObjectStoreError`] on storage backend failures.
-    pub fn metadata(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<Option<ObjectMetadata>, ServerObjectStoreError> {
-        match self {
-            Self::Local(store) => store.metadata(key).map_err(Into::into),
-            Self::S3(store) => store.metadata(key).map_err(Into::into),
-            Self::Blackhole => Ok(None),
         }
     }
 
@@ -724,22 +668,6 @@ impl ServerObjectStore {
             Self::Local(store) => Some(store.path_for_key(key)),
             Self::S3(_store) => None,
             Self::Blackhole => None,
-        }
-    }
-
-    /// Deletes an object if it exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerObjectStoreError`] on storage backend failures.
-    pub fn delete_if_present(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<DeleteOutcome, ServerObjectStoreError> {
-        match self {
-            Self::Local(store) => store.delete_if_present(key).map_err(Into::into),
-            Self::S3(store) => store.delete_if_present(key).map_err(Into::into),
-            Self::Blackhole => Ok(DeleteOutcome::NotFound),
         }
     }
 

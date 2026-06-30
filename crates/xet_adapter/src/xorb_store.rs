@@ -3,7 +3,7 @@ use std::{borrow::Cow, io::Cursor};
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
 use shardline_server_core::{ServerObjectStore, chunk_hash, read_full_object};
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, PutOutcome};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome};
 use xet_core_structures::xorb_object::reconstruct_xorb_with_footer;
 
 fn chunk_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {

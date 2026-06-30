@@ -2,6 +2,7 @@ use axum::body::Bytes;
 #[cfg(test)]
 use shardline_index::FileRecord;
 use shardline_protocol::{ByteRange, RepositoryScope};
+use shardline_storage::ObjectStore;
 use tokio::task;
 
 use super::LocalBackend;

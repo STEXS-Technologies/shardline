@@ -1,5 +1,6 @@
 use axum::body::Bytes;
 use shardline_protocol::{ByteRange, RepositoryScope};
+use shardline_storage::ObjectStore;
 
 use super::LocalBackend;
 use crate::{

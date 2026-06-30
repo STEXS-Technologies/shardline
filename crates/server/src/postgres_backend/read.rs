@@ -2,7 +2,7 @@ use shardline_index::{
     FileRecord, PostgresMetadataStoreError, RecordStore, RepositoryRecordScope,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
-use shardline_storage::{DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix};
+use shardline_storage::{DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
 use sqlx::query_scalar;
 use tokio::task;
 

@@ -17,6 +17,8 @@ use chunk_store::{
 };
 
 #[cfg(test)]
+use shardline_storage::ObjectStore;
+
 use crate::config::default_upload_max_in_flight_chunks;
 use crate::{
     ServerError,
@@ -380,6 +382,7 @@ mod tests {
 
     use axum::body::Bytes;
     use shardline_index::xet_hash_hex_string;
+    use shardline_storage::ObjectStore;
 
     use super::FileUploadIngestor;
     use crate::{
