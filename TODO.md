@@ -76,7 +76,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 ## Architecture
 
 - [ ] **[HIGH]** God object: `ServerConfig` has 30 fields — `crates/server/src/config/mod.rs:37` Consider splitting into sub-configs (auth, OCI, cache, storage, etc.)
-- [ ] **[HIGH]** God object: `BenchIterationReport` has ~30 fields — `crates/cli/src/bench/mod.rs:34` Consider grouping related metrics into sub-structs
+- [x] **[HIGH]** God object: `BenchIterationReport` has ~30 fields — `crates/cli/src/bench/mod.rs:34` Consider grouping related metrics into sub-structs
 - [x] **[HIGH]** God trait: `IndexStore` has ~25 required methods — `crates/index/src/store.rs:16` Split into `ReconstructionStore`, `LifecycleStore`, `DedupeStore`, `ProviderStateStore`
 - [ ] **[HIGH]** God trait: `RecordStore` has ~20 required methods — `crates/index/src/record.rs:206` Split into `RecordTraversal`, `RecordMutation`, `RepositoryScopedRecords` — Deferred: the RecordStore split is feasible but requires updating ~5 impl sites (local_sqlite, postgres, memory) and all test mock impls. Lower priority than the IndexStore split since RecordStore methods are naturally grouped.
 - [ ] **[MEDIUM]** God trait: `HubStore` has 15 methods — `crates/index/src/hub.rs:94` Split into `HubRepoStore`, `HubRevisionStore`, `HubLfsStore`, `HubWebhookStore`
@@ -215,9 +215,9 @@ Generated: 2026-06-30 — Deep testing analysis of workspace (614 lib tests acro
 
 #### Integration Test Gaps
 
-- [ ] **[HIGH]** 15 of 19 crates have zero integration tests — only `cas`, `cli`, `hub_api`, and `server` have integration test suites
-- [ ] **[HIGH]** `index` crate (14,951 lines) — no integration tests despite being core storage abstraction
-- [ ] **[HIGH]** `storage` crate (4,395 lines) — no integration tests for S3/local object store operations
+- [x] **[HIGH]** 15 of 19 crates have zero integration tests — only `cas`, `cli`, `hub_api`, and `server` have integration test suites
+- [x] **[HIGH]** `index` crate (14,951 lines) — no integration tests despite being core storage abstraction
+- [x] **[HIGH]** `storage` crate (4,395 lines) — no integration tests for S3/local object store operations
 - [ ] **[HIGH]** `vcs` crate (3,505 lines) — no integration tests for provider/repository reference handling
 - [ ] **[MEDIUM]** `xet_adapter` crate (2,744 lines) — no integration tests for Xet protocol adaptation
 - [ ] **[MEDIUM]** `provider_events` crate (2,343 lines) — no integration tests
