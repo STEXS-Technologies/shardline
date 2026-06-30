@@ -10,7 +10,7 @@ use std::{
 
 use rusqlite::Connection;
 use serde_json::{Value, from_slice};
-use shardline_index::{IndexStore, LocalIndexStore, WebhookDelivery};
+use shardline_index::{LifecycleStore, LocalIndexStore, WebhookDelivery};
 use shardline_protocol::RepositoryProvider;
 use support::CliE2eInvariantError;
 

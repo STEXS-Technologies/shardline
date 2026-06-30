@@ -6,7 +6,7 @@ use std::{
 };
 
 use axum::body::Bytes;
-use shardline_index::{IndexStore, LocalIndexStore};
+use shardline_index::{LifecycleStore, LocalIndexStore};
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use tokio::{net::TcpListener, spawn, task::JoinHandle};
 
@@ -106,7 +106,7 @@ pub(super) async fn upload_repository_asset(
 
 pub(super) fn retention_hold_count(root: &Path) -> Result<usize, Box<dyn StdError>> {
     let index_store = LocalIndexStore::new(root.to_path_buf())?;
-    let holds = IndexStore::list_retention_holds(&index_store)?;
+    let holds = LifecycleStore::list_retention_holds(&index_store)?;
     Ok(holds.len())
 }
 

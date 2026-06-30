@@ -100,6 +100,23 @@ impl AsyncIndexStore for super::PostgresIndexStore {
         })
     }
 
+    fn insert_object<'operation>(
+        &'operation self,
+        object_id: &'operation StoredObjectId,
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        Box::pin(async move {
+            query(
+                "INSERT INTO shardline_stored_objects (object_hash)
+                 VALUES ($1)
+                 ON CONFLICT (object_hash) DO NOTHING",
+            )
+            .bind(xet_hash_hex_string(object_id.hash()))
+            .execute(&self.pool)
+            .await?;
+            Ok(())
+        })
+    }
+
     fn dedupe_shard_mapping<'operation>(
         &'operation self,
         chunk_hash: &'operation ShardlineHash,
@@ -163,23 +180,6 @@ impl AsyncIndexStore for super::PostgresIndexStore {
                 visitor(mapping)?;
             }
 
-            Ok(())
-        })
-    }
-
-    fn insert_object<'operation>(
-        &'operation self,
-        object_id: &'operation StoredObjectId,
-    ) -> IndexStoreFuture<'operation, (), Self::Error> {
-        Box::pin(async move {
-            query(
-                "INSERT INTO shardline_stored_objects (object_hash)
-                 VALUES ($1)
-                 ON CONFLICT (object_hash) DO NOTHING",
-            )
-            .bind(xet_hash_hex_string(object_id.hash()))
-            .execute(&self.pool)
-            .await?;
             Ok(())
         })
     }

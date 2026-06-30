@@ -7,9 +7,9 @@ use std::{
 use serde_json::to_vec;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord,
-    IndexStore, IndexStoreFuture, LocalIndexStore, LocalIndexStoreError, ProviderRepositoryState,
-    QuarantineCandidate, RecordStore, RetentionHold, WebhookDelivery, XorbId, parse_xet_hash_hex,
-    xet_hash_hex_string,
+    IndexStore, IndexStoreFuture, LifecycleStore, LocalIndexStore, LocalIndexStoreError,
+    ProviderRepositoryState, QuarantineCandidate, RecordStore, RetentionHold, WebhookDelivery,
+    XorbId, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_server_core::{ServerObjectStore, chunk_object_key};
@@ -306,31 +306,31 @@ async fn exercise_repository_deleted_creates_holds_for_matching_repository_versi
     let matching_release_xorb = xorb_object_key(&"1".repeat(64))?;
     let other_chunk = chunk_object_key(&"e".repeat(64))?;
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &matching_first),
+        LifecycleStore::retention_hold(&index_store, &matching_first),
         Ok(Some(_))
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &matching_second),
+        LifecycleStore::retention_hold(&index_store, &matching_second),
         Ok(Some(_))
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &matching_first_xorb),
+        LifecycleStore::retention_hold(&index_store, &matching_first_xorb),
         Ok(Some(_))
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &matching_second_xorb),
+        LifecycleStore::retention_hold(&index_store, &matching_second_xorb),
         Ok(Some(_))
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &matching_release_chunk),
+        LifecycleStore::retention_hold(&index_store, &matching_release_chunk),
         Ok(Some(_))
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &matching_release_xorb),
+        LifecycleStore::retention_hold(&index_store, &matching_release_xorb),
         Ok(Some(_))
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &other_chunk),
+        LifecycleStore::retention_hold(&index_store, &other_chunk),
         Ok(None)
     ));
     assert!(!local_latest_record_exists(&record_store, &matching_record).await?);
@@ -402,11 +402,11 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
     let stale_chunk_key = chunk_object_key(&"f".repeat(64))?;
     let stale_xorb_key = xorb_object_key(&"f".repeat(64))?;
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &stale_chunk_key),
+        LifecycleStore::retention_hold(&index_store, &stale_chunk_key),
         Ok(Some(_))
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &stale_xorb_key),
+        LifecycleStore::retention_hold(&index_store, &stale_xorb_key),
         Ok(Some(_))
     ));
     assert!(!local_latest_record_exists(&record_store, &stale_record).await?);
@@ -484,13 +484,13 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
 
     let xorb_key = xorb_object_key(&xorb_hash)?;
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &xorb_key),
+        LifecycleStore::retention_hold(&index_store, &xorb_key),
         Ok(Some(_))
     ));
     for chunk_hash in &chunk_hashes {
         let chunk_key = chunk_object_key(chunk_hash)?;
         assert!(matches!(
-            IndexStore::retention_hold(&index_store, &chunk_key),
+            LifecycleStore::retention_hold(&index_store, &chunk_key),
             Ok(Some(_))
         ));
     }
@@ -547,10 +547,10 @@ async fn exercise_access_changed_records_provider_repository_state_without_mutat
     assert!(local_latest_record_exists(&record_store, &record).await?);
     let chunk_key = chunk_object_key(&"b".repeat(64))?;
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &chunk_key),
+        LifecycleStore::retention_hold(&index_store, &chunk_key),
         Ok(None)
     ));
-    let repository_state = IndexStore::provider_repository_state(
+    let repository_state = LifecycleStore::provider_repository_state(
         &index_store,
         RepositoryProvider::GitHub,
         "team",
@@ -625,10 +625,10 @@ async fn exercise_revision_pushed_records_provider_repository_state_without_muta
     assert!(local_latest_record_exists(&record_store, &record).await?);
     let chunk_key = chunk_object_key(&"b".repeat(64))?;
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &chunk_key),
+        LifecycleStore::retention_hold(&index_store, &chunk_key),
         Ok(None)
     ));
-    let repository_state = IndexStore::provider_repository_state(
+    let repository_state = LifecycleStore::provider_repository_state(
         &index_store,
         RepositoryProvider::GitHub,
         "team",
@@ -693,7 +693,7 @@ async fn exercise_access_change_and_revision_push_state_survives_reordering()
         access_outcome.event_kind,
         ProviderWebhookOutcomeKind::AccessChanged
     );
-    let repository_state = IndexStore::provider_repository_state(
+    let repository_state = LifecycleStore::provider_repository_state(
         &index_store,
         RepositoryProvider::GitHub,
         "team",
@@ -813,13 +813,13 @@ async fn exercise_matching_delivery_ids_in_different_repositories_are_not_replay
 
     assert_eq!(first.event_kind, ProviderWebhookOutcomeKind::AccessChanged);
     assert_eq!(second.event_kind, ProviderWebhookOutcomeKind::AccessChanged);
-    let first_state = IndexStore::provider_repository_state(
+    let first_state = LifecycleStore::provider_repository_state(
         &index_store,
         RepositoryProvider::GitHub,
         "team",
         "assets",
     )?;
-    let second_state = IndexStore::provider_repository_state(
+    let second_state = LifecycleStore::provider_repository_state(
         &index_store,
         RepositoryProvider::GitHub,
         "team",
@@ -827,7 +827,7 @@ async fn exercise_matching_delivery_ids_in_different_repositories_are_not_replay
     )?;
     assert!(first_state.is_some());
     assert!(second_state.is_some());
-    let deliveries = IndexStore::list_webhook_deliveries(&index_store)?;
+    let deliveries = LifecycleStore::list_webhook_deliveries(&index_store)?;
     assert_eq!(deliveries.len(), 2);
     assert!(deliveries.iter().any(|delivery| {
         delivery.owner() == "team"
@@ -1049,7 +1049,7 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<()
         "delivery-duplicate-1".to_owned(),
         100,
     )?;
-    assert!(IndexStore::record_webhook_delivery(
+    assert!(LifecycleStore::record_webhook_delivery(
         &index_store,
         &recorded_delivery
     )?);
@@ -1075,11 +1075,11 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<()
     let chunk_key = chunk_object_key(&"b".repeat(64))?;
     let xorb_key = xorb_object_key(&"b".repeat(64))?;
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &chunk_key),
+        LifecycleStore::retention_hold(&index_store, &chunk_key),
         Ok(None)
     ));
     assert!(matches!(
-        IndexStore::retention_hold(&index_store, &xorb_key),
+        LifecycleStore::retention_hold(&index_store, &xorb_key),
         Ok(None)
     ));
 

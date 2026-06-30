@@ -12,8 +12,8 @@ use crate::{
 pub type IndexStoreFuture<'operation, T, E> =
     Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'operation>>;
 
-/// Metadata index adapter contract.
-pub trait IndexStore {
+/// File reconstruction and stored-object presence queries.
+pub trait ReconstructionStore {
     /// Adapter-specific error type.
     type Error;
 
@@ -53,6 +53,12 @@ pub trait IndexStore {
     fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error> {
         self.contains_object(xorb_id)
     }
+}
+
+/// Dedupe shard mapping queries.
+pub trait DedupeStore {
+    /// Adapter-specific error type.
+    type Error;
 
     /// Loads the retained shard mapping for one chunk hash.
     ///
@@ -98,6 +104,12 @@ pub trait IndexStore {
     ///
     /// Returns the adapter error when persistence fails.
     fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error>;
+}
+
+/// Lifecycle metadata: quarantine, retention, webhooks, and provider state.
+pub trait LifecycleStore {
+    /// Adapter-specific error type.
+    type Error;
 
     /// Loads durable quarantine state for one object key.
     ///
@@ -309,6 +321,11 @@ pub trait IndexStore {
         repo: &str,
     ) -> Result<bool, Self::Error>;
 }
+
+/// Metadata index adapter contract.
+pub trait IndexStore: ReconstructionStore + DedupeStore + LifecycleStore {}
+
+impl<T: ReconstructionStore + DedupeStore + LifecycleStore> IndexStore for T {}
 
 /// Asynchronous metadata index adapter contract.
 pub trait AsyncIndexStore {

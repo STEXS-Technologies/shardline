@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use shardline_index::{
-    AsyncIndexStore, IndexStore, LocalIndexStore, LocalIndexStoreError, PostgresIndexStore,
+    AsyncIndexStore, IndexStore, LifecycleStore, LocalIndexStore, LocalIndexStoreError, PostgresIndexStore,
     PostgresMetadataStoreError, RetentionHold, RetentionHoldError,
 };
 use shardline_protocol::unix_now_seconds_lossy;
@@ -112,7 +112,7 @@ pub async fn run_hold_set(
     }
 
     let store = LocalIndexStore::new(config.root_dir().to_path_buf())?;
-    IndexStore::upsert_retention_hold(&store, &hold)?;
+    LifecycleStore::upsert_retention_hold(&store, &hold)?;
     Ok(hold)
 }
 
@@ -131,7 +131,7 @@ pub async fn run_hold_list(
         store.list_retention_holds().await?
     } else {
         let store = LocalIndexStore::new(config.root_dir().to_path_buf())?;
-        IndexStore::list_retention_holds(&store)?
+        LifecycleStore::list_retention_holds(&store)?
     };
 
     if active_only {
@@ -164,7 +164,7 @@ pub async fn run_hold_release(
     }
 
     let store = LocalIndexStore::new(config.root_dir().to_path_buf())?;
-    IndexStore::delete_retention_hold(&store, &object_key).map_err(Into::into)
+    LifecycleStore::delete_retention_hold(&store, &object_key).map_err(Into::into)
 }
 
 fn postgres_index_store(index_postgres_url: &str) -> Result<PostgresIndexStore, HoldRuntimeError> {

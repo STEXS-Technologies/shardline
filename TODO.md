@@ -77,8 +77,8 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 - [ ] **[HIGH]** God object: `ServerConfig` has 30 fields — `crates/server/src/config/mod.rs:37` Consider splitting into sub-configs (auth, OCI, cache, storage, etc.)
 - [ ] **[HIGH]** God object: `BenchIterationReport` has ~30 fields — `crates/cli/src/bench/mod.rs:34` Consider grouping related metrics into sub-structs
-- [ ] **[HIGH]** God trait: `IndexStore` has ~25 required methods — `crates/index/src/store.rs:16` Split into `ReconstructionStore`, `LifecycleStore`, `DedupeStore`, `ProviderStateStore`
-- [ ] **[HIGH]** God trait: `RecordStore` has ~20 required methods — `crates/index/src/record.rs:206` Split into `RecordTraversal`, `RecordMutation`, `RepositoryScopedRecords`
+- [x] **[HIGH]** God trait: `IndexStore` has ~25 required methods — `crates/index/src/store.rs:16` Split into `ReconstructionStore`, `LifecycleStore`, `DedupeStore`, `ProviderStateStore`
+- [ ] **[HIGH]** God trait: `RecordStore` has ~20 required methods — `crates/index/src/record.rs:206` Split into `RecordTraversal`, `RecordMutation`, `RepositoryScopedRecords` — Deferred: the RecordStore split is feasible but requires updating ~5 impl sites (local_sqlite, postgres, memory) and all test mock impls. Lower priority than the IndexStore split since RecordStore methods are naturally grouped.
 - [ ] **[MEDIUM]** God trait: `HubStore` has 15 methods — `crates/index/src/hub.rs:94` Split into `HubRepoStore`, `HubRevisionStore`, `HubLfsStore`, `HubWebhookStore`
 - [ ] **[HIGH]** `ServerObjectStore` implements both `ObjectStore` trait AND identical inherent methods (put_if_absent, read_range, metadata, delete_if_present) — `crates/server_core/src/lib.rs:523,610` The inherent methods shadow the trait methods with identical signatures; remove one layer
 - [ ] **[MEDIUM]** Duplicate `read_full_object` implementation — `crates/server_core/src/lib.rs:818` and `crates/server/src/object_store.rs:66` The server version adds test hooks but duplicates core logic
