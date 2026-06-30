@@ -38,6 +38,8 @@ pub mod state;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Builds the Hub API router with all registered routes.
 ///
@@ -45,7 +47,20 @@ use axum::extract::DefaultBodyLimit;
 /// Axum router. Call [`state::init`] with a [`routes::HubState`] before
 /// serving requests.
 pub fn hub_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
-    routes::router().route_layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let security_headers = SetResponseHeaderLayer::overriding(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+
+    routes::router()
+        .route_layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
+        .layer(cors)
+        .layer(security_headers)
 }
 
 /// Initializes the Hub API with the given state.

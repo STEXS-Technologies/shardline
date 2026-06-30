@@ -1171,14 +1171,14 @@ fn parse_jsonl_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<Datas
     Ok(rows)
 }
 
-/// Parses CSV rows.
+/// Parses CSV rows, handling quoted fields that may contain commas.
 fn parse_csv_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<DatasetRow>, HubApiError> {
     let mut lines = text.lines();
     let header_line = lines
         .next()
         .ok_or_else(|| HubApiError::PathValidation("empty CSV file".to_owned()))?;
-    let headers: Vec<String> = header_line
-        .split(',')
+    let headers: Vec<String> = parse_csv_line(header_line)
+        .into_iter()
         .map(|h| h.trim().trim_matches('"').to_owned())
         .collect();
     let mut rows = Vec::new();
@@ -1193,7 +1193,7 @@ fn parse_csv_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<Dataset
         if line.is_empty() {
             continue;
         }
-        let values: Vec<&str> = line.split(',').collect();
+        let values: Vec<&str> = parse_csv_line(line);
         let columns: std::collections::BTreeMap<String, serde_json::Value> = headers
             .iter()
             .zip(values.iter())
@@ -1206,6 +1206,70 @@ fn parse_csv_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<Dataset
         rows.push(DatasetRow { columns });
     }
     Ok(rows)
+}
+
+/// Parses a single CSV line, respecting double-quoted fields that may contain
+/// commas and escaped quotes (`""`).
+fn parse_csv_line(line: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut current = line;
+    loop {
+        if current.is_empty() {
+            break;
+        }
+        if current.starts_with('"') {
+            // Quoted field — find the closing quote, handling "" escapes.
+            let mut chars = current[1..].char_indices().peekable();
+            let mut field_end = None;
+            while let Some((idx, ch)) = chars.next() {
+                if ch == '"' {
+                    if chars.peek().is_none_or(|&(_, next)| next != '"') {
+                        // Closing quote (not followed by another quote).
+                        field_end = Some(idx.saturating_add(1));
+                        break;
+                    }
+                    // Escaped quote `""` — skip the next quote.
+                    chars.next();
+                }
+            }
+            if let Some(end) = field_end {
+                let field = &current[1..end]; // strip opening/closing quotes
+                fields.push(field);
+                // Skip closing quote and comma separator.
+                #[allow(clippy::arithmetic_side_effects)]
+                {
+                    current = &current[end + 1..];
+                }
+                if current.starts_with(',') {
+                    current = &current[1..];
+                }
+            } else {
+                // Unterminated quote — treat rest as field.
+                fields.push(&current[1..]);
+                current = "";
+            }
+        } else {
+            // Unquoted field — split on comma.
+            match current.find(',') {
+                Some(pos) => {
+                    fields.push(&current[..pos]);
+                    #[allow(clippy::arithmetic_side_effects)]
+                    {
+                        current = &current[pos + 1..];
+                    }
+                }
+                None => {
+                    fields.push(current);
+                    current = "";
+                }
+            }
+        }
+    }
+    // If the line ended with a comma, we need an extra empty field.
+    if line.ends_with(',') {
+        fields.push("");
+    }
+    fields
 }
 
 // ---- Webhook endpoints ----
@@ -1277,6 +1341,7 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v4.is_unspecified() // 0.0.0.0
                 || v4.is_broadcast()
                 || v4.is_documentation() // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+                || is_cgnat(*v4) // 100.64.0.0/10 (RFC 6598 shared address space)
         }
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback() // ::1
@@ -1284,6 +1349,13 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_unicast_link_local() // fe80::/10
         }
     }
+}
+
+/// Returns `true` if the IPv4 address is in the CGNAT/Shared Address Space
+/// range 100.64.0.0/10 (RFC 6598).
+const fn is_cgnat(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    a == 100 && (b & 0xC0) == 64
 }
 
 /// Creates a webhook for a repository.
@@ -1347,4 +1419,164 @@ async fn webhook_delete(
         .delete_webhook(&name, &webhook_id)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    #[test]
+    fn validate_webhook_url_accepts_valid_http() {
+        assert!(validate_webhook_url("http://example.com/hook").is_ok());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_ftp_scheme() {
+        assert!(validate_webhook_url("ftp://example.com/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_javascript_scheme() {
+        assert!(validate_webhook_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_localhost() {
+        assert!(validate_webhook_url("http://localhost/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_private_ip_10() {
+        assert!(validate_webhook_url("http://10.0.0.1/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_private_ip_192_168() {
+        assert!(validate_webhook_url("http://192.168.1.1/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_loopback() {
+        assert!(validate_webhook_url("http://127.0.0.1/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_ipv6_loopback() {
+        assert!(validate_webhook_url("http://[::1]/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_long_url() {
+        let long = format!("http://example.com/{}", "a".repeat(3000));
+        assert!(validate_webhook_url(&long).is_err());
+    }
+
+    #[test]
+    fn is_private_ip_true_for_loopback() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_private_10() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_private_172() {
+        let ip: IpAddr = "172.16.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_private_192_168() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_link_local() {
+        let ip: IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_cgnat() {
+        let ip: IpAddr = "100.64.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_unspecified() {
+        let ip: IpAddr = "0.0.0.0".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_ipv6_loopback() {
+        let ip: IpAddr = "::1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_ipv6_link_local() {
+        let ip: IpAddr = "fe80::1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_false_for_public() {
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_false_for_ipv6_public() {
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(!is_private_ip(&ip));
+    }
+
+    #[test]
+    fn parse_csv_line_simple_fields() {
+        let result = parse_csv_line("a,b,c");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_csv_line_quoted_field_with_comma() {
+        let result = parse_csv_line(r#""hello, world",b"#);
+        assert_eq!(result, vec!["hello, world", "b"]);
+    }
+
+    #[test]
+    fn parse_csv_line_escaped_quote() {
+        let result = parse_csv_line(r#""say ""hello""",done"#);
+        assert_eq!(result, vec![r#"say ""hello"""#, "done"]);
+    }
+
+    #[test]
+    fn parse_csv_line_trailing_comma() {
+        let result = parse_csv_line("a,b,");
+        assert_eq!(result, vec!["a", "b", ""]);
+    }
+
+    #[test]
+    fn parse_csv_line_single_field() {
+        let result = parse_csv_line("only");
+        assert_eq!(result, vec!["only"]);
+    }
+
+    #[test]
+    fn parse_csv_line_empty_field() {
+        let result = parse_csv_line("a,,c");
+        assert_eq!(result, vec!["a", "", "c"]);
+    }
+
+    #[test]
+    fn parse_csv_line_unterminated_quote() {
+        let result = parse_csv_line(r#""unterminated,a"#);
+        assert_eq!(result, vec!["unterminated,a"]);
+    }
 }

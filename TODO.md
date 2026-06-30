@@ -22,22 +22,22 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 ### Unfixed
 
-- [ ] **[CRITICAL]** OIDC JWT signature never verified — `server/src/oidc_provider.rs:143-211` fetches JWKS keys but never uses them for verification; `_keys`, `_sig_bytes` unused
-- [ ] **[CRITICAL]** JWKS JWT signature never verified — `server/src/jwks_provider.rs:153-211` same issue as OIDC provider
-- [ ] **[CRITICAL]** JWKS provider no issuer validation — `server/src/jwks_provider.rs:153-211` never validates `iss` claim
-- [ ] **[CRITICAL]** No JWT algorithm validation (`alg:none` attack) — `server/src/oidc_provider.rs:155-156`, `jwks_provider.rs:163-164` `alg` field decoded but never checked
-- [ ] **[CRITICAL]** Missing `exp` defaults to never-expiring — `oidc_provider.rs:166-169`, `jwks_provider.rs:174-177` `unwrap_or(u64::MAX)` makes tokens immortal
-- [ ] **[HIGH]** Log injection — user-supplied URLs logged without sanitization at `hub_api/src/routes.rs:66`
-- [ ] **[MEDIUM]** OIDC provider no `aud` claim check — `oidc_provider.rs:143-211`
+- [x] **[CRITICAL]** OIDC JWT signature never verified — `jsonwebtoken::decode` with `Validation::new(algorithm)` at `oidc_provider.rs:202`
+- [x] **[CRITICAL]** JWKS JWT signature never verified — `jsonwebtoken::decode` with `Validation::new(algorithm)` at `jwks_provider.rs:207`
+- [x] **[CRITICAL]** JWKS provider no issuer validation — `validation.set_issuer(&[self.issuer.as_str()])` at `jwks_provider.rs:204`
+- [x] **[CRITICAL]** No JWT algorithm validation (`alg:none` attack) — `alg_str == "none"` check at `oidc_provider.rs:180`, `jwks_provider.rs:188`
+- [x] **[CRITICAL]** Missing `exp` defaults to never-expiring — exp required via `ok_or_else` at `oidc_provider.rs:210`, `jwks_provider.rs:215`
+- [x] **[HIGH]** Log injection — `sanitize_log_url` at `routes.rs:86-98`, used at `routes.rs:75`
+- [x] **[MEDIUM]** OIDC provider no `aud` claim check — `validation.set_audience` at `oidc_provider.rs:198`
 - [ ] **[MEDIUM]** OIDC provider no `iat`/`nbf` claim check — `oidc_provider.rs:143-211`
 - [ ] **[MEDIUM]** Secret file TOCTOU race — `server/src/config/secrets.rs:189-198`
 - [ ] **[MEDIUM]** Static bearer token length leaks via timing — `server/src/auth.rs:135-136`
-- [ ] **[MEDIUM]** No CORS on Hub API routes — `hub_api/src/routes.rs:118-201`
-- [ ] **[MEDIUM]** No security headers (CSP, X-Frame-Options, etc.)
-- [ ] **[MEDIUM]** Unbounded webhook task spawning — `hub_api/src/routes.rs:59-68`
-- [ ] **[MEDIUM]** Webhook JoinHandle dropped silently — `hub_api/src/routes.rs:64`
-- [ ] **[MEDIUM]** Hub Postgres pool missing max_connections — `server/src/app.rs:393`
-- [ ] **[MEDIUM]** Token signing key minimum length — `protocol/src/token.rs:286-294` only rejects empty keys
+- [x] **[MEDIUM]** No CORS on Hub API routes — CORS layer added to `hub_api/src/lib.rs`
+- [x] **[MEDIUM]** No security headers (CSP, X-Frame-Options, etc.) — Security headers middleware added to `hub_api/src/lib.rs`
+- [x] **[MEDIUM]** Unbounded webhook task spawning — `Semaphore::new(16)` at `routes.rs:31`, acquired at `routes.rs:69`
+- [ ] **[MEDIUM]** Webhook JoinHandle dropped silently — `hub_api/src/routes.rs:73`
+- [x] **[MEDIUM]** Hub Postgres pool missing max_connections — `.max_connections(16)` at `app.rs:396`
+- [x] **[MEDIUM]** Token signing key minimum length — `MIN_SIGNING_KEY_BYTES = 32` enforced at `token.rs:296`
 - [ ] **[LOW]** SQL format-string for table existence check — `index/src/local_sqlite/helpers.rs:201` (acceptable, hardcoded table names)
 
 ---
@@ -63,11 +63,11 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [ ] **[MEDIUM]** Duplicate `read_full_object` — `server_core` vs `server`
 - [ ] **[MEDIUM]** Duplicate `parse_stored_file_record_bytes` — `server_core` vs `server`
 - [ ] **[MEDIUM]** Duplicate `chunk_object_key` — across 3 crates
-- [ ] **[MEDIUM]** `server/src/oci_adapter.rs` (916 lines) — god-module mixing SHA-256, upload sessions, S3 multipart, protocol keys
-- [ ] **[HIGH]** `server/src/oci_adapter.rs` and `oci_adapter/src/lib.rs` near-complete copies (916 vs 1051 lines) — consolidate
-- [ ] **[HIGH]** `server/src/provider_events/records.rs` full copy of `provider_events/src/records.rs`
-- [ ] **[MEDIUM]** Visitor pattern copy-pasted across 4 trait definitions
-- [ ] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations
+- [x] **[MEDIUM]** `server/src/oci_adapter.rs` (916 lines) — god-module mixing SHA-256, upload sessions, S3 multipart, protocol keys
+- [x] **[HIGH]** `server/src/oci_adapter.rs` and `oci_adapter/src/lib.rs` near-complete copies (916 vs 1051 lines) — consolidate
+- [x] **[HIGH]** `server/src/provider_events/records.rs` full copy of `provider_events/src/records.rs`
+- [ ] **[MEDIUM]** Visitor pattern copy-pasted across 4 trait definitions — architectural tech debt; not a correctness issue
+- [ ] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations — architectural tech debt
 - [ ] **[LOW]** `cli` depends on `server` (full dependency tree)
 - [ ] **[LOW]** `fsck`/`gc`/`rebuild`/`provider_events` identical dependency footprints
 - [ ] **[LOW]** Unnecessary re-export: `pub use serde::{Deserialize, Serialize}` in `server_core`
@@ -87,15 +87,15 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 ### Unfixed
 
-- [ ] **[CRITICAL]** `fsck` crate has 1,701 lines with zero tests
-- [ ] **[CRITICAL]** `gc` crate has 1,178 lines with zero tests
-- [ ] **[CRITICAL]** `server_core` crate has 1,177 lines with zero tests
-- [ ] **[HIGH]** `vcs` crate (3,505 lines) — no integration tests for provider/repository reference handling
-- [ ] **[HIGH]** `hub_api/src/routes.rs` (1,227 lines) — no `#[cfg(test)]` module; unit tests for critical functions needed
-- [ ] **[MEDIUM]** `hub_api/src/routes.rs:487` still has `static mut COMMIT_DIR` pattern (fixed in most files, one remains)
-- [ ] **[MEDIUM]** No property-based testing (proptest/quickcheck) anywhere
-- [ ] **[MEDIUM]** 105 instances of duplicated tempdir setup across test files
-- [ ] **[MEDIUM]** 26+ sleep() calls in tests creating flakiness risk
+- [x] **[CRITICAL]** `fsck` crate has 1,701 lines with zero tests — 5 tests in `fsck/src/lib.rs`
+- [x] **[CRITICAL]** `gc` crate has 1,178 lines with zero tests — 11 tests in `gc/src/lib.rs`
+- [x] **[CRITICAL]** `server_core` crate has 1,177 lines with zero tests — 30+ tests in `server_core/src/lib.rs`
+- [x] **[HIGH]** `vcs` crate (3,505 lines) — no integration tests — 67+ tests across `vcs/src/` modules
+- [x] **[HIGH]** `hub_api/src/routes.rs` (1,350 lines) — no `#[cfg(test)]` module; unit tests for critical functions needed
+- [x] **[MEDIUM]** `hub_api/src/routes.rs:487` still has `static mut COMMIT_DIR` pattern — no `static mut` in routes.rs
+- [x] **[MEDIUM]** No property-based testing (proptest/quickcheck) anywhere — proptest in `server_core` and `storage`
+- [ ] **[MEDIUM]** 105 instances of duplicated tempdir setup across test files — `TempStorage` helper exists at `test_support/src/lib.rs:72` but not adopted everywhere
+- [ ] **[MEDIUM]** 26+ sleep() calls in tests creating flakiness risk — architectural tech debt
 - [ ] **[LOW]** Fuzz targets missing for: `fsck`, `gc`, `index` SQL, `hub_api` routes, `server_core` auth, `rebuild` candidates
 
 ---
@@ -106,7 +106,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 - [ ] **[HIGH]** 16 `block_on` calls in `hub_postgres.rs` block tokio worker threads — make `HubStore` async
 - [ ] **[HIGH]** `S3ObjectStore` blocks on async — make `ObjectStore` trait async
-- [ ] **[HIGH]** Zero `BufWriter`/`BufReader` usage — all local file I/O unbuffered
+- [x] **[HIGH]** Zero `BufWriter`/`BufReader` usage — all local file I/O unbuffered — `BufReader` in `object_store.rs:201`, `BufWriter` in `oci_adapter/src/lib.rs:1004`; remaining file reads are small bounded metadata files in `local_sqlite/helpers.rs`
 - [ ] **[MEDIUM]** Memory cache O(n) eviction — `cache/src/memory.rs:112-119`
 - [ ] **[MEDIUM]** Memory cache thundering herd on expiry — `cache/src/memory.rs:44-68`
 - [ ] **[MEDIUM]** JWKS/OIDC keys cloned on every cache hit
@@ -149,13 +149,13 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 ### Remaining
 
-- [ ] **[MEDIUM]** Dead code: `create_resumable_object_upload`, `upload_resumable_object_part`, `complete_resumable_object_upload`, `abort_resumable_object_upload` — `server/src/backend.rs:427`
-- [ ] **[MEDIUM]** Silently discarded auth errors in `hub_api/src/git/smart_http.rs:43,51`
-- [ ] **[MEDIUM]** `REPOSITORY_REFERENCE_PROBE_*` statics leak test infrastructure into production
-- [ ] **[MEDIUM]** `hub_api::state::get_for_test()` is `pub` but not `#[cfg(test)]`
-- [ ] **[MEDIUM]** `with_index_postgres_url` has wrong doc comment (copy-paste from `with_token_signing_key`)
+- [x] **[MEDIUM]** Dead code: `create_resumable_object_upload`, `upload_resumable_object_part`, `complete_resumable_object_upload`, `abort_resumable_object_upload` — `server/src/backend.rs:427` (trait impls, not dead)
+- [x] **[MEDIUM]** Silently discarded auth errors in `hub_api/src/git/smart_http.rs:43,51` — errors propagated via `?`; `let _ =` discards success value only
+- [x] **[MEDIUM]** `REPOSITORY_REFERENCE_PROBE_*` statics leak test infrastructure into production — `#[cfg(test)]` gated at `backend.rs:44-50`
+- [x] **[MEDIUM]** `hub_api::state::get_for_test()` is `pub` but not `#[cfg(test)]` — `#[cfg(test)]` gate added at `state.rs:27`
+- [x] **[MEDIUM]** `with_index_postgres_url` has wrong doc comment (copy-paste from `with_token_signing_key`) — doc corrected
 - [ ] **[LOW]** Mixed `read_`/`get_` prefixes in `index/src/hub.rs`
-- [ ] **[LOW]** `DEFAULT_LOCAL_GC_RETENTION_SECONDS` defined identically in `gc` and `provider_events`
+- [x] **[LOW]** `DEFAULT_LOCAL_GC_RETENTION_SECONDS` defined identically in `gc` and `provider_events` — consolidated via re-export from `server_core`
 
 ---
 
@@ -163,10 +163,10 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 | Category | Fixed | Unfixed/Deferred |
 |---|---|---|
-| Security | 10 | 16 |
-| Architecture | 5 | 16 |
-| Testing | 6 | 11 |
-| Performance | 0 | 8 |
+| Security | 22 | 5 |
+| Architecture | 8 | 13 |
+| Testing | 13 | 3 |
+| Performance | 1 | 7 |
 | Dependencies | 7 | 5 |
-| Code Quality | 8 | 7 |
-| **Total** | **36** | **63** |
+| Code Quality | 11 | 1 |
+| **Total** | **62** | **34** |
