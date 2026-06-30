@@ -108,9 +108,10 @@ Large files that have been split into submodules:
 - [x] **`crates/index/src/local_sqlite`** — split into 6 files
   - `mod.rs`, `index_store.rs`, `async_index_store.rs`, `record_store.rs`, `helpers.rs`, `tests.rs`
 
-- [ ] **`crates/server/src/local_backend.rs`** (700 lines)
-  - Already has companion `records.rs` (102 lines) and `tests.rs` (737 lines)
-  - 700 lines is manageable; split if it grows
+- [x] **`crates/server/src/local_backend`** — split into 6 files
+  - `mod.rs` (core struct, construction, accessors, stats), `files.rs` (upload, reconstruction, download)
+  - `xorbs.rs` (xorb/shard operations), `objects.rs` (raw object store operations)
+  - `records.rs` (record lookup), `tests.rs` (16 tests)
 
 ## Observability
 
@@ -123,7 +124,7 @@ Large files that have been split into submodules:
 
 ## Low Priority
 
-- [ ] **Update ARCHITECTURE.md and DEPLOYMENT.md**
+- [x] **Update ARCHITECTURE.md and DEPLOYMENT.md**
   - Updated for 20-crate structure, layered dependency graph
   - Documented the pluggable auth system, Hub API, Git Smart HTTP
   - Documented the Prometheus metrics endpoint and tracing
