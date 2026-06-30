@@ -12,6 +12,7 @@ use tokio::fs;
 use super::LocalBackend;
 use crate::{
     ServerError, ShardMetadataLimits,
+    error::{IndexError, ObjectStoreError},
     record_store::MAX_LOCAL_RECORD_METADATA_BYTES,
     test_fixtures::{single_chunk_xorb, single_file_shard},
     upload_ingest::RequestBodyReader,
@@ -114,7 +115,7 @@ async fn local_backend_stats_fail_closed_on_symlinked_file_inventory_escape() {
 
     assert!(matches!(
         stats,
-        Err(ServerError::IndexStore(LocalIndexStoreError::Io(error)))
+        Err(ServerError::Index(IndexError::Local(LocalIndexStoreError::Io(error))))
             if error.kind() == ErrorKind::InvalidData
     ));
 }
@@ -161,7 +162,7 @@ async fn local_backend_ready_rejects_symlinked_metadata_database_path() {
 
     assert!(matches!(
         ready,
-        Err(ServerError::IndexStore(LocalIndexStoreError::Io(error)))
+        Err(ServerError::Index(IndexError::Local(LocalIndexStoreError::Io(error))))
             if error.kind() == ErrorKind::InvalidData
     ));
 }
@@ -196,7 +197,7 @@ async fn local_backend_new_rejects_symlinked_root_ancestor() {
     assert!(matches!(
         backend,
         Err(ServerError::ObjectStore(
-            LocalObjectStoreError::InvalidObjectPath
+            ObjectStoreError::Local(LocalObjectStoreError::InvalidObjectPath)
         ))
     ));
 }
@@ -238,12 +239,12 @@ async fn local_backend_file_record_rejects_oversized_metadata_before_reading() {
 
     assert!(matches!(
         record,
-        Err(ServerError::IndexStore(
+        Err(ServerError::Index(IndexError::Local(
             LocalIndexStoreError::MetadataTooLarge {
                 maximum_bytes: MAX_LOCAL_RECORD_METADATA_BYTES,
                 ..
             }
-        ))
+        )))
     ));
 }
 
@@ -593,7 +594,7 @@ async fn repository_references_xorb_fails_closed_on_misplaced_legacy_scope_metad
 
     assert!(matches!(
         reachable,
-        Err(ServerError::IndexStore(LocalIndexStoreError::Io(error)))
+        Err(ServerError::Index(IndexError::Local(LocalIndexStoreError::Io(error))))
             if error.kind() == ErrorKind::InvalidData
     ));
 }

@@ -1,4 +1,16 @@
 #![deny(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use,
+        clippy::format_push_string
+    )
+)]
 
 //! HTTP server runtime and operator workflows for Shardline.
 //!
@@ -108,8 +120,8 @@ pub use database_migration::{
     bundled_database_migrations, run_database_migration,
 };
 pub use error::{
-    InvalidLifecycleMetadataError, InvalidReconstructionResponseError, InvalidSerializedShardError,
-    ServerError,
+    IndexError, InvalidLifecycleMetadataError, InvalidReconstructionResponseError,
+    InvalidSerializedShardError, ObjectStoreError, ServerError,
 };
 pub use fsck::{
     FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,

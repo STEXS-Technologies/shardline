@@ -16,6 +16,7 @@ use super::{AppState, MAX_BATCH_RECONSTRUCTION_FILE_IDS, MAX_BATCH_RECONSTRUCTIO
 use crate::{
     ServerError,
     download_stream::ServerByteStream,
+    error::ObjectStoreError,
     reconstruction_cache::ReconstructionCacheService,
     transfer_limiter::TransferLimiter,
     xet_adapter::{
@@ -93,19 +94,19 @@ fn metered_transfer_body(
         if stream_state.remaining_bytes == 0 {
             let next = stream_state.byte_stream.next().await;
             if next.is_some() {
-                return Err(ServerError::StoredObjectLengthMismatch);
+                return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
             }
 
             return Ok::<Option<(Bytes, TransferByteStreamState)>, ServerError>(None);
         }
 
         let Some(next) = stream_state.byte_stream.next().await else {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         };
         let bytes = next?;
         let read = u64::try_from(bytes.len())?;
         if read == 0 || read > stream_state.remaining_bytes {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         }
         let permit = stream_state.transfer_limiter.acquire_bytes(read).await?;
 

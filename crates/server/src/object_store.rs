@@ -20,6 +20,7 @@ use crate::{
     ObjectStorageAdapter, ServerConfig, ServerError, ServerFrontend, chunk_store::chunk_object_key,
     server_frontend::append_referenced_term_bytes,
 };
+use crate::error::{IndexError, ObjectStoreError};
 
 #[cfg(test)]
 type LocalObjectReadHook = Box<dyn FnOnce() + Send>;
@@ -43,9 +44,11 @@ impl From<ServerObjectStoreError> for ServerError {
             ServerObjectStoreError::NotFound => Self::NotFound,
             ServerObjectStoreError::Overflow => Self::Overflow,
             ServerObjectStoreError::InvalidContentHash => Self::InvalidContentHash,
-            ServerObjectStoreError::StoredObjectLengthMismatch => Self::StoredObjectLengthMismatch,
-            ServerObjectStoreError::Local(e) => Self::ObjectStore(e),
-            ServerObjectStoreError::S3(e) => Self::S3ObjectStore(e),
+            ServerObjectStoreError::StoredObjectLengthMismatch => {
+                Self::ObjectStore(ObjectStoreError::StoredLengthMismatch)
+            }
+            ServerObjectStoreError::Local(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
+            ServerObjectStoreError::S3(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
             ServerObjectStoreError::Io(e) => Self::Io(e),
             ServerObjectStoreError::NumericConversion(e) => Self::NumericConversion(e),
         }
@@ -90,9 +93,9 @@ pub(crate) fn reconstruct_local_file_bytes(
     for chunk in chunks {
         let expected_offset = u64::try_from(output.len())?;
         if chunk.offset != expected_offset {
-            return Err(ServerError::FileRecordInvariant(
+            return Err(ServerError::Index(IndexError::FileRecordInvariant(
                 FileRecordInvariantError::NonContiguousChunkOffsets,
-            ));
+            )));
         }
         let object_key = chunk_object_key(&chunk.hash)?;
         let ServerObjectStore::Local(store) = object_store else {
@@ -103,7 +106,7 @@ pub(crate) fn reconstruct_local_file_bytes(
         read_open_local_object_append(&path, file, chunk.length, &mut output)?;
     }
     if output.len() != capacity {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
     Ok(output)
 }
@@ -140,7 +143,7 @@ fn reconstruct_chunk_file_bytes(
         output.extend_from_slice(&bytes);
     }
     if output.len() != capacity {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
 
     Ok(output)
@@ -156,9 +159,9 @@ fn reconstruct_referenced_object_file_bytes(
     for term in &record.chunks {
         let term_start = u64::try_from(output.len())?;
         if term.offset != term_start {
-            return Err(ServerError::FileRecordInvariant(
+            return Err(ServerError::Index(IndexError::FileRecordInvariant(
                 FileRecordInvariantError::NonContiguousChunkOffsets,
-            ));
+            )));
         }
         append_referenced_term_bytes(frontends, object_store, term, &mut output)?;
         let term_end = term
@@ -166,11 +169,11 @@ fn reconstruct_referenced_object_file_bytes(
             .checked_add(term.length)
             .ok_or(ServerError::Overflow)?;
         if u64::try_from(output.len())? != term_end {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         }
     }
     if output.len() != capacity {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
 
     Ok(output)
@@ -181,7 +184,7 @@ fn read_open_local_object(path: &Path, file: File, length: u64) -> Result<Vec<u8
     let mut output = Vec::with_capacity(capacity);
     read_open_local_object_append(path, file, length, &mut output)?;
     if output.len() != capacity {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
     Ok(output)
 }
@@ -198,7 +201,7 @@ fn read_open_local_object_append(
     let mut limited = file.by_ref().take(expected_length);
     if let Err(error) = limited.read_to_end(output) {
         if error.kind() == ErrorKind::UnexpectedEof {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         }
 
         return Err(ServerError::Io(error));
@@ -208,14 +211,14 @@ fn read_open_local_object_append(
         .checked_sub(start_len)
         .ok_or(ServerError::Overflow)?;
     if u64::try_from(read_len)? != expected_length {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
     let mut trailing_byte = [0_u8; 1];
     match file.read(&mut trailing_byte) {
         Ok(0) => {}
-        Ok(_observed) => return Err(ServerError::StoredObjectLengthMismatch),
+        Ok(_observed) => return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch)),
         Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         }
         Err(error) => return Err(ServerError::Io(error)),
     }
@@ -227,7 +230,7 @@ fn read_open_local_object_append(
 fn validate_local_object_length(file: &File, expected_length: u64) -> Result<u64, ServerError> {
     let actual_length = file.metadata()?.len();
     if actual_length != expected_length {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
 
     Ok(actual_length)
@@ -280,7 +283,7 @@ pub(crate) fn object_store_from_config(
         ObjectStorageAdapter::S3 => {
             let s3_config = config
                 .s3_object_store_config()
-                .ok_or(ServerError::MissingS3ObjectStoreConfig)?
+                .ok_or(ServerError::ObjectStore(ObjectStoreError::MissingS3Config))?
                 .clone();
             Ok(ServerObjectStore::s3(s3_config)?)
         }
@@ -296,6 +299,7 @@ mod tests {
 
     use super::{read_open_local_object_append, set_before_local_object_read_hook};
     use crate::ServerError;
+use crate::error::{IndexError, ObjectStoreError};
 
     #[test]
     fn local_object_read_rejects_growth_after_length_validation_without_retaining_growth_bytes() {
@@ -331,7 +335,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(ServerError::StoredObjectLengthMismatch)
+            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
         ));
         assert_eq!(output, b"abcd");
     }

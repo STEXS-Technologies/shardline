@@ -8,7 +8,7 @@ use shardline_server::{
 };
 use thiserror::Error;
 
-use crate::config::load_server_config;
+use crate::{config::load_server_config, report_output};
 
 /// Report produced by the top-level repair orchestrator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,8 +71,10 @@ impl RepairReport {
             "index_rebuild.issue_count: {}",
             self.index_rebuild.issue_count()
         );
-        self.lifecycle_repair
-            .print_summary_prefixed("lifecycle_repair");
+        report_output::print_lifecycle_repair_summary_prefixed(
+            &self.lifecycle_repair,
+            "lifecycle_repair",
+        );
         println!("fsck.latest_records: {}", self.fsck.latest_records);
         println!("fsck.version_records: {}", self.fsck.version_records);
         println!(

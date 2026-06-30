@@ -2,7 +2,8 @@ use shardline_fsck::run_fsck_with_stores;
 use shardline_index::{LocalIndexStore, LocalRecordStore, PostgresIndexStore, PostgresRecordStore};
 
 use crate::{
-    ServerConfig, ServerError, object_store::object_store_from_config,
+    ServerConfig, ServerError, error::{IndexError, ObjectStoreError},
+    object_store::object_store_from_config,
     postgres_backend::connect_postgres_metadata_pool,
 };
 
@@ -56,8 +57,8 @@ impl From<FsckError> for ServerError {
             FsckError::Json(e) => Self::Json(e),
             FsckError::NumericConversion(e) => Self::NumericConversion(e),
             FsckError::Overflow => Self::Overflow,
-            FsckError::LocalObjectStore(e) => Self::ObjectStore(e),
-            FsckError::S3ObjectStore(e) => Self::S3ObjectStore(e),
+            FsckError::LocalObjectStore(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
+            FsckError::S3ObjectStore(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
             FsckError::ObjectStore(e) => match e {
                 shardline_server_core::ServerObjectStoreError::NotFound => Self::NotFound,
                 shardline_server_core::ServerObjectStoreError::Overflow => Self::Overflow,
@@ -65,20 +66,24 @@ impl From<FsckError> for ServerError {
                     Self::InvalidContentHash
                 }
                 shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch => {
-                    Self::StoredObjectLengthMismatch
+                    Self::ObjectStore(ObjectStoreError::StoredLengthMismatch)
                 }
-                shardline_server_core::ServerObjectStoreError::Local(e) => Self::ObjectStore(e),
-                shardline_server_core::ServerObjectStoreError::S3(e) => Self::S3ObjectStore(e),
+                shardline_server_core::ServerObjectStoreError::Local(e) => {
+                    Self::ObjectStore(ObjectStoreError::Local(e))
+                }
+                shardline_server_core::ServerObjectStoreError::S3(e) => {
+                    Self::ObjectStore(ObjectStoreError::S3(e))
+                }
                 shardline_server_core::ServerObjectStoreError::Io(e) => Self::Io(e),
                 shardline_server_core::ServerObjectStoreError::NumericConversion(e) => {
                     Self::NumericConversion(e)
                 }
             },
             FsckError::XetAdapter(e) => Self::from(e),
-            FsckError::LocalIndexStore(e) => Self::IndexStore(e),
-            FsckError::MemoryIndexStore(e) => Self::MemoryIndexStore(e),
-            FsckError::MemoryRecordStore(e) => Self::MemoryRecordStore(e),
-            FsckError::PostgresMetadata(e) => Self::PostgresMetadata(e),
+            FsckError::LocalIndexStore(e) => Self::Index(IndexError::Local(e)),
+            FsckError::MemoryIndexStore(e) => Self::Index(IndexError::MemoryIndex(e)),
+            FsckError::MemoryRecordStore(e) => Self::Index(IndexError::MemoryRecord(e)),
+            FsckError::PostgresMetadata(e) => Self::Index(IndexError::PostgresMetadata(e)),
             FsckError::StoredFileMetadataTooLarge {
                 observed_bytes,
                 maximum_bytes,

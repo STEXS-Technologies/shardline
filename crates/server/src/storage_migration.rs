@@ -10,6 +10,7 @@ use xet_core_structures::merklehash::compute_data_hash;
 use crate::{
     ServerError,
     chunk_store::chunk_hash_from_chunk_object_key_if_present,
+    error::ObjectStoreError,
     local_backend::chunk_hash,
     object_store::{ServerObjectStore, read_full_object},
     overflow::checked_add,
@@ -97,23 +98,6 @@ pub struct StorageMigrationReport {
     pub copied_bytes: u64,
     /// Number of source bytes inventoried.
     pub scanned_bytes: u64,
-}
-
-impl StorageMigrationReport {
-    pub fn print_summary(&self) {
-        println!("source_backend: {}", self.source_backend);
-        println!("destination_backend: {}", self.destination_backend);
-        println!("prefix: {}", self.prefix);
-        println!("dry_run: {}", self.dry_run);
-        println!("scanned_objects: {}", self.scanned_objects);
-        println!("scanned_bytes: {}", self.scanned_bytes);
-        println!("inserted_objects: {}", self.inserted_objects);
-        println!(
-            "already_present_objects: {}",
-            self.already_present_objects
-        );
-        println!("copied_bytes: {}", self.copied_bytes);
-    }
 }
 
 impl StorageMigrationReport {
@@ -210,11 +194,13 @@ fn ensure_observed_hash_matches_key(
         return Ok(());
     }
 
-    Err(ServerError::StorageMigrationSourceHashMismatch {
-        key: key.as_str().to_owned(),
-        expected_hash: expected_hash.to_owned(),
-        observed_hash: observed_hash.to_owned(),
-    })
+    Err(ServerError::ObjectStore(
+        ObjectStoreError::MigrationSourceHashMismatch {
+            key: key.as_str().to_owned(),
+            expected_hash: expected_hash.to_owned(),
+            observed_hash: observed_hash.to_owned(),
+        },
+    ))
 }
 
 fn endpoint_store(endpoint: &StorageMigrationEndpoint) -> Result<ServerObjectStore, ServerError> {

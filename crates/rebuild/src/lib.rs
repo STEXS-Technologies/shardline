@@ -1,4 +1,16 @@
 #![deny(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use,
+        clippy::format_push_string
+    )
+)]
 
 //! Index rebuild logic for the Shardline server ecosystem.
 //!
@@ -186,70 +198,6 @@ impl IndexRebuildReport {
     #[must_use]
     pub const fn is_clean(&self) -> bool {
         self.issues.is_empty()
-    }
-
-    pub fn print_summary(&self) {
-        println!(
-            "scanned_version_records: {}",
-            self.scanned_version_records
-        );
-        println!(
-            "scanned_retained_shards: {}",
-            self.scanned_retained_shards
-        );
-        println!(
-            "rebuilt_latest_records: {}",
-            self.rebuilt_latest_records
-        );
-        println!(
-            "unchanged_latest_records: {}",
-            self.unchanged_latest_records
-        );
-        println!(
-            "removed_stale_latest_records: {}",
-            self.removed_stale_latest_records
-        );
-        println!(
-            "scanned_reconstructions: {}",
-            self.scanned_reconstructions
-        );
-        println!(
-            "unchanged_reconstructions: {}",
-            self.unchanged_reconstructions
-        );
-        println!(
-            "removed_stale_reconstructions: {}",
-            self.removed_stale_reconstructions
-        );
-        println!(
-            "rebuilt_dedupe_shard_mappings: {}",
-            self.rebuilt_dedupe_shard_mappings
-        );
-        println!(
-            "unchanged_dedupe_shard_mappings: {}",
-            self.unchanged_dedupe_shard_mappings
-        );
-        println!(
-            "removed_stale_dedupe_shard_mappings: {}",
-            self.removed_stale_dedupe_shard_mappings
-        );
-        println!("issue_count: {}", self.issue_count());
-    }
-
-    pub fn print_cli_summary(&self, root: &std::path::Path) {
-        println!("root: {}", root.display());
-        self.print_summary();
-    }
-
-    pub fn print_issues(&self) {
-        for issue in &self.issues {
-            eprintln!(
-                "issue: {} location={} detail={}",
-                issue.kind.as_str(),
-                issue.location,
-                issue.detail
-            );
-        }
     }
 }
 

@@ -7,6 +7,7 @@ use shardline_protocol::RepositoryScope;
 
 use crate::{
     ServerError,
+    error::IndexError,
     record_store::parse_stored_file_record_bytes,
     validation::{validate_content_hash, validate_identifier},
 };
@@ -54,7 +55,7 @@ async fn read_record_bytes(
         Err(LocalIndexStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => {
             Err(ServerError::NotFound)
         }
-        Err(error) => Err(ServerError::IndexStore(error)),
+        Err(error) => Err(ServerError::Index(IndexError::Local(error))),
     }
 }
 

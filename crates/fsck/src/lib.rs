@@ -1,4 +1,16 @@
 #![deny(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use,
+        clippy::format_push_string
+    )
+)]
 
 //! Storage integrity checking logic for the Shardline server ecosystem.
 //!
@@ -159,42 +171,6 @@ impl FsckReport {
     #[must_use]
     pub const fn is_clean(&self) -> bool {
         self.issues.is_empty()
-    }
-
-    pub fn print_summary(&self) {
-        println!("latest_records: {}", self.latest_records);
-        println!("version_records: {}", self.version_records);
-        println!("inspected_chunk_references: {}", self.inspected_chunk_references);
-        println!(
-            "inspected_dedupe_shard_mappings: {}",
-            self.inspected_dedupe_shard_mappings
-        );
-        println!("inspected_reconstructions: {}", self.inspected_reconstructions);
-        println!(
-            "inspected_webhook_deliveries: {}",
-            self.inspected_webhook_deliveries
-        );
-        println!(
-            "inspected_provider_repository_states: {}",
-            self.inspected_provider_repository_states
-        );
-        println!("issue_count: {}", self.issue_count());
-    }
-
-    pub fn print_cli_summary(&self, root: &Path) {
-        println!("root: {}", root.display());
-        self.print_summary();
-    }
-
-    pub fn print_issues(&self) {
-        for issue in &self.issues {
-            eprintln!(
-                "issue: {} location={} detail={}",
-                issue.kind.as_str(),
-                issue.location,
-                issue.detail
-            );
-        }
     }
 }
 

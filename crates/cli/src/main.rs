@@ -20,6 +20,8 @@ use shardline::{
 use shardline_protocol::RepositoryScope;
 use shardline_server::{ServerConfigError, serve};
 
+use shardline::report_output;
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -73,7 +75,7 @@ async fn main() -> ExitCode {
         },
         Ok(CliCommand::ConfigCheck) => match run_config_check_from_env().await {
             Ok(report) => {
-                report.print_summary();
+                report_output::print_config_check_summary(&report);
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -86,7 +88,7 @@ async fn main() -> ExitCode {
             command,
         }) => match run_db_migration(database_url.as_ref().map(|r| r.as_str()), command).await {
             Ok(report) => {
-                report.print_summary();
+                report_output::print_database_migration_summary(&report);
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -140,11 +142,11 @@ async fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                report.print_cli_summary(&root);
+                report_output::print_fsck_cli_summary(&report, &root);
                 if report.is_clean() {
                     ExitCode::SUCCESS
                 } else {
-                    report.print_issues();
+                    report_output::print_fsck_issues(&report);
                     ExitCode::FAILURE
                 }
             }
@@ -162,11 +164,11 @@ async fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                report.print_cli_summary(&root);
+                report_output::print_index_rebuild_cli_summary(&report, &root);
                 if report.is_clean() {
                     ExitCode::SUCCESS
                 } else {
-                    report.print_issues();
+                    report_output::print_index_rebuild_issues(&report);
                     ExitCode::FAILURE
                 }
             }
@@ -212,7 +214,7 @@ async fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                report.print_cli_summary(&root, webhook_retention_seconds);
+                report_output::print_lifecycle_repair_cli_summary(&report, &root, webhook_retention_seconds);
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -230,7 +232,7 @@ async fn main() -> ExitCode {
                             return ExitCode::from(2);
                         }
                     };
-                    report.print_cli_summary(&root, &output);
+                    report_output::print_backup_manifest_cli_summary(&report, &root, &output);
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
@@ -255,7 +257,7 @@ async fn main() -> ExitCode {
             dry_run,
         ) {
             Ok(report) => {
-                report.print_summary();
+                report_output::print_storage_migration_summary(&report);
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -288,7 +290,8 @@ async fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                report.print_cli_summary(
+                report_output::print_local_gc_cli_summary(
+                    &report,
                     gc_mode_name(mark, sweep),
                     &root,
                     retention_seconds,

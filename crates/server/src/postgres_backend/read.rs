@@ -10,6 +10,7 @@ use crate::{
     ServerError,
     chunk_store::chunk_object_key,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
+    error::IndexError,
     object_store::{read_full_object, reconstruct_file_record_bytes},
     record_store::parse_stored_file_record_bytes,
     validation::{ensure_directory, validate_content_hash, validate_identifier},
@@ -57,9 +58,9 @@ impl super::PostgresBackend {
                 .await
                 .map_err(PostgresMetadataStoreError::from)?;
             if registered_name.is_none() {
-                return Err(ServerError::MissingRequiredMetadataTable(
+                return Err(ServerError::Index(IndexError::MissingRequiredMetadataTable(
                     table_name.to_owned(),
-                ));
+                )));
             }
         }
 
@@ -423,6 +424,6 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::WebhookDelivery(_)
         | PostgresMetadataStoreError::IntegerOutOfRange
         | PostgresMetadataStoreError::InvalidRecordKind
-        | PostgresMetadataStoreError::InvalidRepoType(_) => ServerError::PostgresMetadata(error),
+        | PostgresMetadataStoreError::InvalidRepoType(_) => ServerError::Index(IndexError::PostgresMetadata(error)),
     }
 }

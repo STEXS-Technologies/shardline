@@ -28,6 +28,79 @@ use shardline_oci_adapter::OciAdapterError;
 use shardline_provider_events::ProviderEventsError;
 use shardline_xet_adapter::XetAdapterError;
 
+/// Object-storage subsystem failure.
+#[derive(Debug, Error)]
+pub enum ObjectStoreError {
+    /// Local storage IO failed.
+    #[error("local storage operation failed")]
+    Local(#[from] LocalObjectStoreError),
+    /// S3-compatible object-storage adapter access failed.
+    #[error("s3 object storage adapter operation failed")]
+    S3(#[from] S3ObjectStoreError),
+    /// Object inventory prefix validation failed.
+    #[error("object storage prefix validation failed")]
+    Prefix(#[from] ObjectPrefixError),
+    /// S3-compatible object storage was selected without concrete configuration.
+    #[error("s3 object storage configuration is missing")]
+    MissingS3Config,
+    /// Stored object metadata disagreed with the expected transfer length.
+    #[error("stored object length did not match indexed metadata")]
+    StoredLengthMismatch,
+    /// Storage migration found a content-addressed source object under the wrong key.
+    #[error(
+        "storage migration source object hash mismatch for key {key}: expected {expected_hash}, observed {observed_hash}"
+    )]
+    MigrationSourceHashMismatch {
+        /// Content-addressed object key being migrated.
+        key: String,
+        /// Hash implied by the object key.
+        expected_hash: String,
+        /// Hash computed from the source object bytes.
+        observed_hash: String,
+    },
+}
+
+/// Metadata index subsystem failure.
+#[derive(Debug, Error)]
+pub enum IndexError {
+    /// Index adapter access failed.
+    #[error("index adapter operation failed")]
+    Local(#[from] LocalIndexStoreError),
+    /// In-memory index adapter access failed.
+    #[error("memory index adapter operation failed")]
+    MemoryIndex(#[from] MemoryIndexStoreError),
+    /// In-memory record adapter access failed.
+    #[error("memory record adapter operation failed")]
+    MemoryRecord(#[from] MemoryRecordStoreError),
+    /// Postgres metadata adapter access failed.
+    #[error("postgres metadata adapter operation failed")]
+    PostgresMetadata(#[from] PostgresMetadataStoreError),
+    /// Retention hold input was invalid.
+    #[error("retention hold input was invalid")]
+    RetentionHold(#[from] RetentionHoldError),
+    /// Quarantine candidate input was invalid.
+    #[error("quarantine candidate input was invalid")]
+    QuarantineCandidate(#[from] QuarantineCandidateError),
+    /// Webhook delivery metadata was invalid.
+    #[error("webhook delivery metadata was invalid")]
+    WebhookDelivery(#[from] WebhookDeliveryError),
+    /// Stored file metadata could not produce a valid reconstruction plan.
+    #[error("stored file metadata was invalid")]
+    FileRecordInvariant(#[from] FileRecordInvariantError),
+    /// Lifecycle metadata was internally inconsistent.
+    #[error("lifecycle metadata was internally inconsistent")]
+    InvalidLifecycleMetadata(#[from] InvalidLifecycleMetadataError),
+    /// A reconstruction response violated an internal protocol-shape invariant.
+    #[error("reconstruction response invariant failed: {0}")]
+    InvalidReconstructionResponse(#[from] InvalidReconstructionResponseError),
+    /// A required metadata table was missing.
+    #[error("required metadata table is missing: {0}")]
+    MissingRequiredMetadataTable(String),
+    /// Repository rename encountered conflicting target-scope metadata.
+    #[error("repository rename target already contains conflicting metadata")]
+    ConflictingRenameTargetRecord,
+}
+
 /// Server runtime failure.
 ///
 /// This is the unified error type for the Shardline server layer. It maps
@@ -69,42 +142,12 @@ pub enum ServerError {
     /// Hash parsing failed.
     #[error("invalid content hash")]
     HashParse(#[from] HashParseError),
-    /// Object-storage adapter access failed.
-    #[error("object storage adapter operation failed")]
-    ObjectStore(#[from] LocalObjectStoreError),
-    /// S3-compatible object-storage adapter access failed.
-    #[error("s3 object storage adapter operation failed")]
-    S3ObjectStore(#[from] S3ObjectStoreError),
-    /// Object inventory prefix validation failed.
-    #[error("object storage prefix validation failed")]
-    ObjectPrefix(#[from] ObjectPrefixError),
-    /// S3-compatible object storage was selected without concrete configuration.
-    #[error("s3 object storage configuration is missing")]
-    MissingS3ObjectStoreConfig,
-    /// Index adapter access failed.
+    /// Object-storage subsystem failure.
+    #[error("object storage operation failed")]
+    ObjectStore(#[from] ObjectStoreError),
+    /// Metadata index subsystem failure.
     #[error("index adapter operation failed")]
-    IndexStore(#[from] LocalIndexStoreError),
-    /// In-memory index adapter access failed.
-    #[error("memory index adapter operation failed")]
-    MemoryIndexStore(#[from] MemoryIndexStoreError),
-    /// In-memory record adapter access failed.
-    #[error("memory record adapter operation failed")]
-    MemoryRecordStore(#[from] MemoryRecordStoreError),
-    /// Postgres metadata adapter access failed.
-    #[error("postgres metadata adapter operation failed")]
-    PostgresMetadata(#[from] PostgresMetadataStoreError),
-    /// Retention hold input was invalid.
-    #[error("retention hold input was invalid")]
-    RetentionHold(#[from] RetentionHoldError),
-    /// Quarantine candidate input was invalid.
-    #[error("quarantine candidate input was invalid")]
-    QuarantineCandidate(#[from] QuarantineCandidateError),
-    /// Webhook delivery metadata was invalid.
-    #[error("webhook delivery metadata was invalid")]
-    WebhookDelivery(#[from] WebhookDeliveryError),
-    /// Stored file metadata could not produce a valid reconstruction plan.
-    #[error("stored file metadata was invalid")]
-    FileRecordInvariant(#[from] FileRecordInvariantError),
+    Index(#[from] IndexError),
     /// Stored file metadata exceeded the bounded parser ceiling.
     #[error("stored file metadata exceeded the bounded parser ceiling")]
     StoredFileMetadataTooLarge {
@@ -116,17 +159,11 @@ pub enum ServerError {
     /// Stored file metadata changed after bounded validation.
     #[error("stored file metadata length did not match the validated length")]
     StoredFileMetadataLengthMismatch,
-    /// Lifecycle metadata was internally inconsistent for a mutating operator workflow.
-    #[error("lifecycle metadata was internally inconsistent")]
-    InvalidLifecycleMetadata(#[from] InvalidLifecycleMetadataError),
     /// A file identifier was unsafe.
     #[error(
         "file identifier must be relative and must not contain traversal or control characters"
     )]
     InvalidFileId,
-    /// A required metadata table was missing from the configured backend.
-    #[error("required metadata table is missing: {0}")]
-    MissingRequiredMetadataTable(String),
     /// A content hash was malformed.
     #[error("content hash must be 64 hexadecimal characters")]
     InvalidContentHash,
@@ -250,27 +287,6 @@ pub enum ServerError {
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
-    /// Stored object metadata disagreed with the expected transfer length.
-    #[error("stored object length did not match indexed metadata")]
-    StoredObjectLengthMismatch,
-    /// Storage migration found a content-addressed source object under the wrong key.
-    #[error(
-        "storage migration source object hash mismatch for key {key}: expected {expected_hash}, observed {observed_hash}"
-    )]
-    StorageMigrationSourceHashMismatch {
-        /// Content-addressed object key being migrated.
-        key: String,
-        /// Hash implied by the object key.
-        expected_hash: String,
-        /// Hash computed from the source object bytes.
-        observed_hash: String,
-    },
-    /// Repository rename encountered conflicting target-scope metadata.
-    #[error("repository rename target already contains conflicting metadata")]
-    ConflictingRenameTargetRecord,
-    /// A reconstruction response violated an internal protocol-shape invariant.
-    #[error("reconstruction response invariant failed: {0}")]
-    InvalidReconstructionResponse(#[from] InvalidReconstructionResponseError),
 }
 
 impl ServerError {
@@ -283,8 +299,7 @@ impl ServerError {
             | Self::InvalidManifestReference
             | Self::InvalidUploadSession
             | Self::InvalidXorbPrefix
-            | Self::HashParse(_)
-            | Self::ObjectPrefix(_) => StatusCode::BAD_REQUEST,
+            | Self::HashParse(_) => StatusCode::BAD_REQUEST,
             Self::NotAcceptable => StatusCode::NOT_ACCEPTABLE,
             Self::UnauthorizedChallenge(_) => StatusCode::UNAUTHORIZED,
             Self::InvalidRangeHeader => StatusCode::BAD_REQUEST,
@@ -299,9 +314,6 @@ impl ServerError {
             Self::RequestQueryTooLarge => StatusCode::URI_TOO_LONG,
             Self::RequestBodyRead(_) | Self::RequestBodyFrameOutOfBounds => StatusCode::BAD_REQUEST,
             Self::ExpectedBodyHashMismatch => StatusCode::BAD_REQUEST,
-            Self::MissingRequiredMetadataTable(_) | Self::MissingS3ObjectStoreConfig => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
             Self::NotFound | Self::UnknownProvider | Self::ProviderTokensDisabled => {
                 StatusCode::NOT_FOUND
             }
@@ -326,27 +338,14 @@ impl ServerError {
             | Self::Json(_)
             | Self::NumericConversion(_)
             | Self::ObjectStore(_)
-            | Self::S3ObjectStore(_)
-            | Self::IndexStore(_)
-            | Self::MemoryIndexStore(_)
-            | Self::MemoryRecordStore(_)
-            | Self::PostgresMetadata(_)
-            | Self::RetentionHold(_)
-            | Self::QuarantineCandidate(_)
-            | Self::WebhookDelivery(_)
-            | Self::FileRecordInvariant(_)
+            | Self::Index(_)
             | Self::StoredFileMetadataTooLarge { .. }
             | Self::StoredFileMetadataLengthMismatch
-            | Self::InvalidLifecycleMetadata(_)
             | Self::Config(_)
             | Self::Overflow
             | Self::MissingReconstructionCacheRedisUrl
             | Self::ReconstructionCache(_)
             | Self::BlockingTask(_)
-            | Self::StoredObjectLengthMismatch
-            | Self::StorageMigrationSourceHashMismatch { .. }
-            | Self::ConflictingRenameTargetRecord
-            | Self::InvalidReconstructionResponse(_)
             | Self::Provider(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -413,13 +412,15 @@ impl From<XetAdapterError> for ServerError {
             XetAdapterError::NumericConversion(e) => Self::NumericConversion(e),
             XetAdapterError::HashParse(e) => Self::HashParse(e),
             XetAdapterError::ObjectStore(e) => Self::from(e),
-            XetAdapterError::LocalObjectStore(e) => Self::ObjectStore(e),
-            XetAdapterError::S3ObjectStore(e) => Self::S3ObjectStore(e),
-            XetAdapterError::IndexStore(e) => Self::IndexStore(e),
-            XetAdapterError::MemoryIndexStore(e) => Self::MemoryIndexStore(e),
-            XetAdapterError::MemoryRecordStore(e) => Self::MemoryRecordStore(e),
-            XetAdapterError::PostgresMetadata(e) => Self::PostgresMetadata(e),
-            XetAdapterError::FileRecordInvariant(e) => Self::FileRecordInvariant(e),
+            XetAdapterError::LocalObjectStore(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
+            XetAdapterError::S3ObjectStore(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
+            XetAdapterError::IndexStore(e) => Self::Index(IndexError::Local(e)),
+            XetAdapterError::MemoryIndexStore(e) => Self::Index(IndexError::MemoryIndex(e)),
+            XetAdapterError::MemoryRecordStore(e) => Self::Index(IndexError::MemoryRecord(e)),
+            XetAdapterError::PostgresMetadata(e) => Self::Index(IndexError::PostgresMetadata(e)),
+            XetAdapterError::FileRecordInvariant(e) => {
+                Self::Index(IndexError::FileRecordInvariant(e))
+            }
             XetAdapterError::InvalidContentHash => Self::InvalidContentHash,
             XetAdapterError::InvalidXorbPrefix => Self::InvalidXorbPrefix,
             XetAdapterError::XorbHashMismatch => Self::XorbHashMismatch,
@@ -443,17 +444,21 @@ impl From<ProviderEventsError> for ServerError {
                 Self::InvalidProviderWebhookPayload
             }
             ProviderEventsError::ConflictingRenameTargetRecord => {
-                Self::ConflictingRenameTargetRecord
+                Self::Index(IndexError::ConflictingRenameTargetRecord)
             }
             ProviderEventsError::Json(e) => Self::Json(e),
             ProviderEventsError::NumericConversion(e) => Self::NumericConversion(e),
-            ProviderEventsError::RetentionHold(e) => Self::RetentionHold(e),
+            ProviderEventsError::RetentionHold(e) => Self::Index(IndexError::RetentionHold(e)),
             ProviderEventsError::XetAdapter(e) => Self::from(e),
-            ProviderEventsError::IndexStore(e) => Self::IndexStore(e),
-            ProviderEventsError::MemoryIndexStore(e) => Self::MemoryIndexStore(e),
-            ProviderEventsError::MemoryRecordStore(e) => Self::MemoryRecordStore(e),
-            ProviderEventsError::PostgresMetadata(e) => Self::PostgresMetadata(e),
-            ProviderEventsError::WebhookDelivery(e) => Self::WebhookDelivery(e),
+            ProviderEventsError::IndexStore(e) => Self::Index(IndexError::Local(e)),
+            ProviderEventsError::MemoryIndexStore(e) => Self::Index(IndexError::MemoryIndex(e)),
+            ProviderEventsError::MemoryRecordStore(e) => Self::Index(IndexError::MemoryRecord(e)),
+            ProviderEventsError::PostgresMetadata(e) => {
+                Self::Index(IndexError::PostgresMetadata(e))
+            }
+            ProviderEventsError::WebhookDelivery(e) => {
+                Self::Index(IndexError::WebhookDelivery(e))
+            }
             ProviderEventsError::ObjectStore(e) => Self::from(e),
             ProviderEventsError::ParseStoredFileRecord(e) => Self::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -470,18 +475,20 @@ impl From<GcError> for ServerError {
             GcError::Json(e) => Self::Json(e),
             GcError::NumericConversion(e) => Self::NumericConversion(e),
             GcError::ObjectStore(e) => Self::from(e),
-            GcError::LocalObjectStore(e) => Self::ObjectStore(e),
-            GcError::S3ObjectStore(e) => Self::S3ObjectStore(e),
-            GcError::ObjectPrefix(e) => Self::ObjectPrefix(e),
-            GcError::IndexStore(e) => Self::IndexStore(e),
-            GcError::MemoryIndexStore(e) => Self::MemoryIndexStore(e),
-            GcError::MemoryRecordStore(e) => Self::MemoryRecordStore(e),
-            GcError::PostgresMetadata(e) => Self::PostgresMetadata(e),
-            GcError::RetentionHold(e) => Self::RetentionHold(e),
-            GcError::QuarantineCandidate(e) => Self::QuarantineCandidate(e),
-            GcError::WebhookDelivery(e) => Self::WebhookDelivery(e),
-            GcError::FileRecordInvariant(e) => Self::FileRecordInvariant(e),
-            GcError::InvalidLifecycleMetadata(e) => Self::InvalidLifecycleMetadata(e),
+            GcError::LocalObjectStore(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
+            GcError::S3ObjectStore(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
+            GcError::ObjectPrefix(e) => Self::ObjectStore(ObjectStoreError::Prefix(e)),
+            GcError::IndexStore(e) => Self::Index(IndexError::Local(e)),
+            GcError::MemoryIndexStore(e) => Self::Index(IndexError::MemoryIndex(e)),
+            GcError::MemoryRecordStore(e) => Self::Index(IndexError::MemoryRecord(e)),
+            GcError::PostgresMetadata(e) => Self::Index(IndexError::PostgresMetadata(e)),
+            GcError::RetentionHold(e) => Self::Index(IndexError::RetentionHold(e)),
+            GcError::QuarantineCandidate(e) => Self::Index(IndexError::QuarantineCandidate(e)),
+            GcError::WebhookDelivery(e) => Self::Index(IndexError::WebhookDelivery(e)),
+            GcError::FileRecordInvariant(e) => Self::Index(IndexError::FileRecordInvariant(e)),
+            GcError::InvalidLifecycleMetadata(e) => {
+                Self::Index(IndexError::InvalidLifecycleMetadata(e))
+            }
             GcError::InvalidContentHash => Self::InvalidContentHash,
             GcError::Overflow => Self::Overflow,
             GcError::XetAdapter(e) => Self::from(e),
@@ -496,9 +503,9 @@ impl From<OciAdapterError> for ServerError {
             OciAdapterError::Json(e) => Self::Json(e),
             OciAdapterError::NumericConversion(e) => Self::NumericConversion(e),
             OciAdapterError::ObjectStore(e) => Self::from(e),
-            OciAdapterError::S3ObjectStore(e) => Self::S3ObjectStore(e),
-            OciAdapterError::LocalObjectStore(e) => Self::ObjectStore(e),
-            OciAdapterError::ObjectPrefix(e) => Self::ObjectPrefix(e),
+            OciAdapterError::S3ObjectStore(e) => Self::ObjectStore(ObjectStoreError::S3(e)),
+            OciAdapterError::LocalObjectStore(e) => Self::ObjectStore(ObjectStoreError::Local(e)),
+            OciAdapterError::ObjectPrefix(e) => Self::ObjectStore(ObjectStoreError::Prefix(e)),
             OciAdapterError::NotFound => Self::NotFound,
             OciAdapterError::Overflow => Self::Overflow,
             OciAdapterError::InvalidContentHash => Self::InvalidContentHash,
@@ -518,6 +525,84 @@ impl From<shardline_protocol_adapters::ProtocolError> for ServerError {
         match error {
             shardline_protocol_adapters::ProtocolError::InvalidContentHash => Self::InvalidContentHash,
         }
+    }
+}
+
+impl From<LocalObjectStoreError> for ServerError {
+    fn from(e: LocalObjectStoreError) -> Self {
+        Self::ObjectStore(ObjectStoreError::Local(e))
+    }
+}
+
+impl From<S3ObjectStoreError> for ServerError {
+    fn from(e: S3ObjectStoreError) -> Self {
+        Self::ObjectStore(ObjectStoreError::S3(e))
+    }
+}
+
+impl From<ObjectPrefixError> for ServerError {
+    fn from(e: ObjectPrefixError) -> Self {
+        Self::ObjectStore(ObjectStoreError::Prefix(e))
+    }
+}
+
+impl From<LocalIndexStoreError> for ServerError {
+    fn from(e: LocalIndexStoreError) -> Self {
+        Self::Index(IndexError::Local(e))
+    }
+}
+
+impl From<MemoryIndexStoreError> for ServerError {
+    fn from(e: MemoryIndexStoreError) -> Self {
+        Self::Index(IndexError::MemoryIndex(e))
+    }
+}
+
+impl From<MemoryRecordStoreError> for ServerError {
+    fn from(e: MemoryRecordStoreError) -> Self {
+        Self::Index(IndexError::MemoryRecord(e))
+    }
+}
+
+impl From<PostgresMetadataStoreError> for ServerError {
+    fn from(e: PostgresMetadataStoreError) -> Self {
+        Self::Index(IndexError::PostgresMetadata(e))
+    }
+}
+
+impl From<RetentionHoldError> for ServerError {
+    fn from(e: RetentionHoldError) -> Self {
+        Self::Index(IndexError::RetentionHold(e))
+    }
+}
+
+impl From<QuarantineCandidateError> for ServerError {
+    fn from(e: QuarantineCandidateError) -> Self {
+        Self::Index(IndexError::QuarantineCandidate(e))
+    }
+}
+
+impl From<WebhookDeliveryError> for ServerError {
+    fn from(e: WebhookDeliveryError) -> Self {
+        Self::Index(IndexError::WebhookDelivery(e))
+    }
+}
+
+impl From<FileRecordInvariantError> for ServerError {
+    fn from(e: FileRecordInvariantError) -> Self {
+        Self::Index(IndexError::FileRecordInvariant(e))
+    }
+}
+
+impl From<InvalidLifecycleMetadataError> for ServerError {
+    fn from(e: InvalidLifecycleMetadataError) -> Self {
+        Self::Index(IndexError::InvalidLifecycleMetadata(e))
+    }
+}
+
+impl From<InvalidReconstructionResponseError> for ServerError {
+    fn from(e: InvalidReconstructionResponseError) -> Self {
+        Self::Index(IndexError::InvalidReconstructionResponse(e))
     }
 }
 

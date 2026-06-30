@@ -68,67 +68,6 @@ pub struct LifecycleRepairReport {
     pub removed_future_webhook_deliveries: u64,
 }
 
-impl LifecycleRepairReport {
-    pub fn print_summary(&self) {
-        self.print_summary_prefixed("");
-    }
-
-    pub fn print_summary_prefixed(&self, prefix: &str) {
-        let sep = if prefix.is_empty() { "" } else { "." };
-        println!("{prefix}{sep}scanned_records: {}", self.scanned_records);
-        println!(
-            "{prefix}{sep}referenced_objects: {}",
-            self.referenced_objects
-        );
-        println!(
-            "{prefix}{sep}scanned_quarantine_candidates: {}",
-            self.scanned_quarantine_candidates
-        );
-        println!(
-            "{prefix}{sep}removed_missing_quarantine_candidates: {}",
-            self.removed_missing_quarantine_candidates
-        );
-        println!(
-            "{prefix}{sep}removed_reachable_quarantine_candidates: {}",
-            self.removed_reachable_quarantine_candidates
-        );
-        println!(
-            "{prefix}{sep}removed_held_quarantine_candidates: {}",
-            self.removed_held_quarantine_candidates
-        );
-        println!(
-            "{prefix}{sep}scanned_retention_holds: {}",
-            self.scanned_retention_holds
-        );
-        println!(
-            "{prefix}{sep}removed_expired_retention_holds: {}",
-            self.removed_expired_retention_holds
-        );
-        println!(
-            "{prefix}{sep}removed_missing_retention_holds: {}",
-            self.removed_missing_retention_holds
-        );
-        println!(
-            "{prefix}{sep}scanned_webhook_deliveries: {}",
-            self.scanned_webhook_deliveries
-        );
-        println!(
-            "{prefix}{sep}removed_stale_webhook_deliveries: {}",
-            self.removed_stale_webhook_deliveries
-        );
-        println!(
-            "{prefix}{sep}removed_future_webhook_deliveries: {}",
-            self.removed_future_webhook_deliveries
-        );
-    }
-
-    pub fn print_cli_summary(&self, root: &std::path::Path, webhook_retention_seconds: u64) {
-        println!("root: {}", root.display());
-        println!("webhook_retention_seconds: {webhook_retention_seconds}");
-        self.print_summary();
-    }
-}
-
 #[derive(Debug, Default)]
 struct RepairReachability {
     referenced_object_keys: HashSet<String>,

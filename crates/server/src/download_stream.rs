@@ -9,7 +9,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
 };
 
-use crate::{ServerError, object_store::ServerObjectStore};
+use crate::{ServerError, error::ObjectStoreError, object_store::ServerObjectStore};
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
@@ -67,7 +67,7 @@ pub(crate) async fn object_byte_stream(
             return Err(ServerError::NotFound);
         };
         if metadata.length() != 0 {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         }
 
         return Ok(Box::pin(stream::empty()));
@@ -88,7 +88,7 @@ async fn local_store_byte_stream(
         let file = object_store.open_object_file(&object_key)?;
         let metadata = file.metadata()?;
         if metadata.len() != 0 {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         }
 
         return Ok(Box::pin(stream::empty()));
@@ -109,7 +109,7 @@ async fn local_store_byte_range_stream(
     let mut file = File::from_std(file);
     let metadata = file.metadata().await?;
     if metadata.len() != total_length {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
@@ -128,7 +128,7 @@ async fn local_store_byte_range_stream(
         let mut buffer = vec![0_u8; read_len];
         let read = state.file.read(&mut buffer).await?;
         if read == 0 {
-            return Err(ServerError::StoredObjectLengthMismatch);
+            return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
         }
 
         buffer.truncate(read);
@@ -155,7 +155,7 @@ async fn s3_store_byte_range_stream(
         return Err(ServerError::NotFound);
     };
     if metadata.length() != total_length {
-        return Err(ServerError::StoredObjectLengthMismatch);
+        return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
@@ -174,6 +174,7 @@ mod tests {
     use tokio::fs;
 
     use super::{local_object_byte_range_stream, local_object_byte_stream};
+    use crate::error::ObjectStoreError;
     use crate::ServerError;
     #[tokio::test]
     async fn local_object_byte_stream_reads_object_in_segments() {
@@ -252,7 +253,7 @@ mod tests {
 
         assert!(matches!(
             byte_stream,
-            Err(ServerError::StoredObjectLengthMismatch)
+            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
         ));
     }
 
