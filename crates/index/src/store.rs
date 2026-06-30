@@ -8,6 +8,46 @@ use crate::{
     RetentionHold, StoredObjectId, WebhookDelivery, XorbId,
 };
 
+macro_rules! visit_items {
+    ($visit:ident, $list:ident, $item:ty) => {
+        fn $visit<Visitor, VisitorError>(
+            &self,
+            mut visitor: Visitor,
+        ) -> Result<(), VisitorError>
+        where
+            Self::Error: Into<VisitorError>,
+            Visitor: FnMut($item) -> Result<(), VisitorError>,
+        {
+            for item in self.$list().map_err(Into::into)? {
+                visitor(item)?;
+            }
+            Ok(())
+        }
+    };
+}
+
+macro_rules! visit_items_async {
+    ($visit:ident, $list:ident, $item:ty) => {
+        fn $visit<'operation, Visitor, VisitorError>(
+            &'operation self,
+            mut visitor: Visitor,
+        ) -> IndexStoreFuture<'operation, (), VisitorError>
+        where
+            Self: Sync,
+            Self::Error: Into<VisitorError> + 'operation,
+            Visitor: FnMut($item) -> Result<(), VisitorError> + Send + 'operation,
+            VisitorError: Send + 'operation,
+        {
+            Box::pin(async move {
+                for item in self.$list().await.map_err(Into::into)? {
+                    visitor(item)?;
+                }
+                Ok(())
+            })
+        }
+    };
+}
+
 /// Boxed asynchronous index-store operation.
 pub type IndexStoreFuture<'operation, T, E> =
     Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'operation>>;
@@ -77,26 +117,7 @@ pub trait DedupeStore {
     /// Returns the adapter error when the inventory lookup fails.
     fn list_dedupe_shard_mappings(&self) -> Result<Vec<DedupeShardMapping>, Self::Error>;
 
-    /// Visits every retained dedupe-shard mapping.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the inventory lookup fails or when the visitor
-    /// rejects an entry.
-    fn visit_dedupe_shard_mappings<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(DedupeShardMapping) -> Result<(), VisitorError>,
-    {
-        for mapping in self.list_dedupe_shard_mappings().map_err(Into::into)? {
-            visitor(mapping)?;
-        }
-
-        Ok(())
-    }
+    visit_items!(visit_dedupe_shard_mappings, list_dedupe_shard_mappings, DedupeShardMapping);
 
     /// Deletes one retained dedupe-shard mapping.
     ///
@@ -128,26 +149,7 @@ pub trait LifecycleStore {
     /// Returns the adapter error when the inventory lookup fails.
     fn list_quarantine_candidates(&self) -> Result<Vec<QuarantineCandidate>, Self::Error>;
 
-    /// Visits every durable quarantine candidate.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the inventory lookup fails or when the visitor
-    /// rejects an entry.
-    fn visit_quarantine_candidates<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError>,
-    {
-        for candidate in self.list_quarantine_candidates().map_err(Into::into)? {
-            visitor(candidate)?;
-        }
-
-        Ok(())
-    }
+    visit_items!(visit_quarantine_candidates, list_quarantine_candidates, QuarantineCandidate);
 
     /// Inserts or replaces durable quarantine state for one object key.
     ///
@@ -180,26 +182,7 @@ pub trait LifecycleStore {
     /// Returns the adapter error when the inventory lookup fails.
     fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error>;
 
-    /// Visits every durable retention hold.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the inventory lookup fails or when the visitor
-    /// rejects an entry.
-    fn visit_retention_holds<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(RetentionHold) -> Result<(), VisitorError>,
-    {
-        for hold in self.list_retention_holds().map_err(Into::into)? {
-            visitor(hold)?;
-        }
-
-        Ok(())
-    }
+    visit_items!(visit_retention_holds, list_retention_holds, RetentionHold);
 
     /// Inserts or replaces durable retention-hold state for one object key.
     ///
@@ -232,26 +215,7 @@ pub trait LifecycleStore {
     /// Returns the adapter error when the inventory lookup fails.
     fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error>;
 
-    /// Visits every processed provider webhook delivery claim.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the inventory lookup fails or when the visitor
-    /// rejects an entry.
-    fn visit_webhook_deliveries<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(WebhookDelivery) -> Result<(), VisitorError>,
-    {
-        for delivery in self.list_webhook_deliveries().map_err(Into::into)? {
-            visitor(delivery)?;
-        }
-
-        Ok(())
-    }
+    visit_items!(visit_webhook_deliveries, list_webhook_deliveries, WebhookDelivery);
 
     /// Deletes a recorded provider webhook delivery claim.
     ///
@@ -279,25 +243,7 @@ pub trait LifecycleStore {
     /// Returns the adapter error when the inventory lookup fails.
     fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error>;
 
-    /// Visits every durable provider-derived repository lifecycle state.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter error when the inventory lookup fails or the visitor rejects an entry.
-    fn visit_provider_repository_states<Visitor, VisitorError>(
-        &self,
-        mut visitor: Visitor,
-    ) -> Result<(), VisitorError>
-    where
-        Self::Error: Into<VisitorError>,
-        Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError>,
-    {
-        for state in self.list_provider_repository_states().map_err(Into::into)? {
-            visitor(state)?;
-        }
-
-        Ok(())
-    }
+    visit_items!(visit_provider_repository_states, list_provider_repository_states, ProviderRepositoryState);
 
     /// Inserts or replaces durable provider-derived lifecycle state for one repository.
     ///
@@ -393,29 +339,7 @@ pub trait AsyncIndexStore {
         &self,
     ) -> IndexStoreFuture<'_, Vec<DedupeShardMapping>, Self::Error>;
 
-    /// Visits every retained dedupe-shard mapping.
-    fn visit_dedupe_shard_mappings<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> IndexStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(DedupeShardMapping) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for mapping in self
-                .list_dedupe_shard_mappings()
-                .await
-                .map_err(Into::into)?
-            {
-                visitor(mapping)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_items_async!(visit_dedupe_shard_mappings, list_dedupe_shard_mappings, DedupeShardMapping);
 
     /// Inserts or replaces one chunk-hash to retained-shard mapping.
     fn upsert_dedupe_shard_mapping<'operation>(
@@ -440,29 +364,7 @@ pub trait AsyncIndexStore {
         &self,
     ) -> IndexStoreFuture<'_, Vec<QuarantineCandidate>, Self::Error>;
 
-    /// Visits every durable quarantine candidate.
-    fn visit_quarantine_candidates<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> IndexStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for candidate in self
-                .list_quarantine_candidates()
-                .await
-                .map_err(Into::into)?
-            {
-                visitor(candidate)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_items_async!(visit_quarantine_candidates, list_quarantine_candidates, QuarantineCandidate);
 
     /// Inserts or replaces durable quarantine state for one object key.
     fn upsert_quarantine_candidate<'operation>(
@@ -485,25 +387,7 @@ pub trait AsyncIndexStore {
     /// Lists every durable retention hold.
     fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error>;
 
-    /// Visits every durable retention hold.
-    fn visit_retention_holds<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> IndexStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(RetentionHold) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for hold in self.list_retention_holds().await.map_err(Into::into)? {
-                visitor(hold)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_items_async!(visit_retention_holds, list_retention_holds, RetentionHold);
 
     /// Inserts or replaces durable retention-hold state for one object key.
     fn upsert_retention_hold<'operation>(
@@ -529,25 +413,7 @@ pub trait AsyncIndexStore {
     /// Lists every processed provider webhook delivery claim.
     fn list_webhook_deliveries(&self) -> IndexStoreFuture<'_, Vec<WebhookDelivery>, Self::Error>;
 
-    /// Visits every processed provider webhook delivery claim.
-    fn visit_webhook_deliveries<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> IndexStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(WebhookDelivery) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for delivery in self.list_webhook_deliveries().await.map_err(Into::into)? {
-                visitor(delivery)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_items_async!(visit_webhook_deliveries, list_webhook_deliveries, WebhookDelivery);
 
     /// Deletes a recorded provider webhook delivery claim.
     fn delete_webhook_delivery<'operation>(
@@ -568,29 +434,7 @@ pub trait AsyncIndexStore {
         &self,
     ) -> IndexStoreFuture<'_, Vec<ProviderRepositoryState>, Self::Error>;
 
-    /// Visits every durable provider-derived repository lifecycle state.
-    fn visit_provider_repository_states<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> IndexStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for state in self
-                .list_provider_repository_states()
-                .await
-                .map_err(Into::into)?
-            {
-                visitor(state)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_items_async!(visit_provider_repository_states, list_provider_repository_states, ProviderRepositoryState);
 
     /// Inserts or replaces durable provider-derived lifecycle state for one repository.
     fn upsert_provider_repository_state<'operation>(

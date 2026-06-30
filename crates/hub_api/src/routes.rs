@@ -70,10 +70,15 @@ async fn deliver_webhook_events(
             tracing::warn!("webhook delivery semaphore closed");
             return;
         };
-        tokio::spawn(async move {
+        let url_for_log = sanitize_log_url(&url);
+        let handle = tokio::spawn(async move {
             if let Err(e) = deliver_one_webhook(&client, &url, &body, secret.as_deref()).await {
-                let safe_url = sanitize_log_url(&url);
-                tracing::warn!("webhook delivery to {safe_url} failed: {e}");
+                tracing::warn!("webhook delivery to {url_for_log} failed: {e}");
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(join_err) = handle.await {
+                tracing::error!("webhook delivery task panicked: {join_err}");
             }
         });
     }

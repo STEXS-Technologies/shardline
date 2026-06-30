@@ -10,6 +10,51 @@ use crate::parse_xet_hash_hex;
 pub type RecordStoreFuture<'operation, T, E> =
     Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'operation>>;
 
+macro_rules! visit_locators_async {
+    ($visit:ident, $list:ident) => {
+        fn $visit<'operation, Visitor, VisitorError>(
+            &'operation self,
+            mut visitor: Visitor,
+        ) -> RecordStoreFuture<'operation, (), VisitorError>
+        where
+            Self: Sync,
+            Self::Error: Into<VisitorError> + 'operation,
+            Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
+            VisitorError: Send + 'operation,
+        {
+            Box::pin(async move {
+                for locator in self.$list().await.map_err(Into::into)? {
+                    visitor(locator)?;
+                }
+                Ok(())
+            })
+        }
+    };
+}
+
+macro_rules! visit_repository_locators_async {
+    ($visit:ident, $list:ident) => {
+        fn $visit<'operation, Visitor, VisitorError>(
+            &'operation self,
+            repository: &'operation crate::RepositoryRecordScope,
+            mut visitor: Visitor,
+        ) -> RecordStoreFuture<'operation, (), VisitorError>
+        where
+            Self: Sync,
+            Self::Error: Into<VisitorError> + 'operation,
+            Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
+            VisitorError: Send + 'operation,
+        {
+            Box::pin(async move {
+                for locator in self.$list(repository).await.map_err(Into::into)? {
+                    visitor(locator)?;
+                }
+                Ok(())
+            })
+        }
+    };
+}
+
 /// Stored record bytes together with adapter locator and modification time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredRecord<Locator> {
@@ -213,29 +258,7 @@ pub trait RecordStore {
     fn list_latest_record_locators(&self)
     -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error>;
 
-    /// Visits visible latest-file record locators.
-    fn visit_latest_record_locators<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> RecordStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for locator in self
-                .list_latest_record_locators()
-                .await
-                .map_err(Into::into)?
-            {
-                visitor(locator)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_locators_async!(visit_latest_record_locators, list_latest_record_locators);
 
     /// Visits visible latest-file records together with raw bytes and modification time.
     fn visit_latest_records<'operation, Visitor, VisitorError>(
@@ -276,30 +299,7 @@ pub trait RecordStore {
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error>;
 
-    /// Visits visible latest-file record locators for one repository across all revisions.
-    fn visit_repository_latest_record_locators<'operation, Visitor, VisitorError>(
-        &'operation self,
-        repository: &'operation RepositoryRecordScope,
-        mut visitor: Visitor,
-    ) -> RecordStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for locator in self
-                .list_repository_latest_record_locators(repository)
-                .await
-                .map_err(Into::into)?
-            {
-                visitor(locator)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_repository_locators_async!(visit_repository_latest_record_locators, list_repository_latest_record_locators);
 
     /// Visits visible latest-file records for one repository across all revisions.
     fn visit_repository_latest_records<'operation, Visitor, VisitorError>(
@@ -346,29 +346,7 @@ pub trait RecordStore {
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error>;
 
-    /// Visits immutable version-record locators.
-    fn visit_version_record_locators<'operation, Visitor, VisitorError>(
-        &'operation self,
-        mut visitor: Visitor,
-    ) -> RecordStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for locator in self
-                .list_version_record_locators()
-                .await
-                .map_err(Into::into)?
-            {
-                visitor(locator)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_locators_async!(visit_version_record_locators, list_version_record_locators);
 
     /// Visits immutable version records together with raw bytes and modification time.
     fn visit_version_records<'operation, Visitor, VisitorError>(
@@ -403,30 +381,7 @@ pub trait RecordStore {
         })
     }
 
-    /// Visits immutable version-record locators for one repository across all revisions.
-    fn visit_repository_version_record_locators<'operation, Visitor, VisitorError>(
-        &'operation self,
-        repository: &'operation RepositoryRecordScope,
-        mut visitor: Visitor,
-    ) -> RecordStoreFuture<'operation, (), VisitorError>
-    where
-        Self: Sync,
-        Self::Error: Into<VisitorError> + 'operation,
-        Visitor: FnMut(Self::Locator) -> Result<(), VisitorError> + Send + 'operation,
-        VisitorError: Send + 'operation,
-    {
-        Box::pin(async move {
-            for locator in self
-                .list_repository_version_record_locators(repository)
-                .await
-                .map_err(Into::into)?
-            {
-                visitor(locator)?;
-            }
-
-            Ok(())
-        })
-    }
+    visit_repository_locators_async!(visit_repository_version_record_locators, list_repository_version_record_locators);
 
     /// Visits immutable version records for one repository across all revisions.
     fn visit_repository_version_records<'operation, Visitor, VisitorError>(
