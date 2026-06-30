@@ -6,9 +6,9 @@ use std::{
 
 use shardline_cas::{CasCoordinator, CasLimits};
 use shardline_index::{
-    DedupeShardMapping, FileId, FileReconstruction, IndexStore, LocalIndexStore,
-    ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RetentionHold,
-    StoredObjectId, WebhookDelivery, xet_hash_hex_string,
+    DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore, LocalIndexStore,
+    ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
+    RetentionHold, StoredObjectId, WebhookDelivery, xet_hash_hex_string,
 };
 use shardline_protocol::{ByteRange, ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::{
@@ -152,7 +152,7 @@ impl MemoryIndexStore {
     }
 }
 
-impl IndexStore for MemoryIndexStore {
+impl ReconstructionStore for MemoryIndexStore {
     type Error = MemoryIndexError;
 
     fn reconstruction(&self, file_id: &FileId) -> Result<Option<FileReconstruction>, Self::Error> {
@@ -179,6 +179,10 @@ impl IndexStore for MemoryIndexStore {
     fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error> {
         Ok(self.objects.borrow().contains(object_id))
     }
+}
+
+impl DedupeStore for MemoryIndexStore {
+    type Error = MemoryIndexError;
 
     fn dedupe_shard_mapping(
         &self,
@@ -203,6 +207,10 @@ impl IndexStore for MemoryIndexStore {
     fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error> {
         Ok(self.dedupe_shards.borrow_mut().remove(chunk_hash).is_some())
     }
+}
+
+impl LifecycleStore for MemoryIndexStore {
+    type Error = MemoryIndexError;
 
     fn quarantine_candidate(
         &self,

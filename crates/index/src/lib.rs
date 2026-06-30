@@ -78,5 +78,7 @@ pub use record::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout, RecordStore,
     RecordStoreFuture, RepositoryRecordScope, StoredRecord,
 };
-pub use store::{AsyncIndexStore, IndexStore, IndexStoreFuture};
+pub use store::{
+    AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore, ReconstructionStore,
+};
 pub use xet_hash::{parse_xet_hash_hex, xet_hash_hex_string};

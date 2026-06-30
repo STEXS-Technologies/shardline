@@ -11,7 +11,7 @@ use std::{
 
 use bytes::Bytes;
 use rusqlite::Connection;
-use shardline_index::{IndexStore, LocalIndexStore, WebhookDelivery};
+use shardline_index::{LifecycleStore, LocalIndexStore, WebhookDelivery};
 use shardline_protocol::RepositoryProvider;
 use shardline_server::LocalBackend;
 use support::CliE2eInvariantError;

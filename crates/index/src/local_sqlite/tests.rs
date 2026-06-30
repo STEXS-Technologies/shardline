@@ -14,10 +14,11 @@ use super::{
 };
 use super::helpers::legacy_record_path;
 use crate::{
-    DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore,
-    MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState, QuarantineCandidate,
-    ReconstructionTerm, RecordStore, RetentionHold, WebhookDelivery, XorbId,
-    parse_xet_hash_hex, test_invariant_error::LocalSqliteInvariantError, xet_hash_hex_string,
+    DedupeShardMapping, DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord,
+    IndexStore, LifecycleStore, MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState,
+    QuarantineCandidate, ReconstructionStore, ReconstructionTerm, RecordStore, RetentionHold,
+    WebhookDelivery, XorbId, parse_xet_hash_hex, test_invariant_error::LocalSqliteInvariantError,
+    xet_hash_hex_string,
 };
 
 fn sample_repository_scope() -> Result<RepositoryScope, Box<dyn Error>> {
@@ -220,7 +221,7 @@ async fn exercise_local_record_store_commit_native_shard_metadata_is_atomic()
         )
         .into());
     }
-    if IndexStore::dedupe_shard_mapping(&index_store, &mapping.chunk_hash())?.is_some() {
+    if DedupeStore::dedupe_shard_mapping(&index_store, &mapping.chunk_hash())?.is_some() {
         return Err(LocalSqliteInvariantError::new(
             "dedupe mapping survived failed shard transaction",
         )
@@ -467,9 +468,9 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
             }
             5 => {
                 let local_deleted =
-                    IndexStore::delete_reconstruction(&local_index_store, &reconstruction.0)?;
+                    ReconstructionStore::delete_reconstruction(&local_index_store, &reconstruction.0)?;
                 let memory_deleted =
-                    IndexStore::delete_reconstruction(&memory_index_store, &reconstruction.0)?;
+                    ReconstructionStore::delete_reconstruction(&memory_index_store, &reconstruction.0)?;
                 if local_deleted != memory_deleted {
                     return Err(LocalSqliteInvariantError::new(
                         "reconstruction delete behavior diverged from memory",
@@ -486,11 +487,11 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                 memory_index_store.upsert_dedupe_shard_mapping(mapping)?;
             }
             8 => {
-                let local_deleted = IndexStore::delete_dedupe_shard_mapping(
+                let local_deleted = DedupeStore::delete_dedupe_shard_mapping(
                     &local_index_store,
                     &mapping.chunk_hash(),
                 )?;
-                let memory_deleted = IndexStore::delete_dedupe_shard_mapping(
+                let memory_deleted = DedupeStore::delete_dedupe_shard_mapping(
                     &memory_index_store,
                     &mapping.chunk_hash(),
                 )?;
@@ -506,11 +507,11 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                 memory_index_store.upsert_quarantine_candidate(quarantine_candidate)?;
             }
             10 => {
-                let local_deleted = IndexStore::delete_quarantine_candidate(
+                let local_deleted = LifecycleStore::delete_quarantine_candidate(
                     &local_index_store,
                     quarantine_candidate.object_key(),
                 )?;
-                let memory_deleted = IndexStore::delete_quarantine_candidate(
+                let memory_deleted = LifecycleStore::delete_quarantine_candidate(
                     &memory_index_store,
                     quarantine_candidate.object_key(),
                 )?;
@@ -526,11 +527,11 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                 memory_index_store.upsert_retention_hold(retention_hold)?;
             }
             12 => {
-                let local_deleted = IndexStore::delete_retention_hold(
+                let local_deleted = LifecycleStore::delete_retention_hold(
                     &local_index_store,
                     retention_hold.object_key(),
                 )?;
-                let memory_deleted = IndexStore::delete_retention_hold(
+                let memory_deleted = LifecycleStore::delete_retention_hold(
                     &memory_index_store,
                     retention_hold.object_key(),
                 )?;
@@ -555,9 +556,9 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
             }
             14 => {
                 let local_deleted =
-                    IndexStore::delete_webhook_delivery(&local_index_store, webhook_delivery)?;
+                    LifecycleStore::delete_webhook_delivery(&local_index_store, webhook_delivery)?;
                 let memory_deleted =
-                    IndexStore::delete_webhook_delivery(&memory_index_store, webhook_delivery)?;
+                    LifecycleStore::delete_webhook_delivery(&memory_index_store, webhook_delivery)?;
                 if local_deleted != memory_deleted {
                     return Err(LocalSqliteInvariantError::new(
                         "webhook delivery delete behavior diverged from memory",
@@ -571,13 +572,13 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                     local_index_store.upsert_provider_repository_state(provider_state)?;
                     memory_index_store.upsert_provider_repository_state(provider_state)?;
                 } else {
-                    let local_deleted = IndexStore::delete_provider_repository_state(
+                    let local_deleted = LifecycleStore::delete_provider_repository_state(
                         &local_index_store,
                         provider_state.provider(),
                         provider_state.owner(),
                         provider_state.repo(),
                     )?;
-                    let memory_deleted = IndexStore::delete_provider_repository_state(
+                    let memory_deleted = LifecycleStore::delete_provider_repository_state(
                         &memory_index_store,
                         provider_state.provider(),
                         provider_state.owner(),
@@ -787,36 +788,36 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
         )
         .into());
     }
-    if IndexStore::reconstruction(&index_store, &file_id)? != Some(reconstruction) {
+    if ReconstructionStore::reconstruction(&index_store, &file_id)? != Some(reconstruction) {
         return Err(
             LocalSqliteInvariantError::new("reconstruction row was not imported").into(),
         );
     }
-    if !IndexStore::contains_xorb(&index_store, &XorbId::new(parse_xet_hash_hex(&xorb_hash)?))?
+    if !ReconstructionStore::contains_xorb(&index_store, &XorbId::new(parse_xet_hash_hex(&xorb_hash)?))?
     {
         return Err(LocalSqliteInvariantError::new("xorb marker was not imported").into());
     }
-    if IndexStore::dedupe_shard_mapping(&index_store, &parse_xet_hash_hex(&dedupe_chunk_hash)?)?
+    if DedupeStore::dedupe_shard_mapping(&index_store, &parse_xet_hash_hex(&dedupe_chunk_hash)?)?
         != Some(dedupe_mapping)
     {
         return Err(LocalSqliteInvariantError::new("dedupe mapping was not imported").into());
     }
-    if IndexStore::quarantine_candidate(&index_store, quarantine_candidate.object_key())?
+    if LifecycleStore::quarantine_candidate(&index_store, quarantine_candidate.object_key())?
         != Some(quarantine_candidate)
     {
         return Err(
             LocalSqliteInvariantError::new("quarantine candidate was not imported").into(),
         );
     }
-    if IndexStore::retention_hold(&index_store, retention_hold.object_key())?
+    if LifecycleStore::retention_hold(&index_store, retention_hold.object_key())?
         != Some(retention_hold)
     {
         return Err(LocalSqliteInvariantError::new("retention hold was not imported").into());
     }
-    if IndexStore::list_webhook_deliveries(&index_store)? != vec![webhook_delivery] {
+    if LifecycleStore::list_webhook_deliveries(&index_store)? != vec![webhook_delivery] {
         return Err(LocalSqliteInvariantError::new("webhook delivery was not imported").into());
     }
-    if IndexStore::provider_repository_state(
+    if LifecycleStore::provider_repository_state(
         &index_store,
         provider_state.provider(),
         provider_state.owner(),
@@ -1160,8 +1161,8 @@ async fn assert_local_sqlite_matches_memory_state(
         .map(|(file_id, _reconstruction)| *file_id)
         .collect::<Vec<_>>();
     for file_id in reconstruction_file_ids {
-        if IndexStore::reconstruction(local_index_store, &file_id)?
-            != IndexStore::reconstruction(memory_index_store, &file_id)?
+        if ReconstructionStore::reconstruction(local_index_store, &file_id)?
+            != ReconstructionStore::reconstruction(memory_index_store, &file_id)?
         {
             return Err(LocalSqliteInvariantError::new(
                 "reconstruction state diverged from memory",
@@ -1171,8 +1172,8 @@ async fn assert_local_sqlite_matches_memory_state(
     }
 
     for xorb_id in &fixtures.xorb_ids {
-        if IndexStore::contains_xorb(local_index_store, xorb_id)?
-            != IndexStore::contains_xorb(memory_index_store, xorb_id)?
+        if ReconstructionStore::contains_xorb(local_index_store, xorb_id)?
+            != ReconstructionStore::contains_xorb(memory_index_store, xorb_id)?
         {
             return Err(LocalSqliteInvariantError::new(
                 "xorb marker state diverged from memory",
@@ -1181,8 +1182,8 @@ async fn assert_local_sqlite_matches_memory_state(
         }
     }
 
-    if canonical_dedupe_mappings(IndexStore::list_dedupe_shard_mappings(local_index_store)?)
-        != canonical_dedupe_mappings(IndexStore::list_dedupe_shard_mappings(
+    if canonical_dedupe_mappings(DedupeStore::list_dedupe_shard_mappings(local_index_store)?)
+        != canonical_dedupe_mappings(DedupeStore::list_dedupe_shard_mappings(
             memory_index_store,
         )?)
     {
@@ -1192,9 +1193,9 @@ async fn assert_local_sqlite_matches_memory_state(
         .into());
     }
 
-    if canonical_quarantine_candidates(IndexStore::list_quarantine_candidates(
+    if canonical_quarantine_candidates(LifecycleStore::list_quarantine_candidates(
         local_index_store,
-    )?) != canonical_quarantine_candidates(IndexStore::list_quarantine_candidates(
+    )?) != canonical_quarantine_candidates(LifecycleStore::list_quarantine_candidates(
         memory_index_store,
     )?) {
         return Err(LocalSqliteInvariantError::new(
@@ -1203,8 +1204,8 @@ async fn assert_local_sqlite_matches_memory_state(
         .into());
     }
 
-    if canonical_retention_holds(IndexStore::list_retention_holds(local_index_store)?)
-        != canonical_retention_holds(IndexStore::list_retention_holds(memory_index_store)?)
+    if canonical_retention_holds(LifecycleStore::list_retention_holds(local_index_store)?)
+        != canonical_retention_holds(LifecycleStore::list_retention_holds(memory_index_store)?)
     {
         return Err(LocalSqliteInvariantError::new(
             "retention hold state diverged from memory",
@@ -1212,8 +1213,8 @@ async fn assert_local_sqlite_matches_memory_state(
         .into());
     }
 
-    if canonical_webhook_deliveries(IndexStore::list_webhook_deliveries(local_index_store)?)
-        != canonical_webhook_deliveries(IndexStore::list_webhook_deliveries(
+    if canonical_webhook_deliveries(LifecycleStore::list_webhook_deliveries(local_index_store)?)
+        != canonical_webhook_deliveries(LifecycleStore::list_webhook_deliveries(
             memory_index_store,
         )?)
     {
@@ -1223,9 +1224,9 @@ async fn assert_local_sqlite_matches_memory_state(
         .into());
     }
 
-    if canonical_provider_states(IndexStore::list_provider_repository_states(
+    if canonical_provider_states(LifecycleStore::list_provider_repository_states(
         local_index_store,
-    )?) != canonical_provider_states(IndexStore::list_provider_repository_states(
+    )?) != canonical_provider_states(LifecycleStore::list_provider_repository_states(
         memory_index_store,
     )?) {
         return Err(LocalSqliteInvariantError::new(
@@ -1254,8 +1255,8 @@ async fn assert_local_sqlite_matches_memory_state(
     });
     expected_provider_keys.dedup();
     for (provider, owner, repo) in expected_provider_keys {
-        if IndexStore::provider_repository_state(local_index_store, provider, &owner, &repo)?
-            != IndexStore::provider_repository_state(
+        if LifecycleStore::provider_repository_state(local_index_store, provider, &owner, &repo)?
+            != LifecycleStore::provider_repository_state(
                 memory_index_store,
                 provider,
                 &owner,

@@ -4,8 +4,9 @@ use axum::body::Bytes;
 use rusqlite::{Connection, params};
 use serde_json::{from_slice, to_vec};
 use shardline_index::{
-    FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore, LocalIndexStore,
-    ReconstructionTerm, RecordStore, StoredObjectId, parse_xet_hash_hex, xet_hash_hex_string,
+    DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord, LocalIndexStore,
+    ReconstructionStore, ReconstructionTerm, RecordStore, StoredObjectId, parse_xet_hash_hex,
+    xet_hash_hex_string,
 };
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
 use tokio::{fs, time::sleep};
@@ -240,7 +241,7 @@ async fn index_rebuild_prunes_stale_reconstruction_rows() {
         return;
     };
 
-    let loaded = IndexStore::reconstruction(&index_store, &stale_file_id);
+    let loaded = ReconstructionStore::reconstruction(&index_store, &stale_file_id);
     assert!(matches!(loaded, Ok(None)));
     assert_eq!(report.scanned_reconstructions, 1);
     assert_eq!(report.unchanged_reconstructions, 0);
@@ -286,7 +287,7 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
         return;
     };
 
-    let loaded = IndexStore::reconstruction(&index_store, &file_id);
+    let loaded = ReconstructionStore::reconstruction(&index_store, &file_id);
     assert!(matches!(loaded, Ok(Some(ref loaded)) if loaded == &reconstruction));
     assert_eq!(report.scanned_reconstructions, 1);
     assert_eq!(report.unchanged_reconstructions, 1);
@@ -607,9 +608,9 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     let Ok(chunk_hash) = chunk_hash else {
         return;
     };
-    let deleted = IndexStore::delete_dedupe_shard_mapping(&index_store, &chunk_hash);
+    let deleted = DedupeStore::delete_dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(deleted, Ok(true)));
-    let missing = IndexStore::dedupe_shard_mapping(&index_store, &chunk_hash);
+    let missing = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(missing, Ok(None)));
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
@@ -618,7 +619,7 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
         return;
     };
 
-    let restored = IndexStore::dedupe_shard_mapping(&index_store, &chunk_hash);
+    let restored = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(restored, Ok(Some(_))));
     assert_eq!(report.scanned_retained_shards, 1);
     assert_eq!(report.rebuilt_dedupe_shard_mappings, 1);
@@ -665,7 +666,7 @@ async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_co
     let Ok(chunk_hash) = chunk_hash else {
         return;
     };
-    let existing = IndexStore::dedupe_shard_mapping(&index_store, &chunk_hash);
+    let existing = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(existing, Ok(Some(_))));
     let Ok(Some(existing)) = existing else {
         return;
@@ -683,7 +684,7 @@ async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_co
         return;
     };
 
-    let preserved = IndexStore::dedupe_shard_mapping(&index_store, &chunk_hash);
+    let preserved = DedupeStore::dedupe_shard_mapping(&index_store, &chunk_hash);
     assert!(matches!(preserved, Ok(Some(_))));
     let Ok(Some(preserved)) = preserved else {
         return;

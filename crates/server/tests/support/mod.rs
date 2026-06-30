@@ -12,7 +12,7 @@ use futures_util::stream;
 use hmac::Mac;
 use reqwest::Client;
 use serde_json::{json, to_vec};
-use shardline_index::{IndexStore, LocalIndexStore, ProviderRepositoryState};
+use shardline_index::{LifecycleStore, LocalIndexStore, ProviderRepositoryState};
 use shardline_protocol::{
     RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
 };
@@ -181,7 +181,7 @@ pub(crate) fn seed_provider_repository_state(
         Some(11),
         Some("refs/heads/seeded".to_owned()),
     );
-    let persisted = IndexStore::upsert_provider_repository_state(&index_store, &state);
+    let persisted = LifecycleStore::upsert_provider_repository_state(&index_store, &state);
     assert!(persisted.is_ok());
 }
 
@@ -255,7 +255,7 @@ pub(crate) fn provider_repository_state(
     let Ok(index_store) = index_store else {
         return None;
     };
-    let state = IndexStore::provider_repository_state(&index_store, provider, owner, repo);
+    let state = LifecycleStore::provider_repository_state(&index_store, provider, owner, repo);
     assert!(state.is_ok());
     let Ok(state) = state else {
         return None;

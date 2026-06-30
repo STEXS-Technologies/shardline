@@ -10,8 +10,8 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::to_vec;
 use shardline_index::{
-    DedupeShardMapping, IndexStore, LocalIndexStore, QuarantineCandidate, RetentionHold,
-    WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
+    DedupeShardMapping, DedupeStore, LifecycleStore, LocalIndexStore, QuarantineCandidate,
+    RetentionHold, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, unix_now_seconds_lossy};
 use shardline_storage::ObjectKey;
@@ -306,7 +306,7 @@ async fn exercise_gc_mark_only_creates_quarantine_candidates() -> Result<(), Box
         "orphan chunk should still exist",
     )?;
     ensure(
-        IndexStore::quarantine_candidate(
+        LifecycleStore::quarantine_candidate(
             &LocalIndexStore::open(storage.path().to_path_buf()),
             &chunk_object_key(&orphan_hash)?,
         )?
@@ -465,7 +465,7 @@ async fn exercise_gc_sweep_only_deletes_expired_quarantine_candidates() -> Resul
         "expired quarantine candidate should be deleted",
     )?;
     ensure(
-        IndexStore::quarantine_candidate(&index_store, &object_key)?.is_none(),
+        LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_none(),
         "sweep should remove the quarantine candidate",
     )?;
 
@@ -528,7 +528,7 @@ async fn exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable
         "reachable chunk should still exist on disk",
     )?;
     ensure(
-        IndexStore::quarantine_candidate(
+        LifecycleStore::quarantine_candidate(
             &LocalIndexStore::open(storage.path().to_path_buf()),
             &chunk_object_key(&hash)?,
         )?
@@ -670,7 +670,7 @@ async fn exercise_gc_dry_run_keeps_expired_retention_holds() -> Result<(), Box<d
         "expired hold should not appear in the active retention report",
     )?;
     ensure(
-        IndexStore::retention_hold(&index_store, &object_key)?.is_some(),
+        LifecycleStore::retention_hold(&index_store, &object_key)?.is_some(),
         "dry run should not prune expired hold metadata",
     )?;
 
@@ -706,7 +706,7 @@ async fn exercise_gc_mutating_run_prunes_expired_retention_holds() -> Result<(),
         "mark run should quarantine the orphan after expired hold pruning",
     )?;
     ensure(
-        IndexStore::retention_hold(&index_store, &object_key)?.is_none(),
+        LifecycleStore::retention_hold(&index_store, &object_key)?.is_none(),
         "mutating gc run should prune expired hold metadata",
     )?;
 
@@ -942,7 +942,7 @@ async fn exercise_gc_fails_closed_on_missing_quarantined_object_metadata()
 
     let result = run_local_gc(storage.path().to_path_buf(), LocalGcOptions::mark_only(60)).await;
     assert!(matches!(result, Err(GcError::InvalidLifecycleMetadata(_))));
-    assert!(IndexStore::quarantine_candidate(&index_store, &object_key)?.is_some());
+    assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_some());
 
     Ok(())
 }
@@ -990,8 +990,8 @@ async fn exercise_gc_fails_closed_on_active_hold_quarantine_conflict() -> Result
     )
     .await;
     assert!(matches!(result, Err(GcError::InvalidLifecycleMetadata(_))));
-    assert!(IndexStore::retention_hold(&index_store, &object_key)?.is_some());
-    assert!(IndexStore::quarantine_candidate(&index_store, &object_key)?.is_some());
+    assert!(LifecycleStore::retention_hold(&index_store, &object_key)?.is_some());
+    assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_some());
     assert!(fs::try_exists(&object_path).await?);
 
     Ok(())

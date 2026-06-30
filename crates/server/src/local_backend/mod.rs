@@ -6,7 +6,7 @@ pub(crate) mod records;
 mod xorbs;
 
 use shardline_index::{
-    FileChunkRecord, IndexStore, LocalIndexStore, LocalRecordStore, RecordStore,
+    FileChunkRecord, ReconstructionStore, LocalIndexStore, LocalRecordStore, RecordStore,
 };
 use shardline_storage::ObjectPrefix;
 
@@ -152,7 +152,7 @@ impl LocalBackend {
             let _object_store_reachable = object_store.metadata(&probe_key)?;
         }
         let _latest = RecordStore::list_latest_record_locators(&self.record_store).await?;
-        let _reconstructions = IndexStore::list_reconstruction_file_ids(&self.index_store)?;
+        let _reconstructions = ReconstructionStore::list_reconstruction_file_ids(&self.index_store)?;
         Ok(())
     }
 

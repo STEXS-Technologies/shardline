@@ -4,11 +4,12 @@ use shardline_storage::ObjectKey;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, u64_to_i64};
 use crate::{
-    DedupeShardMapping, FileId, FileReconstruction, IndexStore, ProviderRepositoryState,
-    QuarantineCandidate, RetentionHold, StoredObjectId, WebhookDelivery, xet_hash_hex_string,
+    DedupeShardMapping, FileId, FileReconstruction, LifecycleStore, DedupeStore,
+    ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
+    StoredObjectId, WebhookDelivery, xet_hash_hex_string,
 };
 
-impl IndexStore for LocalIndexStore {
+impl ReconstructionStore for LocalIndexStore {
     type Error = LocalIndexStoreError;
 
     fn reconstruction(&self, file_id: &FileId) -> Result<Option<FileReconstruction>, Self::Error> {
@@ -63,6 +64,11 @@ impl IndexStore for LocalIndexStore {
         Ok(exists != 0)
     }
 
+}
+
+impl DedupeStore for LocalIndexStore {
+    type Error = LocalIndexStoreError;
+
     fn dedupe_shard_mapping(
         &self,
         chunk_hash: &ShardlineHash,
@@ -99,7 +105,7 @@ impl IndexStore for LocalIndexStore {
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(DedupeShardMapping) -> Result<(), VisitorError>,
     {
-        for mapping in IndexStore::list_dedupe_shard_mappings(self).map_err(Into::into)? {
+        for mapping in DedupeStore::list_dedupe_shard_mappings(self).map_err(Into::into)? {
             visitor(mapping)?;
         }
         Ok(())
@@ -113,6 +119,11 @@ impl IndexStore for LocalIndexStore {
         )?;
         Ok(changed > 0)
     }
+
+}
+
+impl LifecycleStore for LocalIndexStore {
+    type Error = LocalIndexStoreError;
 
     fn quarantine_candidate(
         &self,
@@ -156,7 +167,7 @@ impl IndexStore for LocalIndexStore {
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError>,
     {
-        for candidate in IndexStore::list_quarantine_candidates(self).map_err(Into::into)? {
+        for candidate in LifecycleStore::list_quarantine_candidates(self).map_err(Into::into)? {
             visitor(candidate)?;
         }
         Ok(())
@@ -242,7 +253,7 @@ impl IndexStore for LocalIndexStore {
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(RetentionHold) -> Result<(), VisitorError>,
     {
-        for hold in IndexStore::list_retention_holds(self).map_err(Into::into)? {
+        for hold in LifecycleStore::list_retention_holds(self).map_err(Into::into)? {
             visitor(hold)?;
         }
         Ok(())
@@ -333,7 +344,7 @@ impl IndexStore for LocalIndexStore {
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(WebhookDelivery) -> Result<(), VisitorError>,
     {
-        for delivery in IndexStore::list_webhook_deliveries(self).map_err(Into::into)? {
+        for delivery in LifecycleStore::list_webhook_deliveries(self).map_err(Into::into)? {
             visitor(delivery)?;
         }
         Ok(())
@@ -408,7 +419,7 @@ impl IndexStore for LocalIndexStore {
         Self::Error: Into<VisitorError>,
         Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError>,
     {
-        for state in IndexStore::list_provider_repository_states(self).map_err(Into::into)? {
+        for state in LifecycleStore::list_provider_repository_states(self).map_err(Into::into)? {
             visitor(state)?;
         }
         Ok(())

@@ -12,7 +12,7 @@ use std::{
 use bytes::Bytes;
 use rusqlite::Connection;
 use shardline_index::{
-    IndexStore, LocalIndexStore, QuarantineCandidate, RetentionHold, WebhookDelivery,
+    LifecycleStore, LocalIndexStore, QuarantineCandidate, RetentionHold, WebhookDelivery,
 };
 use shardline_protocol::RepositoryProvider;
 use shardline_server::{DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LocalBackend};
