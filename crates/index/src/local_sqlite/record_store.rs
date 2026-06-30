@@ -16,7 +16,9 @@ impl RecordStore for LocalRecordStore {
     fn list_latest_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
-        Box::pin(async move { self.list_record_locators(LocalRecordKind::Latest) })
+        Box::pin(async move {
+            tokio::task::block_in_place(|| self.list_record_locators(LocalRecordKind::Latest))
+        })
     }
 
     fn list_repository_latest_record_locators<'operation>(
@@ -24,14 +26,18 @@ impl RecordStore for LocalRecordStore {
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
         Box::pin(async move {
-            self.list_repository_record_locators(LocalRecordKind::Latest, repository)
+            tokio::task::block_in_place(|| {
+                self.list_repository_record_locators(LocalRecordKind::Latest, repository)
+            })
         })
     }
 
     fn list_version_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
-        Box::pin(async move { self.list_record_locators(LocalRecordKind::Version) })
+        Box::pin(async move {
+            tokio::task::block_in_place(|| self.list_record_locators(LocalRecordKind::Version))
+        })
     }
 
     fn list_repository_version_record_locators<'operation>(
@@ -39,7 +45,9 @@ impl RecordStore for LocalRecordStore {
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
         Box::pin(async move {
-            self.list_repository_record_locators(LocalRecordKind::Version, repository)
+            tokio::task::block_in_place(|| {
+                self.list_repository_record_locators(LocalRecordKind::Version, repository)
+            })
         })
     }
 
@@ -48,8 +56,10 @@ impl RecordStore for LocalRecordStore {
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, Vec<u8>, Self::Error> {
         Box::pin(async move {
-            self.read_record_bytes_raw(locator)?
-                .ok_or_else(record_not_found_error)
+            tokio::task::block_in_place(|| {
+                self.read_record_bytes_raw(locator)?
+                    .ok_or_else(record_not_found_error)
+            })
         })
     }
 
@@ -58,8 +68,10 @@ impl RecordStore for LocalRecordStore {
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, Option<Vec<u8>>, Self::Error> {
         Box::pin(async move {
-            let locator = self.latest_record_locator(record);
-            self.read_record_bytes_raw(&locator)
+            tokio::task::block_in_place(|| {
+                let locator = self.latest_record_locator(record);
+                self.read_record_bytes_raw(&locator)
+            })
         })
     }
 
@@ -68,15 +80,17 @@ impl RecordStore for LocalRecordStore {
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
-            let connection = self.open_connection()?;
-            let locator = self.version_record_locator(record);
-            super::helpers::upsert_file_record_row(
-                &connection,
-                &locator,
-                record,
-                unix_now_seconds_lossy(),
-            )?;
-            Ok(())
+            tokio::task::block_in_place(|| {
+                let connection = self.open_connection()?;
+                let locator = self.version_record_locator(record);
+                super::helpers::upsert_file_record_row(
+                    &connection,
+                    &locator,
+                    record,
+                    unix_now_seconds_lossy(),
+                )?;
+                Ok(())
+            })
         })
     }
 
@@ -85,15 +99,17 @@ impl RecordStore for LocalRecordStore {
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
-            let connection = self.open_connection()?;
-            let locator = self.latest_record_locator(record);
-            super::helpers::upsert_file_record_row(
-                &connection,
-                &locator,
-                record,
-                unix_now_seconds_lossy(),
-            )?;
-            Ok(())
+            tokio::task::block_in_place(|| {
+                let connection = self.open_connection()?;
+                let locator = self.latest_record_locator(record);
+                super::helpers::upsert_file_record_row(
+                    &connection,
+                    &locator,
+                    record,
+                    unix_now_seconds_lossy(),
+                )?;
+                Ok(())
+            })
         })
     }
 
@@ -102,15 +118,17 @@ impl RecordStore for LocalRecordStore {
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, (), Self::Error> {
         Box::pin(async move {
-            let connection = self.open_connection()?;
-            let deleted = connection.execute(
-                "DELETE FROM shardline_file_records WHERE record_key = ?1",
-                params![locator.record_key()],
-            )?;
-            if deleted == 0 {
-                return Err(record_not_found_error());
-            }
-            Ok(())
+            tokio::task::block_in_place(|| {
+                let connection = self.open_connection()?;
+                let deleted = connection.execute(
+                    "DELETE FROM shardline_file_records WHERE record_key = ?1",
+                    params![locator.record_key()],
+                )?;
+                if deleted == 0 {
+                    return Err(record_not_found_error());
+                }
+                Ok(())
+            })
         })
     }
 
@@ -119,15 +137,17 @@ impl RecordStore for LocalRecordStore {
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, bool, Self::Error> {
         Box::pin(async move {
-            let connection = self.open_connection()?;
-            let exists = connection.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM shardline_file_records WHERE record_key = ?1
-                 )",
-                params![locator.record_key()],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok(exists != 0)
+            tokio::task::block_in_place(|| {
+                let connection = self.open_connection()?;
+                let exists = connection.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM shardline_file_records WHERE record_key = ?1
+                     )",
+                    params![locator.record_key()],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                Ok(exists != 0)
+            })
         })
     }
 
@@ -140,18 +160,20 @@ impl RecordStore for LocalRecordStore {
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
         Box::pin(async move {
-            let connection = self.open_connection()?;
-            let value = connection
-                .query_row(
-                    "SELECT updated_at_unix_seconds
-                     FROM shardline_file_records
-                     WHERE record_key = ?1",
-                    params![locator.record_key()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .ok_or_else(record_not_found_error)?;
-            Ok(Duration::from_secs(i64_to_u64(value)?))
+            tokio::task::block_in_place(|| {
+                let connection = self.open_connection()?;
+                let value = connection
+                    .query_row(
+                        "SELECT updated_at_unix_seconds
+                         FROM shardline_file_records
+                         WHERE record_key = ?1",
+                        params![locator.record_key()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .ok_or_else(record_not_found_error)?;
+                Ok(Duration::from_secs(i64_to_u64(value)?))
+            })
         })
     }
 

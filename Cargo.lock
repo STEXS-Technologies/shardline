@@ -2975,6 +2975,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardline-bench"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "serde_json",
+ "shardline-index",
+ "shardline-protocol",
+ "shardline-server-core",
+]
+
+[[package]]
 name = "shardline-cache"
 version = "1.0.0"
 dependencies = [
