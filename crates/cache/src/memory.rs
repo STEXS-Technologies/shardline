@@ -2,8 +2,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use tokio::time::Instant;
 
 use tokio::sync::{Notify, RwLock};
 
@@ -222,8 +224,6 @@ mod tests {
         time::Duration,
     };
 
-    use tokio::time::sleep;
-
     use super::MemoryReconstructionCache;
     use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
 
@@ -265,14 +265,14 @@ mod tests {
         assert_eq!(third_value.ok(), Some(Some(b"third".to_vec())));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn memory_cache_expires_entries_after_ttl() {
         let ttl_seconds = NonZeroU64::new(1).map_or(NonZeroU64::MIN, |value| value);
         let cache = MemoryReconstructionCache::new(ttl_seconds, NonZeroUsize::MIN);
         let key = ReconstructionCacheKey::latest("asset.bin", None);
         assert!(cache.put(&key, b"payload").await.is_ok());
 
-        sleep(Duration::from_millis(1100)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
         let value = cache.get(&key).await;
 
         assert!(value.is_ok());

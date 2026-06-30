@@ -16,8 +16,7 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 ///
 /// Validates tokens against a static JWKS endpoint, caching keys with a TTL.
 pub struct JwksProvider {
-    blocking_client: reqwest::blocking::Client,
-    async_client: Client,
+    client: Client,
     jwks_url: String,
     issuer: String,
     cached_keys: Mutex<Option<CachedJwks>>,
@@ -31,8 +30,7 @@ impl Clone for JwksProvider {
             .ok()
             .and_then(|guard| guard.clone());
         Self {
-            blocking_client: reqwest::blocking::Client::new(),
-            async_client: self.async_client.clone(),
+            client: self.client.clone(),
             jwks_url: self.jwks_url.clone(),
             issuer: self.issuer.clone(),
             cached_keys: Mutex::new(cached_keys),
@@ -99,12 +97,12 @@ impl JwksProvider {
     ///
     /// Returns [`JwksProviderError`] when the JWKS endpoint is unreachable.
     pub async fn new(jwks_url: &str, issuer: &str) -> Result<Self, JwksProviderError> {
-        let async_client = Client::builder()
+        let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| JwksProviderError::HttpClient(e.to_string()))?;
 
-        let jwks: JwksResponse = async_client
+        let jwks: JwksResponse = client
             .get(jwks_url)
             .send()
             .await
@@ -113,14 +111,8 @@ impl JwksProvider {
             .await
             .map_err(|e| JwksProviderError::JwksFetch(e.to_string()))?;
 
-        let blocking_client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| JwksProviderError::HttpClient(e.to_string()))?;
-
         Ok(Self {
-            blocking_client,
-            async_client,
+            client,
             jwks_url: jwks_url.to_owned(),
             issuer: issuer.to_owned(),
             cached_keys: Mutex::new(Some(CachedJwks {
@@ -130,7 +122,7 @@ impl JwksProvider {
         })
     }
 
-    fn get_or_refresh_keys(&self) -> Result<Arc<Vec<Jwk>>, AuthError> {
+    async fn get_or_refresh_keys(&self) -> Result<Arc<Vec<Jwk>>, AuthError> {
         {
             let guard = self
                 .cached_keys
@@ -144,11 +136,13 @@ impl JwksProvider {
         }
 
         let jwks: JwksResponse = self
-            .blocking_client
+            .client
             .get(&self.jwks_url)
             .send()
+            .await
             .map_err(|e| AuthError::ProviderError(format!("JWKS fetch failed: {e}")))?
             .json()
+            .await
             .map_err(|e| AuthError::ProviderError(format!("JWKS parse failed: {e}")))?;
 
         let keys = Arc::new(jwks.keys);
@@ -169,7 +163,9 @@ impl JwksProvider {
         payload_b64: &str,
         signature_b64: &str,
     ) -> Result<TokenClaims, AuthError> {
-        let keys = self.get_or_refresh_keys()?;
+        let keys = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.get_or_refresh_keys())
+        })?;
 
         let header_json = base64_decode_url(header_b64)
             .map_err(|e| AuthError::ProviderError(format!("invalid JWT header: {e}")))?;

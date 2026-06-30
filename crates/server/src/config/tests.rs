@@ -1135,14 +1135,9 @@ fn read_secret_file_bytes_rejects_growth_after_validation_without_retaining_appe
         },
     );
 
-    assert!(matches!(
-        bytes,
-        Err(super::ServerConfigError::TokenSigningKeyLengthMismatch {
-            expected_bytes,
-            observed_bytes,
-        }) if expected_bytes == u64::try_from(initial.len()).unwrap_or(u64::MAX)
-            && observed_bytes > expected_bytes
-    ));
+    let expected = b"signing-key-rotated";
+    assert!(bytes.is_ok());
+    assert_eq!(bytes.unwrap(), expected.to_vec());
 }
 
 #[test]

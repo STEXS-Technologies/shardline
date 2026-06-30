@@ -185,6 +185,20 @@ pub(super) fn ensure_legacy_import_state(
     Ok(())
 }
 
+fn is_valid_local_table_name(name: &str) -> bool {
+    matches!(
+        name,
+        "shardline_file_records"
+            | "shardline_file_reconstructions"
+            | "shardline_stored_objects"
+            | "shardline_dedupe_shards"
+            | "shardline_quarantine_candidates"
+            | "shardline_retention_holds"
+            | "shardline_webhook_deliveries"
+            | "shardline_provider_repository_states"
+    )
+}
+
 fn local_metadata_has_rows(connection: &Connection) -> Result<bool, LocalIndexStoreError> {
     let tables = [
         "shardline_file_records",
@@ -197,6 +211,10 @@ fn local_metadata_has_rows(connection: &Connection) -> Result<bool, LocalIndexSt
         "shardline_provider_repository_states",
     ];
     for table in tables {
+        assert!(
+            is_valid_local_table_name(table),
+            "table name must be a valid identifier: {table}"
+        );
         let exists = connection.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"),
             [],

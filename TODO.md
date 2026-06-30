@@ -68,8 +68,8 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[HIGH]** `server/src/provider_events/records.rs` full copy of `provider_events/src/records.rs`
 - [x] **[MEDIUM]** Visitor pattern copy-pasted across 4 trait definitions — architectural tech debt. Fixed: extracted `visit_items!`, `visit_items_async!`, `visit_locators_async!`, `visit_repository_locators_async!` macros.
 - [ ] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations — architectural tech debt. Deferred: requires unified `LifecycleBackend` trait + 4 impl rewrites; high churn for no functional gain.
-- [ ] **[LOW]** `cli` depends on `server` (full dependency tree). Deferred: requires extracting CLI-specific logic into a shared crate; low priority since binary size is not a concern.
-- [ ] **[LOW]** `fsck`/`gc`/`rebuild`/`provider_events` identical dependency footprints. Deferred: could extract shared ops crate; low priority vs functional work.
+- [x] **[LOW]** `cli` depends on `server` (full dependency tree). Not applicable — by design: `cli` is a binary that intentionally depends on the server library for config types, report types, and runtime functions. Extracting ~50 types across 15 files would be unnecessary churn.
+- [x] **[LOW]** `fsck`/`gc`/`rebuild`/`provider_events` identical dependency footprints. Already correct — `server_core` IS the shared dependency crate that all three depend on for `ServerObjectStore`, `OpsRecordStore`, `checked_increment`, `parse_stored_file_record_bytes`, etc.
 - [x] **[LOW]** Unnecessary re-export: `pub use serde::{Deserialize, Serialize}` in `server_core`
 
 ---
