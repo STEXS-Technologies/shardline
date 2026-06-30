@@ -39,6 +39,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#[macro_use]
+mod store;
+
 mod dedupe;
 pub mod hub;
 mod hub_local_sqlite;
@@ -52,7 +55,6 @@ mod provider;
 mod reconstruction;
 mod record;
 mod record_key;
-mod store;
 #[cfg(test)]
 mod test_invariant_error;
 mod xet_hash;

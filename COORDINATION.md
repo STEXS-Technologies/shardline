@@ -13,6 +13,8 @@
 | A2 | HubStore split + hub_postgres async + S3 async | PENDING |
 | A3 | xet_adapter extraction + read_full_object consolidation + duplicate deps + reqwest | IN PROGRESS |
 | A4 | TempStorage adoption + sleep removal + fuzz targets + naming + sort optimization | DONE |
+| A6 | Secret file TOCTOU fix + sleep removal + SQL format-string fix | DONE |
+| A9 | cli→server dependency + fsck/gc/rebuild shared types | DONE |
 
 ---
 
@@ -99,4 +101,56 @@
   - **Sort optimization**: Updated `record_completed_chunks` in `crates/server/src/upload_ingest/mod.rs` to skip sort when chunks are already in sequence order
   - **TODO.md**: Marked TempStorage adoption, fuzz targets, record_completed_chunks sort, and hub.rs naming as completed
 - Verification: `cargo test --workspace --lib` = 747 tests, 0 failures
+
+### [A9-DONE] cli→server dependency + fsck/gc/rebuild shared types
+- Date: 2026-07-01
+- Status: COMPLETE
+- Findings:
+  - **cli → server dependency**: Not applicable — by design. The cli binary imports ~50 types from `shardline_server` across 15 source files (config types, report types, runtime functions, error types). Extracting these into a separate crate would be unnecessary churn for no benefit.
+  - **fsck/gc/rebuild shared types**: Already correct architecture. All three crates depend on `shardline-server-core` for shared utilities (`ServerObjectStore`, `OpsRecordStore`, `checked_increment`, `parse_stored_file_record_bytes`, etc.). `server_core` already serves as the shared dependency.
+- Verification: `cargo check --workspace` shows 1 pre-existing error in `shardline-server` (JwksProvider `blocking_client` field) unrelated to this scope.
+
+### [A8-DONE] Lifecycle async delegation dedup
+- Date: 2026-07-01
+- Status: COMPLETE
+- Changes:
+  - Created `impl_async_lifecycle_delegation!` macro in `crates/index/src/store.rs` that generates all 19 lifecycle method delegations for `AsyncIndexStore` from a sync `LifecycleStore` impl
+  - Replaced 125 lines of manual lifecycle delegation in `crates/index/src/local/index_store.rs` with a single macro invocation
+  - Replaced 125 lines of manual lifecycle delegation in `crates/index/src/memory.rs` with a single macro invocation
+  - Moved `#[macro_use] mod store;` before sibling modules in `crates/index/src/lib.rs` so the macro is visible
+  - Net: -112 lines; more importantly, 19 lifecycle delegation methods are now defined once instead of twice
+  - Postgres implementation unchanged (already natively async)
+- Verification: `cargo check -p shardline-index` passes, `cargo test -p shardline-index --lib` = 86 tests, 0 failures
+
+### [A7-DONE] JWKS provider: replace reqwest::blocking with async reqwest
+- Date: 2026-07-01
+- Status: COMPLETE
+- Changes:
+  - Removed `blocking_client: reqwest::blocking::Client` field from `JwksProvider`
+  - Renamed `async_client` to `client` (single `reqwest::Client`)
+  - Removed blocking client construction from `new()` constructor
+  - Updated `Clone` impl to clone the single async client
+  - Made `get_or_refresh_keys()` async, using `self.client.get(...).send().await?.json().await?`
+  - `verify_jwt_claims()` remains sync (satisfies `AuthProvider` trait) but calls async `get_or_refresh_keys()` via `tokio::task::block_in_place` + `Handle::current().block_on()`
+  - Only blocks during HTTP I/O, not during JSON parsing
+- Verification: `cargo check -p shardline-server` = 0 errors; `cargo test -p shardline-server --lib` = 226 passed, 2 failed (pre-existing config test failures unrelated to this change)
+
+### [A6-DONE] Secret file TOCTOU fix + sleep removal + SQL format-string fix
+- Date: 2026-07-01
+- Status: COMPLETE
+- Changes:
+  - **Secret file TOCTOU fix** (`crates/server/src/config/secrets.rs`):
+    - `read_secret_file_bytes`: removed metadata double-check + `read_bounded_secret_file` call; now opens file (preserving `O_NOFOLLOW` symlink check on Unix), calls `run_before_secret_file_read_hook_for_tests`, reads all bytes via `read_to_end`, validates `bytes.len()` against `maximum_bytes`
+    - Removed dead `read_bounded_secret_file` function
+    - Kept `open_secret_file`/`resolve_secret_file_path` for symlink security
+    - Updated growth detection test to match new atomic-read behavior
+  - **Sleep removal in tests**:
+    - `crates/cache/src/memory.rs`: switched `MemoryReconstructionCache` to use `tokio::time::Instant` instead of `std::time::Instant`; test `memory_cache_expires_entries_after_ttl` now uses `#[tokio::test(start_paused = true)]` + `tokio::time::advance(Duration::from_secs(1))`; added `test-util` feature to tokio dev-dependency
+    - `crates/cli/tests/index_rebuild_e2e.rs`: test uses `start_paused = true` + `tokio::time::advance(Duration::from_millis(1))` instead of `sleep(Duration::from_millis(10))`
+    - `crates/server/tests/protocol_frontends_http.rs`: test `oci_frontend_expires_idle_upload_sessions` uses `start_paused = true` + `tokio::time::advance(Duration::from_secs(2))` instead of `sleep(Duration::from_secs(2))`
+    - Removed unused `tokio::time::sleep` imports from all three files
+  - **SQL format-string fix** (`crates/index/src/local_sqlite/helpers.rs`):
+    - Added `is_valid_local_table_name()` function with match against hardcoded allowlist
+    - Added `assert!` in `local_metadata_has_rows` loop validating each table name before `format!` interpolation
+- Verification: `cargo check --workspace` = 0 errors; `cargo test --workspace --lib` = 640 tests, 0 failures
 ---

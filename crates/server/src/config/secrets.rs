@@ -184,55 +184,15 @@ pub(super) fn read_secret_file_bytes(
     maximum_bytes: u64,
     read_error: impl Fn(IoError) -> ServerConfigError + Copy,
     error: impl Fn(u64, u64) -> ServerConfigError + Copy,
-    length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
+    _length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
 ) -> Result<Vec<u8>, ServerConfigError> {
     let mut file = open_secret_file(path).map_err(read_error)?;
-    let metadata = file.metadata().map_err(read_error)?;
-    ensure_secret_size_within_limit(metadata.len(), maximum_bytes, error)?;
 
     run_before_secret_file_read_hook_for_tests(path);
 
-    let bytes =
-        read_bounded_secret_file(&mut file, metadata.len(), read_error, length_mismatch_error)?;
-    ensure_secret_size_within_limit(metadata.len(), maximum_bytes, error)?;
-
-    Ok(bytes)
-}
-
-fn read_bounded_secret_file(
-    file: &mut File,
-    expected_length: u64,
-    read_error: impl Fn(IoError) -> ServerConfigError + Copy,
-    length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
-) -> Result<Vec<u8>, ServerConfigError> {
-    let capacity = usize::try_from(expected_length).unwrap_or(usize::MAX);
-    let mut bytes = Vec::with_capacity(capacity);
-    let mut limited = file.by_ref().take(expected_length);
-
-    if let Err(error) = limited.read_to_end(&mut bytes) {
-        return Err(read_error(error));
-    }
-
-    let read_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if read_length != expected_length {
-        return Err(length_mismatch_error(expected_length, read_length));
-    }
-
-    let mut trailing = [0_u8; 1];
-    match file.read(&mut trailing) {
-        Ok(0) => {}
-        Ok(_read) => {
-            let observed_bytes = expected_length.saturating_add(1);
-            return Err(length_mismatch_error(expected_length, observed_bytes));
-        }
-        Err(error) => return Err(read_error(error)),
-    }
-
-    let observed_metadata = file.metadata().map_err(read_error)?;
-    let observed_length = observed_metadata.len();
-    if observed_length != expected_length {
-        return Err(length_mismatch_error(expected_length, observed_length));
-    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(read_error)?;
+    ensure_secret_size_within_limit(bytes.len() as u64, maximum_bytes, error)?;
 
     Ok(bytes)
 }

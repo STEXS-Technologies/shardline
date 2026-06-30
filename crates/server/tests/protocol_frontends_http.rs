@@ -2427,7 +2427,7 @@ async fn oci_frontend_reclaims_orphaned_upload_sessions_with_missing_body()
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2, start_paused = true)]
 async fn oci_frontend_expires_idle_upload_sessions() -> Result<(), Box<dyn StdError>> {
     let runtime = start_protocol_runtime_with_oci_limits(
         &[ServerFrontend::Oci],
@@ -2454,7 +2454,7 @@ async fn oci_frontend_expires_idle_upload_sessions() -> Result<(), Box<dyn StdEr
         .ok_or("missing upload location")?;
     let upload_url = format!("{}{}", runtime.base_url(), upload_location);
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
 
     let status = client
         .get(&upload_url)
