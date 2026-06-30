@@ -522,11 +522,8 @@ mod tests {
 
     #[test]
     fn file_record_preserves_repository_scope_and_chunk_order() {
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some("main"));
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some("main"))
+            .unwrap();
         let first = FileChunkRecord {
             hash: "a".repeat(64),
             offset: 0,

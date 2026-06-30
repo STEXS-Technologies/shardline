@@ -382,18 +382,8 @@ mod tests {
 
     #[test]
     fn quarantine_candidate_keeps_fields() {
-        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
-        let candidate = QuarantineCandidate::new(key.clone(), 128, 10, 20);
-
-        assert!(candidate.is_ok());
-        let Ok(candidate) = candidate else {
-            return;
-        };
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 128, 10, 20).unwrap();
 
         assert_eq!(candidate.object_key(), &key);
         assert_eq!(candidate.observed_length(), 128);
@@ -403,12 +393,7 @@ mod tests {
 
     #[test]
     fn quarantine_candidate_rejects_inverted_timeline() {
-        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
 
         assert_eq!(
             QuarantineCandidate::new(key, 128, 20, 10),
@@ -418,23 +403,14 @@ mod tests {
 
     #[test]
     fn retention_hold_keeps_fields() {
-        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
         let hold = RetentionHold::new(
             key.clone(),
             "provider deletion grace".to_owned(),
             10,
             Some(20),
-        );
-
-        assert!(hold.is_ok());
-        let Ok(hold) = hold else {
-            return;
-        };
+        )
+        .unwrap();
 
         assert_eq!(hold.object_key(), &key);
         assert_eq!(hold.reason(), "provider deletion grace");
@@ -446,12 +422,7 @@ mod tests {
 
     #[test]
     fn retention_hold_rejects_blank_reason() {
-        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
 
         assert_eq!(
             RetentionHold::new(key, "   ".to_owned(), 10, None),
@@ -461,12 +432,7 @@ mod tests {
 
     #[test]
     fn retention_hold_rejects_inverted_timeline() {
-        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
-
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
 
         assert_eq!(
             RetentionHold::new(key, "provider deletion grace".to_owned(), 20, Some(10)),

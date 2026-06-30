@@ -15,15 +15,17 @@ axum = "0.8.8"
 base64 = "0.22"
 blake3 = "1.8.3"
 bytes = "1.10.1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = "4.5.60"
 clap_complete = "4.5.59"
 clap_mangen = "0.2.31"
 criterion = { version = "0.5.1", default-features = false }
+flate2 = "1"
 futures-util = "0.3"
 getrandom = "0.3"
 hex = "0.4"
-jsonwebtoken = "9"
 hmac = "0.12"
+jsonwebtoken = "9"
 libc = "0.2.177"
 libfuzzer-sys = "0.4"
 object_store = { version = "0.13.2", default-features = false }
@@ -32,6 +34,7 @@ reqwest = { version = "0.12.28", default-features = false }
 rusqlite = "0.32"
 serde = "1.0"
 serde_json = "1.0"
+sha1 = "0.10"
 sha2 = { version = "0.10", features = ["compress"] }
 shardline = { version = "1.0.0", path = "crates/cli" }
 shardline-cache = { version = "1.0.0", path = "crates/cache" }

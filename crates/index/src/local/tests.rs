@@ -19,64 +19,32 @@ use crate::{
 
 #[test]
 fn local_index_store_roundtrips_reconstruction_xorb_and_quarantine_state() {
-    let storage = tempfile::tempdir();
-    assert!(storage.is_ok());
-    let Ok(storage) = storage else {
-        return;
-    };
-    let store = LocalIndexStore::new(storage.path().to_path_buf());
-    assert!(store.is_ok());
-    let Ok(store) = store else {
-        return;
-    };
+    let storage = tempfile::tempdir().unwrap();
+    let store = LocalIndexStore::new(storage.path().to_path_buf()).unwrap();
 
     let hash = ShardlineHash::from_bytes([3; 32]);
     let file_id = FileId::new(hash);
     let xorb_id = XorbId::new(hash);
-    let range = ChunkRange::new(1, 3);
-    assert!(range.is_ok());
-    let Ok(range) = range else {
-        return;
-    };
+    let range = ChunkRange::new(1, 3).unwrap();
     let reconstruction =
         FileReconstruction::new(vec![ReconstructionTerm::new(xorb_id, range, 64)]);
-    let inserted = store.insert_reconstruction(&file_id, &reconstruction);
-    assert!(inserted.is_ok());
-    let xorb_inserted = store.insert_xorb(&xorb_id);
-    assert!(xorb_inserted.is_ok());
-    let dedupe_key = ObjectKey::parse("shards/aa/hash.shard");
-    assert!(dedupe_key.is_ok());
-    let Ok(dedupe_key) = dedupe_key else {
-        return;
-    };
+    store.insert_reconstruction(&file_id, &reconstruction).unwrap();
+    store.insert_xorb(&xorb_id).unwrap();
+    let dedupe_key = ObjectKey::parse("shards/aa/hash.shard").unwrap();
     let dedupe_mapping = DedupeShardMapping::new(hash, dedupe_key);
-    let dedupe_inserted = store.upsert_dedupe_shard_mapping(&dedupe_mapping);
-    assert!(dedupe_inserted.is_ok());
+    store.upsert_dedupe_shard_mapping(&dedupe_mapping).unwrap();
 
-    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb");
-    assert!(key.is_ok());
-    let Ok(key) = key else {
-        return;
-    };
-    let candidate = QuarantineCandidate::new(key.clone(), 64, 10, 20);
-    assert!(candidate.is_ok());
-    let Ok(candidate) = candidate else {
-        return;
-    };
-    let upserted = store.upsert_quarantine_candidate(&candidate);
-    assert!(upserted.is_ok());
+    let key = ObjectKey::parse("xorbs/default/aa/hash.xorb").unwrap();
+    let candidate = QuarantineCandidate::new(key.clone(), 64, 10, 20).unwrap();
+    store.upsert_quarantine_candidate(&candidate).unwrap();
     let hold = RetentionHold::new(
         key.clone(),
         "provider deletion grace".to_owned(),
         30,
         Some(90),
-    );
-    assert!(hold.is_ok());
-    let Ok(hold) = hold else {
-        return;
-    };
-    let hold_upserted = store.upsert_retention_hold(&hold);
-    assert!(hold_upserted.is_ok());
+    )
+    .unwrap();
+    store.upsert_retention_hold(&hold).unwrap();
 
     let loaded_reconstruction = store.reconstruction(&file_id);
     assert!(matches!(loaded_reconstruction, Ok(Some(_))));

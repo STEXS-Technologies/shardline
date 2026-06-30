@@ -610,3 +610,140 @@ impl From<InvalidReconstructionResponseError> for ServerError {
 struct ErrorBody {
     error: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::ServerError;
+
+    fn status_for(error: &ServerError) -> StatusCode {
+        error.status_code()
+    }
+
+    #[test]
+    fn not_found_maps_to_404() {
+        assert_eq!(status_for(&ServerError::NotFound), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn insufficient_scope_maps_to_403() {
+        assert_eq!(
+            status_for(&ServerError::InsufficientScope),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn too_many_upload_sessions_maps_to_429() {
+        assert_eq!(
+            status_for(&ServerError::TooManyUploadSessions),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[test]
+    fn too_many_registry_token_requests_maps_to_429() {
+        assert_eq!(
+            status_for(&ServerError::TooManyRegistryTokenRequests),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[test]
+    fn missing_authorization_maps_to_401() {
+        assert_eq!(
+            status_for(&ServerError::MissingAuthorization),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn request_body_too_large_maps_to_413() {
+        assert_eq!(
+            status_for(&ServerError::RequestBodyTooLarge),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn invalid_file_id_maps_to_400() {
+        assert_eq!(
+            status_for(&ServerError::InvalidFileId),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn range_not_satisfiable_maps_to_416() {
+        assert_eq!(
+            status_for(&ServerError::RangeNotSatisfiable),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn not_acceptable_maps_to_406() {
+        assert_eq!(
+            status_for(&ServerError::NotAcceptable),
+            StatusCode::NOT_ACCEPTABLE
+        );
+    }
+
+    #[test]
+    fn io_error_maps_to_500() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        assert_eq!(
+            status_for(&ServerError::Io(io_err)),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn transfer_limiter_closed_maps_to_503() {
+        assert_eq!(
+            status_for(&ServerError::TransferLimiterClosed),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn provider_denied_maps_to_403() {
+        assert_eq!(
+            status_for(&ServerError::ProviderDenied),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn unknown_provider_maps_to_404() {
+        assert_eq!(
+            status_for(&ServerError::UnknownProvider),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn overflow_maps_to_500() {
+        assert_eq!(
+            status_for(&ServerError::Overflow),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn invalid_content_hash_maps_to_400() {
+        assert_eq!(
+            status_for(&ServerError::InvalidContentHash),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn expected_body_hash_mismatch_maps_to_400() {
+        assert_eq!(
+            status_for(&ServerError::ExpectedBodyHashMismatch),
+            StatusCode::BAD_REQUEST
+        );
+    }
+}

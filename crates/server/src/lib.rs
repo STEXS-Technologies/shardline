@@ -106,7 +106,7 @@ mod gc_tests;
 mod transfer_limiter;
 mod upload_ingest;
 mod validation;
-pub use shardline_xet_adapter as xet_adapter;
+pub(crate) use shardline_xet_adapter as xet_adapter;
 
 pub use shardline_gc as gc;
 
