@@ -2,7 +2,7 @@
 name = "shardline-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2024"
+edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

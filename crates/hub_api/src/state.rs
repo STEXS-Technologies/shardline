@@ -24,6 +24,7 @@ pub(crate) fn get() -> &'static HubState {
 /// # Panics
 ///
 /// Panics if [`init`] has not been called.
+#[cfg(test)]
 #[must_use]
 pub fn get_for_test() -> &'static HubState {
     get()

@@ -454,7 +454,7 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let issuer = config.auth_oidc_issuer().ok_or_else(|| {
                 ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
             })?;
-            let provider = crate::oidc_provider::OidcProvider::new(issuer)
+            let provider = crate::oidc_provider::OidcProvider::new(issuer, None)
                 .await
                 .map_err(|_e| {
                     ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)

@@ -976,6 +976,8 @@ pub const DEFAULT_LOCAL_GC_RETENTION_SECONDS: u64 = 86_400;
 mod tests {
     use super::*;
 
+    use proptest::prelude::*;
+
     #[test]
     fn validate_identifier_accepts_simple_name() {
         assert!(validate_identifier("hello.txt").is_ok());
@@ -1108,5 +1110,40 @@ mod tests {
 
         let oversized = vec![0u8; (MAX_LOCAL_RECORD_METADATA_BYTES + 1) as usize];
         assert!(parse_stored_file_record_bytes(&oversized).is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn proptest_validate_identifier_rejects_leading_slash(s in "[a-z]{1,100}") {
+            let input = format!("/{s}");
+            prop_assert!(validate_identifier(&input).is_err(), "leading slash should be rejected: {input:?}");
+        }
+
+        #[test]
+        fn proptest_validate_identifier_rejects_traversal(s in "[a-z]{1,50}") {
+            let input = format!("{s}/../{s}");
+            prop_assert!(validate_identifier(&input).is_err(), "traversal should be rejected: {input:?}");
+        }
+
+        #[test]
+        fn proptest_validate_identifier_rejects_backslash(s in "[a-z]{1,50}") {
+            let input = format!("{s}\\{s}");
+            prop_assert!(validate_identifier(&input).is_err(), "backslash should be rejected: {input:?}");
+        }
+
+        #[test]
+        fn proptest_validate_identifier_accepts_valid_names(segs in prop::collection::vec("[a-z]{1,20}", 1..3usize)) {
+            let input = segs.join(".");
+            let result = validate_identifier(&input);
+            prop_assert!(result.is_ok(), "valid identifier should be accepted: {input:?}");
+        }
+
+        #[test]
+        fn proptest_validate_identifier_rejects_control_characters(segs in prop::collection::vec("[a-z]{1,20}", 1..3usize)) {
+            let mut input = segs.join(".");
+            input.push('\t');
+            let result = validate_identifier(&input);
+            prop_assert!(result.is_err(), "control characters should be rejected: {input:?}");
+        }
     }
 }

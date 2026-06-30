@@ -72,9 +72,28 @@ async fn deliver_webhook_events(
         };
         tokio::spawn(async move {
             if let Err(e) = deliver_one_webhook(&client, &url, &body, secret.as_deref()).await {
-                tracing::warn!("webhook delivery to {url} failed: {e}");
+                let safe_url = sanitize_log_url(&url);
+                tracing::warn!("webhook delivery to {safe_url} failed: {e}");
             }
         });
+    }
+}
+
+/// Sanitizes a URL for safe inclusion in log messages.
+///
+/// Replaces control characters (newlines, tabs, etc.) and truncates to a
+/// reasonable length to prevent log injection via user-supplied URLs.
+fn sanitize_log_url(url: &str) -> String {
+    const MAX_LOG_URL_LEN: usize = 200;
+    let sanitized: String = url
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .take(MAX_LOG_URL_LEN)
+        .collect();
+    if url.len() > MAX_LOG_URL_LEN {
+        format!("{sanitized}...")
+    } else {
+        sanitized
     }
 }
 
