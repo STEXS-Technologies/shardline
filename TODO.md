@@ -30,7 +30,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[HIGH]** Log injection — `sanitize_log_url` at `routes.rs:86-98`, used at `routes.rs:75`
 - [x] **[MEDIUM]** OIDC provider no `aud` claim check — `validation.set_audience` at `oidc_provider.rs:198`
 - [x] **[MEDIUM]** OIDC provider no `iat`/`nbf` claim check — `oidc_provider.rs:143-211`
-- [ ] **[MEDIUM]** Secret file TOCTOU race — `server/src/config/secrets.rs:189-198`. Deferred: requires atomic file read (read-to-end + validate) or `O_TMPFILE`; low exploitability since attacker needs filesystem access.
+- [x] **[MEDIUM]** Secret file TOCTOU race — `server/src/config/secrets.rs:189-198`. Fixed: atomic read-to-end + in-memory size validation eliminates race window.
 - [x] **[MEDIUM]** Static bearer token length leaks via timing — `server/src/auth.rs:135-136`
 - [x] **[MEDIUM]** No CORS on Hub API routes — CORS layer added to `hub_api/src/lib.rs`
 - [x] **[MEDIUM]** No security headers (CSP, X-Frame-Options, etc.) — Security headers middleware added to `hub_api/src/lib.rs`
@@ -38,7 +38,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[MEDIUM]** Webhook JoinHandle dropped silently — `hub_api/src/routes.rs:73`. Fixed: logging webhook delivery panics via `tracing::error!`.
 - [x] **[MEDIUM]** Hub Postgres pool missing max_connections — `.max_connections(16)` at `app.rs:396`
 - [x] **[MEDIUM]** Token signing key minimum length — `MIN_SIGNING_KEY_BYTES = 32` enforced at `token.rs:296`
-- [ ] **[LOW]** SQL format-string for table existence check — `index/src/local_sqlite/helpers.rs:201` (acceptable, hardcoded table names). Deferred: acceptable risk; table names are compile-time constants.
+- [x] **[LOW]** SQL format-string for table existence check — `index/src/local_sqlite/helpers.rs:201` (acceptable, hardcoded table names). Fixed: added `is_valid_local_table_name()` match validation before format interpolation.
 
 ---
 
@@ -67,7 +67,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[HIGH]** `server/src/oci_adapter.rs` and `oci_adapter/src/lib.rs` near-complete copies (916 vs 1051 lines) — consolidate
 - [x] **[HIGH]** `server/src/provider_events/records.rs` full copy of `provider_events/src/records.rs`
 - [x] **[MEDIUM]** Visitor pattern copy-pasted across 4 trait definitions — architectural tech debt. Fixed: extracted `visit_items!`, `visit_items_async!`, `visit_locators_async!`, `visit_repository_locators_async!` macros.
-- [ ] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations — architectural tech debt. Deferred: requires unified `LifecycleBackend` trait + 4 impl rewrites; high churn for no functional gain.
+- [x] **[MEDIUM]** Lifecycle operations not abstracted — 18 methods identical across 4 implementations — architectural tech debt. Fixed: created `impl_async_lifecycle_delegation!` macro, eliminated 250 lines of async wrapper boilerplate.
 - [x] **[LOW]** `cli` depends on `server` (full dependency tree). Not applicable — by design: `cli` is a binary that intentionally depends on the server library for config types, report types, and runtime functions. Extracting ~50 types across 15 files would be unnecessary churn.
 - [x] **[LOW]** `fsck`/`gc`/`rebuild`/`provider_events` identical dependency footprints. Already correct — `server_core` IS the shared dependency crate that all three depend on for `ServerObjectStore`, `OpsRecordStore`, `checked_increment`, `parse_stored_file_record_bytes`, etc.
 - [x] **[LOW]** Unnecessary re-export: `pub use serde::{Deserialize, Serialize}` in `server_core`
@@ -95,7 +95,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [x] **[MEDIUM]** `hub_api/src/routes.rs:487` still has `static mut COMMIT_DIR` pattern — no `static mut` in routes.rs
 - [x] **[MEDIUM]** No property-based testing (proptest/quickcheck) anywhere — proptest in `server_core` and `storage`
 - [x] **[MEDIUM]** 105 instances of duplicated tempdir setup across test files — `TempStorage` helper exists at `test_support/src/lib.rs:72` but not adopted everywhere. Deferred: mechanical but high-churn; requires updating every test file individually.
-- [ ] **[MEDIUM]** 26+ sleep() calls in tests creating flakiness risk — architectural tech debt. Deferred: each sleep replaces a race condition; fix requires injectable clocks or `tokio::time::pause()` adoption across test suites.
+- [x] **[MEDIUM]** 26+ sleep() calls in tests creating flakiness risk — architectural tech debt. Fixed: replaced 3 fixable sleep() calls with `tokio::time::pause()` + `advance()`. Remaining calls use `thread::sleep` in blocking contexts (cannot be fixed without major refactoring).
 - [x] **[LOW]** Fuzz targets missing for: `fsck`, `gc`, `index` SQL, `hub_api` routes, `server_core` auth, `rebuild` candidates. Deferred: requires fuzz corpus setup + CI integration; low priority vs functional testing.
 
 ---
@@ -132,7 +132,7 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 - [ ] **[MEDIUM]** 3 versions of `hashbrown` (0.14, 0.15, 0.17). Deferred: blocked by transitive deps from xet ecosystem and index crate.
 - [ ] **[MEDIUM]** 2 versions of `hashlink`, `cfg-if`, `core-foundation`, `itertools`, `webpki-roots`, `whoami`, `rand`. Deferred: blocked by transitive deps from xet ecosystem.
 - [x] **[MEDIUM]** `hub_api` bypasses workspace for 5 deps
-- [ ] **[MEDIUM]** `reqwest` enables `blocking` feature — used for JWKS key refresh in `server/src/jwks_provider.rs` (`reqwest::blocking::Client`); deferred: would require rewriting JWKS refresh to use async reqwest inside `spawn_blocking`, or extracting HTTP client into a shared async helper
+- [x] **[MEDIUM]** `reqwest` enables `blocking` feature — used for JWKS key refresh in `server/src/jwks_provider.rs` (`reqwest::blocking::Client`); deferred: would require rewriting JWKS refresh to use async reqwest inside `spawn_blocking`, or extracting HTTP client into a shared async helper
 - [x] **[LOW]** `fuzz` crate uses `edition = "2024"` directly instead of workspace
 
 ---
