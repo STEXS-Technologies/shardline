@@ -651,6 +651,69 @@ where
     Ok(report)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clean_report() -> FsckReport {
+        FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn is_clean_returns_true_for_empty_issues() {
+        assert!(clean_report().is_clean());
+    }
+
+    #[test]
+    fn is_clean_returns_false_when_issues_present() {
+        let mut report = clean_report();
+        report.issues.push(FsckIssue {
+            kind: FsckIssueKind::MissingChunk,
+            location: "test".to_owned(),
+            detail: FsckIssueDetail::HashMismatch {
+                expected_hash: "a".repeat(64),
+                observed_hash: "b".repeat(64),
+            },
+        });
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn issue_count_zero_for_clean_report() {
+        assert_eq!(clean_report().issue_count(), 0);
+    }
+
+    #[test]
+    fn issue_count_matches_issues_length() {
+        let mut report = clean_report();
+        report.issues.push(FsckIssue {
+            kind: FsckIssueKind::MissingChunk,
+            location: "a".to_owned(),
+            detail: FsckIssueDetail::HashMismatch {
+                expected_hash: "a".repeat(64),
+                observed_hash: "b".repeat(64),
+            },
+        });
+        report.issues.push(FsckIssue {
+            kind: FsckIssueKind::ChunkHashMismatch,
+            location: "b".to_owned(),
+            detail: FsckIssueDetail::InvalidChunkHash {
+                chunk_hash: "c".repeat(64),
+            },
+        });
+        assert_eq!(report.issue_count(), 2);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordKind {
     Latest,

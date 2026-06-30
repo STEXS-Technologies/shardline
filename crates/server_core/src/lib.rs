@@ -1043,3 +1043,142 @@ pub fn unix_now_seconds_checked() -> Result<u64, RebuildOverflowError> {
 
 /// Default retention window for new local quarantine candidates.
 pub const DEFAULT_LOCAL_GC_RETENTION_SECONDS: u64 = 86_400;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_identifier_accepts_simple_name() {
+        assert!(validate_identifier("hello.txt").is_ok());
+    }
+
+    #[test]
+    fn validate_identifier_accepts_dotted_name() {
+        assert!(validate_identifier("file.name.txt").is_ok());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_empty() {
+        assert!(validate_identifier("").is_err());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_whitespace_only() {
+        assert!(validate_identifier("   ").is_err());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_dot() {
+        assert!(validate_identifier(".").is_err());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_leading_slash() {
+        assert!(validate_identifier("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_traversal() {
+        assert!(validate_identifier("foo/../bar").is_err());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_backslash() {
+        assert!(validate_identifier("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn validate_identifier_rejects_control_char() {
+        assert!(validate_identifier("foo\tbar").is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_accepts_valid_hash() {
+        let hash = "a".repeat(64);
+        assert!(validate_content_hash(&hash).is_ok());
+    }
+
+    #[test]
+    fn validate_content_hash_rejects_too_short() {
+        assert!(validate_content_hash("abc123").is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_rejects_too_long() {
+        let hash = "a".repeat(65);
+        assert!(validate_content_hash(&hash).is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_rejects_uppercase() {
+        let hash = "A".repeat(64);
+        assert!(validate_content_hash(&hash).is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_rejects_non_hex() {
+        let mut hash = "a".repeat(64);
+        hash.push('g');
+        hash.remove(0);
+        assert!(validate_content_hash(&hash).is_err());
+    }
+
+    #[test]
+    fn checked_add_normal() {
+        assert_eq!(checked_add(1, 2).unwrap(), 3);
+    }
+
+    #[test]
+    fn checked_add_zero() {
+        assert_eq!(checked_add(0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn checked_add_overflow() {
+        assert!(checked_add(u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn checked_increment_normal() {
+        assert_eq!(checked_increment(0).unwrap(), 1);
+    }
+
+    #[test]
+    fn checked_increment_overflow() {
+        assert!(checked_increment(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn chunk_object_key_valid() {
+        let hash = "a".repeat(64);
+        let key = chunk_object_key(&hash).unwrap();
+        assert!(key.as_str().starts_with("aa/"));
+        assert!(key.as_str().ends_with(&hash));
+    }
+
+    #[test]
+    fn chunk_object_key_invalid_hash() {
+        assert!(chunk_object_key("short").is_err());
+    }
+
+    #[test]
+    fn parse_stored_file_record_bytes_valid() {
+        let json = r#"{"file_id":"test.txt","content_hash":"aabb","total_bytes":100,"chunk_size":10,"chunks":[]}"#;
+        assert!(parse_stored_file_record_bytes(json.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn parse_stored_file_record_bytes_invalid_json() {
+        assert!(parse_stored_file_record_bytes(b"not json").is_err());
+    }
+
+    #[test]
+    fn parse_stored_file_record_bytes_oversized() {
+        let valid = r#"{"file_id":"test","content_hash":"aa","total_bytes":0,"chunk_size":0,"chunks":[]}"#;
+        assert!(parse_stored_file_record_bytes(valid.as_bytes()).is_ok());
+
+        let oversized = vec![0u8; (MAX_LOCAL_RECORD_METADATA_BYTES + 1) as usize];
+        assert!(parse_stored_file_record_bytes(&oversized).is_err());
+    }
+}
