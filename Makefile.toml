@@ -189,6 +189,30 @@ install_crate = "cargo-deny"
 command = "cargo"
 args = ["deny", "check"]
 
+[tasks.coverage]
+description = "Generate test coverage report using cargo-tarpaulin"
+workspace = false
+install_crate = "cargo-tarpaulin"
+install_crate_args = ["--locked"]
+command = "cargo"
+args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Stdout", "--skip", "shardline-fuzz", "${@}"]
+
+[tasks.coverage-html]
+description = "Generate HTML test coverage report using cargo-tarpaulin"
+workspace = false
+install_crate = "cargo-tarpaulin"
+install_crate_args = ["--locked"]
+command = "cargo"
+args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Html", "--skip", "shardline-fuzz", "${@}"]
+
+[tasks.coverage-json]
+description = "Generate JSON test coverage report using cargo-tarpaulin"
+workspace = false
+install_crate = "cargo-tarpaulin"
+install_crate_args = ["--locked"]
+command = "cargo"
+args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Json", "--skip", "shardline-fuzz", "${@}"]
+
 [tasks.ci]
 description = "Run the core contributor CI checks, including dependency advisories"
 workspace = false
