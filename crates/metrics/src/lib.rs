@@ -169,3 +169,114 @@ pub fn record_provider_webhook(provider: &str, event_type: &str) {
 pub fn record_provider_token_exchange() {
     metrics().provider.record_token_exchange();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prometheus::Registry;
+
+    #[test]
+    fn cas_metrics_new_does_not_panic() {
+        let registry = Registry::new();
+        let _m = CasMetrics::new(&registry);
+    }
+
+    #[test]
+    fn encode_metrics_returns_non_empty_string() {
+        let _m = metrics();
+        let output = encode_metrics();
+        assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn encode_metrics_contains_help_or_type_lines() {
+        let _m = metrics();
+        let output = encode_metrics();
+        assert!(
+            output.contains("# HELP") || output.contains("# TYPE"),
+            "expected at least one HELP or TYPE line"
+        );
+    }
+
+    #[test]
+    fn record_upload_does_not_panic() {
+        record_upload("http", 1024);
+        record_upload("grpc", 2048);
+    }
+
+    #[test]
+    fn record_download_does_not_panic() {
+        record_download("http", 512);
+        record_download("grpc", 4096);
+    }
+
+    #[test]
+    fn record_xet_shard_upload_does_not_panic() {
+        record_xet_shard_upload(100);
+    }
+
+    #[test]
+    fn record_xet_xorb_upload_does_not_panic() {
+        record_xet_xorb_upload(200);
+    }
+
+    #[test]
+    fn record_xet_xorb_download_does_not_panic() {
+        record_xet_xorb_download(300);
+    }
+
+    #[test]
+    fn record_xet_reconstruction_does_not_panic() {
+        record_xet_reconstruction(true, std::time::Duration::from_millis(10), 5);
+        record_xet_reconstruction(false, std::time::Duration::from_millis(0), 0);
+    }
+
+    #[test]
+    fn record_xet_dedupe_shard_query_does_not_panic() {
+        record_xet_dedupe_shard_query(true);
+        record_xet_dedupe_shard_query(false);
+    }
+
+    #[test]
+    fn record_reconstruction_does_not_panic() {
+        record_reconstruction(true, std::time::Duration::from_millis(5), 10);
+        record_reconstruction(false, std::time::Duration::ZERO, 0);
+    }
+
+    #[test]
+    fn record_reconstruction_cache_hit_miss_does_not_panic() {
+        record_reconstruction_cache_hit();
+        record_reconstruction_cache_miss();
+    }
+
+    #[test]
+    fn record_gc_run_does_not_panic() {
+        record_gc_run(std::time::Duration::from_millis(50), 10, 1024);
+    }
+
+    #[test]
+    fn record_fsck_run_does_not_panic() {
+        record_fsck_run(std::time::Duration::from_millis(25), 3);
+    }
+
+    #[test]
+    fn record_hub_api_requests_do_not_panic() {
+        record_hub_api_request("GET", "/models", 200);
+        record_hub_api_request("POST", "/datasets", 201);
+        record_hub_api_commit("create");
+        record_hub_api_file_upload();
+        record_hub_api_file_download();
+    }
+
+    #[test]
+    fn record_provider_events_do_not_panic() {
+        record_provider_webhook("github", "push");
+        record_provider_token_exchange();
+    }
+
+    #[test]
+    fn global_metrics_and_registry_are_accessible() {
+        let _m = metrics();
+        let _r = registry();
+    }
+}

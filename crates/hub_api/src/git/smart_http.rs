@@ -733,17 +733,33 @@ fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::
     use flate2::read::ZlibDecoder;
     use std::io::Read;
 
-    let mut decoder = ZlibDecoder::new(data);
+    struct CountingReader<R> {
+        inner: R,
+        count: usize,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.count = self.count.saturating_add(n);
+            Ok(n)
+        }
+    }
+
+    let decoder = ZlibDecoder::new(data);
+    let mut reader = CountingReader {
+        inner: decoder.take(MAX_DECOMPRESSED_SIZE.saturating_add(1) as u64),
+        count: 0,
+    };
     let mut output = Vec::new();
-    decoder.read_to_end(&mut output)?;
+    reader.read_to_end(&mut output)?;
     if output.len() > MAX_DECOMPRESSED_SIZE {
         return Err(format!(
             "decompressed data exceeds maximum size of {MAX_DECOMPRESSED_SIZE} bytes"
         )
         .into());
     }
-    let bytes_used = decoder.total_in() as usize;
-    Ok((output, bytes_used))
+    Ok((output, reader.count))
 }
 
 async fn store_push_objects(
