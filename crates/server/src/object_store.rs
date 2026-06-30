@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::{
     fs::File,
-    io::{ErrorKind, Read},
+    io::{BufReader, ErrorKind, Read},
     path::Path,
 };
 
@@ -191,14 +191,15 @@ fn read_open_local_object(path: &Path, file: File, length: u64) -> Result<Vec<u8
 
 fn read_open_local_object_append(
     path: &Path,
-    mut file: File,
+    file: File,
     expected_length: u64,
     output: &mut Vec<u8>,
 ) -> Result<(), ServerError> {
     validate_local_object_length(&file, expected_length)?;
     run_before_local_object_read_hook(path);
     let start_len = output.len();
-    let mut limited = file.by_ref().take(expected_length);
+    let mut reader = BufReader::new(file);
+    let mut limited = reader.by_ref().take(expected_length);
     if let Err(error) = limited.read_to_end(output) {
         if error.kind() == ErrorKind::UnexpectedEof {
             return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
@@ -214,7 +215,7 @@ fn read_open_local_object_append(
         return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch));
     }
     let mut trailing_byte = [0_u8; 1];
-    match file.read(&mut trailing_byte) {
+    match reader.read(&mut trailing_byte) {
         Ok(0) => {}
         Ok(_observed) => return Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch)),
         Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
@@ -222,7 +223,7 @@ fn read_open_local_object_append(
         }
         Err(error) => return Err(ServerError::Io(error)),
     }
-    validate_local_object_length(&file, expected_length)?;
+    validate_local_object_length(&reader.into_inner(), expected_length)?;
 
     Ok(())
 }
@@ -303,31 +304,15 @@ use crate::error::{IndexError, ObjectStoreError};
 
     #[test]
     fn local_object_read_rejects_growth_after_length_validation_without_retaining_growth_bytes() {
-        let object = tempfile::NamedTempFile::new();
-        assert!(object.is_ok());
-        let Ok(mut object) = object else {
-            return;
-        };
-        let initial_write = object.write_all(b"abcd");
-        assert!(initial_write.is_ok());
-        let object_sync = object.as_file().sync_all();
-        assert!(object_sync.is_ok());
+        let mut object = tempfile::NamedTempFile::new().unwrap();
+        object.write_all(b"abcd").unwrap();
+        object.as_file().sync_all().unwrap();
 
-        let reader = File::open(object.path());
-        assert!(reader.is_ok());
-        let Ok(reader) = reader else {
-            return;
-        };
-        let writer = OpenOptions::new().append(true).open(object.path());
-        assert!(writer.is_ok());
-        let Ok(mut writer) = writer else {
-            return;
-        };
+        let reader = File::open(object.path()).unwrap();
+        let mut writer = OpenOptions::new().append(true).open(object.path()).unwrap();
         set_before_local_object_read_hook(object.path().to_path_buf(), move || {
-            let appended = writer.write_all(b"efgh");
-            assert!(appended.is_ok());
-            let writer_sync = writer.sync_all();
-            assert!(writer_sync.is_ok());
+            writer.write_all(b"efgh").unwrap();
+            writer.sync_all().unwrap();
         });
 
         let mut output = Vec::new();

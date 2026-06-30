@@ -73,29 +73,18 @@ mod tests {
 
     #[tokio::test]
     async fn config_check_reports_local_backend_for_initialized_storage() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = tempfile::tempdir().unwrap();
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             storage.path().to_path_buf(),
             NonZeroUsize::MIN,
         )
-        .with_token_signing_key(b"signing-key".to_vec());
-        assert!(config.is_ok());
-        let Ok(config) = config else {
-            return;
-        };
+        .with_token_signing_key(b"signing-key".to_vec())
+        .unwrap();
 
-        let report = run_config_check(config).await;
+        let report = run_config_check(config).await.unwrap();
 
-        assert!(report.is_ok());
-        let Ok(report) = report else {
-            return;
-        };
         assert_eq!(report.status, "ok");
         assert_eq!(report.server_role, "all");
         assert_eq!(report.server_frontends, vec!["xet".to_owned()]);
@@ -108,11 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn transfer_role_config_check_disables_reconstruction_cache() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = tempfile::tempdir().unwrap();
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
@@ -120,18 +105,11 @@ mod tests {
             NonZeroUsize::MIN,
         )
         .with_server_role(ServerRole::Transfer)
-        .with_token_signing_key(b"signing-key".to_vec());
-        assert!(config.is_ok());
-        let Ok(config) = config else {
-            return;
-        };
+        .with_token_signing_key(b"signing-key".to_vec())
+        .unwrap();
 
-        let report = run_config_check(config).await;
+        let report = run_config_check(config).await.unwrap();
 
-        assert!(report.is_ok());
-        let Ok(report) = report else {
-            return;
-        };
         assert_eq!(report.server_role, "transfer");
         assert_eq!(report.server_frontends, vec!["xet".to_owned()]);
         assert_eq!(report.cache_backend, "disabled");
@@ -141,11 +119,7 @@ mod tests {
 
     #[tokio::test]
     async fn config_check_rejects_missing_signing_key_for_served_routes() {
-        let storage = tempfile::tempdir();
-        assert!(storage.is_ok());
-        let Ok(storage) = storage else {
-            return;
-        };
+        let storage = tempfile::tempdir().unwrap();
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),

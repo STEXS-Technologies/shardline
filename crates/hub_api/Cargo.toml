@@ -13,14 +13,14 @@ description = "HuggingFace Hub API compatibility layer for Shardline."
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-flate2 = "1"
+chrono.workspace = true
+flate2.workspace = true
 hmac.workspace = true
 hex.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha1 = "0.10"
+sha1.workspace = true
 sha2.workspace = true
 shardline-index.workspace = true
 shardline-metrics.workspace = true
@@ -28,11 +28,10 @@ shardline-protocol.workspace = true
 shardline-server-core.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
-tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-flate2 = "1"
 http-body-util = "0.1"
 rusqlite.workspace = true
 tempfile.workspace = true

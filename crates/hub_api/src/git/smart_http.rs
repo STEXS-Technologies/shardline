@@ -675,8 +675,11 @@ fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
         while current & 0x80 != 0 && pos < data.len() {
             current = data[pos];
             pos += 1;
-            _size |= ((current & 0x7f) as u64) << shift;
             shift += 7;
+            if shift >= 64 {
+                return Vec::new();
+            }
+            _size |= ((current & 0x7f) as u64) << shift;
         }
 
         match obj_type {
