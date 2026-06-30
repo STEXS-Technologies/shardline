@@ -11,14 +11,19 @@ pub struct TransferMetrics {
 }
 
 impl TransferMetrics {
+    /// # Panics
+    ///
+    /// Panics if prometheus metric registration fails (should not happen with static names).
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let upload_requests = IntCounter::new("shardline_upload_requests_total", "Total upload requests").unwrap();
-        let upload_bytes = IntCounter::new("shardline_upload_bytes_total", "Total bytes uploaded").unwrap();
-        let upload_duration = Histogram::with_opts(HistogramOpts::new("shardline_upload_duration_seconds", "Upload request duration").buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])).unwrap();
-        let download_requests = IntCounter::new("shardline_download_requests_total", "Total download requests").unwrap();
-        let download_bytes = IntCounter::new("shardline_download_bytes_total", "Total bytes downloaded").unwrap();
-        let download_duration = Histogram::with_opts(HistogramOpts::new("shardline_download_duration_seconds", "Download request duration").buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])).unwrap();
-        let range_requests = IntCounter::new("shardline_range_requests_total", "Total range download requests").unwrap();
+        let upload_requests = IntCounter::new("shardline_upload_requests_total", "Total upload requests").expect("prometheus metric names are static constants");
+        let upload_bytes = IntCounter::new("shardline_upload_bytes_total", "Total bytes uploaded").expect("prometheus metric names are static constants");
+        let upload_duration = Histogram::with_opts(HistogramOpts::new("shardline_upload_duration_seconds", "Upload request duration").buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])).expect("prometheus metric names are static constants");
+        let download_requests = IntCounter::new("shardline_download_requests_total", "Total download requests").expect("prometheus metric names are static constants");
+        let download_bytes = IntCounter::new("shardline_download_bytes_total", "Total bytes downloaded").expect("prometheus metric names are static constants");
+        let download_duration = Histogram::with_opts(HistogramOpts::new("shardline_download_duration_seconds", "Download request duration").buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])).expect("prometheus metric names are static constants");
+        let range_requests = IntCounter::new("shardline_range_requests_total", "Total range download requests").expect("prometheus metric names are static constants");
 
         registry.register(Box::new(upload_requests.clone())).ok();
         registry.register(Box::new(upload_bytes.clone())).ok();

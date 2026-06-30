@@ -205,6 +205,7 @@ impl LocalBackend {
     }
 }
 
+#[must_use]
 pub fn chunk_hash(bytes: &[u8]) -> shardline_protocol::ShardlineHash {
     let digest = blake3::hash(bytes);
     shardline_protocol::ShardlineHash::from_bytes(*digest.as_bytes())

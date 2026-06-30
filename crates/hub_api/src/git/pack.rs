@@ -43,7 +43,7 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::Commit => "commit",
             Self::Tree => "tree",
@@ -61,21 +61,24 @@ pub struct GitObject {
 }
 
 impl GitObject {
-    pub fn commit(data: Vec<u8>) -> Self {
+    #[must_use]
+    pub const fn commit(data: Vec<u8>) -> Self {
         Self {
             object_type: ObjectType::Commit,
             data,
         }
     }
 
-    pub fn tree(data: Vec<u8>) -> Self {
+    #[must_use]
+    pub const fn tree(data: Vec<u8>) -> Self {
         Self {
             object_type: ObjectType::Tree,
             data,
         }
     }
 
-    pub fn blob(data: Vec<u8>) -> Self {
+    #[must_use]
+    pub const fn blob(data: Vec<u8>) -> Self {
         Self {
             object_type: ObjectType::Blob,
             data,
@@ -83,6 +86,7 @@ impl GitObject {
     }
 
     /// Computes the SHA1 hash of the object (type + size + content).
+    #[must_use]
     pub fn sha1(&self) -> [u8; 20] {
         let header = format!("{} {}\0", self.object_type.name(), self.data.len());
         let mut hasher = Sha1::new();
@@ -165,6 +169,8 @@ fn write_object(out: &mut Vec<u8>, obj: &GitObject) -> Result<(), PackError> {
 /// Creates a minimal commit object for a tree with given entries.
 ///
 /// This is a helper for generating test/demo commits.
+#[must_use]
+#[allow(clippy::expect_used)]
 pub fn create_commit_object(
     tree_sha1: &[u8; 20],
     parent_sha1: Option<&[u8; 20]>,
@@ -178,10 +184,14 @@ pub fn create_commit_object(
 
     let mut commit = format!("tree {}\n", hex::encode(tree_sha1));
     if let Some(parent) = parent_sha1 {
-        commit.push_str(&format!("parent {}\n", hex::encode(parent)));
+        use std::fmt::Write;
+        writeln!(&mut commit, "parent {}", hex::encode(parent)).expect("write to String never fails");
     }
-    commit.push_str(&format!("author {author} {timestamp} +0000\n"));
-    commit.push_str(&format!("committer {author} {timestamp} +0000\n"));
+    {
+        use std::fmt::Write;
+        writeln!(&mut commit, "author {author} {timestamp} +0000").expect("write to String never fails");
+        writeln!(&mut commit, "committer {author} {timestamp} +0000").expect("write to String never fails");
+    }
     commit.push('\n');
     commit.push_str(message);
     commit.push('\n');
@@ -192,6 +202,7 @@ pub fn create_commit_object(
 /// Creates a tree object from a list of (mode, filename, sha1) entries.
 ///
 /// Entries must be sorted by filename (Git requirement).
+#[must_use]
 pub fn create_tree_object(entries: &[(u32, &str, &[u8; 20])]) -> GitObject {
     let mut tree_data = Vec::new();
 
@@ -209,6 +220,7 @@ pub fn create_tree_object(entries: &[(u32, &str, &[u8; 20])]) -> GitObject {
 }
 
 /// Creates a blob object from raw content.
+#[must_use]
 pub fn create_blob_object(content: &[u8]) -> GitObject {
     GitObject::blob(content.to_vec())
 }
@@ -225,6 +237,11 @@ pub fn empty_pack() -> Result<Vec<u8>, PackError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

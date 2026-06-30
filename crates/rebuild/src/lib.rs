@@ -189,9 +189,18 @@ impl IndexRebuildReport {
     }
 
     pub fn print_summary(&self) {
-        println!("scanned_version_records: {}", self.scanned_version_records);
-        println!("scanned_retained_shards: {}", self.scanned_retained_shards);
-        println!("rebuilt_latest_records: {}", self.rebuilt_latest_records);
+        println!(
+            "scanned_version_records: {}",
+            self.scanned_version_records
+        );
+        println!(
+            "scanned_retained_shards: {}",
+            self.scanned_retained_shards
+        );
+        println!(
+            "rebuilt_latest_records: {}",
+            self.rebuilt_latest_records
+        );
         println!(
             "unchanged_latest_records: {}",
             self.unchanged_latest_records
@@ -200,7 +209,10 @@ impl IndexRebuildReport {
             "removed_stale_latest_records: {}",
             self.removed_stale_latest_records
         );
-        println!("scanned_reconstructions: {}", self.scanned_reconstructions);
+        println!(
+            "scanned_reconstructions: {}",
+            self.scanned_reconstructions
+        );
         println!(
             "unchanged_reconstructions: {}",
             self.unchanged_reconstructions

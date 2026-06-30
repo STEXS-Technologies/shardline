@@ -171,10 +171,16 @@ fn global_scope_namespace() -> String {
     "global".to_owned()
 }
 
+/// # Errors
+///
+/// Returns an error when the repository name is not a valid OCI repository name.
 pub fn validate_repository(repository: &str) -> Result<(), OciAdapterError> {
     validate_oci_repository_name(repository)
 }
 
+/// # Errors
+///
+/// Returns an error when the reference is not a valid OCI tag or digest.
 pub fn parse_reference(reference: &str) -> Result<OciReference, OciAdapterError> {
     if reference.starts_with("sha256:") {
         return Ok(OciReference::Digest(parse_sha256_digest(reference)?));
@@ -189,6 +195,9 @@ pub enum OciReference {
     Tag(String),
 }
 
+/// # Errors
+///
+/// Returns an error when the repository, digest, or scope is invalid.
 pub fn oci_blob_key(
     repository: &str,
     digest_hex: &str,
@@ -204,6 +213,9 @@ pub fn oci_blob_key(
     ))
 }
 
+/// # Errors
+///
+/// Returns an error when the repository, digest, or scope is invalid.
 pub fn oci_manifest_key(
     repository: &str,
     digest_hex: &str,
@@ -219,6 +231,9 @@ pub fn oci_manifest_key(
     ))
 }
 
+/// # Errors
+///
+/// Returns an error when the repository, digest, or scope is invalid.
 pub fn oci_manifest_media_type_key(
     repository: &str,
     digest_hex: &str,
@@ -234,6 +249,9 @@ pub fn oci_manifest_media_type_key(
     ))
 }
 
+/// # Errors
+///
+/// Returns an error when the repository, tag, or scope is invalid.
 pub fn oci_tag_key(
     repository: &str,
     tag: &str,
@@ -250,6 +268,9 @@ pub fn oci_tag_key(
     ))
 }
 
+/// # Errors
+///
+/// Returns an error when the repository or scope is invalid.
 pub fn oci_tag_prefix(
     repository: &str,
     repository_scope: Option<&RepositoryScope>,
@@ -264,6 +285,9 @@ pub fn oci_tag_prefix(
     .map_err(OciAdapterError::from)
 }
 
+/// # Errors
+///
+/// Returns an error when the repository, digest, tag, or scope is invalid.
 pub fn oci_tag_target_key(
     repository: &str,
     digest_hex: &str,
@@ -283,6 +307,9 @@ pub fn oci_tag_target_key(
     ))
 }
 
+/// # Errors
+///
+/// Returns an error when the repository, digest, or scope is invalid.
 pub fn oci_tag_target_prefix(
     repository: &str,
     digest_hex: &str,
@@ -300,18 +327,22 @@ pub fn oci_tag_target_prefix(
     .map_err(OciAdapterError::from)
 }
 
+#[must_use]
 pub fn oci_blob_location(repository: &str, digest_hex: &str) -> String {
     format!("/v2/{repository}/blobs/sha256:{digest_hex}")
 }
 
+#[must_use]
 pub fn oci_manifest_location(repository: &str, reference: &str) -> String {
     format!("/v2/{repository}/manifests/{reference}")
 }
 
+#[must_use]
 pub fn upload_session_location(repository: &str, session_id: &str) -> String {
     format!("/v2/{repository}/blobs/uploads/{session_id}")
 }
 
+#[must_use]
 pub fn new_upload_session_id() -> String {
     let mut bytes = [0_u8; 16];
     if getrandom_fill(&mut bytes).is_ok() {
@@ -332,6 +363,9 @@ pub fn new_upload_session_id() -> String {
     encoded
 }
 
+/// # Errors
+///
+/// Returns an error when the file lock cannot be acquired.
 pub async fn lock_upload_sessions(root: &Path) -> Result<OciUploadSessionLock, OciAdapterError> {
     let process_guard = OCI_UPLOAD_SESSION_LOCK.lock().await;
     let file_lock = acquire_upload_session_file_lock(upload_session_lock_path(root)).await?;
@@ -361,6 +395,9 @@ fn upload_tail_path(root: &Path, session_id: &str) -> PathBuf {
     upload_dir(root).join(format!("{session_id}.tail"))
 }
 
+/// # Errors
+///
+/// Returns an error when the upload session cannot be created.
 pub async fn create_upload_session(
     root: &Path,
     repository: &str,
@@ -399,6 +436,9 @@ pub async fn create_upload_session(
     Ok(session_id)
 }
 
+/// # Errors
+///
+/// Returns an error when the upload session cannot be read.
 pub async fn read_upload_session(
     root: &Path,
     session_id: &str,
@@ -431,6 +471,9 @@ pub async fn read_upload_session(
     Ok(session)
 }
 
+/// # Errors
+///
+/// Returns an error when bytes cannot be appended to the upload.
 pub async fn append_upload_bytes(
     root: &Path,
     session_id: &str,
@@ -454,6 +497,9 @@ pub async fn append_upload_bytes(
     Ok(metadata.len())
 }
 
+/// # Errors
+///
+/// Returns an error when the upload length cannot be determined.
 pub async fn upload_length(root: &Path, session_id: &str) -> Result<u64, OciAdapterError> {
     validate_upload_session_id(session_id)?;
     let metadata = fs::metadata(upload_body_path(root, session_id))
@@ -468,6 +514,9 @@ pub async fn upload_length(root: &Path, session_id: &str) -> Result<u64, OciAdap
     Ok(metadata.len())
 }
 
+/// # Errors
+///
+/// Returns an error when the session ID is invalid or the body path cannot be resolved.
 pub fn upload_body_path_for_session(
     root: &Path,
     session_id: &str,
@@ -476,6 +525,9 @@ pub fn upload_body_path_for_session(
     Ok(upload_body_path(root, session_id))
 }
 
+/// # Errors
+///
+/// Returns an error when the upload body cannot be read or hashed.
 pub async fn upload_body_integrity(
     root: &Path,
     session_id: &str,
@@ -511,6 +563,9 @@ pub async fn upload_body_integrity(
     .map_err(OciAdapterError::BlockingTask)?
 }
 
+/// # Errors
+///
+/// Returns an error when the upload session cannot be deleted.
 pub async fn delete_upload_session(
     root: &Path,
     session_id: &str,
@@ -537,6 +592,9 @@ pub async fn delete_upload_session(
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the upload session cannot be updated.
 pub async fn touch_upload_session(
     root: &Path,
     session_id: &str,
@@ -547,6 +605,7 @@ pub async fn touch_upload_session(
     persist_upload_session(root, session_id, session).await
 }
 
+#[must_use]
 pub fn upload_session_length(session: &OciUploadSession) -> Option<u64> {
     session.use_s3_multipart.then(|| {
         session
@@ -556,6 +615,9 @@ pub fn upload_session_length(session: &OciUploadSession) -> Option<u64> {
     })
 }
 
+/// # Errors
+///
+/// Returns an error when the S3 multipart upload bytes cannot be appended.
 pub async fn append_s3_multipart_upload_bytes<B: OciBackend>(
     root: &Path,
     backend: &B,
@@ -612,6 +674,9 @@ pub async fn append_s3_multipart_upload_bytes<B: OciBackend>(
     Ok((session, total_length))
 }
 
+/// # Errors
+///
+/// Returns an error when the S3 multipart upload session cannot be finalized.
 pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     root: &Path,
     backend: &B,
@@ -689,6 +754,9 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     backend.copy_object_if_absent(&canonical_key, object_key)
 }
 
+/// # Errors
+///
+/// Returns an error when the S3 multipart upload session cannot be aborted.
 pub async fn abort_s3_multipart_upload_session<B: OciBackend>(
     backend: &B,
     session: &OciUploadSession,
@@ -748,6 +816,9 @@ async fn acquire_upload_session_file_lock(path: PathBuf) -> Result<OciFileLock, 
     .map_err(OciAdapterError::BlockingTask)?
 }
 
+/// # Errors
+///
+/// Returns an error when expired upload sessions cannot be purged.
 pub async fn purge_expired_upload_sessions(
     root: &Path,
     ttl_seconds: NonZeroU64,

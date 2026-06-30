@@ -29,6 +29,20 @@ use shardline_provider_events::ProviderEventsError;
 use shardline_xet_adapter::XetAdapterError;
 
 /// Server runtime failure.
+///
+/// This is the unified error type for the Shardline server layer. It maps
+/// domain-specific errors from storage, indexing, protocol, auth, and OCI
+/// subsystems into a single enum with HTTP status code mapping.
+///
+/// # Design
+///
+/// Each variant maps to exactly one HTTP status code via [`ServerError::status_code`].
+/// Subsystem errors (e.g., [`LocalIndexStoreError`], [`S3ObjectStoreError`]) are
+/// converted via `From` implementations for ergonomic `?` usage.
+///
+/// When adding new error sources, prefer adding a new variant with a `#[from]`
+/// attribute over manual `From` implementations unless the source error maps
+/// to multiple variants.
 #[derive(Debug, Error)]
 pub enum ServerError {
     /// Local storage IO failed.

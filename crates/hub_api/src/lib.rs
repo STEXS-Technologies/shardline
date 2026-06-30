@@ -31,7 +31,6 @@ use axum::Router;
 /// The returned [`Router`] is state-generic and can be merged into any
 /// Axum router. Call [`state::init`] with a [`routes::HubState`] before
 /// serving requests.
-#[must_use]
 pub fn hub_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     routes::router()
 }

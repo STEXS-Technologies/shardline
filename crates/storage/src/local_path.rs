@@ -67,20 +67,22 @@ fn validate_existing_directory_component(path: &Path) -> Result<(), DirectoryPat
 
 /// Resolves well-known platform symlinks in the path without resolving user-created symlinks.
 ///
-/// On macOS, `/var` is a symlink to `/private/var`. This allows `tempfile::tempdir()` paths
-/// (which live under `/var/folders/...`) to pass the symlink safety check.
+/// On macOS, `/var`, `/etc`, and `/tmp` are symlinks to `/private/var`, `/private/etc`, and
+/// `/private/tmp`. Opening files under these paths with `O_NOFOLLOW` or SQLite's `NOFOLLOW`
+/// fails because the symlink component is not followed. This resolves the known platform
+/// symlinks so the flag applies only to the final path component.
 #[cfg(target_os = "macos")]
-fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+#[must_use]
+pub fn resolve_platform_symlinks(path: &Path) -> PathBuf {
     let components: Vec<_> = path.components().collect();
     if let [Component::RootDir, Component::Normal(first), rest @ ..] = components.as_slice() {
-        #[cfg(unix)]
-        let is_var = first.as_encoded_bytes() == b"var";
-        #[cfg(not(unix))]
-        let is_var = first.to_string_lossy() == "var";
-
-        if is_var {
-            let mut resolved = PathBuf::from("/private");
-            resolved.push("var");
+        let resolved_prefix = match first.as_encoded_bytes() {
+            b"var" | b"etc" | b"tmp" => Some("/private"),
+            _ => None,
+        };
+        if let Some(prefix) = resolved_prefix {
+            let mut resolved = PathBuf::from(prefix);
+            resolved.push(first);
             for component in rest {
                 resolved.push(component.as_os_str());
             }
@@ -91,7 +93,8 @@ fn resolve_platform_symlinks(path: &Path) -> PathBuf {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn resolve_platform_symlinks(path: &Path) -> PathBuf {
+#[must_use]
+pub fn resolve_platform_symlinks(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 

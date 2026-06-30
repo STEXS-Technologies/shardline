@@ -36,14 +36,16 @@ pub mod anchored_fs;
 mod key;
 mod local;
 mod local_fs;
-mod local_path;
+pub mod local_path;
 mod object;
 mod s3;
 mod store;
 
 pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
-pub use local_path::{DirectoryPathError, ensure_directory_path_components_are_not_symlinked};
+pub use local_path::{
+    DirectoryPathError, ensure_directory_path_components_are_not_symlinked, resolve_platform_symlinks,
+};
 pub use object::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
 pub use s3::{
     BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,

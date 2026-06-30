@@ -15,10 +15,13 @@ base64.workspace = true
 bytes.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 flate2 = "1"
+hmac.workspace = true
 hex.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha1 = "0.10"
+sha2.workspace = true
 shardline-index.workspace = true
 shardline-metrics.workspace = true
 shardline-protocol.workspace = true

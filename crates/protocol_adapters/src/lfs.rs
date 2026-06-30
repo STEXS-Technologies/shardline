@@ -48,6 +48,12 @@ pub struct LfsObjectError {
     pub message: String,
 }
 
+/// Returns the storage object key for an LFS object.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::InvalidContentHash`] when `oid` is malformed
+/// or the constructed key is invalid.
 pub fn lfs_object_key(
     oid: &str,
     repository_scope: Option<&RepositoryScope>,

@@ -71,10 +71,10 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
             if let Some(msg) = header.get("message").and_then(|v| v.as_str()) {
                 message = msg.to_owned();
             }
-            if let Some(parent) = header.get("parentCommit").and_then(|v| v.as_str()) {
-                if !parent.is_empty() {
-                    parent_commit = Some(parent.to_owned());
-                }
+            if let Some(parent) = header.get("parentCommit").and_then(|v| v.as_str())
+                && !parent.is_empty()
+            {
+                parent_commit = Some(parent.to_owned());
             }
             continue;
         }

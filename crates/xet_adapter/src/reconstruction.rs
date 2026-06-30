@@ -14,6 +14,9 @@ use crate::{
 
 use super::build_xorb_transfer_url;
 
+/// # Errors
+///
+/// Returns an error when the reconstruction plan is invalid or the range is unsatisfiable.
 pub fn build_reconstruction_response(
     public_base_url: &str,
     record: &FileRecord,
@@ -106,6 +109,9 @@ pub fn build_reconstruction_response(
     })
 }
 
+/// # Errors
+///
+/// Returns an error when the reconstruction plan is invalid or the range is unsatisfiable.
 pub fn build_reconstruction_response_with_metrics(
     public_base_url: &str,
     record: &FileRecord,
@@ -119,6 +125,7 @@ pub fn build_reconstruction_response_with_metrics(
     result
 }
 
+#[must_use]
 pub fn reconstruction_v2_from_v1(
     response: FileReconstructionResponse,
 ) -> FileReconstructionV2Response {

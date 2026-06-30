@@ -43,6 +43,10 @@ static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 static METRICS: LazyLock<CasMetrics> = LazyLock::new(|| CasMetrics::new(&REGISTRY));
 
 impl CasMetrics {
+    /// # Panics
+    ///
+    /// Panics if prometheus metric registration fails (should not happen with static names).
+    #[must_use]
     pub fn new(registry: &Registry) -> Self {
         Self {
             storage: StorageMetrics::new(registry),
@@ -60,16 +64,19 @@ impl CasMetrics {
 }
 
 /// Returns a reference to the global metrics instance.
+#[must_use]
 pub fn metrics() -> &'static CasMetrics {
     &METRICS
 }
 
 /// Returns the Prometheus registry for scraping.
+#[must_use]
 pub fn registry() -> &'static Registry {
     &REGISTRY
 }
 
 /// Renders all metrics in Prometheus exposition format.
+#[must_use]
 pub fn encode_metrics() -> String {
     let encoder = TextEncoder::new();
     let metric_families = REGISTRY.gather();

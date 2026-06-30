@@ -121,7 +121,7 @@ pub fn record_dedup_saves(bytes: u64) {
     shardline_metrics::metrics().storage.record_dedup_saves(bytes);
 }
 
-pub fn update_dedup_ratio(_numerator: u64, _denominator: u64) {
+pub const fn update_dedup_ratio(_numerator: u64, _denominator: u64) {
     // The shardline-metrics crate does not currently expose a dedup-ratio gauge.
 }
 

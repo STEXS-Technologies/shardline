@@ -2,7 +2,7 @@ use std::{
     ffi::OsStr,
     io::{Error as IoError, ErrorKind},
     ops::Deref,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use rusqlite::{
@@ -13,7 +13,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::Error as JsonError;
 use shardline_protocol::{ChunkRange, HashParseError, RangeError, unix_now_seconds_lossy};
-use shardline_storage::{ObjectKey, ObjectKeyError};
+use shardline_storage::{ObjectKey, ObjectKeyError, local_path::resolve_platform_symlinks};
 use thiserror::Error;
 
 use crate::{
@@ -575,33 +575,6 @@ fn normalize_local_root(root: PathBuf) -> PathBuf {
             .map_or_else(|| root.clone(), Path::to_path_buf);
     }
     resolve_platform_symlinks(&root)
-}
-
-/// Resolves well-known platform symlinks in the path.
-///
-/// On macOS, `/var` is a symlink to `/private/var`. SQLite with `NOFOLLOW` refuses
-/// to open database files under `/var/folders/...` because the path contains a
-/// symlink. This function resolves the known platform symlink so SQLite can open
-/// the database safely.
-#[cfg(target_os = "macos")]
-fn resolve_platform_symlinks(path: &Path) -> PathBuf {
-    let components: Vec<_> = path.components().collect();
-    if let [Component::RootDir, Component::Normal(first), rest @ ..] = components.as_slice() {
-        if first.as_encoded_bytes() == b"var" {
-            let mut resolved = PathBuf::from("/private");
-            resolved.push("var");
-            for component in rest {
-                resolved.push(component.as_os_str());
-            }
-            return resolved;
-        }
-    }
-    path.to_path_buf()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn resolve_platform_symlinks(path: &Path) -> PathBuf {
-    path.to_path_buf()
 }
 
 pub(super) fn u64_to_i64(value: u64) -> Result<i64, LocalIndexStoreError> {

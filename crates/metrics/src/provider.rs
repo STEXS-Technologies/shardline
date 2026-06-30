@@ -7,10 +7,15 @@ pub struct ProviderMetrics {
 }
 
 impl ProviderMetrics {
+    /// # Panics
+    ///
+    /// Panics if prometheus metric registration fails (should not happen with static names).
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let webhook_events = IntCounter::new("shardline_provider_webhook_events_total", "Provider webhook events received").unwrap();
-        let webhook_duration = Histogram::with_opts(HistogramOpts::new("shardline_provider_webhook_processing_duration_seconds", "Webhook processing latency").buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0])).unwrap();
-        let token_exchanges = IntCounter::new("shardline_provider_token_exchange_total", "Provider token exchanges").unwrap();
+        let webhook_events = IntCounter::new("shardline_provider_webhook_events_total", "Provider webhook events received").expect("prometheus metric names are static constants");
+        let webhook_duration = Histogram::with_opts(HistogramOpts::new("shardline_provider_webhook_processing_duration_seconds", "Webhook processing latency").buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0])).expect("prometheus metric names are static constants");
+        let token_exchanges = IntCounter::new("shardline_provider_token_exchange_total", "Provider token exchanges").expect("prometheus metric names are static constants");
 
         registry.register(Box::new(webhook_events.clone())).ok();
         registry.register(Box::new(webhook_duration.clone())).ok();

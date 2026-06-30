@@ -12,15 +12,20 @@ pub struct StorageMetrics {
 }
 
 impl StorageMetrics {
+    /// # Panics
+    ///
+    /// Panics if prometheus metric registration fails (should not happen with static names).
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let objects_total = IntGauge::new("shardline_objects_total", "Total objects stored").unwrap();
-        let objects_bytes_total = IntCounter::new("shardline_objects_bytes_total", "Total bytes stored across all objects").unwrap();
-        let chunks_total = IntGauge::new("shardline_chunks_total", "Total chunks stored").unwrap();
-        let chunks_bytes_total = IntCounter::new("shardline_chunks_bytes_total", "Total chunk bytes stored").unwrap();
-        let xorbs_total = IntGauge::new("shardline_xorbs_total", "Total xorbs stored").unwrap();
-        let xorbs_bytes_total = IntCounter::new("shardline_xorbs_bytes_total", "Total xorb bytes stored").unwrap();
-        let shards_total = IntGauge::new("shardline_shards_total", "Total shards stored").unwrap();
-        let dedup_saves_bytes_total = IntCounter::new("shardline_dedup_saves_bytes_total", "Bytes saved by deduplication").unwrap();
+        let objects_total = IntGauge::new("shardline_objects_total", "Total objects stored").expect("prometheus metric names are static constants");
+        let objects_bytes_total = IntCounter::new("shardline_objects_bytes_total", "Total bytes stored across all objects").expect("prometheus metric names are static constants");
+        let chunks_total = IntGauge::new("shardline_chunks_total", "Total chunks stored").expect("prometheus metric names are static constants");
+        let chunks_bytes_total = IntCounter::new("shardline_chunks_bytes_total", "Total chunk bytes stored").expect("prometheus metric names are static constants");
+        let xorbs_total = IntGauge::new("shardline_xorbs_total", "Total xorbs stored").expect("prometheus metric names are static constants");
+        let xorbs_bytes_total = IntCounter::new("shardline_xorbs_bytes_total", "Total xorb bytes stored").expect("prometheus metric names are static constants");
+        let shards_total = IntGauge::new("shardline_shards_total", "Total shards stored").expect("prometheus metric names are static constants");
+        let dedup_saves_bytes_total = IntCounter::new("shardline_dedup_saves_bytes_total", "Bytes saved by deduplication").expect("prometheus metric names are static constants");
 
         registry.register(Box::new(objects_total.clone())).ok();
         registry.register(Box::new(objects_bytes_total.clone())).ok();

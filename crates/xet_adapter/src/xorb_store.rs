@@ -31,6 +31,9 @@ pub struct StoredXorbUpload {
     pub stored_bytes: u64,
 }
 
+/// # Errors
+///
+/// Returns an error when the hash is not valid or the object key cannot be constructed.
 pub fn xorb_object_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
     validate_content_hash_local(hash_hex)?;
     let prefix = hash_hex
@@ -40,6 +43,9 @@ pub fn xorb_object_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
     ObjectKey::parse(&key).map_err(map_object_key_error)
 }
 
+/// # Errors
+///
+/// Returns an error when the object key cannot be validated.
 pub fn xorb_hash_from_object_key_if_present(
     key: &ObjectKey,
 ) -> Result<Option<&str>, XetAdapterError> {
@@ -75,6 +81,9 @@ pub fn xorb_hash_from_object_key_if_present(
     Ok(Some(hash_hex))
 }
 
+/// # Errors
+///
+/// Returns an error when the xorb cannot be read or validated.
 pub fn visit_stored_xorb_chunk_hashes<Visitor>(
     object_store: &ServerObjectStore,
     object_key: &ObjectKey,
@@ -99,6 +108,9 @@ where
     .map_err(map_xorb_visit_error)
 }
 
+/// # Errors
+///
+/// Returns an error when the upload fails validation or storage.
 pub fn store_uploaded_xorb(
     object_store: &ServerObjectStore,
     expected_hash: &str,
@@ -158,6 +170,9 @@ pub fn store_uploaded_xorb(
     })
 }
 
+/// # Errors
+///
+/// Returns an error when the upload fails validation or storage.
 pub fn store_uploaded_xorb_with_metrics(
     object_store: &ServerObjectStore,
     expected_hash: &str,
@@ -185,6 +200,9 @@ fn canonicalize_uploaded_xorb<'bytes>(
     }
 }
 
+/// # Errors
+///
+/// Returns an error when the bytes cannot be reconstructed or the hash does not match.
 pub fn normalize_serialized_xorb(
     expected_hash: ShardlineHash,
     bytes: &[u8],
@@ -200,7 +218,7 @@ pub fn normalize_serialized_xorb(
     Ok(normalized)
 }
 
-fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
+const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
     match error {
         ObjectKeyError::Empty
         | ObjectKeyError::UnsafePath

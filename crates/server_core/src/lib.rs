@@ -200,7 +200,7 @@ pub fn content_hash(
     hasher.finalize().to_hex().to_string()
 }
 
-fn map_object_key_error(error: ObjectKeyError) -> ServerObjectStoreError {
+const fn map_object_key_error(error: ObjectKeyError) -> ServerObjectStoreError {
     match error {
         ObjectKeyError::Empty
         | ObjectKeyError::UnsafePath

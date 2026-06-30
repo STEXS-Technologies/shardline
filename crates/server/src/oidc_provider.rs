@@ -61,18 +61,15 @@ struct JwksResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 struct Jwk {
-    #[allow(dead_code)]
-    kid: String,
+    _kid: String,
     #[serde(rename = "kty")]
     _key_type: String,
     #[serde(rename = "alg")]
     _algorithm: String,
     #[serde(rename = "use")]
     _public_key_use: Option<String>,
-    #[allow(dead_code)]
-    n: Option<String>,
-    #[allow(dead_code)]
-    e: Option<String>,
+    _n: Option<String>,
+    _e: Option<String>,
     #[serde(rename = "x5c")]
     _x509_chain: Option<Vec<String>>,
 }
@@ -220,6 +217,7 @@ impl AuthProvider for OidcProvider {
         if parts.len() != 3 {
             return Err(AuthError::InvalidToken);
         }
+        #[allow(clippy::indexing_slicing)]
         self.verify_jwt_claims(parts[0], parts[1], parts[2])
     }
 

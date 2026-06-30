@@ -59,6 +59,7 @@ pub(super) fn byte_range_stream_response(
         .into_response()
 }
 
+#[must_use]
 pub fn full_byte_stream_response(
     byte_stream: ServerByteStream,
     transfer_limiter: TransferLimiter,
@@ -217,6 +218,13 @@ pub(super) fn parse_batch_reconstruction_file_ids(uri: &Uri) -> Result<Vec<Strin
     parse_batch_reconstruction_query(query)
 }
 
+/// Parses a batch reconstruction query string into a list of file IDs.
+///
+/// # Errors
+///
+/// Returns [`ServerError::RequestQueryTooLarge`] if the query exceeds the maximum allowed byte count,
+/// or [`ServerError::InvalidFileId`] / [`ServerError::InvalidContentHash`] if any file ID or
+/// content hash is malformed.
 pub fn parse_batch_reconstruction_query(query: &str) -> Result<Vec<String>, ServerError> {
     if query.len() > MAX_BATCH_RECONSTRUCTION_QUERY_BYTES {
         return Err(ServerError::RequestQueryTooLarge);

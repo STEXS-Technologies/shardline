@@ -149,6 +149,7 @@ where
     Ok(())
 }
 
+#[must_use]
 pub fn reconciled_provider_repository_state(
     state: &ProviderRepositoryState,
     reconciled_at_unix_seconds: u64,
@@ -190,6 +191,7 @@ fn reconciled_timestamp(
     Some(now_unix_seconds)
 }
 
+#[must_use]
 pub fn latest_lifecycle_signal_at(state: &ProviderRepositoryState) -> Option<u64> {
     match (
         state.last_access_changed_at_unix_seconds(),
@@ -213,6 +215,11 @@ fn normalize_provider_name(provider: &str) -> &str {
     }
 }
 
+/// Validates that the provider name segment is present and within bounds.
+///
+/// # Errors
+///
+/// Returns [`ServerError::InvalidProviderTokenRequest`] if the name is empty or exceeds the maximum byte length.
 pub const fn validate_provider_name_path(provider: &str) -> Result<(), ServerError> {
     if provider.is_empty() || provider.len() > MAX_PROVIDER_NAME_BYTES {
         return Err(ServerError::InvalidProviderTokenRequest);
@@ -221,6 +228,11 @@ pub const fn validate_provider_name_path(provider: &str) -> Result<(), ServerErr
     Ok(())
 }
 
+/// Extracts the provider subject from request headers or query parameters.
+///
+/// # Errors
+///
+/// Returns [`ServerError::InvalidProviderTokenRequest`] if the subject is missing or malformed.
 pub fn extract_provider_subject(
     headers: &HeaderMap,
     query_subject: Option<&str>,

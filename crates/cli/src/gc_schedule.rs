@@ -10,6 +10,8 @@ use std::{
 
 use thiserror::Error;
 
+use shardline_storage::local_path::resolve_platform_symlinks;
+
 use crate::local_output::{
     ensure_output_directory, remove_output_file_if_present, write_output_bytes,
 };
@@ -513,37 +515,7 @@ fn read_text_file_with_limit(
     Ok(contents)
 }
 
-/// Resolves well-known platform symlinks in the path.
-///
-/// On macOS, `/etc` and `/var` are symlinks to `/private/etc` and `/private/var`.
-/// Opening files under these paths with `O_NOFOLLOW` fails because the symlink
-/// component is not followed. This resolves the known platform symlinks so
-/// `O_NOFOLLOW` applies only to the final path component.
-#[cfg(target_os = "macos")]
-fn resolve_platform_symlinks(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let components: Vec<_> = path.components().collect();
-    if let [Component::RootDir, Component::Normal(first), rest @ ..] = components.as_slice() {
-        let resolved_prefix = match first.as_encoded_bytes() {
-            b"var" | b"etc" | b"tmp" => Some("/private"),
-            _ => None,
-        };
-        if let Some(prefix) = resolved_prefix {
-            let mut resolved = PathBuf::from(prefix);
-            resolved.push(first);
-            for component in rest {
-                resolved.push(component.as_os_str());
-            }
-            return resolved;
-        }
-    }
-    path.to_path_buf()
-}
 
-#[cfg(not(target_os = "macos"))]
-fn resolve_platform_symlinks(path: &Path) -> PathBuf {
-    path.to_path_buf()
-}
 
 #[cfg(unix)]
 fn open_local_text_file(path: &Path) -> Result<File, GcScheduleError> {

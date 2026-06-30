@@ -164,18 +164,12 @@ impl FsckReport {
     pub fn print_summary(&self) {
         println!("latest_records: {}", self.latest_records);
         println!("version_records: {}", self.version_records);
-        println!(
-            "inspected_chunk_references: {}",
-            self.inspected_chunk_references
-        );
+        println!("inspected_chunk_references: {}", self.inspected_chunk_references);
         println!(
             "inspected_dedupe_shard_mappings: {}",
             self.inspected_dedupe_shard_mappings
         );
-        println!(
-            "inspected_reconstructions: {}",
-            self.inspected_reconstructions
-        );
+        println!("inspected_reconstructions: {}", self.inspected_reconstructions);
         println!(
             "inspected_webhook_deliveries: {}",
             self.inspected_webhook_deliveries

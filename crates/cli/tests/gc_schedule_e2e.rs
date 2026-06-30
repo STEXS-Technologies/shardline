@@ -10,6 +10,7 @@ use std::{
 
 use support::CliE2eInvariantError;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn gc_schedule_install_and_uninstall_manage_systemd_units() {
     let result = exercise_gc_schedule_install_and_uninstall();

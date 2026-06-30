@@ -12,15 +12,20 @@ pub struct ProtocolMetrics {
 }
 
 impl ProtocolMetrics {
+    /// # Panics
+    ///
+    /// Panics if prometheus metric registration fails (should not happen with static names).
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let lfs_uploads = IntCounter::new("shardline_lfs_upload_requests_total", "Git LFS upload requests").unwrap();
-        let lfs_downloads = IntCounter::new("shardline_lfs_download_requests_total", "Git LFS download requests").unwrap();
-        let oci_uploads = IntCounter::new("shardline_oci_upload_requests_total", "OCI upload requests").unwrap();
-        let oci_downloads = IntCounter::new("shardline_oci_download_requests_total", "OCI download requests").unwrap();
-        let hub_api_requests = IntCounter::new("shardline_hub_api_requests_total", "Hub API requests").unwrap();
-        let hub_api_commits = IntCounter::new("shardline_hub_api_commit_operations_total", "Hub API commit operations").unwrap();
-        let hub_api_file_uploads = IntCounter::new("shardline_hub_api_file_uploads_total", "Hub API file uploads").unwrap();
-        let hub_api_file_downloads = IntCounter::new("shardline_hub_api_file_downloads_total", "Hub API file downloads").unwrap();
+        let lfs_uploads = IntCounter::new("shardline_lfs_upload_requests_total", "Git LFS upload requests").expect("prometheus metric names are static constants");
+        let lfs_downloads = IntCounter::new("shardline_lfs_download_requests_total", "Git LFS download requests").expect("prometheus metric names are static constants");
+        let oci_uploads = IntCounter::new("shardline_oci_upload_requests_total", "OCI upload requests").expect("prometheus metric names are static constants");
+        let oci_downloads = IntCounter::new("shardline_oci_download_requests_total", "OCI download requests").expect("prometheus metric names are static constants");
+        let hub_api_requests = IntCounter::new("shardline_hub_api_requests_total", "Hub API requests").expect("prometheus metric names are static constants");
+        let hub_api_commits = IntCounter::new("shardline_hub_api_commit_operations_total", "Hub API commit operations").expect("prometheus metric names are static constants");
+        let hub_api_file_uploads = IntCounter::new("shardline_hub_api_file_uploads_total", "Hub API file uploads").expect("prometheus metric names are static constants");
+        let hub_api_file_downloads = IntCounter::new("shardline_hub_api_file_downloads_total", "Hub API file downloads").expect("prometheus metric names are static constants");
 
         registry.register(Box::new(lfs_uploads.clone())).ok();
         registry.register(Box::new(lfs_downloads.clone())).ok();

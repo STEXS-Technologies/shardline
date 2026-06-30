@@ -16,6 +16,7 @@ impl RepoType {
     ///
     /// Returns `None` for unrecognized types.
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "models" | "model" => Some(Self::Model),
@@ -307,7 +308,7 @@ pub struct RepoSearchQuery {
     pub limit: usize,
 }
 
-fn default_search_limit() -> usize {
+const fn default_search_limit() -> usize {
     50
 }
 
@@ -316,6 +317,153 @@ fn default_search_limit() -> usize {
 pub struct RevisionListResponse {
     /// List of revisions.
     pub revisions: Vec<RevisionResponse>,
+}
+
+/// Dataset parquet file info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetParquetFile {
+    /// File path relative to repo root.
+    pub path: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// File SHA hash.
+    pub sha: String,
+}
+
+/// Dataset parquet listing response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetParquetResponse {
+    /// List of parquet files.
+    pub files: Vec<DatasetParquetFile>,
+}
+
+/// Dataset first-rows query parameters.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatasetFirstRowsQuery {
+    /// Dataset config name (default: "default").
+    #[serde(default = "default_config")]
+    pub config: String,
+    /// Dataset split name (default: "train").
+    #[serde(default = "default_split")]
+    pub split: String,
+    /// Maximum number of rows to return (default: 100, max: 1000).
+    #[serde(default = "default_first_rows_limit")]
+    pub limit: usize,
+}
+
+fn default_config() -> String {
+    "default".to_owned()
+}
+
+fn default_split() -> String {
+    "train".to_owned()
+}
+
+const fn default_first_rows_limit() -> usize {
+    100
+}
+
+/// Dataset viewer query parameters.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatasetViewerQuery {
+    /// Dataset config name (default: "default").
+    #[serde(default = "default_config")]
+    pub config: String,
+    /// Row offset (default: 0).
+    #[serde(default)]
+    pub offset: usize,
+    /// Maximum number of rows to return (default: 100, max: 10000).
+    #[serde(default = "default_viewer_limit")]
+    pub length: usize,
+}
+
+const fn default_viewer_limit() -> usize {
+    100
+}
+
+/// Dataset row (key-value pairs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetRow {
+    /// Column values as key-value pairs.
+    pub columns: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Dataset viewer response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetViewerResponse {
+    /// Column names.
+    pub columns: Vec<String>,
+    /// Rows of data.
+    pub rows: Vec<DatasetRow>,
+    /// Total number of rows in the split (if known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_rows_total: Option<usize>,
+}
+
+/// Dataset first-rows response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetFirstRowsResponse {
+    /// Column names.
+    pub columns: Vec<String>,
+    /// First rows of data.
+    pub rows: Vec<DatasetRow>,
+}
+
+// ---- Webhook models ----
+
+/// Webhook creation request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookCreateRequest {
+    /// Webhook URL to receive events.
+    pub url: String,
+    /// Events to subscribe to (e.g. ["push", "delete"]).
+    #[serde(default = "default_webhook_events")]
+    pub events: Vec<String>,
+    /// Optional secret for HMAC signature verification.
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+fn default_webhook_events() -> Vec<String> {
+    vec!["push".to_owned()]
+}
+
+/// Webhook info response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookResponse {
+    /// Webhook ID.
+    pub id: String,
+    /// Webhook URL.
+    pub url: String,
+    /// Subscribed events.
+    pub events: Vec<String>,
+    /// Whether the webhook is active.
+    pub active: bool,
+    /// Creation timestamp.
+    pub created_at: u64,
+}
+
+/// Webhook list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookListResponse {
+    /// List of webhooks.
+    pub webhooks: Vec<WebhookResponse>,
+}
+
+/// Webhook event payload delivered to subscribers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookEventPayload {
+    /// Event type (e.g. "push", "delete").
+    pub event: String,
+    /// Repository ID.
+    pub repository: String,
+    /// Revision SHA.
+    pub revision: String,
+    /// Event timestamp.
+    pub timestamp: u64,
+    /// Additional event-specific data.
+    #[serde(default)]
+    pub data: serde_json::Value,
 }
 
 /// LFS object error.

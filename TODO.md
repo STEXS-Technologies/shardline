@@ -43,11 +43,9 @@
 ## Hub API — Known Limitations
 
 - **No model card or metadata search** — ✅ Added: model card endpoint (`GET /api/{type}/{ns}/{repo}/modelcard`), repo search (`GET /api/{type}/search?q=...`), revisions list (`GET /api/{type}/{ns}/{repo}/revisions`). Model card content served via inline_content storage.
-- **No dataset viewer** — dataset-specific preview and streaming endpoints are not yet
-  implemented.
-- **No webhooks or callbacks** — repository event notifications are not implemented.
-- **Single-process only** — Hub metadata stores are per-process (local SQLite or
-  Postgres). Shared deployments use Postgres for cross-instance consistency.
+- **No dataset viewer** — ✅ Added: parquet listing (`GET /api/datasets/{ns}/{repo}/parquet`), first-rows (`GET /api/datasets/{ns}/{repo}/first-rows`), paginated viewer (`GET /api/datasets/{ns}/{repo}/viewer/{split}`). Supports CSV and JSONL.
+- **No webhooks or callbacks** — ✅ Added: webhook CRUD (`POST/GET/DELETE /api/{type}/{ns}/{repo}/webhooks`), `HubWebhook` struct, 4 HubStore methods, `shardline_hub_webhooks` table (Postgres + SQLite migrations). Delivery engine wired: POST with HMAC-SHA256 signatures on commit events.
+- **Single-process only** — ✅ Hub API now shares the main server's Postgres connection pool when configured. SQLite remains per-process by design. Postgres is required for multi-process shared deployments.
 
 ## New Features
 

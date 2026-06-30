@@ -45,7 +45,10 @@ impl HubAuth {
             .ok_or(HubApiError::Unauthorized)?;
         let header = header
             .to_str()
-            .map_err(|_| HubApiError::InvalidToken)?;
+            .map_err(|e| {
+            tracing::debug!("invalid authorization header encoding: {e}");
+            HubApiError::InvalidToken
+        })?;
         let token = parse_bearer_token(header)?;
         let claims = self.provider.verify_token(token)?;
         if !scope_allows(claims.scope(), required_scope) {
@@ -69,7 +72,7 @@ impl std::fmt::Debug for HubAuth {
     }
 }
 
-fn scope_allows(actual_scope: TokenScope, required_scope: TokenScope) -> bool {
+const fn scope_allows(actual_scope: TokenScope, required_scope: TokenScope) -> bool {
     match required_scope {
         TokenScope::Read => actual_scope.allows_read(),
         TokenScope::Write => actual_scope.allows_write(),

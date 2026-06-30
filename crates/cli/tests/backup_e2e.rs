@@ -149,6 +149,7 @@ async fn exercise_backup_manifest() -> Result<(), Box<dyn Error>> {
 
 async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
+    let resolved_root = std::fs::canonicalize(storage.path())?;
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -182,8 +183,12 @@ async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn
     }
 
     let stdout = String::from_utf8(output.stdout)?;
-    if !stdout.contains(&format!("root: {}", storage.path().display())) {
-        return Err(CliE2eInvariantError::new("backup did not resolve cwd as root").into());
+    let root_display = resolved_root.display().to_string();
+    if !stdout.contains(&format!("root: {root_display}")) {
+        return Err(CliE2eInvariantError::new(format!(
+            "backup did not resolve cwd as root (stdout: {stdout})"
+        ))
+        .into());
     }
     let manifest: Value = from_slice(&read(output_path)?)?;
     if manifest.get("latest_records").and_then(Value::as_u64) != Some(1) {
@@ -202,6 +207,7 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
         NonZeroUsize::new(4).ok_or("chunk size")?,
     )
     .await?;
+    let resolved_storage_root = std::fs::canonicalize(&storage_root)?;
     backend
         .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
         .await?;
@@ -229,9 +235,13 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
     }
 
     let stdout = String::from_utf8(output.stdout)?;
-    if !stdout.contains(&format!("root: {}", storage_root.display())) {
+    let root_display = resolved_storage_root.display().to_string();
+    if !stdout.contains(&format!("root: {root_display}")) {
         return Err(
-            CliE2eInvariantError::new("backup did not resolve project-local state root").into(),
+            CliE2eInvariantError::new(format!(
+                "backup did not resolve project-local state root (stdout: {stdout})"
+            ))
+            .into(),
         );
     }
     let manifest: Value = from_slice(&read(output_path)?)?;

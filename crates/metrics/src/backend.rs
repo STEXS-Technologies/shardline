@@ -9,12 +9,17 @@ pub struct StorageBackendMetrics {
 }
 
 impl StorageBackendMetrics {
+    /// # Panics
+    ///
+    /// Panics if prometheus metric registration fails (should not happen with static names).
+    #[must_use]
+    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let s3_requests = IntCounter::new("shardline_s3_requests_total", "S3 API requests").unwrap();
-        let s3_duration = Histogram::with_opts(HistogramOpts::new("shardline_s3_request_duration_seconds", "S3 request latency").buckets(vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0])).unwrap();
-        let s3_errors = IntCounter::new("shardline_s3_errors_total", "S3 API errors").unwrap();
-        let local_io_operations = IntCounter::new("shardline_local_io_operations_total", "Local filesystem IO operations").unwrap();
-        let local_io_duration = Histogram::with_opts(HistogramOpts::new("shardline_local_io_duration_seconds", "Local filesystem IO latency").buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5])).unwrap();
+        let s3_requests = IntCounter::new("shardline_s3_requests_total", "S3 API requests").expect("prometheus metric names are static constants");
+        let s3_duration = Histogram::with_opts(HistogramOpts::new("shardline_s3_request_duration_seconds", "S3 request latency").buckets(vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0])).expect("prometheus metric names are static constants");
+        let s3_errors = IntCounter::new("shardline_s3_errors_total", "S3 API errors").expect("prometheus metric names are static constants");
+        let local_io_operations = IntCounter::new("shardline_local_io_operations_total", "Local filesystem IO operations").expect("prometheus metric names are static constants");
+        let local_io_duration = Histogram::with_opts(HistogramOpts::new("shardline_local_io_duration_seconds", "Local filesystem IO latency").buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5])).expect("prometheus metric names are static constants");
 
         registry.register(Box::new(s3_requests.clone())).ok();
         registry.register(Box::new(s3_duration.clone())).ok();
