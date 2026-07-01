@@ -13,7 +13,6 @@ use super::LocalBackend;
 use crate::{
     ServerError, ShardMetadataLimits,
     error::{IndexError, ObjectStoreError},
-    record_store::MAX_LOCAL_RECORD_METADATA_BYTES,
     test_fixtures::{single_chunk_xorb, single_file_shard},
     upload_ingest::RequestBodyReader,
 };
@@ -204,6 +203,7 @@ async fn local_backend_new_rejects_symlinked_root_ancestor() {
 
 #[tokio::test]
 async fn local_backend_file_record_rejects_oversized_metadata_before_reading() {
+    use shardline_server_core::MAX_LOCAL_RECORD_METADATA_BYTES;
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
     let Ok(temp) = temp else {

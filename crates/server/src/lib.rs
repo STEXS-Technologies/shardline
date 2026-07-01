@@ -109,7 +109,7 @@ pub use database_migration::{
     bundled_database_migrations, run_database_migration,
 };
 pub use error::ServerError;
-pub(crate) use error::{InvalidLifecycleMetadataError, InvalidReconstructionResponseError, InvalidSerializedShardError};
+pub(crate) use error::{InvalidReconstructionResponseError, InvalidSerializedShardError};
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
 };
@@ -153,9 +153,6 @@ pub use storage_migration::{
 pub use xet_adapter::{
     FileReconstructionResponse, XorbUploadResponse, decode_serialized_xorb_chunks,
     try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
-};
-pub(crate) use xet_adapter::{
-    ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm, ReconstructionUrlRange,
 };
 
 use object_store::object_store_from_config;

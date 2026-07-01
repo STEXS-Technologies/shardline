@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use shardline_index::{
-    AsyncIndexStore, IndexStore, LifecycleStore, LocalIndexStore, LocalIndexStoreError, PostgresIndexStore,
+    AsyncIndexStore, LifecycleStore, LocalIndexStore, LocalIndexStoreError, PostgresIndexStore,
     PostgresMetadataStoreError, RetentionHold, RetentionHoldError,
 };
 use shardline_protocol::unix_now_seconds_lossy;

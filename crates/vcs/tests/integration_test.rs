@@ -22,7 +22,7 @@ fn make_grant(
     let rev = RevisionRef::new(revision).expect("valid revision ref");
     let sub = ProviderSubject::new(subject).expect("valid subject");
     GrantedRepositoryAccess::from_decision(
-        &shardline_vcs::AuthorizationRequest::new(sub, repository, rev, access),
+        &shardline_vcs::AuthorizationRequest::new(sub.clone(), repository, rev, access),
         shardline_vcs::AuthorizationDecision::Allow(sub),
     )
     .expect("allow decision should produce a grant")

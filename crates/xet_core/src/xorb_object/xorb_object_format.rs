@@ -509,12 +509,12 @@ impl XorbObject {
             cumulative_compressed_length += compressed_chunk_length as u32;
             unpacked_chunk_offset += chunk_uncompressed_length;
 
-            if *xorb.info.chunk_hashes.get(idx as usize).unwrap() != chunk_hash {
+            if *xorb.info.chunk_hashes.get(idx as usize).ok_or_else(|| CoreError::MalformedData("missing chunk hash".into()))? != chunk_hash {
                 warn!("XORB Validation: Chunk hash does not match Info object.");
                 return Ok(None);
             }
 
-            let boundary = *xorb.info.chunk_boundary_offsets.get(idx as usize).unwrap();
+            let boundary = *xorb.info.chunk_boundary_offsets.get(idx as usize).ok_or_else(|| CoreError::MalformedData("missing chunk boundary offset".into()))?;
             if (start_offset + compressed_chunk_length as u32) != boundary {
                 warn!("XORB Validation: Chunk boundary byte index does not match Info object.");
                 return Ok(None);
@@ -524,7 +524,7 @@ impl XorbObject {
 
             if xorb.info.boundaries_version == XORB_OBJECT_FORMAT_BOUNDARIES_VERSION
                 && unpacked_chunk_offset
-                    != *xorb.info.unpacked_chunk_offsets.get(idx as usize).unwrap()
+                    != *xorb.info.unpacked_chunk_offsets.get(idx as usize).ok_or_else(|| CoreError::MalformedData("missing unpacked chunk offset".into()))?
             {
                 warn!(
                     "XORB Validation: Chunk unpacked byte offset does not match Info object."
@@ -799,7 +799,7 @@ pub mod test_utils {
         num_chunks: u32,
         chunk_size: ChunkSize,
         compression_scheme: CompressionScheme,
-    ) -> (XorbObject, Vec<u8>, Vec<u8>, Vec<(MerkleHash, u32)>) {
+    ) -> Result<(XorbObject, Vec<u8>, Vec<u8>, Vec<(MerkleHash, u32)>), CoreError> {
         let mut c = XorbObject::default();
         let mut chunk_hashes = vec![];
         let mut writer = Cursor::new(vec![]);
@@ -819,7 +819,7 @@ pub mod test_utils {
 
             data_contents_raw.extend_from_slice(&bytes);
 
-            let _bytes_written = serialize_chunk(&bytes, &mut writer, compression_scheme).unwrap();
+            let _bytes_written = serialize_chunk(&bytes, &mut writer, compression_scheme)?;
 
             raw_chunk_boundaries.push((chunk_hash, data_contents_raw.len() as u32));
             chunk_hashes.push(chunk_hash);
@@ -837,7 +837,7 @@ pub mod test_utils {
             }
             let header_buf: [u8; 8] = writer_data[pos..pos + 8]
                 .try_into()
-                .expect("slice len is 8");
+                .map_err(|_| CoreError::MalformedData("failed to read chunk header".into()))?;
             let compressed_len =
                 u32::from_le_bytes([header_buf[1], header_buf[2], header_buf[3], 0]);
             pos += 8 + compressed_len as usize;
@@ -856,6 +856,6 @@ pub mod test_utils {
         c.info.fill_in_boundary_offsets();
         c.info_length = c.info.serialized_length() as u32;
 
-        (c, writer.into_inner(), data_contents_raw, raw_chunk_boundaries)
+        Ok((c, writer.into_inner(), data_contents_raw, raw_chunk_boundaries))
     }
 }
