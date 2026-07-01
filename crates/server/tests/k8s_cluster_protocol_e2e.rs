@@ -284,6 +284,7 @@ struct ProviderRoute<'route> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires k8s cluster / S3 / Postgres / Garnet infrastructure"]
 async fn k8s_cluster_native_xet_sparse_mutation_flow_uses_s3_postgres_and_garnet() {
     let result = async {
         let local_runtime = if let Some(config) = ClusterConfig::from_env() {
