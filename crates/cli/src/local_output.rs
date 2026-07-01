@@ -1,5 +1,3 @@
-#[cfg(not(unix))]
-use std::fs;
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
