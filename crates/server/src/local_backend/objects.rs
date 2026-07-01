@@ -107,13 +107,17 @@ impl LocalBackend {
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
-        tokio::task::block_in_place(|| {
-            let metadata = self.object_store().metadata(object_key)?;
+        let object_store = self.object_store();
+        let object_key = object_key.clone();
+        tokio::task::spawn_blocking(move || {
+            let metadata = object_store.metadata(&object_key)?;
             let Some(metadata) = metadata else {
                 return Err(ServerError::NotFound);
             };
             Ok(metadata.length())
         })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
@@ -175,8 +179,12 @@ impl LocalBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, ServerError> {
-        tokio::task::block_in_place(|| {
-            Ok(self.object_store().delete_if_present(object_key)?)
+        let object_store = self.object_store();
+        let object_key = object_key.clone();
+        tokio::task::spawn_blocking(move || {
+            Ok(object_store.delete_if_present(&object_key)?)
         })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 }

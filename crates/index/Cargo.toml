@@ -29,6 +29,7 @@ sqlx = { workspace = true, features = [
     "json",
 ] }
 thiserror.workspace = true
+async-trait.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [dev-dependencies]
