@@ -369,6 +369,11 @@ pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Resul
 }
 
 /// Renames a file. On non-macOS platforms, this delegates to `std::fs::rename`.
+///
+/// # Errors
+///
+/// Returns an error if the source path does not exist, the target path already
+/// exists, or the filesystem prevents the rename.
 #[cfg(not(target_os = "macos"))]
 pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Result<()> {
     let old_path = fd_child_path(parent, old_name);
@@ -406,6 +411,10 @@ pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
 }
 
 /// Removes a file. On non-macOS, delegates to `std::fs::remove_file`.
+///
+/// # Errors
+///
+/// Returns an error if the file does not exist or cannot be removed.
 #[cfg(not(target_os = "macos"))]
 pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
     let path = fd_child_path(parent, name);
