@@ -46,7 +46,6 @@ args = ["${@}", "check-all"]
 [tasks.audit]
 description = "Security audit for dependencies"
 workspace = false
-install_crate = "cargo-audit"
 command = "cargo"
 args = ["audit", "${@}"]
 
@@ -70,6 +69,15 @@ install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked"]
 command = "cargo"
 args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "${@}"]
+
+[tasks.test-e2e]
+description = "Run e2e integration tests from the e2e/ folder"
+workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked"]
+command = "cargo"
+args = ["nextest", "run", "--all-features", "--no-tests=pass", "${@}"]
+cwd = "e2e"
 
 [tasks.verify-release-binary]
 description = "Build the release shardline binary and smoke-test the packaged entrypoint"
