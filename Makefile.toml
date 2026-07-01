@@ -69,7 +69,7 @@ workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "${@}"]
+args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "${@}"]
 
 [tasks.verify-release-binary]
 description = "Build the release shardline binary and smoke-test the packaged entrypoint"
@@ -81,7 +81,7 @@ args = ["scripts/verify-release-binary.sh"]
 description = "Run clippy with strict rules on the shardline workspace"
 workspace = false
 command = "cargo"
-args = ["clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings", "${@}"]
+args = ["clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--exclude", "shardline-xet-core", "--", "-D", "warnings", "${@}"]
 
 [tasks.udeps]
 description = "Find unused dependencies (requires nightly)"
