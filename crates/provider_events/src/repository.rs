@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use shardline_index::{AsyncIndexStore, FileRecord, RecordStore, RetentionHold};
+use shardline_index::{AsyncIndexStore, FileRecord, RecordMutation, RecordStore, RecordTraversal, RetentionHold};
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_storage::ObjectKey;
 use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent};
@@ -45,23 +45,23 @@ where
     for renamed_record in &renamed_records {
         ensure_absent_or_matching_record(
             record_store,
-            &RecordStore::version_record_locator(record_store, renamed_record),
+            &RecordTraversal::version_record_locator(record_store, renamed_record),
             renamed_record,
         )
         .await?;
         ensure_absent_or_matching_record(
             record_store,
-            &RecordStore::latest_record_locator(record_store, renamed_record),
+            &RecordTraversal::latest_record_locator(record_store, renamed_record),
             renamed_record,
         )
         .await?;
     }
 
     for renamed_record in renamed_records {
-        RecordStore::write_version_record(record_store, &renamed_record)
+        RecordMutation::write_version_record(record_store, &renamed_record)
             .await
             .map_err(Into::into)?;
-        RecordStore::write_latest_record(record_store, &renamed_record)
+        RecordMutation::write_latest_record(record_store, &renamed_record)
             .await
             .map_err(Into::into)?;
 
@@ -200,7 +200,7 @@ where
         version_records: Vec::new(),
     };
 
-    RecordStore::visit_repository_latest_records(record_store, &repository_scope, |entry| {
+    RecordTraversal::visit_repository_latest_records(record_store, &repository_scope, |entry| {
         let record = parse_record_entry(&entry.bytes)?;
         if !record_belongs_to_repository(&record, repository) {
             return Ok::<(), ProviderEventsError>(());
@@ -212,7 +212,7 @@ where
     })
     .await?;
 
-    RecordStore::visit_repository_version_records(record_store, &repository_scope, |entry| {
+    RecordTraversal::visit_repository_version_records(record_store, &repository_scope, |entry| {
         let record = parse_record_entry(&entry.bytes)?;
         if !record_belongs_to_repository(&record, repository) {
             return Ok::<(), ProviderEventsError>(());
@@ -237,16 +237,16 @@ where
     RecordAdapter::Error: Into<ProviderEventsError>,
 {
     for locator in old_latest_locators {
-        RecordStore::delete_record_locator(record_store, &locator)
+        RecordMutation::delete_record_locator(record_store, &locator)
             .await
             .map_err(Into::into)?;
     }
     for locator in old_version_locators {
-        RecordStore::delete_record_locator(record_store, &locator)
+        RecordMutation::delete_record_locator(record_store, &locator)
             .await
             .map_err(Into::into)?;
     }
-    RecordStore::prune_empty_latest_records(record_store)
+    RecordMutation::prune_empty_latest_records(record_store)
         .await
         .map_err(Into::into)?;
     Ok(())

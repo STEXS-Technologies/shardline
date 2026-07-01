@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use serde_json::to_vec;
-use shardline_index::{FileRecord, RecordStore, RepositoryRecordScope};
+use shardline_index::{FileRecord, RecordMutation, RecordStore, RecordTraversal, RepositoryRecordScope};
 use shardline_protocol::RepositoryScope;
 use shardline_vcs::RepositoryRef;
 
@@ -13,14 +13,14 @@ use shardline_xet_adapter::{visit_stored_xorb_chunk_hashes, xorb_object_key};
 
 pub(super) async fn ensure_absent_or_matching_record<RecordAdapter>(
     record_store: &RecordAdapter,
-    locator: &RecordAdapter::Locator,
+    locator: &<RecordAdapter as RecordTraversal>::Locator,
     record: &FileRecord,
 ) -> Result<(), ProviderEventsError>
 where
     RecordAdapter: RecordStore + Sync,
     RecordAdapter::Error: Into<ProviderEventsError>,
 {
-    if !RecordStore::record_locator_exists(record_store, locator)
+    if !RecordTraversal::record_locator_exists(record_store, locator)
         .await
         .map_err(Into::into)?
     {
@@ -28,7 +28,7 @@ where
     }
 
     let expected_bytes = to_vec(record)?;
-    let existing_bytes = RecordStore::read_record_bytes(record_store, locator)
+    let existing_bytes = RecordTraversal::read_record_bytes(record_store, locator)
         .await
         .map_err(Into::into)?;
     if existing_bytes == expected_bytes {

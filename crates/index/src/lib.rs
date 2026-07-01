@@ -77,8 +77,8 @@ pub use postgres::{
 };
 pub use reconstruction::{FileReconstruction, ReconstructionTerm};
 pub use record::{
-    FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout, RecordStore,
-    RecordStoreFuture, RepositoryRecordScope, StoredRecord,
+    FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout, RecordMutation,
+    RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope, StoredRecord,
 };
 pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore, ReconstructionStore,

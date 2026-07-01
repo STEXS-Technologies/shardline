@@ -142,8 +142,11 @@ mod tests {
 
     use serde_json::to_vec;
     use shardline_index::{
-        FileChunkRecord, FileRecord, RecordStore, RecordStoreFuture, RepositoryRecordScope,
+        FileChunkRecord, FileRecord, RecordMutation, RecordStoreFuture,
+        RecordTraversal, RepositoryRecordScope,
     };
+
+    use RecordTraversal as _;
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use sqlx::{PgPool, postgres::PgPoolOptions, query};
     use thiserror::Error;
@@ -323,7 +326,7 @@ mod tests {
         }
     }
 
-    impl RecordStore for GuardedScopeRecordStore {
+    impl RecordTraversal for GuardedScopeRecordStore {
         type Error = GuardedScopeRecordStoreError;
         type Locator = String;
 
@@ -377,6 +380,30 @@ mod tests {
             Box::pin(ready(Ok(None)))
         }
 
+        fn record_locator_exists<'operation>(
+            &'operation self,
+            _locator: &'operation Self::Locator,
+        ) -> RecordStoreFuture<'operation, bool, Self::Error> {
+            Box::pin(ready(Ok(false)))
+        }
+
+        fn modified_since_epoch<'operation>(
+            &'operation self,
+            _locator: &'operation Self::Locator,
+        ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
+            Box::pin(ready(Ok(Duration::ZERO)))
+        }
+
+        fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
+            record.file_id.clone()
+        }
+
+        fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
+            record.content_hash.clone()
+        }
+    }
+
+    impl RecordMutation for GuardedScopeRecordStore {
         fn write_version_record<'operation>(
             &'operation self,
             _record: &'operation FileRecord,
@@ -398,30 +425,8 @@ mod tests {
             Box::pin(ready(Ok(())))
         }
 
-        fn record_locator_exists<'operation>(
-            &'operation self,
-            _locator: &'operation Self::Locator,
-        ) -> RecordStoreFuture<'operation, bool, Self::Error> {
-            Box::pin(ready(Ok(false)))
-        }
-
         fn prune_empty_latest_records(&self) -> RecordStoreFuture<'_, (), Self::Error> {
             Box::pin(ready(Ok(())))
-        }
-
-        fn modified_since_epoch<'operation>(
-            &'operation self,
-            _locator: &'operation Self::Locator,
-        ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
-            Box::pin(ready(Ok(Duration::ZERO)))
-        }
-
-        fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
-            record.file_id.clone()
-        }
-
-        fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
-            record.content_hash.clone()
         }
     }
 

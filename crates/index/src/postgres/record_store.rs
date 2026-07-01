@@ -6,14 +6,16 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow, query, query_scalar, typ
 
 use super::{PostgresMetadataStoreError, PostgresRecordKind, PostgresRecordLocator, i64_to_u64};
 use crate::{
-    DedupeShardMapping, FileRecord, RecordStore, RecordStoreFuture, RepositoryRecordScope,
-    StoredRecord, xet_hash_hex_string,
+    DedupeShardMapping, FileRecord, RecordMutation, RecordStore, RecordStoreFuture, RecordTraversal,
+    RepositoryRecordScope, StoredRecord, xet_hash_hex_string,
     record_key::record_key as shared_record_key,
     record_key::{
         repository_record_scope_key as shared_repository_record_scope_key,
         repository_scope_key as shared_repository_scope_key,
     },
 };
+
+use RecordTraversal as _;
 
 impl super::PostgresRecordStore {
     /// Inserts or replaces an immutable version record.
@@ -281,10 +283,9 @@ impl super::PostgresRecordStore {
     }
 }
 
-impl RecordStore for super::PostgresRecordStore {
+impl RecordTraversal for super::PostgresRecordStore {
     type Error = PostgresMetadataStoreError;
     type Locator = PostgresRecordLocator;
-
     fn list_latest_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
@@ -443,6 +444,55 @@ impl RecordStore for super::PostgresRecordStore {
         })
     }
 
+    fn record_locator_exists<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            let exists = query_scalar::<_, bool>(
+                "SELECT EXISTS(
+                    SELECT 1 FROM shardline_file_records WHERE record_key = $1
+                 )",
+            )
+            .bind(&locator.record_key)
+            .fetch_one(&self.pool)
+            .await?;
+            Ok(exists)
+        })
+    }
+
+    fn modified_since_epoch<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
+        Box::pin(async move {
+            let value = query_scalar::<_, i64>(
+                "SELECT FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT
+                 FROM shardline_file_records
+                 WHERE record_key = $1",
+            )
+            .bind(&locator.record_key)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(PostgresMetadataStoreError::RecordNotFound)?;
+            Ok(Duration::from_secs(i64_to_u64(value)?))
+        })
+    }
+
+    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
+        record_locator(PostgresRecordKind::Latest, record, None)
+    }
+
+    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
+        record_locator(
+            PostgresRecordKind::Version,
+            record,
+            Some(record.content_hash.clone()),
+        )
+    }
+}
+
+impl RecordMutation for super::PostgresRecordStore {
     fn write_version_record<'operation>(
         &'operation self,
         record: &'operation FileRecord,
@@ -480,55 +530,8 @@ impl RecordStore for super::PostgresRecordStore {
         })
     }
 
-    fn record_locator_exists<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, bool, Self::Error> {
-        Box::pin(async move {
-            let exists = query_scalar::<_, bool>(
-                "SELECT EXISTS(
-                    SELECT 1 FROM shardline_file_records WHERE record_key = $1
-                 )",
-            )
-            .bind(&locator.record_key)
-            .fetch_one(&self.pool)
-            .await?;
-            Ok(exists)
-        })
-    }
-
     fn prune_empty_latest_records(&self) -> RecordStoreFuture<'_, (), Self::Error> {
         Box::pin(async move { Ok(()) })
-    }
-
-    fn modified_since_epoch<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
-        Box::pin(async move {
-            let value = query_scalar::<_, i64>(
-                "SELECT FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT
-                 FROM shardline_file_records
-                 WHERE record_key = $1",
-            )
-            .bind(&locator.record_key)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(PostgresMetadataStoreError::RecordNotFound)?;
-            Ok(Duration::from_secs(i64_to_u64(value)?))
-        })
-    }
-
-    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        record_locator(PostgresRecordKind::Latest, record, None)
-    }
-
-    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        record_locator(
-            PostgresRecordKind::Version,
-            record,
-            Some(record.content_hash.clone()),
-        )
     }
 }
 

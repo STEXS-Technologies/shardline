@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use serde_json::{from_slice, to_vec};
 use shardline_index::{
     DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord, LocalIndexStore,
-    ReconstructionStore, ReconstructionTerm, RecordStore, StoredObjectId, parse_xet_hash_hex,
+    ReconstructionStore, ReconstructionTerm, RecordMutation, RecordTraversal, StoredObjectId, parse_xet_hash_hex,
     xet_hash_hex_string,
 };
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
@@ -95,8 +95,8 @@ async fn index_rebuild_restores_missing_latest_record() {
     let Ok(latest_record) = latest_record else {
         return;
     };
-    let latest_locator = RecordStore::latest_record_locator(&record_store, &latest_record);
-    let removed = RecordStore::delete_record_locator(&record_store, &latest_locator).await;
+    let latest_locator = RecordTraversal::latest_record_locator(&record_store, &latest_record);
+    let removed = RecordMutation::delete_record_locator(&record_store, &latest_locator).await;
     assert!(removed.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
@@ -142,7 +142,7 @@ async fn index_rebuild_reaches_a_fixed_point_on_second_run() {
             packed_end: 4,
         }],
     };
-    let written = RecordStore::write_version_record(&record_store, &record).await;
+    let written = RecordMutation::write_version_record(&record_store, &record).await;
     assert!(written.is_ok());
 
     let first_report = run_local_index_rebuild(storage.path().to_path_buf()).await;
@@ -197,8 +197,8 @@ async fn index_rebuild_prunes_stale_latest_record_without_versions() {
     let Ok(version_record) = version_record else {
         return;
     };
-    let version_locator = RecordStore::version_record_locator(&record_store, &version_record);
-    let removed = RecordStore::delete_record_locator(&record_store, &version_locator).await;
+    let version_locator = RecordTraversal::version_record_locator(&record_store, &version_record);
+    let removed = RecordMutation::delete_record_locator(&record_store, &version_locator).await;
     assert!(removed.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;
@@ -269,7 +269,7 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
         repository_scope: None,
         chunks: Vec::new(),
     };
-    let written = RecordStore::write_version_record(&record_store, &record).await;
+    let written = RecordMutation::write_version_record(&record_store, &record).await;
     assert!(written.is_ok());
     let object_id = StoredObjectId::new(ShardlineHash::from_bytes([35; 32]));
     let range = ChunkRange::new(0, 1);
@@ -355,10 +355,10 @@ async fn index_rebuild_restores_repository_scoped_latest_records() {
     let (Ok(first_record), Ok(second_record)) = (first_record, second_record) else {
         return;
     };
-    let first_locator = RecordStore::latest_record_locator(&record_store, &first_record);
-    let second_locator = RecordStore::latest_record_locator(&record_store, &second_record);
-    let removed_first = RecordStore::delete_record_locator(&record_store, &first_locator).await;
-    let removed_second = RecordStore::delete_record_locator(&record_store, &second_locator).await;
+    let first_locator = RecordTraversal::latest_record_locator(&record_store, &first_record);
+    let second_locator = RecordTraversal::latest_record_locator(&record_store, &second_record);
+    let removed_first = RecordMutation::delete_record_locator(&record_store, &first_locator).await;
+    let removed_second = RecordMutation::delete_record_locator(&record_store, &second_locator).await;
     assert!(removed_first.is_ok());
     assert!(removed_second.is_ok());
 
@@ -404,7 +404,7 @@ async fn exercise_index_rebuild_scans_large_repository_metadata_inventory()
 
     for index in 0..LARGE_METADATA_RECORD_COUNT {
         let record = synthetic_large_inventory_record(index)?;
-        RecordStore::write_version_record(&record_store, &record).await?;
+        RecordMutation::write_version_record(&record_store, &record).await?;
         records.push(record);
     }
 
@@ -423,7 +423,7 @@ async fn exercise_index_rebuild_scans_large_repository_metadata_inventory()
     assert!(report.is_clean());
 
     for record in records.iter().step_by(17) {
-        let latest_bytes = RecordStore::read_latest_record_bytes(&record_store, record)
+        let latest_bytes = RecordTraversal::read_latest_record_bytes(&record_store, record)
             .await?
             .ok_or_else(|| ServerTestInvariantError::new("missing rebuilt latest record"))?;
         let latest_record = from_slice::<FileRecord>(&latest_bytes)?;
@@ -457,7 +457,7 @@ async fn index_rebuild_reports_invalid_version_record_json() {
             packed_end: 12,
         }],
     };
-    let written = RecordStore::write_version_record(&record_store, &record).await;
+    let written = RecordMutation::write_version_record(&record_store, &record).await;
     assert!(written.is_ok());
     let connection = Connection::open(storage.path().join("metadata.sqlite3"));
     assert!(connection.is_ok());
@@ -554,8 +554,8 @@ async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
     );
     assert!(written.is_ok());
 
-    let latest_locator = RecordStore::latest_record_locator(&record_store, &version_record);
-    let removed = RecordStore::delete_record_locator(&record_store, &latest_locator).await;
+    let latest_locator = RecordTraversal::latest_record_locator(&record_store, &version_record);
+    let removed = RecordMutation::delete_record_locator(&record_store, &latest_locator).await;
     assert!(removed.is_ok());
 
     let report = run_local_index_rebuild(storage.path().to_path_buf()).await;

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{
-    AsyncIndexStore, FileRecordStorageLayout, RecordStore, StoredRecord, xet_hash_hex_string,
+    AsyncIndexStore, FileRecordStorageLayout, RecordStore, RecordTraversal, StoredRecord, xet_hash_hex_string,
 };
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore};
 
@@ -46,12 +46,12 @@ where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<GcError>,
 {
-    RecordStore::visit_latest_records(record_store, |entry| {
+    RecordTraversal::visit_latest_records(record_store, |entry| {
         collect_record_object_references(object_store, frontends, &entry, reachability)
     })
     .await?;
 
-    RecordStore::visit_version_records(record_store, |entry| {
+    RecordTraversal::visit_version_records(record_store, |entry| {
         collect_record_object_references(object_store, frontends, &entry, reachability)
     })
     .await?;

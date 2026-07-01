@@ -2,7 +2,7 @@ use std::{collections::HashSet, path::PathBuf};
 
 use shardline_index::{
     AsyncIndexStore, FileRecordStorageLayout, LocalIndexStore, PostgresIndexStore,
-    PostgresRecordStore, RecordStore, xet_hash_hex_string,
+    PostgresRecordStore, RecordStore, RecordTraversal, xet_hash_hex_string,
 };
 use shardline_storage::ObjectStore;
 
@@ -352,12 +352,12 @@ where
     IndexAdapter: AsyncIndexStore + Sync,
     IndexAdapter::Error: Into<ServerError>,
 {
-    RecordStore::visit_latest_records(record_store, |entry| {
+    RecordTraversal::visit_latest_records(record_store, |entry| {
         collect_record_object_references(object_store, frontends, &entry.bytes, reachability)
     })
     .await?;
 
-    RecordStore::visit_version_records(record_store, |entry| {
+    RecordTraversal::visit_version_records(record_store, |entry| {
         collect_record_object_references(object_store, frontends, &entry.bytes, reachability)
     })
     .await?;

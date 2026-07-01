@@ -1,5 +1,5 @@
 use shardline_index::{
-    FileRecord, PostgresMetadataStoreError, RecordStore, RepositoryRecordScope,
+    FileRecord, PostgresMetadataStoreError, RecordStore, RecordTraversal, RepositoryRecordScope,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::{DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
@@ -340,7 +340,7 @@ impl super::PostgresBackend {
         } else {
             self.record_store.latest_record_locator(&probe)
         };
-        let bytes = RecordStore::read_record_bytes(&self.record_store, &locator)
+        let bytes = RecordTraversal::read_record_bytes(&self.record_store, &locator)
             .await
             .map_err(map_record_store_error)?;
         parse_stored_file_record_bytes(&bytes)
@@ -358,7 +358,7 @@ where
 {
     let repository = RepositoryRecordScope::from_repository_scope(repository_scope);
     let mut found = false;
-    RecordStore::visit_repository_latest_records(record_store, &repository, |entry| {
+    RecordTraversal::visit_repository_latest_records(record_store, &repository, |entry| {
         if found {
             return Ok::<(), ServerError>(());
         }
@@ -373,7 +373,7 @@ where
         return Ok(true);
     }
 
-    RecordStore::visit_repository_version_records(record_store, &repository, |entry| {
+    RecordTraversal::visit_repository_version_records(record_store, &repository, |entry| {
         if found {
             return Ok::<(), ServerError>(());
         }

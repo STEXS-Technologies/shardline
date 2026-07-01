@@ -2,7 +2,7 @@ pub(crate) use shardline_server_core::OpsRecordStore;
 
 #[cfg(test)]
 mod tests {
-    use shardline_index::{FileRecord, RecordStore};
+    use shardline_index::{FileRecord, RecordTraversal};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use shardline_server_core::OpsRecordKind;
 

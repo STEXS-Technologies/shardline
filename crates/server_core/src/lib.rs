@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use shardline_index::{LocalRecordStore, PostgresRecordStore, RecordStore};
+use shardline_index::{LocalRecordStore, PostgresRecordStore, RecordStore, RecordTraversal};
 use shardline_protocol::{
     ByteRange, RepositoryProvider, ShardlineHash, TokenClaims, TokenCodecError, TokenScope,
 };
@@ -786,25 +786,25 @@ pub enum OpsRecordKind {
 /// Extra locator metadata needed by operator tooling.
 pub trait OpsRecordStore: RecordStore {
     /// Renders a stable operator-facing location for one record locator.
-    fn locator_display(&self, locator: &Self::Locator) -> String;
+    fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String;
 
     /// Extracts the file identifier implied by a locator.
-    fn locator_file_id(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String>;
+    fn locator_file_id(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String>;
 
     /// Extracts the immutable content hash implied by a version locator.
-    fn locator_content_hash(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String>;
+    fn locator_content_hash(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String>;
 }
 
 impl OpsRecordStore for LocalRecordStore {
-    fn locator_display(&self, locator: &Self::Locator) -> String {
+    fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String {
         locator.record_key().to_owned()
     }
 
-    fn locator_file_id(&self, locator: &Self::Locator, _kind: OpsRecordKind) -> Option<String> {
+    fn locator_file_id(&self, locator: &<Self as RecordTraversal>::Locator, _kind: OpsRecordKind) -> Option<String> {
         Some(locator.file_id().to_owned())
     }
 
-    fn locator_content_hash(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String> {
+    fn locator_content_hash(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String> {
         if kind != OpsRecordKind::Version {
             return None;
         }
@@ -814,15 +814,15 @@ impl OpsRecordStore for LocalRecordStore {
 }
 
 impl OpsRecordStore for PostgresRecordStore {
-    fn locator_display(&self, locator: &Self::Locator) -> String {
+    fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String {
         locator.record_key().to_owned()
     }
 
-    fn locator_file_id(&self, locator: &Self::Locator, _kind: OpsRecordKind) -> Option<String> {
+    fn locator_file_id(&self, locator: &<Self as RecordTraversal>::Locator, _kind: OpsRecordKind) -> Option<String> {
         Some(locator.file_id().to_owned())
     }
 
-    fn locator_content_hash(&self, locator: &Self::Locator, kind: OpsRecordKind) -> Option<String> {
+    fn locator_content_hash(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String> {
         if kind != OpsRecordKind::Version {
             return None;
         }

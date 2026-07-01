@@ -16,7 +16,7 @@ use super::helpers::legacy_record_path;
 use crate::{
     DedupeShardMapping, DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord,
     IndexStore, LifecycleStore, MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState,
-    QuarantineCandidate, ReconstructionStore, ReconstructionTerm, RecordStore, RetentionHold,
+    QuarantineCandidate, ReconstructionStore, ReconstructionTerm, RecordMutation, RecordStore, RecordTraversal, RetentionHold,
     WebhookDelivery, XorbId, parse_xet_hash_hex, test_invariant_error::LocalSqliteInvariantError,
     xet_hash_hex_string,
 };
@@ -164,15 +164,15 @@ async fn exercise_local_record_store_commit_file_version_metadata_is_atomic()
         return Err(LocalSqliteInvariantError::new("expected sqlite trigger failure").into());
     }
 
-    let latest_locator = RecordStore::latest_record_locator(&store, &record);
-    let version_locator = RecordStore::version_record_locator(&store, &record);
-    if RecordStore::record_locator_exists(&store, &latest_locator).await? {
+    let latest_locator = RecordTraversal::latest_record_locator(&store, &record);
+    let version_locator = RecordTraversal::version_record_locator(&store, &record);
+    if RecordTraversal::record_locator_exists(&store, &latest_locator).await? {
         return Err(LocalSqliteInvariantError::new(
             "latest locator survived failed transaction",
         )
         .into());
     }
-    if RecordStore::record_locator_exists(&store, &version_locator).await? {
+    if RecordTraversal::record_locator_exists(&store, &version_locator).await? {
         return Err(LocalSqliteInvariantError::new(
             "version locator survived failed transaction",
         )
@@ -207,15 +207,15 @@ async fn exercise_local_record_store_commit_native_shard_metadata_is_atomic()
             LocalSqliteInvariantError::new("expected sqlite dedupe trigger failure").into(),
         );
     }
-    let latest_locator = RecordStore::latest_record_locator(&record_store, &record);
-    let version_locator = RecordStore::version_record_locator(&record_store, &record);
-    if RecordStore::record_locator_exists(&record_store, &latest_locator).await? {
+    let latest_locator = RecordTraversal::latest_record_locator(&record_store, &record);
+    let version_locator = RecordTraversal::version_record_locator(&record_store, &record);
+    if RecordTraversal::record_locator_exists(&record_store, &latest_locator).await? {
         return Err(LocalSqliteInvariantError::new(
             "latest locator survived failed shard transaction",
         )
         .into());
     }
-    if RecordStore::record_locator_exists(&record_store, &version_locator).await? {
+    if RecordTraversal::record_locator_exists(&record_store, &version_locator).await? {
         return Err(LocalSqliteInvariantError::new(
             "version locator survived failed shard transaction",
         )
@@ -321,8 +321,8 @@ async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
     let storage = shardline_test_support::TempStorage::new();
     let store = LocalRecordStore::new(storage.path_buf())?;
     let record = sample_record(Some(sample_repository_scope()?));
-    RecordStore::write_version_record(&store, &record).await?;
-    RecordStore::write_latest_record(&store, &record).await?;
+    RecordMutation::write_version_record(&store, &record).await?;
+    RecordMutation::write_latest_record(&store, &record).await?;
 
     let corrupt_bytes = b"{not-json".to_vec();
     let connection = open_sqlite_connection(storage.path())?;
@@ -338,8 +338,8 @@ async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
         ],
     )?;
 
-    let version_locator = RecordStore::version_record_locator(&store, &record);
-    let loaded = RecordStore::read_record_bytes(&store, &version_locator).await?;
+    let version_locator = RecordTraversal::version_record_locator(&store, &record);
+    let loaded = RecordTraversal::read_record_bytes(&store, &version_locator).await?;
     if loaded != corrupt_bytes {
         return Err(LocalSqliteInvariantError::new(
             "sqlite record read normalized corrupt bytes",
@@ -405,23 +405,23 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
 
         match step & 15 {
             0 => {
-                RecordStore::write_latest_record(&local_record_store, record).await?;
-                RecordStore::write_latest_record(&memory_record_store, record).await?;
+                RecordMutation::write_latest_record(&local_record_store, record).await?;
+                RecordMutation::write_latest_record(&memory_record_store, record).await?;
             }
             1 => {
-                RecordStore::write_version_record(&local_record_store, record).await?;
-                RecordStore::write_version_record(&memory_record_store, record).await?;
+                RecordMutation::write_version_record(&local_record_store, record).await?;
+                RecordMutation::write_version_record(&memory_record_store, record).await?;
             }
             2 => {
                 let local_locator =
-                    RecordStore::latest_record_locator(&local_record_store, record);
+                    RecordTraversal::latest_record_locator(&local_record_store, record);
                 let memory_locator =
-                    RecordStore::latest_record_locator(&memory_record_store, record);
+                    RecordTraversal::latest_record_locator(&memory_record_store, record);
                 let local_exists =
-                    RecordStore::record_locator_exists(&local_record_store, &local_locator)
+                    RecordTraversal::record_locator_exists(&local_record_store, &local_locator)
                         .await?;
                 let memory_exists =
-                    RecordStore::record_locator_exists(&memory_record_store, &memory_locator)
+                    RecordTraversal::record_locator_exists(&memory_record_store, &memory_locator)
                         .await?;
                 if local_exists != memory_exists {
                     return Err(LocalSqliteInvariantError::new(
@@ -430,22 +430,22 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                     .into());
                 }
                 if local_exists {
-                    RecordStore::delete_record_locator(&local_record_store, &local_locator)
+                    RecordMutation::delete_record_locator(&local_record_store, &local_locator)
                         .await?;
-                    RecordStore::delete_record_locator(&memory_record_store, &memory_locator)
+                    RecordMutation::delete_record_locator(&memory_record_store, &memory_locator)
                         .await?;
                 }
             }
             3 => {
                 let local_locator =
-                    RecordStore::version_record_locator(&local_record_store, record);
+                    RecordTraversal::version_record_locator(&local_record_store, record);
                 let memory_locator =
-                    RecordStore::version_record_locator(&memory_record_store, record);
+                    RecordTraversal::version_record_locator(&memory_record_store, record);
                 let local_exists =
-                    RecordStore::record_locator_exists(&local_record_store, &local_locator)
+                    RecordTraversal::record_locator_exists(&local_record_store, &local_locator)
                         .await?;
                 let memory_exists =
-                    RecordStore::record_locator_exists(&memory_record_store, &memory_locator)
+                    RecordTraversal::record_locator_exists(&memory_record_store, &memory_locator)
                         .await?;
                 if local_exists != memory_exists {
                     return Err(LocalSqliteInvariantError::new(
@@ -454,9 +454,9 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                     .into());
                 }
                 if local_exists {
-                    RecordStore::delete_record_locator(&local_record_store, &local_locator)
+                    RecordMutation::delete_record_locator(&local_record_store, &local_locator)
                         .await?;
-                    RecordStore::delete_record_locator(&memory_record_store, &memory_locator)
+                    RecordMutation::delete_record_locator(&memory_record_store, &memory_locator)
                         .await?;
                 }
             }
@@ -767,20 +767,20 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
     let record_store = LocalRecordStore::new(storage.path().to_path_buf())?;
     let index_store = LocalIndexStore::new(storage.path().to_path_buf())?;
 
-    let latest_locator = RecordStore::latest_record_locator(&record_store, &record);
-    let version_locator = RecordStore::version_record_locator(&record_store, &record);
-    if !RecordStore::record_locator_exists(&record_store, &latest_locator).await? {
+    let latest_locator = RecordTraversal::latest_record_locator(&record_store, &record);
+    let version_locator = RecordTraversal::version_record_locator(&record_store, &record);
+    if !RecordTraversal::record_locator_exists(&record_store, &latest_locator).await? {
         return Err(
             LocalSqliteInvariantError::new("latest legacy record was not imported").into(),
         );
     }
-    if !RecordStore::record_locator_exists(&record_store, &version_locator).await? {
+    if !RecordTraversal::record_locator_exists(&record_store, &version_locator).await? {
         return Err(
             LocalSqliteInvariantError::new("version legacy record was not imported").into(),
         );
     }
     let latest_record = from_slice::<FileRecord>(
-        &RecordStore::read_record_bytes(&record_store, &latest_locator).await?,
+        &RecordTraversal::read_record_bytes(&record_store, &latest_locator).await?,
     )?;
     if latest_record != record {
         return Err(LocalSqliteInvariantError::new(
@@ -1145,8 +1145,8 @@ async fn assert_local_sqlite_matches_memory_state(
     }
 
     for record in &fixtures.records {
-        if RecordStore::read_latest_record_bytes(local_record_store, record).await?
-            != RecordStore::read_latest_record_bytes(memory_record_store, record).await?
+        if RecordTraversal::read_latest_record_bytes(local_record_store, record).await?
+            != RecordTraversal::read_latest_record_bytes(memory_record_store, record).await?
         {
             return Err(LocalSqliteInvariantError::new(
                 "latest-record lookup diverged from memory",
@@ -1282,13 +1282,13 @@ where
     Store::Error: Error + Send + Sync + 'static,
 {
     let locators = if latest {
-        RecordStore::list_latest_record_locators(store).await?
+        RecordTraversal::list_latest_record_locators(store).await?
     } else {
-        RecordStore::list_version_record_locators(store).await?
+        RecordTraversal::list_version_record_locators(store).await?
     };
     let mut entries = Vec::with_capacity(locators.len());
     for locator in locators {
-        let bytes = RecordStore::read_record_bytes(store, &locator).await?;
+        let bytes = RecordTraversal::read_record_bytes(store, &locator).await?;
         let record = from_slice::<FileRecord>(&bytes)?;
         entries.push(canonical_file_record(&record));
     }
