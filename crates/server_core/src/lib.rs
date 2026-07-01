@@ -35,6 +35,7 @@ use shardline_storage::{
 use thiserror::Error;
 
 pub mod auth;
+pub mod protocol_support;
 pub mod server_frontend;
 
 /// Provider-agnostic authentication trait.

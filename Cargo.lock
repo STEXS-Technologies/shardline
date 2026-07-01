@@ -3267,9 +3267,11 @@ name = "shardline-server-core"
 version = "1.0.0"
 dependencies = [
  "blake3",
+ "hex",
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",

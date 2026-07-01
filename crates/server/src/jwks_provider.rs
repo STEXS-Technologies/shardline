@@ -1,55 +1,45 @@
 use std::{
     str::FromStr,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::{Arc, OnceLock},
+    time::Duration,
 };
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::{AuthError, AuthProvider};
+use tokio::sync::RwLock;
 
-const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// JWKS authentication provider.
 ///
-/// Validates tokens against a static JWKS endpoint, caching keys with a TTL.
+/// Validates tokens against a JWKS endpoint, caching keys and refreshing
+/// them in the background using ETag-based conditional requests.
 pub struct JwksProvider {
     client: Client,
     jwks_url: String,
     issuer: String,
-    cached_keys: Mutex<Option<CachedJwks>>,
+    cached_keys: Arc<RwLock<Option<CachedJwks>>>,
+    background_handle: Arc<OnceLock<tokio::task::JoinHandle<()>>>,
 }
 
 impl Clone for JwksProvider {
     fn clone(&self) -> Self {
-        let cached_keys = self
-            .cached_keys
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
         Self {
             client: self.client.clone(),
             jwks_url: self.jwks_url.clone(),
             issuer: self.issuer.clone(),
-            cached_keys: Mutex::new(cached_keys),
+            cached_keys: Arc::clone(&self.cached_keys),
+            background_handle: Arc::clone(&self.background_handle),
         }
     }
 }
 
 struct CachedJwks {
     keys: Arc<Vec<Jwk>>,
-    fetched_at: Instant,
-}
-
-impl Clone for CachedJwks {
-    fn clone(&self) -> Self {
-        Self {
-            keys: Arc::clone(&self.keys),
-            fetched_at: self.fetched_at,
-        }
-    }
+    etag: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,11 +92,19 @@ impl JwksProvider {
             .build()
             .map_err(|e| JwksProviderError::HttpClient(e.to_string()))?;
 
-        let jwks: JwksResponse = client
+        let response = client
             .get(jwks_url)
             .send()
             .await
-            .map_err(|e| JwksProviderError::JwksFetch(e.to_string()))?
+            .map_err(|e| JwksProviderError::JwksFetch(e.to_string()))?;
+
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+
+        let jwks: JwksResponse = response
             .json()
             .await
             .map_err(|e| JwksProviderError::JwksFetch(e.to_string()))?;
@@ -115,46 +113,83 @@ impl JwksProvider {
             client,
             jwks_url: jwks_url.to_owned(),
             issuer: issuer.to_owned(),
-            cached_keys: Mutex::new(Some(CachedJwks {
+            cached_keys: Arc::new(RwLock::new(Some(CachedJwks {
                 keys: Arc::new(jwks.keys),
-                fetched_at: Instant::now(),
-            })),
+                etag,
+            }))),
+            background_handle: Arc::new(OnceLock::new()),
         })
     }
 
     async fn get_or_refresh_keys(&self) -> Result<Arc<Vec<Jwk>>, AuthError> {
-        {
-            let guard = self
-                .cached_keys
-                .lock()
-                .map_err(|e| AuthError::ProviderError(e.to_string()))?;
-            if let Some(cached) = guard.as_ref() {
-                if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
-                    return Ok(Arc::clone(&cached.keys));
+        self.start_background_refresh();
+
+        let guard = self.cached_keys.read().await;
+        if let Some(cached) = guard.as_ref() {
+            return Ok(Arc::clone(&cached.keys));
+        }
+        Err(AuthError::ProviderError(
+            "JWKS keys not available".to_owned(),
+        ))
+    }
+
+    fn start_background_refresh(&self) {
+        let provider = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(JWKS_REFRESH_INTERVAL);
+            loop {
+                interval.tick().await;
+                if let Err(e) = provider.refresh_keys_if_changed().await {
+                    tracing::warn!("JWKS background refresh failed: {e}");
                 }
             }
+        });
+        let _ = self.background_handle.set(handle);
+    }
+
+    async fn refresh_keys_if_changed(&self) -> Result<(), AuthError> {
+        let etag = self
+            .cached_keys
+            .read()
+            .await
+            .as_ref()
+            .and_then(|c| c.etag.clone());
+
+        let mut request = self.client.get(&self.jwks_url);
+        if let Some(etag) = &etag {
+            request = request.header("If-None-Match", etag);
         }
 
-        let jwks: JwksResponse = self
-            .client
-            .get(&self.jwks_url)
+        let response = request
             .send()
             .await
-            .map_err(|e| AuthError::ProviderError(format!("JWKS fetch failed: {e}")))?
-            .json()
-            .await
-            .map_err(|e| AuthError::ProviderError(format!("JWKS parse failed: {e}")))?;
+            .map_err(|e| AuthError::ProviderError(format!("JWKS refresh request failed: {e}")))?;
 
-        let keys = Arc::new(jwks.keys);
-        let mut guard = self
-            .cached_keys
-            .lock()
-            .map_err(|e| AuthError::ProviderError(e.to_string()))?;
-        *guard = Some(CachedJwks {
-            keys: Arc::clone(&keys),
-            fetched_at: Instant::now(),
-        });
-        Ok(keys)
+        match response.status() {
+            StatusCode::NOT_MODIFIED => Ok(()),
+            StatusCode::OK => {
+                let new_etag = response
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_owned());
+
+                let jwks: JwksResponse = response.json().await.map_err(|e| {
+                    AuthError::ProviderError(format!("JWKS refresh parse failed: {e}"))
+                })?;
+
+                let new_cache = CachedJwks {
+                    keys: Arc::new(jwks.keys),
+                    etag: new_etag,
+                };
+
+                *self.cached_keys.write().await = Some(new_cache);
+                Ok(())
+            }
+            status => Err(AuthError::ProviderError(format!(
+                "JWKS refresh failed with status: {status}"
+            ))),
+        }
     }
 
     fn verify_jwt_claims(

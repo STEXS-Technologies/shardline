@@ -43,6 +43,9 @@ mod error;
 mod protocol_support;
 mod traits;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::OciAdapterError;
 pub use traits::OciBackend;
 
@@ -1007,42 +1010,4 @@ fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Res
     std::fs::rename(&temporary, path)?;
     let _ignored = root;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use sha2::{Digest, Sha256};
-
-    use super::{SerializableSha256State, new_upload_session_id};
-
-    #[test]
-    fn upload_session_ids_are_hex_and_not_reused_back_to_back() {
-        let first = new_upload_session_id();
-        let second = new_upload_session_id();
-
-        assert_eq!(first.len(), 32);
-        assert_eq!(second.len(), 32);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(second.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn serializable_sha256_state_matches_reference_digest() {
-        let mut state = SerializableSha256State::default();
-        assert!(state.update(b"chunk-1").is_ok());
-        assert!(state.update(&vec![b'x'; 1_000_000]).is_ok());
-        assert!(state.update(b"chunk-3").is_ok());
-
-        let mut reference = Sha256::new();
-        reference.update(b"chunk-1");
-        reference.update(vec![b'x'; 1_000_000]);
-        reference.update(b"chunk-3");
-        let expected = hex::encode(reference.finalize());
-
-        assert!(matches!(
-            state.finalize_hex().as_deref(),
-            Ok(actual) if actual == expected
-        ));
-    }
 }
