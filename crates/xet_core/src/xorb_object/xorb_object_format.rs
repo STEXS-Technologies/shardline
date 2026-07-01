@@ -837,7 +837,11 @@ pub mod test_utils {
             }
             let header_buf: [u8; 8] = writer_data[pos..pos + 8]
                 .try_into()
-                .map_err(|_| CoreError::MalformedData("failed to read chunk header".into()))?;
+                .map_err(|e: std::array::TryFromSliceError| {
+                    CoreError::MalformedData(format!(
+                        "failed to read chunk header: {e}"
+                    ))
+                })?;
             let compressed_len =
                 u32::from_le_bytes([header_buf[1], header_buf[2], header_buf[3], 0]);
             pos += 8 + compressed_len as usize;

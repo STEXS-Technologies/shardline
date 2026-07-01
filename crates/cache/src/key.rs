@@ -1,12 +1,14 @@
+use std::sync::Arc;
+
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
 /// Repository scope material embedded into a cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepositoryScopeCacheKey {
-    provider: String,
-    owner: String,
-    repo: String,
-    revision: Option<String>,
+    provider: &'static str,
+    owner: Arc<str>,
+    repo: Arc<str>,
+    revision: Option<Arc<str>>,
 }
 
 impl RepositoryScopeCacheKey {
@@ -14,17 +16,17 @@ impl RepositoryScopeCacheKey {
     #[must_use]
     pub fn from_scope(scope: &RepositoryScope) -> Self {
         Self {
-            provider: provider_token(scope.provider()).to_owned(),
-            owner: scope.owner().to_owned(),
-            repo: scope.name().to_owned(),
-            revision: scope.revision().map(ToOwned::to_owned),
+            provider: provider_token(scope.provider()),
+            owner: Arc::from(scope.owner()),
+            repo: Arc::from(scope.name()),
+            revision: scope.revision().map(|r| Arc::from(r)),
         }
     }
 
     /// Returns the repository provider.
     #[must_use]
     pub fn provider(&self) -> &str {
-        &self.provider
+        self.provider
     }
 
     /// Returns the repository owner or namespace.

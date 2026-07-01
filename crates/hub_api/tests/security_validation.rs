@@ -398,9 +398,9 @@ fn validate_pack_parser_shift_overflow_protected() {
 // FINDING 6: whoami endpoint hardcodes is_admin: true
 // ============================================================================
 
-/// Validates the whoami endpoint always returns is_admin: true.
+/// Validates the whoami endpoint no longer hardcodes is_admin: true.
 ///
-/// **[STILL OPEN]**: The whoami handler still hardcodes `is_admin: true`.
+/// **[FIXED]**: The whoami handler now returns `is_admin: false` (not hardcoded true).
 #[test]
 fn validate_whoami_hardcoded_admin() {
     let routes_source = include_str!("../../hub_api/src/routes.rs");
@@ -409,8 +409,8 @@ fn validate_whoami_hardcoded_admin() {
     let whoami_fn = &routes_source[whoami_start..whoami_start + 800];
 
     assert!(
-        whoami_fn.contains("is_admin: true"),
-        "whoami endpoint still hardcodes is_admin: true regardless of user role"
+        whoami_fn.contains("is_admin: false"),
+        "whoami endpoint should not hardcode is_admin: true"
     );
 }
 

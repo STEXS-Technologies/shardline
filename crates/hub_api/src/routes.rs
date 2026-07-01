@@ -109,6 +109,7 @@ async fn deliver_one_webhook(
     body: &[u8],
     secret: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    validate_webhook_url(url)?;
     let mut request = client
         .post(url)
         .header("Content-Type", "application/json")
@@ -275,7 +276,7 @@ async fn whoami(
         .map_or_else(|| "anonymous".to_owned(), |ctx| ctx.subject().to_owned());
     Ok(Json(WhoamiResponse {
         name,
-        is_admin: true,
+        is_admin: false,
     }))
 }
 

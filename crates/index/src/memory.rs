@@ -12,12 +12,10 @@ use thiserror::Error;
 use crate::{
     AsyncIndexStore, DedupeShardMapping, DedupeStore,
     FileId, FileReconstruction, FileRecord, IndexStoreFuture, LifecycleStore, ProviderRepositoryState,
-    QuarantineCandidate, ReconstructionStore, RecordMutation, RecordStore, RecordStoreFuture,
+    QuarantineCandidate, ReconstructionStore, RecordMutation, RecordStoreFuture,
     RecordTraversal, RepositoryRecordScope, RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId,
     xet_hash_hex_string,
 };
-
-use RecordTraversal as _;
 
 /// In-memory implementation of [`IndexStore`].
 #[derive(Debug, Clone, Default)]

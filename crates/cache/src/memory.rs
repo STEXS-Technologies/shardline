@@ -13,7 +13,7 @@ use crate::{AsyncReconstructionCache, ReconstructionCacheFuture, ReconstructionC
 
 #[derive(Debug, Clone)]
 struct MemoryEntry {
-    payload: Vec<u8>,
+    payload: Arc<Vec<u8>>,
     expires_at: Instant,
     inserted_at: Instant,
     seq: u64,
@@ -84,19 +84,6 @@ impl CacheInner {
             }
         }
     }
-
-    fn prune_expired(&mut self, now: Instant) {
-        let expired: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.expires_at <= now)
-            .map(|(k, v)| (k.clone(), EvictionKey(v.inserted_at, v.seq)))
-            .collect();
-        for (key, eviction_key) in expired {
-            self.entries.remove(&key);
-            self.eviction_order.remove(&eviction_key);
-        }
-    }
 }
 
 /// Bounded in-memory reconstruction cache adapter.
@@ -134,7 +121,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 let inner = self.inner.read().await;
                 if let Some(entry) = inner.entries.get(key) {
                     if entry.expires_at > now {
-                        return Ok(Some(entry.payload.clone()));
+                        return Ok(Some(entry.payload.as_ref().clone()));
                     }
                 } else if !inner.loading.contains_key(key) {
                     return Ok(None);
@@ -145,7 +132,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
 
             if let Some(entry) = inner.entries.get(key) {
                 if entry.expires_at > now {
-                    return Ok(Some(entry.payload.clone()));
+                    return Ok(Some(entry.payload.as_ref().clone()));
                 }
             }
 
@@ -157,7 +144,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 let read_inner = self.inner.read().await;
                 if let Some(entry) = read_inner.entries.get(key) {
                     if entry.expires_at > Instant::now() {
-                        return Ok(Some(entry.payload.clone()));
+                        return Ok(Some(entry.payload.as_ref().clone()));
                     }
                 }
                 return Ok(None);
@@ -186,14 +173,13 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             let now = Instant::now();
             let expires_at = now.checked_add(self.ttl).map_or(now, |value| value);
             let mut inner = self.inner.write().await;
-            inner.prune_expired(now);
             if !inner.entries.contains_key(key) && inner.entries.len() >= self.max_entries.get() {
                 inner.evict_oldest();
             }
             inner.insert(
                 key.clone(),
                 MemoryEntry {
-                    payload: payload.to_vec(),
+                    payload: Arc::new(payload.to_vec()),
                     expires_at,
                     inserted_at: now,
                     seq: 0,
