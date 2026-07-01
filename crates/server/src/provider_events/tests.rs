@@ -17,7 +17,7 @@ use shardline_vcs::{
     ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind, RevisionRef,
     WebhookDeliveryId,
 };
-use xet_core_structures::xorb_object::{
+use shardline_xet_core::xorb_object::{
     CompressionScheme, SerializedXorbObject,
     xorb_format_test_utils::{ChunkSize, build_raw_xorb},
 };

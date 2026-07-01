@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use shardline_server::{
     FuzzRetainedShardSummary, ShardMetadataLimits, fuzz_retained_shard_chunk_hashes,
 };
-use xet_core_structures::metadata_shard::shard_format::MDBShardInfo;
+use shardline_xet_core::metadata_shard::shard_format::MDBShardInfo;
 
 const MAX_SHARD_BYTES: usize = 1_048_576;
 

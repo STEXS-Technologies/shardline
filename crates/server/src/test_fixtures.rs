@@ -3,7 +3,7 @@ use std::io::{self, Cursor};
 
 use axum::body::Bytes;
 use shardline_protocol::ShardlineHash;
-use xet_core_structures::{
+use shardline_xet_core::{
     merklehash::{HashedWrite, MerkleHash, compute_data_hash, file_hash, xorb_hash},
     metadata_shard::{
         file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},

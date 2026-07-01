@@ -1,0 +1,25 @@
+[package]
+name = "shardline-xet-core"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-xet-core"
+readme = "../../README.md"
+description = "Re-implementation of xet-core-structures surface area without xet-runtime dependencies."
+
+[dependencies]
+blake3.workspace = true
+bytes.workspace = true
+countio = "0.3"
+lz4_flex = "0.11"
+serde = { workspace = true, features = ["derive"] }
+static_assertions = "1"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

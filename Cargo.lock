@@ -1772,6 +1772,15 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
+name = "lz4_flex"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
@@ -3042,9 +3051,9 @@ dependencies = [
  "shardline-server-core",
  "shardline-storage",
  "shardline-vcs",
+ "shardline-xet-core",
  "tempfile",
  "tokio",
- "xet-core-structures",
 ]
 
 [[package]]
@@ -3185,10 +3194,10 @@ dependencies = [
  "shardline-storage",
  "shardline-vcs",
  "shardline-xet-adapter",
+ "shardline-xet-core",
  "tempfile",
  "thiserror",
  "tokio",
- "xet-core-structures",
 ]
 
 [[package]]
@@ -3246,6 +3255,7 @@ dependencies = [
  "shardline-test-support",
  "shardline-vcs",
  "shardline-xet-adapter",
+ "shardline-xet-core",
  "sqlx",
  "subtle",
  "tempfile",
@@ -3256,7 +3266,6 @@ dependencies = [
  "tracing",
  "url",
  "xet-client",
- "xet-core-structures",
  "xet-data",
  "xet-runtime",
  "zeroize",
@@ -3329,10 +3338,24 @@ dependencies = [
  "shardline-protocol",
  "shardline-server-core",
  "shardline-storage",
+ "shardline-xet-core",
  "tempfile",
  "thiserror",
  "tokio",
- "xet-core-structures",
+]
+
+[[package]]
+name = "shardline-xet-core"
+version = "1.0.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "countio",
+ "lz4_flex 0.11.6",
+ "serde",
+ "static_assertions",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -4843,7 +4866,7 @@ dependencies = [
  "heapify",
  "itertools 0.14.0",
  "lazy_static",
- "lz4_flex",
+ "lz4_flex 0.13.1",
  "more-asserts",
  "rand 0.10.1",
  "regex",
