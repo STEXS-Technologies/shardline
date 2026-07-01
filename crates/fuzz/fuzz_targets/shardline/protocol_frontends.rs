@@ -33,6 +33,6 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if summary.frontend_accepts {
-        assert!(matches!(frontend, "xet" | "lfs" | "bazel-http" | "oci"));
+        assert!(matches!(frontend, "xet" | "lfs" | "bazel-http" | "oci" | "hub" | "metrics"));
     }
 });

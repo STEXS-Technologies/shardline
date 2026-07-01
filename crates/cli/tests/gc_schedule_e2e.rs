@@ -109,7 +109,7 @@ fn exercise_gc_schedule_install_and_uninstall() -> Result<(), Box<dyn Error>> {
         return Err(CliE2eInvariantError::new("gc schedule did not create timer unit").into());
     }
 
-    let service = read_to_string(&service_path)?;
+    let service = std::fs::read_to_string(&service_path)?;
     let expected_exec = format!(
         "ExecStart={} gc --mark --sweep --retention-seconds 600",
         shardline_bin.display()
@@ -128,7 +128,7 @@ fn exercise_gc_schedule_install_and_uninstall() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let timer = read_to_string(&timer_path)?;
+    let timer = std::fs::read_to_string(&timer_path)?;
     if !timer.contains("OnCalendar=hourly") {
         return Err(CliE2eInvariantError::new("gc timer unit used unexpected calendar").into());
     }
