@@ -30,7 +30,7 @@ shardline-storage.workspace = true
 shardline-vcs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
-xet-core-structures.workspace = true
+shardline-xet-core.workspace = true
 
 [[bin]]
 name = "shardline_protocol_hash"

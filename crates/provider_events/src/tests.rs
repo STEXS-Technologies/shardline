@@ -22,7 +22,7 @@ use shardline_xet_adapter::{
     normalize_serialized_xorb, store_uploaded_xorb, try_for_each_serialized_xorb_chunk,
     validate_serialized_xorb, xorb_object_key,
 };
-use xet_core_structures::xorb_object::{
+use shardline_xet_core::xorb_object::{
     CompressionScheme, SerializedXorbObject,
     xorb_format_test_utils::{ChunkSize, build_raw_xorb},
 };

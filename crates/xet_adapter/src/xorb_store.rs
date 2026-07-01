@@ -4,7 +4,7 @@ use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
 use shardline_server_core::{ServerObjectStore, chunk_hash, read_full_object};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome};
-use xet_core_structures::xorb_object::reconstruct_xorb_with_footer;
+use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer;
 
 fn chunk_object_key_local(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
     shardline_server_core::validate_content_hash_with(hash_hex, || {
@@ -235,7 +235,7 @@ mod tests {
 
     use shardline_index::parse_xet_hash_hex;
     use shardline_protocol::ShardlineHash;
-    use xet_core_structures::xorb_object::{
+    use shardline_xet_core::xorb_object::{
         CompressionScheme, SerializedXorbObject,
         xorb_format_test_utils::{ChunkSize, build_raw_xorb},
     };

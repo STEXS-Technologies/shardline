@@ -6,7 +6,7 @@ use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome,
     S3ObjectStoreConfig,
 };
-use xet_core_structures::merklehash::compute_data_hash;
+use shardline_xet_core::merklehash::compute_data_hash;
 
 use crate::{
     ServerError,

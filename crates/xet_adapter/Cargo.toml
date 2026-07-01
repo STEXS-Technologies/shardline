@@ -19,11 +19,10 @@ shardline-server-core.workspace = true
 shardline-storage.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
-xet-core-structures.workspace = true
+shardline-xet-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-xet-core-structures.workspace = true
 
 [lints]
 workspace = true

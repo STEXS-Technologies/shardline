@@ -63,6 +63,7 @@ shardline-storage = { version = "1.0.0", path = "crates/storage" }
 shardline-test-support = { version = "1.0.0", path = "crates/test_support" }
 shardline-vcs = { version = "1.0.0", path = "crates/vcs" }
 shardline-xet-adapter = { version = "1.0.0", path = "crates/xet_adapter" }
+shardline-xet-core = { version = "1.0.0", path = "crates/xet_core" }
 sqlx = { version = "0.8.6", default-features = false }
 subtle = { version = "2.6", default-features = false }
 tempfile = "3.15"

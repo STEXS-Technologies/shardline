@@ -20,7 +20,7 @@ use shardline_vcs::{
 };
 use support::ServerE2eInvariantError;
 use tokio::{net::TcpListener, spawn, time::sleep};
-use xet_core_structures::{
+use shardline_xet_core::{
     merklehash::{MerkleHash, compute_data_hash, file_hash, xorb_hash},
     metadata_shard::{
         file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},

@@ -6,7 +6,7 @@ use std::{
 
 use shardline_protocol::ShardlineHash;
 use thiserror::Error;
-use xet_core_structures::{
+    use shardline_xet_core::{
     error::CoreError,
     merklehash::{MerkleHash, compute_data_hash},
     xorb_object::{XorbObject, deserialize_chunk},
@@ -436,7 +436,7 @@ fn merkle_hash_to_shardline_hash(hash: MerkleHash) -> Result<ShardlineHash, Xorb
 mod tests {
     use std::io::Cursor;
 
-    use xet_core_structures::{
+use shardline_xet_core::{
         merklehash::{compute_data_hash, xorb_hash},
         xorb_object::{
             CompressionScheme, xorb_format_test_utils::serialized_xorb_object_from_components,

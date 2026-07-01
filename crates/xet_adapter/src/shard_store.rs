@@ -13,7 +13,7 @@ use shardline_server_core::{
     InvalidSerializedShardError, ServerObjectStore, ShardMetadataLimits, chunk_hash, content_hash,
 };
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome};
-use xet_core_structures::{
+    use shardline_xet_core::{
     merklehash::{MerkleHash, compute_data_hash},
     metadata_shard::{
         MDBShardFileHeader,
@@ -602,7 +602,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use shardline_server_core::{DEFAULT_SHARD_METADATA_LIMITS, ShardMetadataLimits};
-    use xet_core_structures::{
+use shardline_xet_core::{
         merklehash::{compute_data_hash, file_hash, xorb_hash},
         metadata_shard::{
             file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
