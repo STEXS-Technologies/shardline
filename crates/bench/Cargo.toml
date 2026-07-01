@@ -7,7 +7,14 @@ license.workspace = true
 name = "reconstruction"
 harness = false
 
+[[bin]]
+name = "load_test"
+path = "src/load_test.rs"
+
 [dependencies]
+libc.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 serde_json.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
