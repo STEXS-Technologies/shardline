@@ -13,7 +13,9 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::pack::{GitObject, ObjectType, PackError, create_commit_object, empty_pack, generate_pack};
+use super::pack::{
+    GitObject, ObjectType, PackError, create_commit_object, empty_pack, generate_pack,
+};
 use super::pktline::{self, FLUSH};
 use crate::error::HubApiError;
 use shardline_index::hub::HubFileEntry;
