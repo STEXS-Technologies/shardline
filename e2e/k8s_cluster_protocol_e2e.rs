@@ -149,7 +149,7 @@ async fn start_local_cluster_runtime() -> Result<Option<LocalClusterRuntime>, Te
     .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config.clone()))
     .with_index_postgres_url(postgres_url.clone())?
     .with_reconstruction_cache_redis(redis_url.clone(), NonZeroU64::new(30).ok_or("cache ttl")?)?
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_metrics_token(metrics_token.clone())?
     .with_provider_runtime(
         provider_config,

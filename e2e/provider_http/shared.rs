@@ -17,7 +17,7 @@ use shardline_server::{
 };
 
 pub(super) const PROVIDER_BOOTSTRAP_KEY: &str = "provider-bootstrap";
-pub(super) const TOKEN_SIGNING_KEY: &[u8] = b"signing-key";
+pub(super) const TOKEN_SIGNING_KEY: &[u8] = b"test-signing-key-32-bytes-long!!";
 
 pub(super) struct ProviderHttpRuntime {
     storage: tempfile::TempDir,

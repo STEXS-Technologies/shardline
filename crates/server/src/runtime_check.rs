@@ -80,7 +80,7 @@ mod tests {
             storage.path_buf(),
             NonZeroUsize::MIN,
         )
-        .with_token_signing_key(b"signing-key".to_vec())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
         .unwrap();
 
         let report = run_config_check(config).await.unwrap();
@@ -105,7 +105,7 @@ mod tests {
             NonZeroUsize::MIN,
         )
         .with_server_role(ServerRole::Transfer)
-        .with_token_signing_key(b"signing-key".to_vec())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
         .unwrap();
 
         let report = run_config_check(config).await.unwrap();

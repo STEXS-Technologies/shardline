@@ -314,7 +314,7 @@ pub(crate) async fn start_server(
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
     let server =
         tokio::spawn(async move { shardline_server::serve_with_listener(config, listener).await });

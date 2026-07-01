@@ -1,0 +1,70 @@
+[package]
+name = "shardline-e2e"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[test]]
+name = "protocol_frontends_http"
+path = "protocol_frontends_http.rs"
+
+[[test]]
+name = "transfer_http"
+path = "transfer_http.rs"
+
+[[test]]
+name = "role_split_e2e"
+path = "role_split_e2e.rs"
+
+[[test]]
+name = "git_xet_push_e2e"
+path = "git_xet_push_e2e.rs"
+
+[[test]]
+name = "native_protocol_frontends_e2e"
+path = "native_protocol_frontends_e2e.rs"
+
+[[test]]
+name = "native_xet_client_e2e"
+path = "native_xet_client_e2e.rs"
+
+[[test]]
+name = "live_provider_bridge_e2e"
+path = "live_provider_bridge_e2e.rs"
+
+[[test]]
+name = "provider_http_tests"
+path = "provider_http_tests.rs"
+
+[[test]]
+name = "provider_token_flow"
+path = "provider_token_flow.rs"
+
+[[test]]
+name = "k8s_cluster_protocol_e2e"
+path = "k8s_cluster_protocol_e2e.rs"
+
+[dependencies]
+shardline-server = { path = "../crates/server" }
+shardline-server-core = { path = "../crates/server_core" }
+shardline-protocol = { path = "../crates/protocol" }
+shardline-index = { path = "../crates/index" }
+shardline-storage = { path = "../crates/storage" }
+shardline-test-support = { path = "../crates/test_support" }
+axum = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+hmac = "0.12"
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

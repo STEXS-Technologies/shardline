@@ -50,7 +50,7 @@ async fn protocol_xorb_and_shard_routes_register_reconstruction() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -197,7 +197,7 @@ async fn reconstruction_route_applies_requested_range_and_rejects_unsatisfiable_
         storage.path().to_path_buf(),
         chunk_size,
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -341,7 +341,7 @@ async fn native_hash_path_routes_reject_non_xet_hashes() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -444,7 +444,7 @@ async fn xorb_transfer_route_requires_range_and_serves_partial_content() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -752,7 +752,7 @@ async fn xorb_routes_reject_missing_hashes_before_repository_reference_scan() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -833,7 +833,7 @@ async fn chunk_routes_reject_missing_hashes_before_repository_reference_scan() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1060,7 +1060,7 @@ async fn health_route_boots_with_postgres_metadata_config() {
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
     .with_index_postgres_url("postgres://shardline:change-me@localhost:5432/shardline".to_owned())
-    .and_then(|config| config.with_token_signing_key(b"signing-key".to_vec()));
+    .and_then(|config| config.with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1097,7 +1097,7 @@ async fn readiness_route_reports_local_backend_for_initialized_storage() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1154,7 +1154,7 @@ async fn metrics_route_reports_runtime_configuration() {
         NonZeroUsize::new(65_536).unwrap_or(NonZeroUsize::MIN),
     )
     .with_server_role(ServerRole::Api)
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1229,7 +1229,7 @@ async fn metrics_route_can_require_static_bearer_token() {
         NonZeroUsize::new(65_536).unwrap_or(NonZeroUsize::MIN),
     )
     .with_server_role(ServerRole::Api)
-    .with_token_signing_key(b"signing-key".to_vec())
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .and_then(|config| config.with_metrics_token(b"metrics-token".to_vec()));
     assert!(config.is_ok());
     let Ok(config) = config else {
@@ -1294,7 +1294,7 @@ async fn shard_route_rejects_missing_xorbs() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1359,7 +1359,7 @@ async fn routes_require_bearer_token_when_auth_is_enabled() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1407,7 +1407,7 @@ async fn write_routes_reject_read_only_tokens() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1473,7 +1473,7 @@ async fn routes_accept_matching_scope_tokens() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1574,7 +1574,7 @@ async fn router_rejects_bodies_over_configured_limit() {
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
     .with_max_request_body_bytes(max_request_body_bytes)
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1636,7 +1636,7 @@ async fn stats_route_requires_auth_when_token_auth_is_configured() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1683,7 +1683,7 @@ async fn authenticated_chunk_route_requires_file_version_context() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1838,7 +1838,7 @@ async fn reconstruction_transfer_urls_work_and_stay_repository_scoped() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;

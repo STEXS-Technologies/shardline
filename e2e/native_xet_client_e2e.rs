@@ -230,7 +230,7 @@ async fn exercise_native_xet_transfers_during_provider_lifecycle_churn() -> Resu
         storage.path().to_path_buf(),
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),
@@ -816,7 +816,7 @@ async fn exercise_all_provider_native_xet_downloads() -> Result<(), TestError> {
         storage.path().to_path_buf(),
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),
@@ -902,7 +902,7 @@ async fn exercise_authenticated_native_xet_flow() -> Result<(), TestError> {
         storage.path().to_path_buf(),
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),
@@ -1041,7 +1041,7 @@ async fn exercise_refresh_route_native_xet_flow() -> Result<(), TestError> {
         storage.path().to_path_buf(),
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),
@@ -1127,7 +1127,7 @@ async fn exercise_concurrent_authenticated_native_xet_flow() -> Result<(), TestE
         storage.path().to_path_buf(),
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),
@@ -1269,7 +1269,7 @@ async fn exercise_long_lived_authenticated_native_xet_flow() -> Result<(), TestE
         storage.path().to_path_buf(),
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_provider_runtime(
         provider_config,
         b"provider-bootstrap".to_vec(),

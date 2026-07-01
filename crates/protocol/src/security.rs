@@ -99,16 +99,16 @@ mod tests {
 
     #[test]
     fn secret_bytes_debug_redacts_contents() {
-        let secret = SecretBytes::from_slice(b"signing-key");
+        let secret = SecretBytes::from_slice(b"test-signing-key-32-bytes-long!!");
 
         assert_eq!(format!("{secret:?}"), "***");
     }
 
     #[test]
     fn secret_bytes_exposes_underlying_bytes() {
-        let secret = SecretBytes::from_slice(b"signing-key");
+        let secret = SecretBytes::from_slice(b"test-signing-key-32-bytes-long!!");
 
-        assert_eq!(secret.expose_secret(), b"signing-key");
+        assert_eq!(secret.expose_secret(), b"test-signing-key-32-bytes-long!!");
     }
 
     #[test]

@@ -1599,7 +1599,7 @@ async fn start_runtime(frontends: &[ServerFrontend]) -> Result<FrontendRuntime, 
         storage.path().to_path_buf(),
         NonZeroUsize::new(65_536).unwrap_or(NonZeroUsize::MIN),
     )
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
@@ -1634,7 +1634,7 @@ async fn start_runtime_with_s3(
         NonZeroUsize::new(65_536).unwrap_or(NonZeroUsize::MIN),
     )
     .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config))
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
