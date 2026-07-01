@@ -16,8 +16,11 @@ impl RecordTraversal for LocalRecordStore {
     fn list_latest_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
+        let store = self.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| self.list_record_locators(LocalRecordKind::Latest))
+            tokio::task::spawn_blocking(move || store.list_record_locators(LocalRecordKind::Latest))
+                .await
+                .expect("record task panicked")
         })
     }
 
@@ -25,18 +28,25 @@ impl RecordTraversal for LocalRecordStore {
         &'operation self,
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
+        let store = self.clone();
+        let repository = repository.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                self.list_repository_record_locators(LocalRecordKind::Latest, repository)
+            tokio::task::spawn_blocking(move || {
+                store.list_repository_record_locators(LocalRecordKind::Latest, &repository)
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
     fn list_version_record_locators(
         &self,
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
+        let store = self.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| self.list_record_locators(LocalRecordKind::Version))
+            tokio::task::spawn_blocking(move || store.list_record_locators(LocalRecordKind::Version))
+                .await
+                .expect("record task panicked")
         })
     }
 
@@ -44,10 +54,14 @@ impl RecordTraversal for LocalRecordStore {
         &'operation self,
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
+        let store = self.clone();
+        let repository = repository.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                self.list_repository_record_locators(LocalRecordKind::Version, repository)
+            tokio::task::spawn_blocking(move || {
+                store.list_repository_record_locators(LocalRecordKind::Version, &repository)
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
@@ -55,11 +69,15 @@ impl RecordTraversal for LocalRecordStore {
         &'operation self,
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, Vec<u8>, Self::Error> {
+        let store = self.clone();
+        let locator = locator.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                self.read_record_bytes_raw(locator)?
+            tokio::task::spawn_blocking(move || {
+                store.read_record_bytes_raw(&locator)?
                     .ok_or_else(record_not_found_error)
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
@@ -67,11 +85,15 @@ impl RecordTraversal for LocalRecordStore {
         &'operation self,
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, Option<Vec<u8>>, Self::Error> {
+        let store = self.clone();
+        let record = record.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let locator = self.latest_record_locator(record);
-                self.read_record_bytes_raw(&locator)
+            tokio::task::spawn_blocking(move || {
+                let locator = store.latest_record_locator(&record);
+                store.read_record_bytes_raw(&locator)
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
@@ -79,9 +101,11 @@ impl RecordTraversal for LocalRecordStore {
         &'operation self,
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, bool, Self::Error> {
+        let store = self.clone();
+        let locator = locator.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let connection = self.open_connection()?;
+            tokio::task::spawn_blocking(move || {
+                let connection = store.open_connection()?;
                 let exists = connection.query_row(
                     "SELECT EXISTS(
                         SELECT 1 FROM shardline_file_records WHERE record_key = ?1
@@ -91,6 +115,8 @@ impl RecordTraversal for LocalRecordStore {
                 )?;
                 Ok(exists != 0)
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
@@ -98,9 +124,11 @@ impl RecordTraversal for LocalRecordStore {
         &'operation self,
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
+        let store = self.clone();
+        let locator = locator.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let connection = self.open_connection()?;
+            tokio::task::spawn_blocking(move || {
+                let connection = store.open_connection()?;
                 let value = connection
                     .query_row(
                         "SELECT updated_at_unix_seconds
@@ -113,6 +141,8 @@ impl RecordTraversal for LocalRecordStore {
                     .ok_or_else(record_not_found_error)?;
                 Ok(Duration::from_secs(i64_to_u64(value)?))
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
@@ -134,18 +164,22 @@ impl RecordMutation for LocalRecordStore {
         &'operation self,
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, (), Self::Error> {
+        let store = self.clone();
+        let record = record.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let connection = self.open_connection()?;
-                let locator = self.version_record_locator(record);
+            tokio::task::spawn_blocking(move || {
+                let connection = store.open_connection()?;
+                let locator = store.version_record_locator(&record);
                 super::helpers::upsert_file_record_row(
                     &connection,
                     &locator,
-                    record,
+                    &record,
                     unix_now_seconds_lossy(),
                 )?;
                 Ok(())
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
@@ -153,18 +187,22 @@ impl RecordMutation for LocalRecordStore {
         &'operation self,
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, (), Self::Error> {
+        let store = self.clone();
+        let record = record.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let connection = self.open_connection()?;
-                let locator = self.latest_record_locator(record);
+            tokio::task::spawn_blocking(move || {
+                let connection = store.open_connection()?;
+                let locator = store.latest_record_locator(&record);
                 super::helpers::upsert_file_record_row(
                     &connection,
                     &locator,
-                    record,
+                    &record,
                     unix_now_seconds_lossy(),
                 )?;
                 Ok(())
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
@@ -172,9 +210,11 @@ impl RecordMutation for LocalRecordStore {
         &'operation self,
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, (), Self::Error> {
+        let store = self.clone();
+        let locator = locator.clone();
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let connection = self.open_connection()?;
+            tokio::task::spawn_blocking(move || {
+                let connection = store.open_connection()?;
                 let deleted = connection.execute(
                     "DELETE FROM shardline_file_records WHERE record_key = ?1",
                     params![locator.record_key()],
@@ -184,6 +224,8 @@ impl RecordMutation for LocalRecordStore {
                 }
                 Ok(())
             })
+            .await
+            .expect("record task panicked")
         })
     }
 
