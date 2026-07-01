@@ -336,10 +336,18 @@ pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Resul
     use std::ffi::CString;
     use std::os::unix::io::AsRawFd;
 
-    let old_cstr = CString::new(old_name.as_encoded_bytes())
-        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("name contains null byte: {e}")))?;
-    let new_cstr = CString::new(new_name.as_encoded_bytes())
-        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("name contains null byte: {e}")))?;
+    let old_cstr = CString::new(old_name.as_encoded_bytes()).map_err(|e| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("name contains null byte: {e}"),
+        )
+    })?;
+    let new_cstr = CString::new(new_name.as_encoded_bytes()).map_err(|e| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("name contains null byte: {e}"),
+        )
+    })?;
 
     // SAFETY: renameat(2) is safe when given valid FDs and null-terminated strings.
     // The parent FD is an open directory descriptor; old_cstr and new_cstr are
@@ -381,8 +389,12 @@ pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::io::AsRawFd;
 
-    let cstr = CString::new(name.as_encoded_bytes())
-        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("name contains null byte: {e}")))?;
+    let cstr = CString::new(name.as_encoded_bytes()).map_err(|e| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("name contains null byte: {e}"),
+        )
+    })?;
     // SAFETY: unlinkat(2) is safe when given a valid FD and null-terminated string.
     // The parent FD is an open directory descriptor; cstr is a valid C string.
     let result = unsafe { libc::unlinkat(parent.as_raw_fd(), cstr.as_ptr(), 0) };

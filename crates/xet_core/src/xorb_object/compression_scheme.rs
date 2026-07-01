@@ -83,7 +83,9 @@ impl CompressionScheme {
 
     pub fn compress_from_slice<'a>(&self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, CoreError> {
         Ok(match self {
-            CompressionScheme::Auto => return self.resolve_for_data(data).compress_from_slice(data),
+            CompressionScheme::Auto => {
+                return self.resolve_for_data(data).compress_from_slice(data);
+            }
             CompressionScheme::None => data.into(),
             CompressionScheme::LZ4 => lz4_compress_from_slice(data).map(Cow::from)?,
             CompressionScheme::ByteGrouping4LZ4 => lz4_compress_from_slice(data).map(Cow::from)?,
@@ -99,7 +101,9 @@ impl CompressionScheme {
             }
             CompressionScheme::None => data.into(),
             CompressionScheme::LZ4 => lz4_decompress_from_slice(data).map(Cow::from)?,
-            CompressionScheme::ByteGrouping4LZ4 => lz4_decompress_from_slice(data).map(Cow::from)?,
+            CompressionScheme::ByteGrouping4LZ4 => {
+                lz4_decompress_from_slice(data).map(Cow::from)?
+            }
         })
     }
 

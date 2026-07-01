@@ -15,11 +15,7 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use shardline_hub_api::routes::HubState;
-use shardline_index::hub::{BoxedHubStore, HubFileEntry, HubRepoType};
-use shardline_index::LocalIndexStore;
-use std::sync::{Mutex, Once, OnceLock};
-use tempfile::TempDir;
+use shardline_index::hub::{HubFileEntry, HubRepoType};
 use tower::ServiceExt;
 
 use common::{app, setup};

@@ -41,8 +41,7 @@ impl ServerAuth {
     ///
     /// Returns [`ServerError`] when the signing key is invalid.
     pub fn new(signing_key: &[u8]) -> Result<Self, ServerError> {
-        let provider =
-            shardline_server_core::auth::LocalEd25519Provider::new(signing_key)?;
+        let provider = shardline_server_core::auth::LocalEd25519Provider::new(signing_key)?;
         Ok(Self {
             provider: std::sync::Arc::new(provider),
         })
@@ -162,9 +161,7 @@ impl From<AuthError> for ServerError {
             AuthError::InvalidToken => Self::InvalidToken(TokenCodecError::InvalidFormat),
             AuthError::ExpiredToken => Self::InvalidToken(TokenCodecError::Expired),
             AuthError::InsufficientScope => Self::InsufficientScope,
-            AuthError::ProviderError(_msg) => {
-                Self::InvalidToken(TokenCodecError::InvalidFormat)
-            }
+            AuthError::ProviderError(_msg) => Self::InvalidToken(TokenCodecError::InvalidFormat),
         }
     }
 }

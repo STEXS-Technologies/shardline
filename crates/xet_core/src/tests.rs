@@ -5,16 +5,19 @@ use proptest::prelude::*;
 use crate::error::{CoreError, Validate};
 use crate::merklehash::{
     DataHash, HMACKey, MerkleHash,
-    data_hash::{DataHashBytesParseError, DataHashHexParseError},
     aggregated_hashes::{file_hash, file_hash_with_salt, xorb_hash},
     compute_data_hash, compute_internal_node_hash,
+    data_hash::{DataHashBytesParseError, DataHashHexParseError},
 };
 use crate::metadata_shard::{
-    constants::{MDB_SHARD_EXPIRATION_BUFFER, MDB_SHARD_GLOBAL_DEDUP_CHUNK_MODULUS, MDB_SHARD_LOCAL_CACHE_EXPIRATION, hash_is_global_dedup_eligible},
+    constants::{
+        MDB_SHARD_EXPIRATION_BUFFER, MDB_SHARD_GLOBAL_DEDUP_CHUNK_MODULUS,
+        MDB_SHARD_LOCAL_CACHE_EXPIRATION, hash_is_global_dedup_eligible,
+    },
     file_structs::{
         FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt, FileVerificationEntry,
-        MDB_FILE_FLAG_METADATA_EXT_MASK, MDB_FILE_FLAG_WITH_METADATA_EXT, MDB_FILE_FLAG_WITH_VERIFICATION,
-        MDB_FILE_FLAG_VERIFICATION_MASK, MDBFileInfo,
+        MDB_FILE_FLAG_METADATA_EXT_MASK, MDB_FILE_FLAG_VERIFICATION_MASK,
+        MDB_FILE_FLAG_WITH_METADATA_EXT, MDB_FILE_FLAG_WITH_VERIFICATION, MDBFileInfo,
     },
     shard_format::{MDBShardFileFooter, MDBShardFileHeader, MDBShardInfo},
     xorb_structs::{MDBXorbInfo, MDBXorbInfoView, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
@@ -24,13 +27,13 @@ use crate::xorb_object::{
     compression_scheme::{lz4_compress_from_slice, lz4_decompress_from_slice},
     raw_xorb_data::XorbInfo,
     xorb_chunk_format::{
-        XorbChunkHeader, deserialize_chunk, deserialize_chunk_header, parse_chunk_header,
-        serialize_chunk, XORB_CHUNK_HEADER_LENGTH,
+        XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk, deserialize_chunk_header,
+        parse_chunk_header, serialize_chunk,
     },
     xorb_format_test_utils::{ChunkSize, build_raw_xorb, build_xorb_object},
     xorb_object_format::{
-        reconstruct_xorb_with_footer, SerializedXorbObject, XorbObject, XorbObjectInfoV0,
-        XorbObjectInfoV1,
+        SerializedXorbObject, XorbObject, XorbObjectInfoV0, XorbObjectInfoV1,
+        reconstruct_xorb_with_footer,
     },
 };
 
@@ -131,7 +134,10 @@ fn data_hash_display_and_lower_hex() {
 fn data_hash_debug() {
     let h = DataHash::from([0u64; 4]);
     let dbg = format!("{h:?}");
-    assert_eq!(dbg, "0000000000000000000000000000000000000000000000000000000000000000");
+    assert_eq!(
+        dbg,
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    );
 }
 
 #[test]
@@ -348,14 +354,26 @@ fn compression_scheme_variants() {
 
 #[test]
 fn compression_scheme_try_from() {
-    assert_eq!(CompressionScheme::try_from(0).unwrap(), CompressionScheme::None);
-    assert_eq!(CompressionScheme::try_from(1).unwrap(), CompressionScheme::LZ4);
+    assert_eq!(
+        CompressionScheme::try_from(0).unwrap(),
+        CompressionScheme::None
+    );
+    assert_eq!(
+        CompressionScheme::try_from(1).unwrap(),
+        CompressionScheme::LZ4
+    );
     assert_eq!(
         CompressionScheme::try_from(2).unwrap(),
         CompressionScheme::ByteGrouping4LZ4
     );
-    assert_eq!(CompressionScheme::try_from(99).unwrap(), CompressionScheme::Auto);
-    assert!(CompressionScheme::try_from(99).is_err() || CompressionScheme::try_from(99).unwrap() == CompressionScheme::Auto);
+    assert_eq!(
+        CompressionScheme::try_from(99).unwrap(),
+        CompressionScheme::Auto
+    );
+    assert!(
+        CompressionScheme::try_from(99).is_err()
+            || CompressionScheme::try_from(99).unwrap() == CompressionScheme::Auto
+    );
 }
 
 #[test]
@@ -366,13 +384,34 @@ fn compression_scheme_try_from_invalid() {
 
 #[test]
 fn compression_scheme_from_str() {
-    assert_eq!("auto".parse::<CompressionScheme>().unwrap(), CompressionScheme::Auto);
-    assert_eq!("none".parse::<CompressionScheme>().unwrap(), CompressionScheme::None);
-    assert_eq!("lz4".parse::<CompressionScheme>().unwrap(), CompressionScheme::LZ4);
-    assert_eq!("bg4-lz4".parse::<CompressionScheme>().unwrap(), CompressionScheme::ByteGrouping4LZ4);
-    assert_eq!("".parse::<CompressionScheme>().unwrap(), CompressionScheme::Auto);
-    assert_eq!("AUTO".parse::<CompressionScheme>().unwrap(), CompressionScheme::Auto);
-    assert_eq!(" Auto ".parse::<CompressionScheme>().unwrap(), CompressionScheme::Auto);
+    assert_eq!(
+        "auto".parse::<CompressionScheme>().unwrap(),
+        CompressionScheme::Auto
+    );
+    assert_eq!(
+        "none".parse::<CompressionScheme>().unwrap(),
+        CompressionScheme::None
+    );
+    assert_eq!(
+        "lz4".parse::<CompressionScheme>().unwrap(),
+        CompressionScheme::LZ4
+    );
+    assert_eq!(
+        "bg4-lz4".parse::<CompressionScheme>().unwrap(),
+        CompressionScheme::ByteGrouping4LZ4
+    );
+    assert_eq!(
+        "".parse::<CompressionScheme>().unwrap(),
+        CompressionScheme::Auto
+    );
+    assert_eq!(
+        "AUTO".parse::<CompressionScheme>().unwrap(),
+        CompressionScheme::Auto
+    );
+    assert_eq!(
+        " Auto ".parse::<CompressionScheme>().unwrap(),
+        CompressionScheme::Auto
+    );
 }
 
 #[test]
@@ -386,7 +425,10 @@ fn compression_scheme_display() {
     assert_eq!(format!("{}", CompressionScheme::Auto), "auto");
     assert_eq!(format!("{}", CompressionScheme::None), "none");
     assert_eq!(format!("{}", CompressionScheme::LZ4), "lz4");
-    assert_eq!(format!("{}", CompressionScheme::ByteGrouping4LZ4), "bg4-lz4");
+    assert_eq!(
+        format!("{}", CompressionScheme::ByteGrouping4LZ4),
+        "bg4-lz4"
+    );
 }
 
 #[test]
@@ -407,7 +449,10 @@ fn compression_scheme_resolve_for_data() {
 
 #[test]
 fn compression_scheme_choose_from_data() {
-    assert_eq!(CompressionScheme::choose_from_data(b"test"), CompressionScheme::LZ4);
+    assert_eq!(
+        CompressionScheme::choose_from_data(b"test"),
+        CompressionScheme::LZ4
+    );
 }
 
 #[test]
@@ -422,7 +467,9 @@ fn lz4_roundtrip() {
 fn lz4_compress_then_decompress_via_enum() {
     let data = b"test data for compression scheme roundtrip";
     let compressed = CompressionScheme::LZ4.compress_from_slice(data).unwrap();
-    let decompressed = CompressionScheme::LZ4.decompress_from_slice(&compressed).unwrap();
+    let decompressed = CompressionScheme::LZ4
+        .decompress_from_slice(&compressed)
+        .unwrap();
     assert_eq!(&decompressed[..], &data[..]);
 }
 
@@ -431,7 +478,9 @@ fn compression_none_passthrough() {
     let data = b"no compression here";
     let compressed = CompressionScheme::None.compress_from_slice(data).unwrap();
     assert_eq!(compressed.as_ref(), data);
-    let decompressed = CompressionScheme::None.decompress_from_slice(&compressed).unwrap();
+    let decompressed = CompressionScheme::None
+        .decompress_from_slice(&compressed)
+        .unwrap();
     assert_eq!(&*decompressed, data);
 }
 
@@ -439,13 +488,19 @@ fn compression_none_passthrough() {
 fn compression_auto_compress_resolves_to_lz4() {
     let data = b"auto resolved compression";
     let compressed = CompressionScheme::Auto.compress_from_slice(data).unwrap();
-    let decompressed = CompressionScheme::LZ4.decompress_from_slice(&compressed).unwrap();
+    let decompressed = CompressionScheme::LZ4
+        .decompress_from_slice(&compressed)
+        .unwrap();
     assert_eq!(&decompressed[..], &data[..]);
 }
 
 #[test]
 fn decompress_auto_errors() {
-    assert!(CompressionScheme::Auto.decompress_from_slice(b"test").is_err());
+    assert!(
+        CompressionScheme::Auto
+            .decompress_from_slice(b"test")
+            .is_err()
+    );
 }
 
 // ============================================================================
@@ -457,7 +512,10 @@ fn xorb_chunk_header_new_roundtrip() {
     let header = XorbChunkHeader::new(CompressionScheme::LZ4, 100, 200);
     assert_eq!(header.get_compressed_length(), 100);
     assert_eq!(header.get_uncompressed_length(), 200);
-    assert_eq!(header.get_compression_scheme().unwrap(), CompressionScheme::LZ4);
+    assert_eq!(
+        header.get_compression_scheme().unwrap(),
+        CompressionScheme::LZ4
+    );
 }
 
 #[test]
@@ -468,7 +526,10 @@ fn xorb_chunk_header_setters() {
     header.set_compression_scheme(CompressionScheme::None);
     assert_eq!(header.get_compressed_length(), 500);
     assert_eq!(header.get_uncompressed_length(), 1000);
-    assert_eq!(header.get_compression_scheme().unwrap(), CompressionScheme::None);
+    assert_eq!(
+        header.get_compression_scheme().unwrap(),
+        CompressionScheme::None
+    );
 }
 
 #[test]
@@ -483,7 +544,10 @@ fn xorb_chunk_header_parse_roundtrip() {
     let parsed = parse_chunk_header(buf).unwrap();
     assert_eq!(parsed.get_compressed_length(), 42);
     assert_eq!(parsed.get_uncompressed_length(), 84);
-    assert_eq!(parsed.get_compression_scheme().unwrap(), CompressionScheme::None);
+    assert_eq!(
+        parsed.get_compression_scheme().unwrap(),
+        CompressionScheme::None
+    );
 }
 
 #[test]
@@ -668,7 +732,10 @@ fn xorb_object_info_v1_serialize_roundtrip() {
     assert_eq!(deserialized.xorb_hash, info.xorb_hash);
     assert_eq!(deserialized.num_chunks, 2);
     assert_eq!(deserialized.chunk_hashes, info.chunk_hashes);
-    assert_eq!(deserialized.chunk_boundary_offsets, info.chunk_boundary_offsets);
+    assert_eq!(
+        deserialized.chunk_boundary_offsets,
+        info.chunk_boundary_offsets
+    );
 }
 
 #[test]
@@ -854,7 +921,10 @@ fn serialized_xorb_object_from_components_roundtrip() {
 
     let hash = compute_data_hash(b"test_hash");
     let data = vec![0u8; 1024];
-    let chunk_boundaries = vec![(compute_data_hash(b"c1"), 512), (compute_data_hash(b"c2"), 1024)];
+    let chunk_boundaries = vec![
+        (compute_data_hash(b"c1"), 512),
+        (compute_data_hash(b"c2"), 1024),
+    ];
 
     let serialized = serialized_xorb_object_from_components(
         &hash,
@@ -1138,14 +1208,22 @@ fn mdb_file_info_serialize_roundtrip_no_flags() {
     let deserialized = MDBFileInfo::deserialize(&mut cursor).unwrap().unwrap();
     assert_eq!(info.metadata.file_hash, deserialized.metadata.file_hash);
     assert_eq!(info.segments.len(), deserialized.segments.len());
-    assert_eq!(info.segments[0].unpacked_segment_bytes, deserialized.segments[0].unpacked_segment_bytes);
+    assert_eq!(
+        info.segments[0].unpacked_segment_bytes,
+        deserialized.segments[0].unpacked_segment_bytes
+    );
 }
 
 #[test]
 fn mdb_file_info_serialize_with_verification() {
     let info = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, false),
-        segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32)],
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(),
+            50u32,
+            0u32,
+            25u32,
+        )],
         verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
         metadata_ext: None,
     };
@@ -1163,7 +1241,12 @@ fn mdb_file_info_serialize_with_verification() {
 fn mdb_file_info_serialize_with_metadata_ext() {
     let info = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, true),
-        segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32)],
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(),
+            50u32,
+            0u32,
+            25u32,
+        )],
         verification: vec![],
         metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
     };
@@ -1205,7 +1288,11 @@ fn mdb_file_info_default() {
 fn mdb_xorb_info_new() {
     let hash = compute_data_hash(b"xorb");
     let metadata = XorbChunkSequenceHeader::new(hash, 1u32, 100u32);
-    let chunks = vec![XorbChunkSequenceEntry::new(compute_data_hash(b"c"), 100u32, 0u32)];
+    let chunks = vec![XorbChunkSequenceEntry::new(
+        compute_data_hash(b"c"),
+        100u32,
+        0u32,
+    )];
     let info = MDBXorbInfo { metadata, chunks };
     assert_eq!(info.num_bytes(), 48 + 48); // header + 1 entry
 }
@@ -1214,7 +1301,11 @@ fn mdb_xorb_info_new() {
 fn mdb_xorb_info_serialize_roundtrip() {
     let hash = compute_data_hash(b"xorb");
     let metadata = XorbChunkSequenceHeader::new(hash, 1u32, 200u32);
-    let chunks = vec![XorbChunkSequenceEntry::new(compute_data_hash(b"c"), 200u32, 0u32)];
+    let chunks = vec![XorbChunkSequenceEntry::new(
+        compute_data_hash(b"c"),
+        200u32,
+        0u32,
+    )];
     let info = MDBXorbInfo { metadata, chunks };
 
     let mut buf = Vec::new();
@@ -1409,11 +1500,9 @@ fn mdb_xorb_info_view_from_data_too_small() {
     let mut buf = Vec::new();
     metadata.serialize(&mut buf).unwrap();
     // Intentionally too small - no room for 2 chunks
-    assert!(MDBXorbInfoView::from_data_and_header(
-        metadata,
-        bytes::Bytes::from(vec![0u8; 10])
-    )
-    .is_err());
+    assert!(
+        MDBXorbInfoView::from_data_and_header(metadata, bytes::Bytes::from(vec![0u8; 10])).is_err()
+    );
 }
 
 // ============================================================================
@@ -1497,7 +1586,8 @@ fn mdb_shard_info_non_content_byte_size() {
     assert!(size > 0);
     assert_eq!(
         size,
-        (std::mem::size_of::<MDBShardFileHeader>() + std::mem::size_of::<MDBShardFileFooter>()) as u64
+        (std::mem::size_of::<MDBShardFileHeader>() + std::mem::size_of::<MDBShardFileFooter>())
+            as u64
     );
 }
 
@@ -1544,7 +1634,12 @@ fn mdb_shard_info_materialized_bytes() {
         footer: MDBShardFileFooter::default(),
         file_infos: vec![MDBFileInfo {
             metadata: FileDataSequenceHeader::new(MerkleHash::default(), 1u32, false, false),
-            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 500u32, 0u32, 0u32)],
+            segments: vec![FileDataSequenceEntry::new(
+                MerkleHash::default(),
+                500u32,
+                0u32,
+                0u32,
+            )],
             verification: vec![],
             metadata_ext: None,
         }],
@@ -1571,7 +1666,12 @@ fn mdb_in_memory_shard_add_file_reconstruction_info() {
     let mut shard = crate::metadata_shard::shard_in_memory::MDBInMemoryShard::default();
     let info = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false),
-        segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 100u32, 0u32, 0u32)],
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(),
+            100u32,
+            0u32,
+            0u32,
+        )],
         verification: vec![],
         metadata_ext: None,
     };
@@ -1585,7 +1685,11 @@ fn mdb_in_memory_shard_add_xorb_block() {
     let mut shard = crate::metadata_shard::shard_in_memory::MDBInMemoryShard::default();
     let xorb = MDBXorbInfo {
         metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 200u32),
-        chunks: vec![XorbChunkSequenceEntry::new(MerkleHash::default(), 200u32, 0u32)],
+        chunks: vec![XorbChunkSequenceEntry::new(
+            MerkleHash::default(),
+            200u32,
+            0u32,
+        )],
     };
     shard.add_xorb_block(xorb).unwrap();
     assert_eq!(shard.num_xorb_entries(), 1);
@@ -1641,7 +1745,10 @@ fn shard_expiration_buffer() {
 #[test]
 fn shard_local_cache_expiration() {
     assert!(MDB_SHARD_LOCAL_CACHE_EXPIRATION.as_secs() > 0);
-    assert_eq!(MDB_SHARD_LOCAL_CACHE_EXPIRATION.as_secs(), 3 * 7 * 24 * 3600);
+    assert_eq!(
+        MDB_SHARD_LOCAL_CACHE_EXPIRATION.as_secs(),
+        3 * 7 * 24 * 3600
+    );
 }
 
 // ============================================================================
@@ -1650,7 +1757,10 @@ fn shard_local_cache_expiration() {
 
 #[test]
 fn core_error_display_io() {
-    let err = CoreError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "file missing"));
+    let err = CoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "file missing",
+    ));
     let msg = format!("{err}");
     assert!(msg.contains("I/O error"));
     assert!(msg.contains("file missing"));
@@ -1877,12 +1987,7 @@ fn build_raw_xorb_to_vec() {
 #[test]
 fn build_xorb_object_and_serialize() {
     let (obj, _chunk_data, _raw_data, _boundaries) =
-        build_xorb_object(
-            2,
-            ChunkSize::Fixed(512),
-            CompressionScheme::None,
-        )
-        .unwrap();
+        build_xorb_object(2, ChunkSize::Fixed(512), CompressionScheme::None).unwrap();
 
     assert_eq!(obj.info.num_chunks, 2);
     assert_ne!(obj.info.xorb_hash, MerkleHash::default());
@@ -1902,7 +2007,8 @@ fn mdb_file_info_view_basic() {
     entry.serialize(&mut buf).unwrap();
 
     use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
-    let view = crate::metadata_shard::file_structs::MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    let view =
+        crate::metadata_shard::file_structs::MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
     assert_eq!(view.num_entries(), 1);
     assert_eq!(view.file_hash(), compute_data_hash(b"f"));
     let e = view.entry(0);
@@ -1913,11 +2019,13 @@ fn mdb_file_info_view_basic() {
 #[test]
 fn mdb_file_info_view_from_data_too_small() {
     let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u32, false, false);
-    assert!(crate::metadata_shard::file_structs::MDBFileInfoView::from_data_and_header(
-        header,
-        bytes::Bytes::from(vec![0u8; 5])
-    )
-    .is_err());
+    assert!(
+        crate::metadata_shard::file_structs::MDBFileInfoView::from_data_and_header(
+            header,
+            bytes::Bytes::from(vec![0u8; 5])
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1925,7 +2033,8 @@ fn mdb_file_info_view_bytes() {
     let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
-    let view = crate::metadata_shard::file_structs::MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    let view =
+        crate::metadata_shard::file_structs::MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
     let _ = view.bytes();
 }
 
@@ -1938,7 +2047,8 @@ fn mdb_file_info_view_fromMDBFileInfoView_into_mdb_file_info() {
     header.serialize(&mut buf).unwrap();
     entry.serialize(&mut buf).unwrap();
 
-    let view = crate::metadata_shard::file_structs::MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    let view =
+        crate::metadata_shard::file_structs::MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
     let info: MDBFileInfo = (&view).into();
     assert_eq!(info.segments.len(), 1);
     assert_eq!(info.segments[0].unpacked_segment_bytes, 100);
@@ -2031,10 +2141,10 @@ fn serialize_chunk_auto_compression() {
 #[test]
 fn xorb_object_format_constants() {
     use crate::xorb_object::xorb_object_format::{
-        XORB_OBJECT_FORMAT_BOUNDARIES_VERSION, XORB_OBJECT_FORMAT_BOUNDARIES_VERSION_NO_UNPACKED_INFO,
-        XORB_OBJECT_FORMAT_HASHES_VERSION, XORB_OBJECT_FORMAT_IDENT,
-        XORB_OBJECT_FORMAT_IDENT_BOUNDARIES, XORB_OBJECT_FORMAT_IDENT_HASHES,
-        XORB_OBJECT_FORMAT_VERSION, XORB_OBJECT_FORMAT_VERSION_V0,
+        XORB_OBJECT_FORMAT_BOUNDARIES_VERSION,
+        XORB_OBJECT_FORMAT_BOUNDARIES_VERSION_NO_UNPACKED_INFO, XORB_OBJECT_FORMAT_HASHES_VERSION,
+        XORB_OBJECT_FORMAT_IDENT, XORB_OBJECT_FORMAT_IDENT_BOUNDARIES,
+        XORB_OBJECT_FORMAT_IDENT_HASHES, XORB_OBJECT_FORMAT_VERSION, XORB_OBJECT_FORMAT_VERSION_V0,
     };
     assert_eq!(XORB_OBJECT_FORMAT_IDENT, *b"XETBLOB");
     assert_eq!(XORB_OBJECT_FORMAT_IDENT_HASHES, *b"XBLBHSH");
@@ -2052,7 +2162,10 @@ fn xorb_object_format_constants() {
 
 #[test]
 fn file_flag_constants() {
-    assert_eq!(crate::metadata_shard::file_structs::MDB_DEFAULT_FILE_FLAG, 0);
+    assert_eq!(
+        crate::metadata_shard::file_structs::MDB_DEFAULT_FILE_FLAG,
+        0
+    );
     assert_eq!(
         crate::metadata_shard::file_structs::MDB_FILE_FLAG_WITH_VERIFICATION,
         1u32 << 31

@@ -7,15 +7,15 @@
     clippy::dbg_macro,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::must_use_candidate
+    clippy::must_use_candidate,
+    clippy::format_push_string
 )]
 
 use criterion::{BenchmarkId, Criterion, black_box};
 use shardline_index::{FileChunkRecord, FileRecord};
-use shardline_server_core::{
-    chunk_hash, parse_stored_file_record_bytes, validate_content_hash,
-};
+use shardline_server_core::{chunk_hash, parse_stored_file_record_bytes, validate_content_hash};
 
+#[expect(dead_code)]
 fn make_hash_string(suffix: u8) -> String {
     let mut s = String::with_capacity(64);
     for i in 0..64u8 {
@@ -106,8 +106,7 @@ fn bench_parse_stored_file_record_bytes(c: &mut Criterion) {
     let small_json = serde_json::to_vec(&small_record).expect("serialize");
     group.bench_function("1_chunk", |b| {
         b.iter(|| {
-            black_box(parse_stored_file_record_bytes(black_box(&small_json)))
-                .expect("parse");
+            black_box(parse_stored_file_record_bytes(black_box(&small_json))).expect("parse");
         });
     });
 
@@ -115,8 +114,7 @@ fn bench_parse_stored_file_record_bytes(c: &mut Criterion) {
     let large_json = serde_json::to_vec(&large_record).expect("serialize");
     group.bench_function("100_chunks", |b| {
         b.iter(|| {
-            black_box(parse_stored_file_record_bytes(black_box(&large_json)))
-                .expect("parse");
+            black_box(parse_stored_file_record_bytes(black_box(&large_json))).expect("parse");
         });
     });
 

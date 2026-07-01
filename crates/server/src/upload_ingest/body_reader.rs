@@ -1,7 +1,4 @@
-use std::{
-    num::NonZeroUsize,
-    pin::Pin,
-};
+use std::{num::NonZeroUsize, pin::Pin};
 
 use axum::{
     Error as AxumError,
@@ -9,10 +6,7 @@ use axum::{
 };
 use futures_util::stream::{self, Stream, StreamExt};
 
-use crate::{
-    ServerError,
-    overflow::checked_add,
-};
+use crate::{ServerError, overflow::checked_add};
 
 type BodyChunkResult = Result<Bytes, AxumError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;

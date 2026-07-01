@@ -20,12 +20,8 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use shardline_hub_api::routes::HubState;
-use shardline_index::hub::{BoxedHubStore, HubFileEntry, HubRepoType};
-use shardline_index::LocalIndexStore;
+use shardline_index::hub::{HubFileEntry, HubRepoType};
 use std::io::Read;
-use std::sync::{Mutex, Once, OnceLock};
-use tempfile::TempDir;
 use tower::ServiceExt;
 
 use common::{app, setup};
@@ -117,21 +113,27 @@ async fn info_refs_upload_pack_empty_repo() {
     setup();
     let repo_id = format!("models/test-{}/empty", std::process::id());
     let state = shardline_hub_api::state::get_for_test();
-    let _ = state
-        .store
-        .create_repo(HubRepoType::Model, &repo_id, false);
+    let _ = state.store.create_repo(HubRepoType::Model, &repo_id, false);
 
     let response = app()
         .oneshot(
             Request::builder()
-                .uri(format!("/models/test-{}/empty/info/refs?service=git-upload-pack", std::process::id()))
+                .uri(format!(
+                    "/models/test-{}/empty/info/refs?service=git-upload-pack",
+                    std::process::id()
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(ct, "application/x-git-upload-pack-advertisement");
 
     let body = collect_body_bytes(response).await;
@@ -157,7 +159,9 @@ async fn info_refs_upload_pack_with_refs() {
     let response = app()
         .oneshot(
             Request::builder()
-                .uri(format!("/models/test-{uid}/with-refs/info/refs?service=git-upload-pack"))
+                .uri(format!(
+                    "/models/test-{uid}/with-refs/info/refs?service=git-upload-pack"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -245,10 +249,20 @@ async fn upload_pack_empty_repo() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(ct, "application/x-git-upload-pack-result");
     assert_eq!(
-        response.headers().get("cache-control").unwrap().to_str().unwrap(),
+        response
+            .headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "no-cache"
     );
 }
@@ -304,11 +318,13 @@ async fn upload_pack_with_files() {
     assert_eq!(&pack_data[0..4], b"PACK");
     let version = u32::from_be_bytes([pack_data[4], pack_data[5], pack_data[6], pack_data[7]]);
     assert_eq!(version, 2);
-    let num_objects = u32::from_be_bytes([
-        pack_data[8], pack_data[9], pack_data[10], pack_data[11],
-    ]);
+    let num_objects =
+        u32::from_be_bytes([pack_data[8], pack_data[9], pack_data[10], pack_data[11]]);
     // At minimum: 1 root tree + 1 sub-tree (src/) + 2 blobs + 1 commit = 5
-    assert!(num_objects >= 5, "expected at least 5 objects, got {num_objects}");
+    assert!(
+        num_objects >= 5,
+        "expected at least 5 objects, got {num_objects}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -367,12 +383,20 @@ async fn upload_pack_with_lfs_files() {
         .iter()
         .filter(|o| o.0 == 3) // blob type
         .collect();
-    assert!(blobs.len() >= 2, "expected at least 2 blobs (LFS pointer + README), got {}", blobs.len());
+    assert!(
+        blobs.len() >= 2,
+        "expected at least 2 blobs (LFS pointer + README), got {}",
+        blobs.len()
+    );
     let blobs: Vec<_> = objects
         .iter()
         .filter(|o| o.0 == 3) // blob type
         .collect();
-    assert!(blobs.len() >= 2, "expected at least 2 blobs (LFS pointer + README), got {}", blobs.len());
+    assert!(
+        blobs.len() >= 2,
+        "expected at least 2 blobs (LFS pointer + README), got {}",
+        blobs.len()
+    );
 
     // One of the blob contents should be an LFS pointer.
     let has_lfs_pointer = blobs.iter().any(|(_, data)| {
@@ -410,7 +434,12 @@ async fn receive_pack_push() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(ct, "application/x-git-receive-pack-result");
 
     let body = collect_body_bytes(response).await;
@@ -504,13 +533,7 @@ async fn git_head_nonexistent_repo() {
 async fn info_refs_receive_pack_requires_write() {
     setup();
     let uid = std::process::id();
-    let _ = create_repo_and_commit(
-        "models",
-        &format!("test-{uid}"),
-        "rp-auth",
-        vec![],
-        "msg",
-    );
+    let _ = create_repo_and_commit("models", &format!("test-{uid}"), "rp-auth", vec![], "msg");
 
     // receive-pack discovery should also work (no auth configured, so always allowed).
     let response = app()
@@ -525,7 +548,12 @@ async fn info_refs_receive_pack_requires_write() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(ct, "application/x-git-receive-pack-advertisement");
 }
 
@@ -560,7 +588,7 @@ fn parse_pack_objects(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
         }
 
         match obj_type {
-            1 | 2 | 3 | 4 => {
+            1..=4 => {
                 let mut decoder = flate2::read::ZlibDecoder::new(&data[pos..]);
                 let mut output = Vec::new();
                 if decoder.read_to_end(&mut output).is_ok() {

@@ -79,7 +79,9 @@ impl HubStore for PostgresIndexStore {
                 repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                 private: row.try_get::<bool, _>("private")?,
                 default_branch: row.try_get("default_branch")?,
-                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                created_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("created_at_unix_seconds")?,
+                )?,
             })
         })
     }
@@ -106,7 +108,9 @@ impl HubStore for PostgresIndexStore {
                 repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                 private: row.try_get::<bool, _>("private")?,
                 default_branch: row.try_get("default_branch")?,
-                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                created_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("created_at_unix_seconds")?,
+                )?,
             }))
         })
     }
@@ -128,7 +132,9 @@ impl HubStore for PostgresIndexStore {
                     repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                     private: row.try_get::<bool, _>("private")?,
                     default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
                 });
             }
             Ok(repos)
@@ -180,7 +186,9 @@ impl HubStore for PostgresIndexStore {
                     repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
                     private: row.try_get::<bool, _>("private")?,
                     default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
                 });
             }
             Ok(repos)
@@ -260,7 +268,9 @@ impl HubStore for PostgresIndexStore {
                 sha: row.try_get("sha")?,
                 parent_sha: row.try_get("parent_sha")?,
                 message: row.try_get("message")?,
-                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                created_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("created_at_unix_seconds")?,
+                )?,
             })
         })
     }
@@ -286,14 +296,20 @@ impl HubStore for PostgresIndexStore {
                     sha: row.try_get("sha")?,
                     parent_sha: row.try_get("parent_sha")?,
                     message: row.try_get("message")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
                 });
             }
             Ok(revisions)
         })
     }
 
-    fn resolve_revision(&self, repo_id: &str, revision: &str) -> Result<Option<String>, Self::Error> {
+    fn resolve_revision(
+        &self,
+        repo_id: &str,
+        revision: &str,
+    ) -> Result<Option<String>, Self::Error> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
         let revision = revision.to_owned();
@@ -399,7 +415,10 @@ impl HubStore for PostgresIndexStore {
             )
             .bind(&oid)
             .bind(&data)
-            .bind(i64::try_from(data.len()).map_err(|_e| PostgresMetadataStoreError::IntegerOutOfRange)?)
+            .bind(
+                i64::try_from(data.len())
+                    .map_err(|_e| PostgresMetadataStoreError::IntegerOutOfRange)?,
+            )
             .execute(&pool)
             .await?;
             Ok(())
@@ -473,7 +492,9 @@ impl HubStore for PostgresIndexStore {
                 events: events_vec,
                 secret: row.try_get("secret")?,
                 active: row.try_get::<bool, _>("active")?,
-                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                created_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("created_at_unix_seconds")?,
+                )?,
             })
         })
     }
@@ -500,7 +521,9 @@ impl HubStore for PostgresIndexStore {
                     events: events_str.split(',').map(ToOwned::to_owned).collect(),
                     secret: row.try_get("secret")?,
                     active: row.try_get::<bool, _>("active")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
                 });
             }
             Ok(webhooks)
@@ -513,18 +536,20 @@ impl HubStore for PostgresIndexStore {
         let webhook_id = webhook_id.to_owned();
 
         block_on_async(async {
-            sqlx::query(
-                "DELETE FROM shardline_hub_webhooks WHERE repo_id = $1 AND id = $2",
-            )
-            .bind(&repo_id)
-            .bind(&webhook_id)
-            .execute(&pool)
-            .await?;
+            sqlx::query("DELETE FROM shardline_hub_webhooks WHERE repo_id = $1 AND id = $2")
+                .bind(&repo_id)
+                .bind(&webhook_id)
+                .execute(&pool)
+                .await?;
             Ok(())
         })
     }
 
-    fn webhooks_for_event(&self, repo_id: &str, event: &str) -> Result<Vec<HubWebhook>, Self::Error> {
+    fn webhooks_for_event(
+        &self,
+        repo_id: &str,
+        event: &str,
+    ) -> Result<Vec<HubWebhook>, Self::Error> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
         let event = event.to_owned();
@@ -549,7 +574,9 @@ impl HubStore for PostgresIndexStore {
                     events: events_str.split(',').map(ToOwned::to_owned).collect(),
                     secret: row.try_get("secret")?,
                     active: row.try_get::<bool, _>("active")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                    created_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
                 });
             }
             Ok(webhooks)
@@ -561,7 +588,7 @@ impl HubStore for PostgresIndexStore {
 mod tests {
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType, HubStore};
-    use sqlx::postgres::{PgPoolOptions, PgPool};
+    use sqlx::postgres::{PgPool, PgPoolOptions};
 
     async fn connect_postgres() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL")
@@ -634,7 +661,9 @@ mod tests {
             return;
         };
         let store = make_store(pool);
-        let result = store.get_repo("pg-definitely-nonexistent").expect("get_repo");
+        let result = store
+            .get_repo("pg-definitely-nonexistent")
+            .expect("get_repo");
         assert!(result.is_none());
     }
 
@@ -647,14 +676,22 @@ mod tests {
         let store = make_store(pool);
         cleanup_repo(&store, "pg-rev-resolve").await;
 
-        store.create_repo(HubRepoType::Model, "pg-rev-resolve", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "pg-rev-resolve", false)
+            .unwrap();
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 
         let revs = store.list_revisions("pg-rev-resolve").unwrap();
         assert_eq!(revs.len(), 1);
 
         let rev = store
-            .create_revision("pg-rev-resolve", Some(initial_sha), "rev2", "main", "second commit")
+            .create_revision(
+                "pg-rev-resolve",
+                Some(initial_sha),
+                "rev2",
+                "main",
+                "second commit",
+            )
             .unwrap();
         assert_eq!(rev.sha, "rev2");
 
@@ -679,11 +716,25 @@ mod tests {
         let store = make_store(pool);
 
         let files = vec![
-            HubFileEntry { path: "a.txt".into(), size: 100, sha: "sha_a".into(), is_lfs: false, inline_content: None },
-            HubFileEntry { path: "b.bin".into(), size: 2048, sha: "sha_b".into(), is_lfs: true, inline_content: None },
+            HubFileEntry {
+                path: "a.txt".into(),
+                size: 100,
+                sha: "sha_a".into(),
+                is_lfs: false,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "b.bin".into(),
+                size: 2048,
+                sha: "sha_b".into(),
+                is_lfs: true,
+                inline_content: None,
+            },
         ];
 
-        store.store_files("pg-commit-files", &files).expect("store_files");
+        store
+            .store_files("pg-commit-files", &files)
+            .expect("store_files");
         let retrieved = store.get_files("pg-commit-files").expect("get_files");
 
         assert_eq!(retrieved.len(), 2);
@@ -709,7 +760,9 @@ mod tests {
         };
         let store = make_store(pool);
 
-        store.put_lfs_object("pg-lfs-oid1", b"hello pg lfs").expect("put_lfs_object");
+        store
+            .put_lfs_object("pg-lfs-oid1", b"hello pg lfs")
+            .expect("put_lfs_object");
 
         let retrieved = store.get_lfs_object("pg-lfs-oid1").expect("get_lfs_object");
         assert_eq!(retrieved.as_deref(), Some(b"hello pg lfs" as &[u8]));
@@ -735,14 +788,22 @@ mod tests {
         let store = make_store(pool);
         cleanup_repo(&store, "pg-concurrency").await;
 
-        store.create_repo(HubRepoType::Model, "pg-concurrency", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "pg-concurrency", false)
+            .unwrap();
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 
         store
             .create_revision("pg-concurrency", Some(initial_sha), "sha1", "main", "first")
             .unwrap();
 
-        let result = store.create_revision("pg-concurrency", Some(initial_sha), "sha_stale", "main", "stale");
+        let result = store.create_revision(
+            "pg-concurrency",
+            Some(initial_sha),
+            "sha_stale",
+            "main",
+            "stale",
+        );
         assert!(result.is_err());
 
         cleanup_repo(&store, "pg-concurrency").await;
@@ -778,14 +839,20 @@ mod tests {
         assert!(sha.is_some());
 
         let files = vec![HubFileEntry {
-            path: "test.py".into(), size: 42, sha: "sha_py".into(), is_lfs: false, inline_content: None,
+            path: "test.py".into(),
+            size: 42,
+            sha: "sha_py".into(),
+            is_lfs: false,
+            inline_content: None,
         }];
         let commit_sha = sha.unwrap();
         boxed.store_files(&commit_sha, &files).expect("store_files");
         let retrieved = boxed.get_files(&commit_sha).expect("get_files");
         assert_eq!(retrieved.len(), 1);
 
-        boxed.put_lfs_object("pg-boxed-oid", b"boxed data").expect("put_lfs");
+        boxed
+            .put_lfs_object("pg-boxed-oid", b"boxed data")
+            .expect("put_lfs");
         assert!(boxed.has_lfs_object("pg-boxed-oid").unwrap());
         let data = boxed.get_lfs_object("pg-boxed-oid").unwrap().unwrap();
         assert_eq!(&data, b"boxed data");

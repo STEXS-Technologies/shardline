@@ -7,8 +7,7 @@ use std::{
 
 use rusqlite::{
     Connection, Error as SqliteError, MappedRows, OptionalExtension, Params,
-    Result as SqliteResult, Row, Transaction,
-    params,
+    Result as SqliteResult, Row, Transaction, params,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Error as JsonError;
@@ -19,8 +18,7 @@ use thiserror::Error;
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, QuarantineCandidateError,
     ReconstructionTerm, RecordTraversal, RepositoryRecordScope, RetentionHoldError, StoredObjectId,
-    WebhookDeliveryError, XorbId,
-    parse_xet_hash_hex,
+    WebhookDeliveryError, XorbId, parse_xet_hash_hex,
     record_key::repository_record_scope_key as shared_repository_record_scope_key,
     xet_hash_hex_string,
 };
@@ -99,9 +97,7 @@ const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 7] = [
     LocalSqliteMigration {
         version: "20260418020000",
         name: "provider_repository_states",
-        up_sql: include_str!(
-            "../../migrations/20260418020000_provider_repository_states.up.sql"
-        ),
+        up_sql: include_str!("../../migrations/20260418020000_provider_repository_states.up.sql"),
         down_sql: include_str!(
             "../../migrations/20260418020000_provider_repository_states.down.sql"
         ),
@@ -357,8 +353,10 @@ impl LocalRecordStore {
              WHERE record_kind = ?1
              ORDER BY record_key",
         )?;
-        let rows =
-            statement.query_map(params![kind.as_str()], helpers::local_record_locator_from_row)?;
+        let rows = statement.query_map(
+            params![kind.as_str()],
+            helpers::local_record_locator_from_row,
+        )?;
         collect_rows(rows)
     }
 
@@ -483,6 +481,12 @@ pub enum LocalIndexStoreError {
     /// An invalid repository type string was encountered.
     #[error("invalid repository type: {0}")]
     InvalidRepoType(String),
+    /// A blocking computation task failed (panicked).
+    #[error("blocking task failed")]
+    BlockingTask,
+    /// An invalid local table name was encountered.
+    #[error("invalid local table name")]
+    InvalidTableName,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

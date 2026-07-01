@@ -6,17 +6,22 @@ use serde::Serialize;
 use tracing::warn;
 
 use super::constants::{TARGET_CHUNK_SIZE, XORB_BLOCK_SIZE};
-use super::xorb_chunk_format::{deserialize_chunk, deserialize_chunk_header, serialize_chunk, write_chunk_header};
+use super::xorb_chunk_format::{
+    deserialize_chunk, deserialize_chunk_header, serialize_chunk, write_chunk_header,
+};
 use super::{CompressionScheme, XorbChunkHeader};
 use crate::error::{CoreError, Validate};
 use crate::merklehash::MerkleHash;
 use crate::utils::serialization_utils::*;
 
 pub type XorbObjectIdent = [u8; 7];
-pub(crate) const XORB_OBJECT_FORMAT_IDENT: XorbObjectIdent = [b'X', b'E', b'T', b'B', b'L', b'O', b'B'];
+pub(crate) const XORB_OBJECT_FORMAT_IDENT: XorbObjectIdent =
+    [b'X', b'E', b'T', b'B', b'L', b'O', b'B'];
 pub(crate) const XORB_OBJECT_FORMAT_VERSION_V0: u8 = 0;
-pub(crate) const XORB_OBJECT_FORMAT_IDENT_HASHES: XorbObjectIdent = [b'X', b'B', b'L', b'B', b'H', b'S', b'H'];
-pub(crate) const XORB_OBJECT_FORMAT_IDENT_BOUNDARIES: XorbObjectIdent = [b'X', b'B', b'L', b'B', b'B', b'N', b'D'];
+pub(crate) const XORB_OBJECT_FORMAT_IDENT_HASHES: XorbObjectIdent =
+    [b'X', b'B', b'L', b'B', b'H', b'S', b'H'];
+pub(crate) const XORB_OBJECT_FORMAT_IDENT_BOUNDARIES: XorbObjectIdent =
+    [b'X', b'B', b'L', b'B', b'B', b'N', b'D'];
 pub(crate) const XORB_OBJECT_FORMAT_VERSION: u8 = 1;
 pub(crate) const XORB_OBJECT_FORMAT_HASHES_VERSION: u8 = 0;
 pub(crate) const XORB_OBJECT_FORMAT_BOUNDARIES_VERSION_NO_UNPACKED_INFO: u8 = 0;
@@ -25,8 +30,8 @@ const XORB_OBJECT_INFO_DEFAULT_LENGTH: u32 = 92;
 
 #[inline]
 fn prealloc_num_chunks(declared_size: usize) -> usize {
-    let average_num_chunks_per_xorb: usize =
-        XORB_BLOCK_SIZE.load(Ordering::Relaxed) as usize / TARGET_CHUNK_SIZE.load(Ordering::Relaxed) as usize;
+    let average_num_chunks_per_xorb: usize = XORB_BLOCK_SIZE.load(Ordering::Relaxed) as usize
+        / TARGET_CHUNK_SIZE.load(Ordering::Relaxed) as usize;
     declared_size.min(average_num_chunks_per_xorb * 9 / 8)
 }
 
@@ -127,7 +132,8 @@ impl XorbObjectInfoV0 {
         read_bytes(&mut num_chunks)?;
         let num_chunks = u32::from_le_bytes(num_chunks);
 
-        let mut chunk_boundary_offsets = Vec::with_capacity(prealloc_num_chunks(num_chunks as usize));
+        let mut chunk_boundary_offsets =
+            Vec::with_capacity(prealloc_num_chunks(num_chunks as usize));
         for _ in 0..num_chunks {
             let mut offset = [0u8; size_of::<u32>()];
             read_bytes(&mut offset)?;
@@ -309,7 +315,8 @@ impl XorbObjectInfoV1 {
 
         let num_chunks_2 = read_u32(r)?;
 
-        s.chunk_hashes.reserve(prealloc_num_chunks(num_chunks_2 as usize));
+        s.chunk_hashes
+            .reserve(prealloc_num_chunks(num_chunks_2 as usize));
         for _ in 0..num_chunks_2 {
             s.chunk_hashes.push(read_hash(r)?);
         }
@@ -338,12 +345,14 @@ impl XorbObjectInfoV1 {
             ));
         }
 
-        s.chunk_boundary_offsets.reserve(prealloc_num_chunks(num_chunks_3 as usize));
+        s.chunk_boundary_offsets
+            .reserve(prealloc_num_chunks(num_chunks_3 as usize));
         for _ in 0..num_chunks_3 {
             s.chunk_boundary_offsets.push(read_u32(r)?);
         }
 
-        s.unpacked_chunk_offsets.reserve(prealloc_num_chunks(num_chunks_3 as usize));
+        s.unpacked_chunk_offsets
+            .reserve(prealloc_num_chunks(num_chunks_3 as usize));
         for _ in 0..num_chunks_3 {
             s.unpacked_chunk_offsets.push(read_u32(r)?);
         }
@@ -458,7 +467,9 @@ impl XorbObject {
         ))?;
         let (info, total_bytes_read) = XorbObjectInfoV1::deserialize(reader)?;
         if total_bytes_read != info_length {
-            return Err(CoreError::MalformedData("Xorb Info Format Error".to_string()));
+            return Err(CoreError::MalformedData(
+                "Xorb Info Format Error".to_string(),
+            ));
         }
         Ok(Self { info, info_length })
     }
@@ -509,12 +520,22 @@ impl XorbObject {
             cumulative_compressed_length += compressed_chunk_length as u32;
             unpacked_chunk_offset += chunk_uncompressed_length;
 
-            if *xorb.info.chunk_hashes.get(idx as usize).ok_or_else(|| CoreError::MalformedData("missing chunk hash".into()))? != chunk_hash {
+            if *xorb
+                .info
+                .chunk_hashes
+                .get(idx as usize)
+                .ok_or_else(|| CoreError::MalformedData("missing chunk hash".into()))?
+                != chunk_hash
+            {
                 warn!("XORB Validation: Chunk hash does not match Info object.");
                 return Ok(None);
             }
 
-            let boundary = *xorb.info.chunk_boundary_offsets.get(idx as usize).ok_or_else(|| CoreError::MalformedData("missing chunk boundary offset".into()))?;
+            let boundary = *xorb
+                .info
+                .chunk_boundary_offsets
+                .get(idx as usize)
+                .ok_or_else(|| CoreError::MalformedData("missing chunk boundary offset".into()))?;
             if (start_offset + compressed_chunk_length as u32) != boundary {
                 warn!("XORB Validation: Chunk boundary byte index does not match Info object.");
                 return Ok(None);
@@ -524,20 +545,23 @@ impl XorbObject {
 
             if xorb.info.boundaries_version == XORB_OBJECT_FORMAT_BOUNDARIES_VERSION
                 && unpacked_chunk_offset
-                    != *xorb.info.unpacked_chunk_offsets.get(idx as usize).ok_or_else(|| CoreError::MalformedData("missing unpacked chunk offset".into()))?
+                    != *xorb
+                        .info
+                        .unpacked_chunk_offsets
+                        .get(idx as usize)
+                        .ok_or_else(|| {
+                            CoreError::MalformedData("missing unpacked chunk offset".into())
+                        })?
             {
-                warn!(
-                    "XORB Validation: Chunk unpacked byte offset does not match Info object."
-                );
+                warn!("XORB Validation: Chunk unpacked byte offset does not match Info object.");
                 return Ok(None);
             }
         }
 
         let cur_position = reader.stream_position()? as u32;
         let expected_position = cumulative_compressed_length;
-        let expected_from_end_position = reader.seek(SeekFrom::End(0))? as u32
-            - xorb.info_length
-            - size_of::<u32>() as u32;
+        let expected_from_end_position =
+            reader.seek(SeekFrom::End(0))? as u32 - xorb.info_length - size_of::<u32>() as u32;
         if cur_position != expected_position || cur_position != expected_from_end_position {
             warn!("XORB Validation: Content bytes after known chunks in Info object.");
             return Ok(None);
@@ -545,9 +569,7 @@ impl XorbObject {
 
         let xorb_hash = crate::merklehash::xorb_hash(&hash_chunks);
         if xorb_hash != *hash || xorb_hash != xorb.info.xorb_hash {
-            warn!(
-                "XORB Validation: Computed hash does not match provided hash or Info hash."
-            );
+            warn!("XORB Validation: Computed hash does not match provided hash or Info hash.");
             return Ok(None);
         }
 
@@ -616,8 +638,12 @@ impl SerializedXorbObject {
         let chunks_and_boundaries = xorb.xorb_info.chunks_and_boundaries();
 
         xorb_object_info.num_chunks = chunks_and_boundaries.len() as u32;
-        xorb_object_info.chunk_boundary_offsets = Vec::with_capacity(xorb_object_info.num_chunks as usize);
-        xorb_object_info.chunk_hashes = chunks_and_boundaries.iter().map(|(hash, _)| *hash).collect();
+        xorb_object_info.chunk_boundary_offsets =
+            Vec::with_capacity(xorb_object_info.num_chunks as usize);
+        xorb_object_info.chunk_hashes = chunks_and_boundaries
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect();
         xorb_object_info.unpacked_chunk_offsets = chunks_and_boundaries
             .iter()
             .map(|(_, unpacked_chunk_boundary)| *unpacked_chunk_boundary)
@@ -725,19 +751,17 @@ pub mod test_utils {
         xorb.info.num_chunks = chunk_and_boundaries.len() as u32;
         xorb.info.chunk_boundary_offsets = Vec::with_capacity(xorb.info.num_chunks as usize);
         xorb.info.chunk_hashes = chunk_and_boundaries.iter().map(|(h, _)| *h).collect();
-        xorb.info.unpacked_chunk_offsets = chunk_and_boundaries
-            .iter()
-            .map(|(_, b)| *b)
-            .collect();
+        xorb.info.unpacked_chunk_offsets = chunk_and_boundaries.iter().map(|(_, b)| *b).collect();
 
         let mut raw_start_idx = 0u32;
 
         for boundary in &chunk_and_boundaries {
             let chunk_boundary = boundary.1;
             let chunk_raw_bytes = &data[raw_start_idx as usize..chunk_boundary as usize];
-            let _chunk_written_bytes =
-                serialize_chunk(chunk_raw_bytes, &mut writer, compression)?;
-            xorb.info.chunk_boundary_offsets.push(writer.position() as u32);
+            let _chunk_written_bytes = serialize_chunk(chunk_raw_bytes, &mut writer, compression)?;
+            xorb.info
+                .chunk_boundary_offsets
+                .push(writer.position() as u32);
             raw_start_idx = chunk_boundary;
         }
 
@@ -835,13 +859,11 @@ pub mod test_utils {
             if pos + 8 > writer_data.len() {
                 break;
             }
-            let header_buf: [u8; 8] = writer_data[pos..pos + 8]
-                .try_into()
-                .map_err(|e: std::array::TryFromSliceError| {
-                    CoreError::MalformedData(format!(
-                        "failed to read chunk header: {e}"
-                    ))
-                })?;
+            let header_buf: [u8; 8] = writer_data[pos..pos + 8].try_into().map_err(
+                |e: std::array::TryFromSliceError| {
+                    CoreError::MalformedData(format!("failed to read chunk header: {e}"))
+                },
+            )?;
             let compressed_len =
                 u32::from_le_bytes([header_buf[1], header_buf[2], header_buf[3], 0]);
             pos += 8 + compressed_len as usize;
@@ -849,10 +871,7 @@ pub mod test_utils {
             c.info.chunk_boundary_offsets.push(accumulated);
         }
 
-        c.info.unpacked_chunk_offsets = raw_chunk_boundaries
-            .iter()
-            .map(|(_, b)| *b)
-            .collect();
+        c.info.unpacked_chunk_offsets = raw_chunk_boundaries.iter().map(|(_, b)| *b).collect();
         c.info.chunk_hashes = chunk_hashes.clone();
 
         c.info.xorb_hash = xorb_hash(&chunks);
@@ -860,6 +879,11 @@ pub mod test_utils {
         c.info.fill_in_boundary_offsets();
         c.info_length = c.info.serialized_length() as u32;
 
-        Ok((c, writer.into_inner(), data_contents_raw, raw_chunk_boundaries))
+        Ok((
+            c,
+            writer.into_inner(),
+            data_contents_raw,
+            raw_chunk_boundaries,
+        ))
     }
 }

@@ -1,5 +1,5 @@
-pub mod compression_scheme;
 mod chunk;
+pub mod compression_scheme;
 pub mod constants;
 pub mod raw_xorb_data;
 pub mod xorb_chunk_format;

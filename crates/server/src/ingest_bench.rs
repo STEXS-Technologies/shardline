@@ -2,13 +2,12 @@ use std::num::NonZeroUsize;
 
 use axum::body::Bytes;
 
-use crate::{
-    ServerError, model::UploadFileResponse,
-    object_store::ServerObjectStore, upload_ingest::FileUploadIngestor,
-    validation::validate_identifier,
-};
 #[cfg(test)]
 use crate::config::default_upload_max_in_flight_chunks;
+use crate::{
+    ServerError, model::UploadFileResponse, object_store::ServerObjectStore,
+    upload_ingest::FileUploadIngestor, validation::validate_identifier,
+};
 
 /// Runs the upload ingestion pipeline without persisting chunk bytes or metadata.
 ///

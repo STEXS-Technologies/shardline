@@ -237,12 +237,10 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
     let stdout = String::from_utf8(output.stdout)?;
     let root_display = resolved_storage_root.display().to_string();
     if !stdout.contains(&format!("root: {root_display}")) {
-        return Err(
-            CliE2eInvariantError::new(format!(
-                "backup did not resolve project-local state root (stdout: {stdout})"
-            ))
-            .into(),
-        );
+        return Err(CliE2eInvariantError::new(format!(
+            "backup did not resolve project-local state root (stdout: {stdout})"
+        ))
+        .into());
     }
     let manifest: Value = from_slice(&read(output_path)?)?;
     if manifest.get("latest_records").and_then(Value::as_u64) != Some(1) {

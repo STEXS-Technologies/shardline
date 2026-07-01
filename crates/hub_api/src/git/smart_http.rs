@@ -138,7 +138,11 @@ pub async fn info_refs_upload_pack(
     info_refs(
         Path((repo_type, ns, repo)),
         Query(InfoRefsQuery {
-            service: Some(query.service.unwrap_or_else(|| "git-upload-pack".to_owned())),
+            service: Some(
+                query
+                    .service
+                    .unwrap_or_else(|| "git-upload-pack".to_owned()),
+            ),
         }),
         headers,
     )
@@ -158,7 +162,11 @@ pub async fn info_refs_receive_pack(
     info_refs(
         Path((repo_type, ns, repo)),
         Query(InfoRefsQuery {
-            service: Some(query.service.unwrap_or_else(|| "git-receive-pack".to_owned())),
+            service: Some(
+                query
+                    .service
+                    .unwrap_or_else(|| "git-receive-pack".to_owned()),
+            ),
         }),
         headers,
     )
@@ -267,13 +275,10 @@ fn is_valid_refname(refname: &str) -> bool {
 /// Collects all refs from the HubStore for a given repo.
 async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
     let state = crate::state::get();
-    let revisions = state
-        .store
-        .list_revisions(repo_id)
-        .map_err(|e| {
-            tracing::debug!("failed to list revisions for {repo_id}: {e}");
-            HubApiError::RepoNotFound
-        })?;
+    let revisions = state.store.list_revisions(repo_id).map_err(|e| {
+        tracing::debug!("failed to list revisions for {repo_id}: {e}");
+        HubApiError::RepoNotFound
+    })?;
 
     let mut refs = Vec::new();
     let mut seen_refs = std::collections::HashSet::new();
@@ -386,10 +391,7 @@ async fn generate_pack_for_refs(refs: &[GitRef]) -> Result<Vec<u8>, HubApiError>
         }
 
         // Resolve files from HubStore for this ref's commit SHA.
-        let files = state
-            .store
-            .get_files(&git_ref.sha1)
-            .unwrap_or_default();
+        let files = state.store.get_files(&git_ref.sha1).unwrap_or_default();
 
         // Build tree (and all sub-trees) from file entries.
         let (root_tree, sub_trees) = build_git_tree_objects(&files);
@@ -493,7 +495,9 @@ fn build_tree_entries<'input>(
         let relative = if prefix.is_empty() {
             file.path.as_str()
         } else {
-            file.path.strip_prefix(&format!("{prefix}/")).unwrap_or(&file.path)
+            file.path
+                .strip_prefix(&format!("{prefix}/"))
+                .unwrap_or(&file.path)
         };
 
         if let Some((name, _rest)) = relative.split_once('/') {
@@ -553,9 +557,8 @@ fn build_inline_blob(file: &HubFileEntry) -> GitObject {
 /// size <size>
 /// ```
 fn build_lfs_pointer_blob(oid: &str, size: u64) -> GitObject {
-    let pointer = format!(
-        "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n"
-    );
+    let pointer =
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n");
     GitObject::blob(pointer.into_bytes())
 }
 
@@ -575,8 +578,12 @@ fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
 
     for file in &sorted {
         use std::fmt::Write;
-        writeln!(&mut content, "{} filter=lfs diff=lfs merge=lfs -text", file.path)
-            .expect("write to String never fails");
+        writeln!(
+            &mut content,
+            "{} filter=lfs diff=lfs merge=lfs -text",
+            file.path
+        )
+        .expect("write to String never fails");
     }
 
     Some(GitObject::blob(content.into_bytes()))
@@ -770,7 +777,13 @@ async fn store_push_objects(
     let state = crate::state::get();
     state
         .store
-        .create_revision(repo_id, None, new_sha, "main", &format!("Push to {new_sha}"))
+        .create_revision(
+            repo_id,
+            None,
+            new_sha,
+            "main",
+            &format!("Push to {new_sha}"),
+        )
         .map_err(|e| {
             tracing::warn!("failed to create revision for {repo_id}: {e}");
             "failed to create revision".to_owned()
@@ -809,11 +822,7 @@ fn build_report_response(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

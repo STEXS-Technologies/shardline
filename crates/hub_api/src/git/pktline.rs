@@ -203,11 +203,7 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

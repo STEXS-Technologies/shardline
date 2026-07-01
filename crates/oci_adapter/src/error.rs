@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn io_error_display_message() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         assert_eq!(
             OciAdapterError::Io(io_err).to_string(),
             "local storage operation failed"

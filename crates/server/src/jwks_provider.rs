@@ -107,8 +107,8 @@ impl JwksProvider {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned());
 
-        let refresh_interval = parse_cache_max_age(response.headers())
-            .unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL);
+        let refresh_interval =
+            parse_cache_max_age(response.headers()).unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL);
 
         let jwks: JwksResponse = response
             .json()
@@ -146,7 +146,10 @@ impl JwksProvider {
             loop {
                 let interval = {
                     let guard = provider.cached_keys.read().await;
-                    guard.as_ref().map(|c| c.refresh_interval).unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL)
+                    guard
+                        .as_ref()
+                        .map(|c| c.refresh_interval)
+                        .unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL)
                 };
                 tokio::time::sleep(interval).await;
                 if let Err(e) = provider.refresh_keys_if_changed().await {
@@ -283,13 +286,9 @@ impl JwksProvider {
             _ => TokenScope::Read,
         };
 
-        let repository = RepositoryScope::new(
-            RepositoryProvider::Generic,
-            "jwks",
-            &sub,
-            Some("main"),
-        )
-        .map_err(|e| AuthError::ProviderError(e.to_string()))?;
+        let repository =
+            RepositoryScope::new(RepositoryProvider::Generic, "jwks", &sub, Some("main"))
+                .map_err(|e| AuthError::ProviderError(e.to_string()))?;
 
         TokenClaims::new(&self.issuer, &sub, scope, repository, exp)
             .map_err(|e| AuthError::ProviderError(e.to_string()))
@@ -316,35 +315,32 @@ impl AuthProvider for JwksProvider {
 fn is_algorithm_compatible(key_type: &str, algorithm: Algorithm) -> bool {
     matches!(
         (key_type, algorithm),
-        ("RSA", Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512)
-            | ("EC", Algorithm::ES256 | Algorithm::ES384)
-            | ("RSA", Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512)
+        (
+            "RSA",
+            Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512
+        ) | ("EC", Algorithm::ES256 | Algorithm::ES384)
+            | (
+                "RSA",
+                Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512
+            )
     )
 }
 
 fn build_decoding_key(jwk: &Jwk, algorithm: Algorithm) -> Result<DecodingKey, String> {
     match algorithm {
-        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512
-        | Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512 => {
-            let n = jwk
-                .n
-                .as_ref()
-                .ok_or("RSA key missing n parameter")?;
-            let e = jwk
-                .e
-                .as_ref()
-                .ok_or("RSA key missing e parameter")?;
+        Algorithm::RS256
+        | Algorithm::RS384
+        | Algorithm::RS512
+        | Algorithm::PS256
+        | Algorithm::PS384
+        | Algorithm::PS512 => {
+            let n = jwk.n.as_ref().ok_or("RSA key missing n parameter")?;
+            let e = jwk.e.as_ref().ok_or("RSA key missing e parameter")?;
             DecodingKey::from_rsa_components(n, e).map_err(|e| format!("invalid RSA key: {e}"))
         }
         Algorithm::ES256 | Algorithm::ES384 => {
-            let x = jwk
-                .x_coord
-                .as_ref()
-                .ok_or("EC key missing x parameter")?;
-            let y = jwk
-                .y_coord
-                .as_ref()
-                .ok_or("EC key missing y parameter")?;
+            let x = jwk.x_coord.as_ref().ok_or("EC key missing x parameter")?;
+            let y = jwk.y_coord.as_ref().ok_or("EC key missing y parameter")?;
             DecodingKey::from_ec_components(x, y).map_err(|e| format!("invalid EC key: {e}"))
         }
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 | Algorithm::EdDSA => {

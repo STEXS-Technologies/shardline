@@ -8,9 +8,9 @@ use std::{
 
 use axum::body::Bytes;
 use shardline_index::{
-    DedupeStore, FileChunkRecord, FileRecord, LifecycleStore, LocalIndexStore, MemoryIndexStore,
+    FileChunkRecord, FileRecord, LifecycleStore, LocalIndexStore, MemoryIndexStore,
     MemoryRecordStore, PostgresIndexStore, PostgresRecordStore, QuarantineCandidate,
-    ReconstructionStore, RecordMutation, RecordTraversal, RetentionHold, WebhookDelivery,
+    RecordMutation, RetentionHold, WebhookDelivery,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use shardline_storage::ObjectKey;

@@ -29,7 +29,9 @@ pub(crate) fn parse_sha256_digest(value: &str) -> Result<String, OciAdapterError
     core_ps::parse_sha256_digest(value)
 }
 
-pub(crate) fn scope_namespace(repository_scope: Option<&shardline_protocol::RepositoryScope>) -> String {
+pub(crate) fn scope_namespace(
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+) -> String {
     core_ps::scope_namespace(repository_scope)
 }
 
@@ -63,7 +65,6 @@ pub(crate) fn validate_oci_tag(value: &str) -> Result<(), OciAdapterError> {
 pub(crate) fn validate_upload_session_id(value: &str) -> Result<(), OciAdapterError> {
     core_ps::validate_upload_session_id(value)
 }
-
 
 #[cfg(test)]
 mod tests {

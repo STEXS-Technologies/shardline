@@ -121,7 +121,9 @@ pub fn build_reconstruction_response_with_metrics(
     let result = build_reconstruction_response(public_base_url, record, requested_range);
     let chunks = result.as_ref().map_or(0, |r| r.terms.len() as u64);
     let ok = result.is_ok();
-    shardline_metrics::metrics().xet.record_reconstruction(ok, start.elapsed(), chunks);
+    shardline_metrics::metrics()
+        .xet
+        .record_reconstruction(ok, start.elapsed(), chunks);
     result
 }
 

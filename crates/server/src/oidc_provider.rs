@@ -25,11 +25,7 @@ pub struct OidcProvider {
 
 impl Clone for OidcProvider {
     fn clone(&self) -> Self {
-        let cached_keys = self
-            .cached_keys
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
+        let cached_keys = self.cached_keys.lock().ok().and_then(|guard| guard.clone());
         Self {
             client: self.client.clone(),
             issuer: self.issuer.clone(),
@@ -209,16 +205,16 @@ impl OidcProvider {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        if let Some(iat) = payload.get("iat").and_then(|v| v.as_u64()) {
-            if iat > now {
-                return Err(AuthError::InvalidToken);
-            }
+        if let Some(iat) = payload.get("iat").and_then(|v| v.as_u64())
+            && iat > now
+        {
+            return Err(AuthError::InvalidToken);
         }
 
-        if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_u64()) {
-            if nbf > now {
-                return Err(AuthError::InvalidToken);
-            }
+        if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_u64())
+            && nbf > now
+        {
+            return Err(AuthError::InvalidToken);
         }
 
         let exp = payload
@@ -245,13 +241,9 @@ impl OidcProvider {
             _ => TokenScope::Read,
         };
 
-        let repository = RepositoryScope::new(
-            RepositoryProvider::Generic,
-            "oidc",
-            &sub,
-            Some("main"),
-        )
-        .map_err(|e| AuthError::ProviderError(e.to_string()))?;
+        let repository =
+            RepositoryScope::new(RepositoryProvider::Generic, "oidc", &sub, Some("main"))
+                .map_err(|e| AuthError::ProviderError(e.to_string()))?;
 
         TokenClaims::new(&self.issuer, &sub, scope, repository, exp)
             .map_err(|e| AuthError::ProviderError(e.to_string()))
@@ -278,35 +270,32 @@ impl AuthProvider for OidcProvider {
 fn is_algorithm_compatible(key_type: &str, algorithm: Algorithm) -> bool {
     matches!(
         (key_type, algorithm),
-        ("RSA", Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512)
-            | ("EC", Algorithm::ES256 | Algorithm::ES384)
-            | ("RSA", Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512)
+        (
+            "RSA",
+            Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512
+        ) | ("EC", Algorithm::ES256 | Algorithm::ES384)
+            | (
+                "RSA",
+                Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512
+            )
     )
 }
 
 fn build_decoding_key(jwk: &Jwk, algorithm: Algorithm) -> Result<DecodingKey, String> {
     match algorithm {
-        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512
-        | Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512 => {
-            let n = jwk
-                .n
-                .as_ref()
-                .ok_or("RSA key missing n parameter")?;
-            let e = jwk
-                .e
-                .as_ref()
-                .ok_or("RSA key missing e parameter")?;
+        Algorithm::RS256
+        | Algorithm::RS384
+        | Algorithm::RS512
+        | Algorithm::PS256
+        | Algorithm::PS384
+        | Algorithm::PS512 => {
+            let n = jwk.n.as_ref().ok_or("RSA key missing n parameter")?;
+            let e = jwk.e.as_ref().ok_or("RSA key missing e parameter")?;
             DecodingKey::from_rsa_components(n, e).map_err(|e| format!("invalid RSA key: {e}"))
         }
         Algorithm::ES256 | Algorithm::ES384 => {
-            let x = jwk
-                .x_coord
-                .as_ref()
-                .ok_or("EC key missing x parameter")?;
-            let y = jwk
-                .y_coord
-                .as_ref()
-                .ok_or("EC key missing y parameter")?;
+            let x = jwk.x_coord.as_ref().ok_or("EC key missing x parameter")?;
+            let y = jwk.y_coord.as_ref().ok_or("EC key missing y parameter")?;
             DecodingKey::from_ec_components(x, y).map_err(|e| format!("invalid EC key: {e}"))
         }
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 | Algorithm::EdDSA => {

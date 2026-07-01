@@ -8,16 +8,13 @@ use sha2::{Digest, Sha256};
 use shardline_index::{FileChunkRecord, FileRecord};
 use shardline_protocol::RepositoryScope;
 
-pub(super) use body_reader::{RequestBodyReader, read_body_to_bytes};
 use body_reader::ChunkBuffer;
+pub(super) use body_reader::{RequestBodyReader, read_body_to_bytes};
 
 use chunk_store::{
-    SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome,
-    put_if_absent_chunk_buffer, put_if_absent_pooled_chunk_buffer,
+    SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome, put_if_absent_chunk_buffer,
+    put_if_absent_pooled_chunk_buffer,
 };
-
-#[cfg(test)]
-use shardline_storage::ObjectStore;
 
 #[cfg(test)]
 use crate::config::default_upload_max_in_flight_chunks;

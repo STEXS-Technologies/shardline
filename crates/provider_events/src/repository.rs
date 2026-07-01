@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use shardline_index::{AsyncIndexStore, FileRecord, RecordMutation, RecordStore, RecordTraversal, RetentionHold};
+use shardline_index::{
+    AsyncIndexStore, FileRecord, RecordMutation, RecordStore, RecordTraversal, RetentionHold,
+};
 use shardline_protocol::unix_now_seconds_lossy;
 use shardline_storage::ObjectKey;
 use shardline_vcs::{RepositoryRef, RepositoryWebhookEvent};

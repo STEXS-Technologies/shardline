@@ -124,8 +124,11 @@ pub fn serialize_chunk<W: Write>(
     } else {
         (compression_scheme, compressed)
     };
-    let header =
-        XorbChunkHeader::new(compression_scheme, compressed.len() as u32, chunk.len() as u32);
+    let header = XorbChunkHeader::new(
+        compression_scheme,
+        compressed.len() as u32,
+        chunk.len() as u32,
+    );
     write_chunk_header(w, &header)?;
     w.write_all(&compressed)?;
 
@@ -140,9 +143,13 @@ pub fn parse_chunk_header(
     }
     let mut header = XorbChunkHeader::default();
     header.version = chunk_header_bytes[0];
-    header.compressed_length.copy_from_slice(&chunk_header_bytes[1..4]);
+    header
+        .compressed_length
+        .copy_from_slice(&chunk_header_bytes[1..4]);
     header.compression_scheme = chunk_header_bytes[4];
-    header.uncompressed_length.copy_from_slice(&chunk_header_bytes[5..8]);
+    header
+        .uncompressed_length
+        .copy_from_slice(&chunk_header_bytes[5..8]);
     header.validate()?;
     Ok(header)
 }
@@ -153,9 +160,7 @@ pub fn deserialize_chunk_header<R: Read>(reader: &mut R) -> Result<XorbChunkHead
     parse_chunk_header(buf)
 }
 
-pub fn deserialize_chunk<R: Read>(
-    reader: &mut R,
-) -> Result<(Vec<u8>, usize, u32), CoreError> {
+pub fn deserialize_chunk<R: Read>(reader: &mut R) -> Result<(Vec<u8>, usize, u32), CoreError> {
     let mut buf = Vec::new();
     let (compressed_chunk_size, uncompressed_chunk_size) =
         deserialize_chunk_to_writer(reader, &mut buf)?;
@@ -183,7 +188,8 @@ fn deserialize_chunk_with_header_to_writer<R: Read, W: Write>(
 
     if uncompressed_len != header.get_uncompressed_length() as u64 {
         return Err(CoreError::MalformedData(
-            "chunk is corrupted, uncompressed bytes len doesn't agree with chunk header".to_string(),
+            "chunk is corrupted, uncompressed bytes len doesn't agree with chunk header"
+                .to_string(),
         ));
     }
 
@@ -193,9 +199,7 @@ fn deserialize_chunk_with_header_to_writer<R: Read, W: Write>(
     ))
 }
 
-fn try_read_chunk_header<R: Read>(
-    reader: &mut R,
-) -> Result<Option<XorbChunkHeader>, CoreError> {
+fn try_read_chunk_header<R: Read>(reader: &mut R) -> Result<Option<XorbChunkHeader>, CoreError> {
     let mut header_buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
     let n = match reader.read(&mut header_buf) {
         Ok(0) => return Ok(None),

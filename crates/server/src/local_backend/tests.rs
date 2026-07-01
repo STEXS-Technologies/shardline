@@ -195,9 +195,9 @@ async fn local_backend_new_rejects_symlinked_root_ancestor() {
 
     assert!(matches!(
         backend,
-        Err(ServerError::ObjectStore(
-            ObjectStoreError::Local(LocalObjectStoreError::InvalidObjectPath)
-        ))
+        Err(ServerError::ObjectStore(ObjectStoreError::Local(
+            LocalObjectStoreError::InvalidObjectPath
+        )))
     ));
 }
 

@@ -23,14 +23,9 @@ use crate::{
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::super::{
-    AppState,
-    direct_object_response,
-    parse_query_values,
-    scope_from_auth,
-};
+use super::super::{AppState, direct_object_response, parse_query_values, scope_from_auth};
+use super::tags::{delete_oci_tags_pointing_to_digest, update_oci_tags};
 use super::token::oci_authorize;
-use super::tags::{update_oci_tags, delete_oci_tags_pointing_to_digest};
 
 pub(super) const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(super) const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -128,7 +123,10 @@ pub(crate) async fn oci_put_manifest(
 
     let mut builder = Response::builder()
         .status(StatusCode::CREATED)
-        .header(axum::http::header::LOCATION, oci_manifest_location(repository, &digest_hex))
+        .header(
+            axum::http::header::LOCATION,
+            oci_manifest_location(repository, &digest_hex),
+        )
         .header("Docker-Content-Digest", format!("sha256:{digest_hex}"));
     if !accepted_tags.is_empty() {
         let joined = accepted_tags.join(", ");

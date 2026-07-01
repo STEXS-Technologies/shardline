@@ -6,8 +6,7 @@ mod tests {
 
     #[cfg(unix)]
     use shardline_storage::anchored_fs::{
-        AnchoredPathOptions,
-        open_anchored_target as open_anchored_target_shared,
+        AnchoredPathOptions, open_anchored_target as open_anchored_target_shared,
         write_anchored_temporary_file as write_anchored_temporary_file_shared,
     };
     #[cfg(unix)]
@@ -27,19 +26,17 @@ mod tests {
     fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
         use shardline_storage::anchored_fs::remove_if_present;
 
-        let anchored = open_anchored_target_shared(
-            root,
-            path,
-            anchored_path_options(),
-            || {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "local filesystem path must remain under the configured root",
-                )
-            },
+        let anchored = open_anchored_target_shared(root, path, anchored_path_options(), || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "local filesystem path must remain under the configured root",
+            )
+        })?;
+        let temporary = write_anchored_temporary_file_shared(
+            &anchored,
+            bytes,
+            anchored_path_options().file_mode,
         )?;
-        let temporary =
-            write_anchored_temporary_file_shared(&anchored, bytes, anchored_path_options().file_mode)?;
         let final_path = anchored.final_path();
         match rename(&temporary, &final_path) {
             Ok(()) => {}

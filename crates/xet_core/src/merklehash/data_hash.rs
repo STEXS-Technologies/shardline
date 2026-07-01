@@ -8,7 +8,7 @@ use std::{fmt, str};
 use serde::{Deserialize, Serialize};
 
 /// The DataHash is a 256-bit value stored as `[u64; 4]`.
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
 pub struct DataHash([u64; 4]);
 
 impl Deref for DataHash {
@@ -35,9 +35,8 @@ impl From<[u64; 4]> for DataHash {
 impl From<[u8; 32]> for DataHash {
     fn from(value: [u8; 32]) -> Self {
         let mut inner = [0u64; 4];
-        for i in 0..4 {
-            let start = i * 8;
-            inner[i] = u64::from_le_bytes(value[start..start + 8].try_into().expect("slice len is 8"));
+        for (i, chunk) in value.chunks_exact(8).enumerate() {
+            inner[i] = u64::from_le_bytes(chunk.try_into().expect("slice len is 8"));
         }
         DataHash(inner)
     }
@@ -84,12 +83,6 @@ impl AsRef<[u8]> for DataHash {
 impl AsRef<DataHash> for DataHash {
     fn as_ref(&self) -> &DataHash {
         self
-    }
-}
-
-impl Default for DataHash {
-    fn default() -> DataHash {
-        DataHash([0; 4])
     }
 }
 
@@ -182,7 +175,8 @@ impl DataHash {
         let mut hash: DataHash = DataHash::default();
         for i in 0..4 {
             let start = i * 8;
-            hash.0[i] = u64::from_le_bytes(value[start..start + 8].try_into().expect("slice len is 8"));
+            hash.0[i] =
+                u64::from_le_bytes(value[start..start + 8].try_into().expect("slice len is 8"));
         }
         Ok(hash)
     }
@@ -238,13 +232,13 @@ impl Hash for DataHash {
 }
 
 const DATA_KEY: [u8; 32] = [
-    102, 151, 245, 119, 91, 149, 80, 222, 49, 53, 203, 172, 165, 151, 24, 28, 157, 228, 33, 16, 155, 235, 43, 88,
-    180, 208, 176, 75, 147, 173, 242, 41,
+    102, 151, 245, 119, 91, 149, 80, 222, 49, 53, 203, 172, 165, 151, 24, 28, 157, 228, 33, 16,
+    155, 235, 43, 88, 180, 208, 176, 75, 147, 173, 242, 41,
 ];
 
 const INTERNAL_NODE_HASH: [u8; 32] = [
-    1, 126, 197, 199, 165, 71, 41, 150, 253, 148, 102, 102, 180, 138, 2, 230, 93, 221, 83, 111, 55, 199, 109, 210,
-    248, 99, 82, 230, 74, 83, 113, 63,
+    1, 126, 197, 199, 165, 71, 41, 150, 253, 148, 102, 102, 180, 138, 2, 230, 93, 221, 83, 111, 55,
+    199, 109, 210, 248, 99, 82, 230, 74, 83, 113, 63,
 ];
 
 pub fn compute_data_hash(slice: &[u8]) -> DataHash {

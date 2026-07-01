@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use axum::{
     body::Body,
@@ -15,16 +12,10 @@ use shardline_protocol::TokenScope;
 
 use crate::{
     ServerError,
-    oci_adapter::{
-        oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix,
-    },
+    oci_adapter::{oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix},
 };
 
-use super::super::{
-    AppState,
-    parse_query_map,
-    scope_from_auth,
-};
+use super::super::{AppState, parse_query_map, scope_from_auth};
 use super::token::oci_authorize;
 
 struct OciTagListPage {
@@ -208,7 +199,10 @@ fn oci_tags_list_next_link(
     .map_err(|_error| ServerError::InvalidManifestReference)
 }
 
-pub(crate) fn oci_created_response(location: &str, digest_hex: Option<&str>) -> Result<Response, ServerError> {
+pub(crate) fn oci_created_response(
+    location: &str,
+    digest_hex: Option<&str>,
+) -> Result<Response, ServerError> {
     let mut builder = Response::builder()
         .status(StatusCode::CREATED)
         .header(axum::http::header::LOCATION, location);

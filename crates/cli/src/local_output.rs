@@ -187,7 +187,10 @@ impl AtomicOutputFile {
             self.anchored.file_name(),
         )?;
         if let Err(error) = ensure_parent_path_matches_anchor(&self.anchored) {
-            drop(remove_at(self.anchored.parent_dir(), self.anchored.file_name()));
+            drop(remove_at(
+                self.anchored.parent_dir(),
+                self.anchored.file_name(),
+            ));
             return Err(error);
         }
         self.committed = true;
@@ -233,13 +236,13 @@ fn open_anchored_target(path: &Path, create_parent: bool) -> io::Result<Anchored
     let parent_path = effective_parent_path(path).to_path_buf();
 
     // Reject symlinked parent directories to prevent write-through-symlink attacks.
-    if let Ok(metadata) = fs::symlink_metadata(&parent_path) {
-        if metadata.file_type().is_symlink() {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "local output parent directory must not be a symlink",
-            ));
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&parent_path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "local output parent directory must not be a symlink",
+        ));
     }
 
     let parent_dir = open_directory_chain(&parent_path, create_parent)?;

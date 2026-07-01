@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::num::NonZeroU64;
 
 use shardline_protocol::{
@@ -30,9 +32,12 @@ fn make_grant(
 
 #[test]
 fn token_issuance_roundtrip_verifies_with_same_key() {
-    let issuer =
-        shardline_vcs::ProviderTokenIssuer::new("test-issuer", SIGNING_KEY, NonZeroU64::new(300).expect("nonzero"))
-            .expect("valid issuer");
+    let issuer = shardline_vcs::ProviderTokenIssuer::new(
+        "test-issuer",
+        SIGNING_KEY,
+        NonZeroU64::new(300).expect("nonzero"),
+    )
+    .expect("valid issuer");
     let grant = make_grant(
         ProviderKind::GitHub,
         "acme",
@@ -42,34 +47,35 @@ fn token_issuance_roundtrip_verifies_with_same_key() {
         RepositoryAccess::Read,
     );
 
-    let issued = issuer.issue_at(&grant, 1_000).expect("issuance should succeed");
+    let issued = issuer
+        .issue_at(&grant, 1_000)
+        .expect("issuance should succeed");
 
     assert_eq!(issued.claims().issuer(), "test-issuer");
     assert_eq!(issued.claims().subject(), "user-1");
     assert_eq!(issued.claims().expires_at_unix_seconds(), 1_300);
 
     let signer = TokenSigner::new(SIGNING_KEY).expect("valid signer");
-    let verified = signer.verify_at(issued.token(), 1_000).expect("verification should succeed");
+    let verified = signer
+        .verify_at(issued.token(), 1_000)
+        .expect("verification should succeed");
 
     assert_eq!(verified.issuer(), "test-issuer");
     assert_eq!(verified.subject(), "user-1");
     assert_eq!(verified.scope(), TokenScope::Read);
-    assert_eq!(
-        verified.repository().owner(),
-        "acme"
-    );
+    assert_eq!(verified.repository().owner(), "acme");
     assert_eq!(verified.repository().name(), "assets");
-    assert_eq!(
-        verified.repository().revision(),
-        Some("refs/heads/main")
-    );
+    assert_eq!(verified.repository().revision(), Some("refs/heads/main"));
 }
 
 #[test]
 fn token_verification_rejects_wrong_key() {
-    let issuer =
-        shardline_vcs::ProviderTokenIssuer::new("test-issuer", SIGNING_KEY, NonZeroU64::new(60).expect("nonzero"))
-            .expect("valid issuer");
+    let issuer = shardline_vcs::ProviderTokenIssuer::new(
+        "test-issuer",
+        SIGNING_KEY,
+        NonZeroU64::new(60).expect("nonzero"),
+    )
+    .expect("valid issuer");
     let grant = make_grant(
         ProviderKind::GitLab,
         "team",
@@ -79,7 +85,9 @@ fn token_verification_rejects_wrong_key() {
         RepositoryAccess::Write,
     );
 
-    let issued = issuer.issue_at(&grant, 500).expect("issuance should succeed");
+    let issued = issuer
+        .issue_at(&grant, 500)
+        .expect("issuance should succeed");
 
     let wrong_key = b"wrong-signing-key-different-32bytes!!";
     let wrong_signer = TokenSigner::new(wrong_key).expect("valid wrong signer");
@@ -90,9 +98,12 @@ fn token_verification_rejects_wrong_key() {
 
 #[test]
 fn token_verification_rejects_expired_token() {
-    let issuer =
-        shardline_vcs::ProviderTokenIssuer::new("test-issuer", SIGNING_KEY, NonZeroU64::new(10).expect("nonzero"))
-            .expect("valid issuer");
+    let issuer = shardline_vcs::ProviderTokenIssuer::new(
+        "test-issuer",
+        SIGNING_KEY,
+        NonZeroU64::new(10).expect("nonzero"),
+    )
+    .expect("valid issuer");
     let grant = make_grant(
         ProviderKind::Generic,
         "org",
@@ -102,7 +113,9 @@ fn token_verification_rejects_expired_token() {
         RepositoryAccess::Read,
     );
 
-    let issued = issuer.issue_at(&grant, 100).expect("issuance should succeed");
+    let issued = issuer
+        .issue_at(&grant, 100)
+        .expect("issuance should succeed");
 
     let signer = TokenSigner::new(SIGNING_KEY).expect("valid signer");
     let result = signer.verify_at(issued.token(), 200);
@@ -115,11 +128,16 @@ fn hmac_signature_is_deterministic() {
     let signer = TokenSigner::new(SIGNING_KEY).expect("valid signer");
     let repository = RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", Some("main"))
         .expect("valid scope");
-    let claims_a =
-        TokenClaims::new("issuer", "subject", TokenScope::Read, repository.clone(), 42)
-            .expect("valid claims");
-    let claims_b =
-        TokenClaims::new("issuer", "subject", TokenScope::Read, repository, 42).expect("valid claims");
+    let claims_a = TokenClaims::new(
+        "issuer",
+        "subject",
+        TokenScope::Read,
+        repository.clone(),
+        42,
+    )
+    .expect("valid claims");
+    let claims_b = TokenClaims::new("issuer", "subject", TokenScope::Read, repository, 42)
+        .expect("valid claims");
 
     let token_a = signer.sign(&claims_a).expect("signing should succeed");
     let token_b = signer.sign(&claims_b).expect("signing should succeed");
@@ -130,14 +148,20 @@ fn hmac_signature_is_deterministic() {
 #[test]
 fn repository_scope_roundtrips_through_token_claims() {
     let signer = TokenSigner::new(SIGNING_KEY).expect("valid signer");
-    let scope =
-        RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", Some("refs/heads/dev"))
-            .expect("valid scope");
+    let scope = RepositoryScope::new(
+        RepositoryProvider::GitLab,
+        "group",
+        "project",
+        Some("refs/heads/dev"),
+    )
+    .expect("valid scope");
     let claims =
         TokenClaims::new("issuer", "user", TokenScope::Write, scope, 999).expect("valid claims");
 
     let token = signer.sign(&claims).expect("signing should succeed");
-    let verified = signer.verify_at(&token, 0).expect("verification should succeed");
+    let verified = signer
+        .verify_at(&token, 0)
+        .expect("verification should succeed");
 
     assert_eq!(verified.repository().provider(), RepositoryProvider::GitLab);
     assert_eq!(verified.repository().owner(), "group");

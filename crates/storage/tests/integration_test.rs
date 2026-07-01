@@ -1,9 +1,20 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::shadow_unrelated,
+    clippy::let_underscore_must_use,
+    clippy::format_push_string,
+    clippy::unwrap_in_result
+)]
+
 use shardline_protocol::{ByteRange, ShardlineHash};
+use shardline_storage::LocalObjectStore;
 use shardline_storage::{
-    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, ObjectStore as _,
+    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore as _,
     PutOutcome,
 };
-use shardline_storage::LocalObjectStore;
 
 fn chunk_hash(bytes: &[u8]) -> ShardlineHash {
     let digest = blake3::hash(bytes);
@@ -30,7 +41,10 @@ fn local_object_store_put_and_get_roundtrip() {
 
     assert!(store.contains(&key).expect("contains"));
 
-    let metadata = store.metadata(&key).expect("metadata").expect("some metadata");
+    let metadata = store
+        .metadata(&key)
+        .expect("metadata")
+        .expect("some metadata");
     assert_eq!(metadata.length(), body.len() as u64);
 }
 

@@ -10,8 +10,8 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::to_vec;
 use shardline_index::{
-    DedupeShardMapping, DedupeStore, LifecycleStore, LocalIndexStore, QuarantineCandidate,
-    RetentionHold, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
+    DedupeShardMapping, LifecycleStore, LocalIndexStore, QuarantineCandidate, RetentionHold,
+    WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, unix_now_seconds_lossy};
 use shardline_storage::ObjectKey;

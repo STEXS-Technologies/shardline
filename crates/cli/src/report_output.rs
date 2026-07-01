@@ -13,7 +13,10 @@ pub fn print_config_check_summary(report: &ConfigCheckReport) {
     println!("object_backend: {}", report.object_backend);
     println!("cache_backend: {}", report.cache_backend);
     println!("auth_enabled: {}", report.auth_enabled);
-    println!("provider_tokens_enabled: {}", report.provider_tokens_enabled);
+    println!(
+        "provider_tokens_enabled: {}",
+        report.provider_tokens_enabled
+    );
 }
 
 pub fn print_database_migration_summary(report: &DatabaseMigrationReport) {
@@ -84,10 +87,7 @@ pub fn print_index_rebuild_summary(report: &LocalIndexRebuildReport) {
         "scanned_retained_shards: {}",
         report.scanned_retained_shards
     );
-    println!(
-        "rebuilt_latest_records: {}",
-        report.rebuilt_latest_records
-    );
+    println!("rebuilt_latest_records: {}", report.rebuilt_latest_records);
     println!(
         "unchanged_latest_records: {}",
         report.unchanged_latest_records
@@ -143,10 +143,7 @@ pub fn print_lifecycle_repair_summary(report: &LifecycleRepairReport) {
     print_lifecycle_repair_summary_prefixed(report, "");
 }
 
-pub fn print_lifecycle_repair_summary_prefixed(
-    report: &LifecycleRepairReport,
-    prefix: &str,
-) {
+pub fn print_lifecycle_repair_summary_prefixed(report: &LifecycleRepairReport, prefix: &str) {
     let sep = if prefix.is_empty() { "" } else { "." };
     println!("{prefix}{sep}scanned_records: {}", report.scanned_records);
     println!(

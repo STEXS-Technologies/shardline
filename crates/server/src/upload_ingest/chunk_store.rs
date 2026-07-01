@@ -5,9 +5,7 @@ use tokio::task;
 
 use super::ChunkBuffer;
 use crate::{
-    ServerError,
-    chunk_store::chunk_object_key_for_computed_hash,
-    local_backend::chunk_hash,
+    ServerError, chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
     object_store::ServerObjectStore,
 };
 

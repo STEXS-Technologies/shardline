@@ -27,8 +27,8 @@ use std::{
 use serde_json::Error as JsonError;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileId, LocalIndexStoreError, MemoryIndexStoreError,
-    MemoryRecordStoreError, PostgresMetadataStoreError, RecordMutation, RecordTraversal, parse_xet_hash_hex,
-    xet_hash_hex_string,
+    MemoryRecordStoreError, PostgresMetadataStoreError, RecordMutation, RecordTraversal,
+    parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::HashParseError;
 use shardline_server_core::{
@@ -369,9 +369,10 @@ where
         desired_latest_paths.insert(latest_path.clone());
 
         let record_bytes = serde_json::to_vec(&candidate.record)?;
-        let existing_bytes = RecordTraversal::read_latest_record_bytes(record_store, &candidate.record)
-            .await
-            .map_err(Into::into)?;
+        let existing_bytes =
+            RecordTraversal::read_latest_record_bytes(record_store, &candidate.record)
+                .await
+                .map_err(Into::into)?;
 
         if existing_bytes.as_deref() == Some(record_bytes.as_slice()) {
             report.unchanged_latest_records = checked_increment(report.unchanged_latest_records)?;
@@ -723,12 +724,14 @@ mod tests {
         };
         assert!(detail.to_string().contains("/expected/path"));
 
-        let detail =
-            IndexRebuildIssueDetail::InvalidReconstructionPlan(IndexRebuildReconstructionPlanDetail::ChunkHashInvalid);
+        let detail = IndexRebuildIssueDetail::InvalidReconstructionPlan(
+            IndexRebuildReconstructionPlanDetail::ChunkHashInvalid,
+        );
         assert!(!detail.to_string().is_empty());
 
-        let detail =
-            IndexRebuildIssueDetail::InvalidRetainedShard(shardline_server_core::InvalidSerializedShardError::ParserRejectedMetadata);
+        let detail = IndexRebuildIssueDetail::InvalidRetainedShard(
+            shardline_server_core::InvalidSerializedShardError::ParserRejectedMetadata,
+        );
         assert!(!detail.to_string().is_empty());
     }
 

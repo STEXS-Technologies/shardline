@@ -12,8 +12,10 @@ use shardline_protocol::RepositoryScope;
 use shardline_server_core::{
     InvalidSerializedShardError, ServerObjectStore, ShardMetadataLimits, chunk_hash, content_hash,
 };
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome};
-    use shardline_xet_core::{
+use shardline_storage::{
+    ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome,
+};
+use shardline_xet_core::{
     merklehash::{MerkleHash, compute_data_hash},
     metadata_shard::{
         MDBShardFileHeader,
@@ -571,9 +573,11 @@ impl XorbRangeInfo {
         if range_start == 0 {
             return Ok(0);
         }
-        let previous_index = range_start.checked_sub(1).ok_or_else(|| XetAdapterError::from(
-            InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList,
-        ))?;
+        let previous_index = range_start.checked_sub(1).ok_or_else(|| {
+            XetAdapterError::from(
+                InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList,
+            )
+        })?;
         self.packed_chunk_ends
             .get(previous_index)
             .copied()
@@ -602,7 +606,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use shardline_server_core::{DEFAULT_SHARD_METADATA_LIMITS, ShardMetadataLimits};
-use shardline_xet_core::{
+    use shardline_xet_core::{
         merklehash::{compute_data_hash, file_hash, xorb_hash},
         metadata_shard::{
             file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},

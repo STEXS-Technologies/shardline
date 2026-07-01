@@ -4,7 +4,7 @@ use shardline_storage::ObjectKey;
 
 use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, u64_to_i64};
 use crate::{
-    DedupeShardMapping, FileId, FileReconstruction, LifecycleStore, DedupeStore,
+    DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
     StoredObjectId, WebhookDelivery, xet_hash_hex_string,
 };
@@ -63,7 +63,6 @@ impl ReconstructionStore for LocalIndexStore {
         )?;
         Ok(exists != 0)
     }
-
 }
 
 impl DedupeStore for LocalIndexStore {
@@ -119,7 +118,6 @@ impl DedupeStore for LocalIndexStore {
         )?;
         Ok(changed > 0)
     }
-
 }
 
 impl LifecycleStore for LocalIndexStore {

@@ -1,8 +1,4 @@
-use crate::{
-    ServerError,
-    oci_adapter::validate_repository,
-    protocol_support::parse_sha256_digest,
-};
+use crate::{ServerError, oci_adapter::validate_repository, protocol_support::parse_sha256_digest};
 
 pub(crate) enum OciPath {
     Blob {

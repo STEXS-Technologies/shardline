@@ -13,11 +13,10 @@ use shardline_protocol::TokenScope;
 use crate::{
     ServerError,
     oci_adapter::{
-        abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
-        append_upload_bytes, create_upload_session, delete_upload_session,
-        finalize_s3_multipart_upload_session, lock_upload_sessions, oci_blob_key,
-        oci_blob_location, read_upload_session, touch_upload_session,
-        upload_body_integrity, upload_body_path_for_session, upload_length,
+        abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
+        create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
+        lock_upload_sessions, oci_blob_key, oci_blob_location, read_upload_session,
+        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
         upload_session_length, upload_session_location, validate_repository,
     },
     protocol_support::{parse_sha256_digest, scope_namespace, validate_oci_repository_scope},
@@ -25,14 +24,11 @@ use crate::{
 };
 
 use super::super::{
-    AppState,
-    ensure_upload_growth_within_limit,
-    parse_query_map,
-    parse_upload_content_range,
+    AppState, ensure_upload_growth_within_limit, parse_query_map, parse_upload_content_range,
     scope_from_auth,
 };
-use super::token::oci_authorize;
 use super::tags::oci_created_response;
+use super::token::oci_authorize;
 
 #[tracing::instrument(skip(state, headers, uri, body), fields(repository))]
 pub(crate) async fn oci_post_blob_upload(
@@ -99,7 +95,10 @@ pub(crate) async fn oci_post_blob_upload(
         .map_err(|_error| ServerError::Overflow)
 }
 
-#[tracing::instrument(skip(state, auth_headers, headers, body), fields(repository, session_id))]
+#[tracing::instrument(
+    skip(state, auth_headers, headers, body),
+    fields(repository, session_id)
+)]
 pub(crate) async fn oci_patch_blob_upload(
     state: &Arc<AppState>,
     auth_headers: &HeaderMap,

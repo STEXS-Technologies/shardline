@@ -324,7 +324,8 @@ impl BenchReport {
         );
         println!(
             "average_sparse_update_upload_bytes_per_second: {}",
-            self.throughput.average_sparse_update_upload_bytes_per_second
+            self.throughput
+                .average_sparse_update_upload_bytes_per_second
         );
         println!(
             "average_latest_download_bytes_per_second: {}",
@@ -370,10 +371,7 @@ impl BenchReport {
             "total_cached_reconstruction_response_bytes: {}",
             self.totals.total_cached_reconstruction_response_bytes
         );
-        println!(
-            "cache_hit_iterations: {}",
-            self.totals.cache_hit_iterations
-        );
+        println!("cache_hit_iterations: {}", self.totals.cache_hit_iterations);
         println!(
             "total_concurrent_downloaded_bytes: {}",
             self.totals.total_concurrent_downloaded_bytes
@@ -427,10 +425,7 @@ impl BenchReport {
                 "last_iteration_chunk_objects: {}",
                 last.inventory.chunk_objects
             );
-            println!(
-                "last_iteration_chunk_bytes: {}",
-                last.inventory.chunk_bytes
-            );
+            println!("last_iteration_chunk_bytes: {}", last.inventory.chunk_bytes);
             println!(
                 "last_iteration_visible_files: {}",
                 last.inventory.visible_files
@@ -1074,8 +1069,10 @@ pub async fn run_bench(
             benchmark_backend_names = Some((metadata_backend, object_backend));
         }
 
-        total_initial_upload_micros =
-            checked_add_u64(total_initial_upload_micros, report.latency.initial_upload_micros)?;
+        total_initial_upload_micros = checked_add_u64(
+            total_initial_upload_micros,
+            report.latency.initial_upload_micros,
+        )?;
         total_sparse_update_upload_micros = checked_add_u64(
             total_sparse_update_upload_micros,
             report.latency.sparse_update_upload_micros,
@@ -1112,8 +1109,7 @@ pub async fn run_bench(
             total_cached_latest_reconstruction_hot_micros,
             report.latency.cached_latest_reconstruction_hot_micros,
         )?;
-        total_uploaded_bytes =
-            checked_add_u64(total_uploaded_bytes, report.bytes.uploaded_bytes)?;
+        total_uploaded_bytes = checked_add_u64(total_uploaded_bytes, report.bytes.uploaded_bytes)?;
         total_downloaded_bytes =
             checked_add_u64(total_downloaded_bytes, report.bytes.downloaded_bytes)?;
         total_cached_reconstruction_response_bytes = checked_add_u64(
@@ -1881,10 +1877,7 @@ mod tests {
         assert_eq!(report.totals.total_concurrent_newly_stored_bytes, 8);
         assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
         assert_eq!(report.totals.total_cross_repository_reused_chunks, 2);
-        assert_eq!(
-            report.totals.total_cross_repository_newly_stored_bytes,
-            4
-        );
+        assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 4);
         assert!(
             iteration.timing.process_cpu_cores_per_mille
                 >= iteration.timing.process_host_utilization_per_mille
@@ -2065,10 +2058,7 @@ mod tests {
         assert_eq!(report.totals.total_uploaded_bytes, 12);
         assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
         assert_eq!(report.totals.total_cross_repository_reused_chunks, 2);
-        assert_eq!(
-            report.totals.total_cross_repository_newly_stored_bytes,
-            4
-        );
+        assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 4);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

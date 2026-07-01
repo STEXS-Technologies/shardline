@@ -19,14 +19,10 @@ use shardline_protocol::TokenScope;
 
 use crate::ServerError;
 
-use super::{
-    AppState,
-    direct_object_response,
-    scope_from_auth,
-};
+use super::{AppState, direct_object_response, scope_from_auth};
 use blob_upload::{
-    oci_delete_blob_upload, oci_get_blob_upload, oci_patch_blob_upload,
-    oci_post_blob_upload, oci_put_blob_upload,
+    oci_delete_blob_upload, oci_get_blob_upload, oci_patch_blob_upload, oci_post_blob_upload,
+    oci_put_blob_upload,
 };
 use manifest::{oci_delete_manifest, oci_get_manifest, oci_put_manifest};
 use tags::oci_tags_list;
@@ -102,8 +98,11 @@ async fn oci_dispatch_parsed(
             },
         ) => {
             let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key =
-                crate::oci_adapter::oci_blob_key(&repository, &digest_hex, auth.as_ref().map(scope_from_auth))?;
+            let object_key = crate::oci_adapter::oci_blob_key(
+                &repository,
+                &digest_hex,
+                auth.as_ref().map(scope_from_auth),
+            )?;
             direct_object_response(
                 state,
                 &headers,
@@ -121,8 +120,11 @@ async fn oci_dispatch_parsed(
             },
         ) => {
             let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key =
-                crate::oci_adapter::oci_blob_key(&repository, &digest_hex, auth.as_ref().map(scope_from_auth))?;
+            let object_key = crate::oci_adapter::oci_blob_key(
+                &repository,
+                &digest_hex,
+                auth.as_ref().map(scope_from_auth),
+            )?;
             let total_length = state.backend.object_length(&object_key).await?;
             Ok(Response::builder()
                 .status(StatusCode::OK)

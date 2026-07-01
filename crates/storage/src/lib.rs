@@ -56,7 +56,8 @@ mod store;
 pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
 pub use local_path::{
-    DirectoryPathError, ensure_directory_path_components_are_not_symlinked, resolve_platform_symlinks,
+    DirectoryPathError, ensure_directory_path_components_are_not_symlinked,
+    resolve_platform_symlinks,
 };
 pub use object::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
 pub use s3::{

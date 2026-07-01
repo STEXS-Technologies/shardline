@@ -214,7 +214,11 @@ async fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                report_output::print_lifecycle_repair_cli_summary(&report, &root, webhook_retention_seconds);
+                report_output::print_lifecycle_repair_cli_summary(
+                    &report,
+                    &root,
+                    webhook_retention_seconds,
+                );
                 ExitCode::SUCCESS
             }
             Err(error) => {

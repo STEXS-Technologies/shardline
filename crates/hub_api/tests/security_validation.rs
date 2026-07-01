@@ -94,7 +94,9 @@ fn validate_jwt_alg_none_attack_blocked() {
     let jwks_source = include_str!("../../server/src/jwks_provider.rs");
 
     let oidc_verify_start = oidc_source.find("fn verify_jwt_claims").unwrap();
-    let oidc_verify_end = oidc_source.find("impl AuthProvider for OidcProvider").unwrap();
+    let oidc_verify_end = oidc_source
+        .find("impl AuthProvider for OidcProvider")
+        .unwrap();
     let oidc_fn = &oidc_source[oidc_verify_start..oidc_verify_end];
     assert!(
         oidc_fn.contains("if alg_str == \"none\""),
@@ -102,7 +104,9 @@ fn validate_jwt_alg_none_attack_blocked() {
     );
 
     let jwks_verify_start = jwks_source.find("fn verify_jwt_claims").unwrap();
-    let jwks_verify_end = jwks_source.find("impl AuthProvider for JwksProvider").unwrap();
+    let jwks_verify_end = jwks_source
+        .find("impl AuthProvider for JwksProvider")
+        .unwrap();
     let jwks_fn = &jwks_source[jwks_verify_start..jwks_verify_end];
     assert!(
         jwks_fn.contains("if alg_str == \"none\""),
@@ -193,8 +197,8 @@ fn validate_webhook_url_validation_exists() {
 /// happens at the route handler level via `validate_webhook_url`.
 #[test]
 fn validate_webhook_accepts_dangerous_urls_at_store_level() {
-    use shardline_index::hub::{BoxedHubStore, HubRepoType};
     use shardline_index::LocalIndexStore;
+    use shardline_index::hub::{BoxedHubStore, HubRepoType};
     use tempfile::TempDir;
 
     let tmp = TempDir::new().unwrap();
@@ -235,7 +239,9 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
 
     let store = LocalIndexStore::open(root);
     let boxed = BoxedHubStore::from_store(store);
-    boxed.create_repo(HubRepoType::Model, "team/ssrf-test", false).unwrap();
+    boxed
+        .create_repo(HubRepoType::Model, "team/ssrf-test", false)
+        .unwrap();
 
     let wh = boxed.create_webhook(
         "team/ssrf-test",
@@ -243,7 +249,10 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
         &["push".to_owned()],
         None,
     );
-    assert!(wh.is_ok(), "Store-level accepts file:// URL (validation is at route layer)");
+    assert!(
+        wh.is_ok(),
+        "Store-level accepts file:// URL (validation is at route layer)"
+    );
 }
 
 // ============================================================================
@@ -427,8 +436,7 @@ fn validate_cas_error_no_longer_leaks_internals() {
     let error_source = include_str!("../../hub_api/src/error.rs");
 
     assert!(
-        error_source.contains("CasError(_)")
-            && error_source.contains("\"internal error\""),
+        error_source.contains("CasError(_)") && error_source.contains("\"internal error\""),
         "CasError now returns generic 'internal error' — no internal details leaked"
     );
 }
@@ -473,8 +481,8 @@ async fn validate_commit_body_bounded_by_router() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use shardline_hub_api::routes::HubState;
-    use shardline_index::hub::{BoxedHubStore, HubRepoType};
     use shardline_index::LocalIndexStore;
+    use shardline_index::hub::{BoxedHubStore, HubRepoType};
     use std::sync::{Mutex, Once, OnceLock};
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -557,9 +565,8 @@ async fn validate_commit_body_bounded_by_router() {
         .create_revision("team/body-limit-test", None, "sha1", "main", "init")
         .unwrap();
 
-    let mut ndjson_body = String::from(
-        r#"{"header":{"message":"large commit","parentCommit":"sha1"}}"#,
-    );
+    let mut ndjson_body =
+        String::from(r#"{"header":{"message":"large commit","parentCommit":"sha1"}}"#);
     ndjson_body.push('\n');
     for i in 0..100 {
         let content = base64::Engine::encode(

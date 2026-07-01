@@ -1,31 +1,31 @@
-#[cfg(test)]
-use std::sync::{LazyLock, Mutex};
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::env::current_exe;
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
 #[cfg(any(target_os = "linux", test))]
 use std::fs;
 #[cfg(any(target_os = "linux", test))]
 use std::fs::{File, OpenOptions};
 #[cfg(any(target_os = "linux", test))]
 use std::io::Read;
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 
 #[cfg(any(target_os = "linux", test))]
 use shardline_storage::local_path::resolve_platform_symlinks;
 
+#[cfg(not(target_os = "linux"))]
+use crate::local_output::remove_output_file_if_present;
 #[cfg(target_os = "linux")]
 use crate::local_output::{
     ensure_output_directory, remove_output_file_if_present, write_output_bytes,
 };
-#[cfg(not(target_os = "linux"))]
-use crate::local_output::remove_output_file_if_present;
 
 const DEFAULT_OUTPUT_DIR: &str = "/etc/systemd/system";
 const DEFAULT_UNIT_PREFIX: &str = "shardline-gc";
@@ -38,6 +38,7 @@ const DEFAULT_SERVICE_GROUP: &str = "shardline";
 #[cfg(any(target_os = "linux", test))]
 const MAX_SYSTEMD_ENV_FILE_BYTES: u64 = 65_536;
 #[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 const MAX_SYSTEM_ACCOUNT_FILE_BYTES: u64 = 4_194_304;
 
 #[cfg(test)]
@@ -257,42 +258,42 @@ pub fn install_gc_schedule(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = options;
-        return Err(GcScheduleError::Io(io::Error::new(
+        Err(GcScheduleError::Io(io::Error::new(
             io::ErrorKind::Unsupported,
             "scheduled garbage collection via systemd is only supported on Linux",
-        )));
+        )))
     }
     #[cfg(target_os = "linux")]
     {
-    let resolved = resolve_install_options(options)?;
+        let resolved = resolve_install_options(options)?;
 
-    ensure_output_directory(&resolved.output_dir)?;
-    if !resolved.output_dir.is_dir() {
-        return Err(GcScheduleError::InvalidOutputDirectory(resolved.output_dir));
-    }
-    ensure_output_directory(&resolved.working_directory)?;
+        ensure_output_directory(&resolved.output_dir)?;
+        if !resolved.output_dir.is_dir() {
+            return Err(GcScheduleError::InvalidOutputDirectory(resolved.output_dir));
+        }
+        ensure_output_directory(&resolved.working_directory)?;
 
-    let service_path = resolved
-        .output_dir
-        .join(format!("{}.service", resolved.unit_prefix));
-    let timer_path = resolved
-        .output_dir
-        .join(format!("{}.timer", resolved.unit_prefix));
+        let service_path = resolved
+            .output_dir
+            .join(format!("{}.service", resolved.unit_prefix));
+        let timer_path = resolved
+            .output_dir
+            .join(format!("{}.timer", resolved.unit_prefix));
 
-    let service_unit = render_service_unit(&resolved);
-    let timer_unit = render_timer_unit(&resolved);
-    write_output_bytes(&service_path, service_unit.as_bytes(), true)?;
-    write_output_bytes(&timer_path, timer_unit.as_bytes(), true)?;
+        let service_unit = render_service_unit(&resolved);
+        let timer_unit = render_timer_unit(&resolved);
+        write_output_bytes(&service_path, service_unit.as_bytes(), true)?;
+        write_output_bytes(&timer_path, timer_unit.as_bytes(), true)?;
 
-    Ok(GcScheduleInstallReport {
-        service_path,
-        timer_path,
-        binary_path: resolved.binary_path,
-        env_file: resolved.env_file,
-        working_directory: resolved.working_directory,
-        calendar: resolved.calendar,
-        retention_seconds: resolved.retention_seconds,
-    })
+        Ok(GcScheduleInstallReport {
+            service_path,
+            timer_path,
+            binary_path: resolved.binary_path,
+            env_file: resolved.env_file,
+            working_directory: resolved.working_directory,
+            calendar: resolved.calendar,
+            retention_seconds: resolved.retention_seconds,
+        })
     }
 }
 
@@ -549,8 +550,6 @@ fn read_text_file_with_limit(
     Ok(contents)
 }
 
-
-
 #[cfg(any(target_os = "linux", test))]
 #[cfg(unix)]
 fn open_local_text_file(path: &Path) -> Result<File, GcScheduleError> {
@@ -718,18 +717,20 @@ fn render_timer_unit(options: &GcScheduleInstallOptions) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use std::os::unix::fs::symlink;
+    #[cfg(target_os = "linux")]
+    use std::{fs::read_to_string, io::ErrorKind, os::unix::fs::symlink};
     use std::{
-        fs::{OpenOptions, read_to_string, write as write_file},
-        io::{ErrorKind, Write},
+        fs::{OpenOptions, write as write_file},
+        io::Write,
         path::Path,
     };
 
     use super::{
-        GcScheduleError, GcScheduleInstallOptions, MAX_SYSTEMD_ENV_FILE_BYTES, install_gc_schedule,
-        read_text_file_with_limit, set_before_local_text_file_read_hook, uninstall_gc_schedule,
+        GcScheduleError, MAX_SYSTEMD_ENV_FILE_BYTES, read_text_file_with_limit,
+        set_before_local_text_file_read_hook,
     };
+    #[cfg(target_os = "linux")]
+    use super::{GcScheduleInstallOptions, install_gc_schedule, uninstall_gc_schedule};
 
     #[cfg(target_os = "linux")]
     #[test]

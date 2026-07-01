@@ -123,15 +123,11 @@ mod tests {
 
     #[test]
     fn scope_namespace_differs_with_revision() {
-        let scope_no_rev = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None)
-            .unwrap();
-        let scope_rev = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "acme",
-            "repo",
-            Some("abc123"),
-        )
-        .unwrap();
+        let scope_no_rev =
+            RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap();
+        let scope_rev =
+            RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", Some("abc123"))
+                .unwrap();
         assert_ne!(
             scope_namespace(Some(&scope_no_rev)),
             scope_namespace(Some(&scope_rev))

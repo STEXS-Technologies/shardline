@@ -7,9 +7,8 @@ use crate::{
     InvalidSerializedShardError, ServerError,
     object_store::{ServerObjectStore, read_full_object},
     xet_adapter::{
-        XorbVisitError, try_for_each_serialized_xorb_chunk,
-        validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
-        xorb_hash_from_object_key_if_present, xorb_object_key,
+        XorbVisitError, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
     },
 };
 

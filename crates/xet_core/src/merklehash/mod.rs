@@ -1,5 +1,5 @@
-pub mod data_hash;
 pub mod aggregated_hashes;
+pub mod data_hash;
 
 pub use data_hash::*;
 pub type MerkleHash = DataHash;

@@ -7,12 +7,13 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow, query, query_scalar, typ
 use super::{PostgresMetadataStoreError, PostgresRecordKind, PostgresRecordLocator, i64_to_u64};
 use crate::{
     DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
-    RepositoryRecordScope, StoredRecord, xet_hash_hex_string,
+    RepositoryRecordScope, StoredRecord,
     record_key::record_key as shared_record_key,
     record_key::{
         repository_record_scope_key as shared_repository_record_scope_key,
         repository_scope_key as shared_repository_scope_key,
     },
+    xet_hash_hex_string,
 };
 
 impl super::PostgresRecordStore {

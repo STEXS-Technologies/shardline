@@ -1,13 +1,17 @@
 #![deny(unsafe_code)]
+#![allow(
+    clippy::indexing_slicing,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::let_underscore_must_use
+)]
 #![cfg_attr(
     test,
     allow(
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::indexing_slicing,
         clippy::arithmetic_side_effects,
         clippy::shadow_unrelated,
-        clippy::let_underscore_must_use,
         clippy::format_push_string
     )
 )]
@@ -50,15 +54,15 @@ mod error;
 mod fsck;
 mod fuzz;
 mod ingest_bench;
+mod jwks_provider;
 mod lifecycle_repair;
 mod local_backend;
 mod local_fs;
 mod local_path;
-mod model;
 pub mod metrics;
+mod model;
 mod object_store;
 mod oidc_provider;
-mod jwks_provider;
 mod ops_record_store;
 mod overflow;
 mod postgres_backend;
@@ -83,18 +87,18 @@ pub use app::{
     acquire_chunk_transfer_permit, full_byte_stream_response,
 };
 pub use backend::{
-    ServerBackend, BenchmarkBackend, clear_repository_reference_probe_filter,
+    BenchmarkBackend, ServerBackend, clear_repository_reference_probe_filter,
     lock_repository_reference_probe_test, repository_reference_probe_count,
     reset_repository_reference_probe_count_for_hash,
 };
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
-pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
 pub use local_backend::chunk_hash;
 pub use object_store::ServerObjectStore;
-pub(crate) use shardline_oci_adapter as oci_adapter;
 pub use oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 pub use protocol_support::shared_sha256_object_key;
 pub use reconstruction_cache::ReconstructionCacheService;
+pub(crate) use shardline_oci_adapter as oci_adapter;
+pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
 pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
 mod gc_tests;
@@ -105,7 +109,9 @@ pub(crate) use shardline_xet_adapter as xet_adapter;
 
 pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
-pub use config::{AuthProviderKind, ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits};
+pub use config::{
+    AuthProviderKind, ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
+};
 pub use database_migration::{
     DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,
     DatabaseMigrationReport, DatabaseMigrationStatusEntry, apply_database_migrations,
@@ -113,12 +119,6 @@ pub use database_migration::{
 };
 pub use error::ServerError;
 pub(crate) use error::{InvalidReconstructionResponseError, InvalidSerializedShardError};
-pub(crate) use shardline_protocol_adapters::{
-    LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-};
-pub(crate) use shardline_xet_adapter::ShardUploadResponse;
-pub(crate) use postgres_backend::PostgresBackend;
-pub(crate) use shardline_gc as gc;
 pub use fsck::{
     FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,
     LocalFsckIssueKind, LocalFsckReport, ProviderRepositoryStateTimestampField, run_fsck,
@@ -132,7 +132,9 @@ pub use fuzz::{
     fuzz_oci_frontend_summary, fuzz_protocol_frontend_summary,
     fuzz_reconstruction_response_summary, fuzz_retained_shard_chunk_hashes,
 };
-pub use gc::{DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport};
+pub use gc::{
+    DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
+};
 pub use ingest_bench::ingest_without_storage_with_parallelism;
 pub use lifecycle_repair::{
     DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairOptions, LifecycleRepairReport,
@@ -144,15 +146,23 @@ pub use model::{
     ProviderTokenIssueResponse, ProviderWebhookResponse, ReadyResponse, ServerStatsResponse,
     XetCasTokenResponse,
 };
+pub(crate) use postgres_backend::PostgresBackend;
 pub use rebuild::{
     IndexRebuildIssueDetail, IndexRebuildReconstructionPlanDetail, LocalIndexRebuildIssue,
     LocalIndexRebuildIssueKind, LocalIndexRebuildReport, run_index_rebuild,
     run_local_index_rebuild,
 };
-pub use reconstruction_cache::{ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache};
+pub use reconstruction_cache::{
+    ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache,
+};
 pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
+pub(crate) use shardline_gc as gc;
+pub(crate) use shardline_protocol_adapters::{
+    LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
+};
+pub(crate) use shardline_xet_adapter::ShardUploadResponse;
 pub use storage_migration::{
     StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport,
     run_storage_migration,

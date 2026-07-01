@@ -9,18 +9,11 @@ use axum::{
 use shardline_protocol::TokenScope;
 
 use crate::{
-    ServerError,
-    BazelCacheKind,
-    bazel_cache_object_key,
+    BazelCacheKind, ServerError, bazel_cache_object_key,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
-use super::{
-    AppState,
-    authorize,
-    direct_object_response,
-    scope_from_auth,
-};
+use super::{AppState, authorize, direct_object_response, scope_from_auth};
 
 #[tracing::instrument(skip(state, headers), fields(hash))]
 pub(crate) async fn bazel_get_ac(

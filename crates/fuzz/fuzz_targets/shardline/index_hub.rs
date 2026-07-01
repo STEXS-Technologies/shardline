@@ -8,5 +8,6 @@ fuzz_target!(|data: &str| {
     let second = HubRepoType::parse_str(data);
     assert_eq!(first, second);
 
+    #[allow(clippy::let_underscore_must_use)]
     let _ = HubRepoType::from_api_repo_type(data);
 });

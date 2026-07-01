@@ -1,8 +1,21 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::shadow_unrelated,
+    clippy::let_underscore_must_use,
+    clippy::format_push_string,
+    clippy::missing_const_for_fn,
+    clippy::str_to_string,
+    clippy::unwrap_in_result
+)]
+
 use shardline_index::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LocalIndexStore,
     ReconstructionStore, ReconstructionTerm, StoredObjectId,
 };
-use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
+use shardline_protocol::{ChunkRange, ShardlineHash};
 use shardline_storage::ObjectKey;
 
 fn make_file_id(byte: u8) -> FileId {
@@ -62,7 +75,9 @@ fn local_index_store_reconstruction_delete_is_idempotent() {
     let deleted = store.delete_reconstruction(&file_id).expect("delete first");
     assert!(deleted);
 
-    let deleted = store.delete_reconstruction(&file_id).expect("delete second");
+    let deleted = store
+        .delete_reconstruction(&file_id)
+        .expect("delete second");
     assert!(!deleted);
 
     let ids = store.list_reconstruction_file_ids().expect("list");
@@ -91,7 +106,9 @@ fn local_index_store_upserts_dedupe_shard_mappings() {
     let shard_key = ObjectKey::parse("shards/aa/chunk.shard").expect("valid key");
     let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
 
-    store.upsert_dedupe_shard_mapping(&mapping).expect("upsert mapping");
+    store
+        .upsert_dedupe_shard_mapping(&mapping)
+        .expect("upsert mapping");
 
     let loaded = store
         .dedupe_shard_mapping(&chunk_hash)
@@ -153,7 +170,10 @@ fn local_index_store_multiple_reconstructions_are_independent() {
     let first = store.reconstruction(&first_id).expect("get first").unwrap();
     assert_eq!(first.terms().len(), 1);
 
-    let second = store.reconstruction(&second_id).expect("get second").unwrap();
+    let second = store
+        .reconstruction(&second_id)
+        .expect("get second")
+        .unwrap();
     assert_eq!(second.terms().len(), 3);
 }
 

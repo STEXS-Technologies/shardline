@@ -268,19 +268,15 @@ pub(super) async fn metrics(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn metrics_output_is_valid_prometheus_text_format() {
-        let body = format!(
-            concat!(
-                "# HELP shardline_up Whether the Shardline process is serving requests.\n",
-                "# TYPE shardline_up gauge\n",
-                "shardline_up 1\n",
-                "# HELP shardline_server_info Static Shardline runtime information.\n",
-                "# TYPE shardline_server_info gauge\n",
-                "shardline_server_info{{role=\"all\",frontends=\"xet\",metadata_backend=\"local\",object_backend=\"local\",cache_backend=\"memory\"}} 1\n",
-            ),
+        let body = concat!(
+            "# HELP shardline_up Whether the Shardline process is serving requests.\n",
+            "# TYPE shardline_up gauge\n",
+            "shardline_up 1\n",
+            "# HELP shardline_server_info Static Shardline runtime information.\n",
+            "# TYPE shardline_server_info gauge\n",
+            "shardline_server_info{{role=\"all\",frontends=\"xet\",metadata_backend=\"local\",object_backend=\"local\",cache_backend=\"memory\"}} 1\n",
         );
         assert!(body.starts_with("# HELP"));
         assert!(body.contains("# TYPE"));

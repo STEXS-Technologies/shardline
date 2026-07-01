@@ -1,8 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use shardline_index::{LocalIndexStore, LocalRecordStore, parse_xet_hash_hex};
 use shardline_index::hub::HubRepoType;
+use shardline_index::{LocalIndexStore, LocalRecordStore, parse_xet_hash_hex};
 
 fuzz_target!(|data: &str| {
     let first_hash = parse_xet_hash_hex(data);
@@ -31,18 +31,18 @@ fuzz_target!(|data: &str| {
         Err(_) => return,
     };
 
+    #[allow(clippy::let_underscore_must_use)]
     let _ = index_store.insert_reconstruction(
         &shardline_index::FileId::new(shardline_protocol::ShardlineHash::from_bytes([1; 32])),
         &shardline_index::FileReconstruction::new(vec![]),
     );
-    let _ = record_store.commit_file_version_metadata(
-        &shardline_index::FileRecord {
-            file_id: data.to_owned(),
-            content_hash: "a".repeat(64),
-            total_bytes: 0,
-            chunk_size: 0,
-            repository_scope: None,
-            chunks: vec![],
-        },
-    );
+    #[allow(clippy::let_underscore_must_use, clippy::let_underscore_future)]
+    let _ = record_store.commit_file_version_metadata(&shardline_index::FileRecord {
+        file_id: data.to_owned(),
+        content_hash: "a".repeat(64),
+        total_bytes: 0,
+        chunk_size: 0,
+        repository_scope: None,
+        chunks: vec![],
+    });
 });

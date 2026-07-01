@@ -14,19 +14,11 @@ use serde_json::json;
 use shardline_protocol::TokenScope;
 
 use crate::{
-    ServerError,
-    LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError,
-    LfsObjectResponse, lfs_object_key,
-    upload_ingest::RequestBodyReader,
+    LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
+    ServerError, lfs_object_key, upload_ingest::RequestBodyReader,
 };
 
-use super::{
-    AppState,
-    MAX_LFS_BATCH_OBJECTS,
-    authorize,
-    direct_object_response,
-    scope_from_auth,
-};
+use super::{AppState, MAX_LFS_BATCH_OBJECTS, authorize, direct_object_response, scope_from_auth};
 
 #[tracing::instrument(skip(state, headers, request))]
 pub(crate) async fn lfs_batch(

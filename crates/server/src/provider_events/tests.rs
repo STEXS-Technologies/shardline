@@ -7,9 +7,9 @@ use std::{
 use serde_json::to_vec;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord,
-    IndexStore, IndexStoreFuture, LifecycleStore, LocalIndexStore, LocalIndexStoreError,
-    ProviderRepositoryState, QuarantineCandidate, RecordMutation, RecordTraversal, RetentionHold, WebhookDelivery,
-    XorbId, parse_xet_hash_hex, xet_hash_hex_string,
+    IndexStoreFuture, LifecycleStore, LocalIndexStore, LocalIndexStoreError,
+    ProviderRepositoryState, QuarantineCandidate, RecordMutation, RecordTraversal, RetentionHold,
+    WebhookDelivery, XorbId, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_storage::ObjectKey;
@@ -1234,7 +1234,9 @@ async fn exercise_repository_rename_rejects_conflicting_target_metadata()
             .await;
     assert!(matches!(
         outcome,
-        Err(ServerError::Index(IndexError::ConflictingRenameTargetRecord))
+        Err(ServerError::Index(
+            IndexError::ConflictingRenameTargetRecord
+        ))
     ));
     assert!(local_version_record_exists(&record_store, &source_record).await?);
     assert!(local_latest_record_exists(&record_store, &source_record).await?);
