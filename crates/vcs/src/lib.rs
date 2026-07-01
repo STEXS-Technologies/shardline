@@ -43,6 +43,7 @@
 mod adapter;
 mod authorization;
 mod builtin;
+mod codeberg;
 mod generic;
 mod gitea;
 mod github;
@@ -60,6 +61,7 @@ pub use authorization::AuthorizationRequest;
 pub use builtin::{
     BuiltInProviderCatalog, BuiltInProviderError, ProviderRepositoryPolicy, configured_metadata,
 };
+pub use codeberg::CodebergAdapter;
 pub use generic::GenericAdapter;
 pub use gitea::GiteaAdapter;
 pub use github::GitHubAdapter;

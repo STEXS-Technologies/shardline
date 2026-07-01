@@ -30,10 +30,11 @@ fn checked_inventory_value(index: u64, delta: u64) -> Result<u64, Box<dyn Error>
 
 fn synthetic_large_inventory_record(index: usize) -> Result<FileRecord, Box<dyn Error>> {
     let index_u64 = u64::try_from(index)?;
-    let provider = match index % 3 {
+    let provider = match index % 4 {
         0 => RepositoryProvider::GitHub,
         1 => RepositoryProvider::GitLab,
-        _ => RepositoryProvider::Gitea,
+        2 => RepositoryProvider::Gitea,
+        _ => RepositoryProvider::Codeberg,
     };
     let owner = format!("team-{}", index % 8);
     let name = format!("assets-{}", index % 5);

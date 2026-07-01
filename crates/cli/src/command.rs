@@ -882,6 +882,9 @@ enum CliRepositoryProvider {
     /// GitLab repository hosting.
     #[value(name = "gitlab")]
     GitLab,
+    /// Codeberg (Gitea-based) repository hosting.
+    #[value(name = "codeberg")]
+    Codeberg,
     /// Generic Git provider integration.
     #[value(name = "generic")]
     Generic,
@@ -1189,6 +1192,7 @@ impl From<CliRepositoryProvider> for RepositoryProvider {
             CliRepositoryProvider::GitHub => Self::GitHub,
             CliRepositoryProvider::Gitea => Self::Gitea,
             CliRepositoryProvider::GitLab => Self::GitLab,
+            CliRepositoryProvider::Codeberg => Self::Codeberg,
             CliRepositoryProvider::Generic => Self::Generic,
         }
     }

@@ -17,12 +17,12 @@ use serde::Deserialize;
 use serde_json::Error as SerdeJsonError;
 use shardline_protocol::{SecretBytes, SecretString, TokenScope};
 use shardline_vcs::{
-    AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError, GenericAdapter,
-    GitHubAdapter, GitLabAdapter, GiteaAdapter, GrantedRepositoryAccess, ProviderAdapter,
-    ProviderBoundaryError, ProviderKind, ProviderRepositoryPolicy, ProviderSubject,
-    ProviderTokenIssuanceError, ProviderTokenIssuer, RepositoryAccess, RepositoryRef,
-    RepositoryVisibility, RepositoryWebhookEvent, RevisionRef, VcsReferenceError, WebhookRequest,
-    configured_metadata,
+    AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError, CodebergAdapter,
+    GenericAdapter, GitHubAdapter, GitLabAdapter, GiteaAdapter, GrantedRepositoryAccess,
+    ProviderAdapter, ProviderBoundaryError, ProviderKind, ProviderRepositoryPolicy,
+    ProviderSubject, ProviderTokenIssuanceError, ProviderTokenIssuer, RepositoryAccess,
+    RepositoryRef, RepositoryVisibility, RepositoryWebhookEvent, RevisionRef, VcsReferenceError,
+    WebhookRequest, configured_metadata,
 };
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -39,6 +39,9 @@ const GITHUB_SIGNATURE_HEADER: &str = "x-hub-signature-256";
 const GITEA_EVENT_HEADER: &str = "x-gitea-event";
 const GITEA_DELIVERY_HEADER: &str = "x-gitea-delivery";
 const GITEA_SIGNATURE_HEADER: &str = "x-gitea-signature";
+const CODEBERG_EVENT_HEADER: &str = "x-codeberg-event";
+const CODEBERG_DELIVERY_HEADER: &str = "x-codeberg-delivery";
+const CODEBERG_SIGNATURE_HEADER: &str = "x-codeberg-signature";
 const GITLAB_EVENT_HEADER: &str = "x-gitlab-event";
 const GITLAB_DELIVERY_HEADER: &str = "x-gitlab-webhook-uuid";
 const GITLAB_SIGNATURE_HEADER: &str = "x-gitlab-token";
@@ -243,6 +246,7 @@ enum BuiltInProvider {
     GitHub(GitHubAdapter),
     Gitea(GiteaAdapter),
     GitLab(GitLabAdapter),
+    Codeberg(CodebergAdapter),
     Generic(GenericAdapter),
 }
 
@@ -289,6 +293,9 @@ impl BuiltInProvider {
             ProviderKind::GitHub => Self::GitHub(GitHubAdapter::new(catalog, Some(webhook_secret))),
             ProviderKind::Gitea => Self::Gitea(GiteaAdapter::new(catalog, Some(webhook_secret))),
             ProviderKind::GitLab => Self::GitLab(GitLabAdapter::new(catalog, Some(webhook_secret))),
+            ProviderKind::Codeberg => {
+                Self::Codeberg(CodebergAdapter::new(catalog, Some(webhook_secret)))
+            }
             ProviderKind::Generic => {
                 Self::Generic(GenericAdapter::new(catalog, Some(webhook_secret)))
             }
@@ -300,6 +307,7 @@ impl BuiltInProvider {
             Self::GitHub(_) => ProviderKind::GitHub,
             Self::Gitea(_) => ProviderKind::Gitea,
             Self::GitLab(_) => ProviderKind::GitLab,
+            Self::Codeberg(_) => ProviderKind::Codeberg,
             Self::Generic(_) => ProviderKind::Generic,
         }
     }
@@ -321,6 +329,10 @@ impl BuiltInProvider {
                 .repository_metadata(repository)?
                 .default_revision()
                 .clone()),
+            Self::Codeberg(adapter) => Ok(adapter
+                .repository_metadata(repository)?
+                .default_revision()
+                .clone()),
             Self::Generic(adapter) => Ok(adapter
                 .repository_metadata(repository)?
                 .default_revision()
@@ -336,6 +348,7 @@ impl BuiltInProvider {
             Self::GitHub(adapter) => Ok(GrantedRepositoryAccess::authorize(adapter, request)?),
             Self::Gitea(adapter) => Ok(GrantedRepositoryAccess::authorize(adapter, request)?),
             Self::GitLab(adapter) => Ok(GrantedRepositoryAccess::authorize(adapter, request)?),
+            Self::Codeberg(adapter) => Ok(GrantedRepositoryAccess::authorize(adapter, request)?),
             Self::Generic(adapter) => Ok(GrantedRepositoryAccess::authorize(adapter, request)?),
         }
     }
@@ -348,6 +361,7 @@ impl BuiltInProvider {
             Self::GitHub(adapter) => Ok(ProviderAdapter::parse_webhook(adapter, request)?),
             Self::Gitea(adapter) => Ok(ProviderAdapter::parse_webhook(adapter, request)?),
             Self::GitLab(adapter) => Ok(ProviderAdapter::parse_webhook(adapter, request)?),
+            Self::Codeberg(adapter) => Ok(ProviderAdapter::parse_webhook(adapter, request)?),
             Self::Generic(adapter) => Ok(ProviderAdapter::parse_webhook(adapter, request)?),
         }
     }
@@ -450,6 +464,7 @@ fn parse_provider_kind(value: &str) -> Result<ProviderKind, ProviderServiceError
         "github" => Ok(ProviderKind::GitHub),
         "gitea" => Ok(ProviderKind::Gitea),
         "gitlab" => Ok(ProviderKind::GitLab),
+        "codeberg" => Ok(ProviderKind::Codeberg),
         "generic" => Ok(ProviderKind::Generic),
         _other => Err(ProviderServiceError::UnknownProvider),
     }
@@ -508,6 +523,11 @@ fn webhook_request<'body>(
             GITLAB_EVENT_HEADER,
             GITLAB_DELIVERY_HEADER,
             GITLAB_SIGNATURE_HEADER,
+        ),
+        ProviderKind::Codeberg => (
+            CODEBERG_EVENT_HEADER,
+            CODEBERG_DELIVERY_HEADER,
+            CODEBERG_SIGNATURE_HEADER,
         ),
         ProviderKind::Generic => (
             GENERIC_EVENT_HEADER,

@@ -245,7 +245,7 @@ flowchart TD
 ### Layer 1 — Foundation
 
 - `storage`: content-addressed `ObjectStore` trait + `LocalObjectStore` and `S3ObjectStore`
-- `vcs`: provider adapters (`ProviderAdapter` trait) for GitHub, GitLab, Gitea
+- `vcs`: provider adapters (`ProviderAdapter` trait) for GitHub, GitLab, Gitea, Codeberg
 - `cache`: reconstruction-cache trait + memory, Redis, and disabled adapters
 - `test_support`: shared test helpers (`DockerLocalStack`)
 
@@ -343,7 +343,7 @@ repository.
 The core CAS must remain usable without any platform-specific integration.
 
 Provider adapters are first-class extension points, just like storage adapters.
-GitHub, GitLab, Gitea, and generic forges should plug into the same normalized provider
+GitHub, GitLab, Gitea, Codeberg, and generic forges should plug into the same normalized provider
 contract so repository hosting logic does not leak into chunking, reconstruction, or
 storage code.
 

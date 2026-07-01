@@ -47,6 +47,8 @@ pub enum RepositoryProvider {
     Gitea,
     /// GitLab repository scope.
     GitLab,
+    /// Codeberg (Gitea-based) repository scope.
+    Codeberg,
     /// Generic Git forge repository scope.
     Generic,
 }
@@ -59,6 +61,7 @@ impl RepositoryProvider {
             Self::GitHub => "github",
             Self::Gitea => "gitea",
             Self::GitLab => "gitlab",
+            Self::Codeberg => "codeberg",
             Self::Generic => "generic",
         }
     }
@@ -77,6 +80,7 @@ impl FromStr for RepositoryProvider {
             "github" => Ok(Self::GitHub),
             "gitea" => Ok(Self::Gitea),
             "gitlab" => Ok(Self::GitLab),
+            "codeberg" => Ok(Self::Codeberg),
             "generic" => Ok(Self::Generic),
             _other => Err(RepositoryProviderParseError),
         }
@@ -426,6 +430,7 @@ mod tests {
         assert_eq!("github".parse(), Ok(RepositoryProvider::GitHub));
         assert_eq!("gitea".parse(), Ok(RepositoryProvider::Gitea));
         assert_eq!("gitlab".parse(), Ok(RepositoryProvider::GitLab));
+        assert_eq!("codeberg".parse(), Ok(RepositoryProvider::Codeberg));
         assert_eq!("generic".parse(), Ok(RepositoryProvider::Generic));
         assert_eq!(
             "bitbucket".parse::<RepositoryProvider>(),

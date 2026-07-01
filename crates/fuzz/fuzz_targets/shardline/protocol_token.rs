@@ -59,10 +59,11 @@ fuzz_target!(|data: ProtocolTokenInput| {
         _ => return,
     }
 
-    let provider = match provider_tag % 4 {
+    let provider = match provider_tag % 5 {
         0 => RepositoryProvider::GitHub,
         1 => RepositoryProvider::Gitea,
         2 => RepositoryProvider::GitLab,
+        3 => RepositoryProvider::Codeberg,
         _ => RepositoryProvider::Generic,
     };
     let scope = if write_scope {

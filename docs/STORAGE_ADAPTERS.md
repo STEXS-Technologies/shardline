@@ -211,7 +211,8 @@ The index must support:
 Current synchronous Rust shape for local adapters:
 
 ```rust
-pub trait IndexStore {
+// ReconstructionStore — lookup and reconstruction planning
+pub trait ReconstructionStore {
     type Error;
 
     fn reconstruction(
@@ -219,7 +220,32 @@ pub trait IndexStore {
         file_id: &FileId,
     ) -> Result<Option<FileReconstruction>, Self::Error>;
 
+    fn list_reconstruction_file_ids(&self) -> Result<Vec<FileId>, Self::Error>;
+
+    fn delete_reconstruction(&self, file_id: &FileId) -> Result<bool, Self::Error>;
+
+    fn contains_object(&self, object_id: &StoredObjectId) -> Result<bool, Self::Error>;
+
     fn contains_xorb(&self, xorb_id: &XorbId) -> Result<bool, Self::Error>;
+}
+
+// DedupeStore — deduplication mapping
+pub trait DedupeStore {
+    type Error;
+
+    fn dedupe_shard_mapping(
+        &self,
+        chunk_hash: &ShardlineHash,
+    ) -> Result<Option<DedupeShardMapping>, Self::Error>;
+
+    fn list_dedupe_shard_mappings(&self) -> Result<Vec<DedupeShardMapping>, Self::Error>;
+
+    fn delete_dedupe_shard_mapping(&self, chunk_hash: &ShardlineHash) -> Result<bool, Self::Error>;
+}
+
+// LifecycleStore — quarantine, retention, webhooks, provider state
+pub trait LifecycleStore {
+    type Error;
 
     fn quarantine_candidate(
         &self,
@@ -239,7 +265,46 @@ pub trait IndexStore {
         &self,
         object_key: &ObjectKey,
     ) -> Result<bool, Self::Error>;
+
+    fn retention_hold(&self, object_key: &ObjectKey) -> Result<Option<RetentionHold>, Self::Error>;
+
+    fn list_retention_holds(&self) -> Result<Vec<RetentionHold>, Self::Error>;
+
+    fn upsert_retention_hold(&self, hold: &RetentionHold) -> Result<(), Self::Error>;
+
+    fn delete_retention_hold(&self, object_key: &ObjectKey) -> Result<bool, Self::Error>;
+
+    fn record_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
+
+    fn list_webhook_deliveries(&self) -> Result<Vec<WebhookDelivery>, Self::Error>;
+
+    fn delete_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<bool, Self::Error>;
+
+    fn provider_repository_state(
+        &self,
+        provider: RepositoryProvider,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<ProviderRepositoryState>, Self::Error>;
+
+    fn list_provider_repository_states(&self) -> Result<Vec<ProviderRepositoryState>, Self::Error>;
+
+    fn upsert_provider_repository_state(
+        &self,
+        state: &ProviderRepositoryState,
+    ) -> Result<(), Self::Error>;
+
+    fn delete_provider_repository_state(
+        &self,
+        provider: RepositoryProvider,
+        owner: &str,
+        repo: &str,
+    ) -> Result<bool, Self::Error>;
 }
+
+// IndexStore — supertrait combining all three
+pub trait IndexStore: ReconstructionStore + DedupeStore + LifecycleStore {}
+```
 ```
 
 That quarantine state is the durable source of truth for retention windows and staged

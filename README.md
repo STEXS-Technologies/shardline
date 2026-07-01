@@ -17,7 +17,7 @@ The first open-source, production-ready, multi-protocol CAS server with a Xet fr
 - **Pluggable auth** — local Ed25519, OIDC, JWKS, or passthrough provider adapters
 - **Self-hosted or cloud** — local filesystem, S3-compatible storage, Postgres metadata
 - **Production-ready** — health checks, migrations, integrity verification, garbage collection, backups
-- **Provider integration** — optional webhooks and token issuance for GitHub, GitLab, Gitea
+- **Provider integration** — optional webhooks and token issuance for GitHub, GitLab, Gitea, Codeberg
 
 ## Quick start
 
@@ -63,7 +63,7 @@ All profiles run providerless by default. Provider integration is optional.
 | [HuggingFace Hub API](docs/HUGGINGFACE_HUB_API.md) | Hub API compatibility for huggingface-cli |
 | [Operations](docs/OPERATIONS.md) | Day-to-day operations runbook |
 | [CLI Reference](docs/CLI.md) | All commands and flags |
-| [Provider Setup](docs/PROVIDER_QUICKSTART.md) | GitHub/GitLab/Gitea integration |
+| [Provider Setup](docs/PROVIDER_QUICKSTART.md) | GitHub/GitLab/Gitea/Codeberg integration |
 | [Client Configuration](docs/CLIENT_CONFIGURATION.md) | Configure git, LFS, and Xet clients |
 | [Protocols](docs/PROTOCOLS.md) | Supported protocol frontends |
 | [Kubernetes](docs/k8s/README.md) | Production Kubernetes manifests |
