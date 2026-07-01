@@ -18,8 +18,6 @@ use shardline_vcs::{
     ProviderTokenIssuer, RepositoryAccess, RepositoryRef, RepositoryVisibility, RevisionRef,
     configured_metadata,
 };
-use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, time::sleep};
 use shardline_xet_core::{
     merklehash::{MerkleHash, compute_data_hash, file_hash, xorb_hash},
     metadata_shard::{
@@ -32,6 +30,8 @@ use shardline_xet_core::{
         CompressionScheme, xorb_format_test_utils::serialized_xorb_object_from_components,
     },
 };
+use support::ServerE2eInvariantError;
+use tokio::{net::TcpListener, spawn, time::sleep};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_authorization_mints_repository_scoped_tokens_for_server_access() {

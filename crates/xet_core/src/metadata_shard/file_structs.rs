@@ -367,7 +367,8 @@ impl MDBFileInfoView {
         let contains_verification = header.contains_verification();
         let contains_metadata_ext = header.contains_metadata_ext();
 
-        let n_structs = 1 + n
+        let n_structs = 1
+            + n
             + (if contains_verification { n } else { 0 })
             + (if contains_metadata_ext { 1 } else { 0 });
 
@@ -421,7 +422,8 @@ impl MDBFileInfoView {
 
     pub fn byte_size(&self, with_verification: bool) -> usize {
         let n = self.num_entries();
-        let n_structs = 1 + n
+        let n_structs = 1
+            + n
             + (if with_verification && self.contains_verification() {
                 n
             } else {
@@ -441,7 +443,9 @@ impl From<&MDBFileInfoView> for MDBFileInfo {
         let segments: Vec<FileDataSequenceEntry> =
             (0..view.num_entries()).map(|i| view.entry(i)).collect();
         let verification = if view.contains_verification() {
-            (0..view.num_entries()).map(|i| view.verification(i)).collect()
+            (0..view.num_entries())
+                .map(|i| view.verification(i))
+                .collect()
         } else {
             vec![]
         };

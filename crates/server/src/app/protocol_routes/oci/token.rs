@@ -11,11 +11,7 @@ use shardline_protocol::{TokenClaims, TokenScope, TokenSigner};
 
 use crate::ServerError;
 
-use super::super::{
-    AppState,
-    authorize,
-    parse_query_values,
-};
+use super::super::{AppState, authorize, parse_query_values};
 
 pub(super) const OCI_REGISTRY_SERVICE: &str = "shardline";
 const MAX_OCI_TOKEN_BASIC_AUTH_BYTES: usize = 8192;
@@ -32,7 +28,9 @@ pub(crate) async fn oci_registry_token(
     state
         .protocol_metrics
         .increment_oci_registry_token_requests();
-    shardline_metrics::metrics().protocol.record_oci_registry_token_request();
+    shardline_metrics::metrics()
+        .protocol
+        .record_oci_registry_token_request();
     let _permit = state
         .oci_registry_token_limiter
         .clone()
@@ -41,11 +39,15 @@ pub(crate) async fn oci_registry_token(
             state
                 .protocol_metrics
                 .increment_oci_registry_token_rate_limited();
-            shardline_metrics::metrics().protocol.record_oci_registry_token_rate_limited();
+            shardline_metrics::metrics()
+                .protocol
+                .record_oci_registry_token_rate_limited();
             ServerError::TooManyRegistryTokenRequests
         })?;
     let _active_request = state.protocol_metrics.begin_oci_registry_token_request();
-    shardline_metrics::metrics().protocol.begin_oci_registry_token_request();
+    shardline_metrics::metrics()
+        .protocol
+        .begin_oci_registry_token_request();
     let _prom_active = PromActiveRequestGuard;
     let signer = TokenSigner::new(
         state
@@ -79,7 +81,10 @@ pub(crate) async fn oci_registry_token(
         })?;
     let (requested_scope, requested_repository) = parse_oci_registry_token_scopes(&query.scopes)?;
     if let Some(repository) = requested_repository.as_deref() {
-        crate::protocol_support::validate_oci_repository_scope(repository, Some(bootstrap_claims.repository()))?;
+        crate::protocol_support::validate_oci_repository_scope(
+            repository,
+            Some(bootstrap_claims.repository()),
+        )?;
     }
     if !scope_allows_oci_exchange(bootstrap_claims.scope(), requested_scope) {
         return Err(ServerError::InsufficientScope);
@@ -331,6 +336,8 @@ struct PromActiveRequestGuard;
 
 impl Drop for PromActiveRequestGuard {
     fn drop(&mut self) {
-        shardline_metrics::metrics().protocol.end_oci_registry_token_request();
+        shardline_metrics::metrics()
+            .protocol
+            .end_oci_registry_token_request();
     }
 }

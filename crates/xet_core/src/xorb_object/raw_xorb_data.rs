@@ -40,9 +40,7 @@ impl RawXorbData {
                 Some(*acc)
             })
             .collect();
-        let xorb_info = XorbInfo {
-            chunk_boundaries,
-        };
+        let xorb_info = XorbInfo { chunk_boundaries };
         Self {
             data,
             xorb_info,

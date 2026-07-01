@@ -57,8 +57,7 @@ use crate::protocol_support::{
 const OCI_UPLOAD_DIR: &str = "oci-uploads";
 const OCI_S3_MULTIPART_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const SHA256_INITIAL_STATE: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 static OCI_UPLOAD_SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -141,8 +140,9 @@ impl SerializableSha256State {
 
         let mut chunks = remaining.chunks_exact(64);
         for chunk in &mut chunks {
-            let block: [u8; 64] =
-                chunk.try_into().map_err(|_error| OciAdapterError::Overflow)?;
+            let block: [u8; 64] = chunk
+                .try_into()
+                .map_err(|_error| OciAdapterError::Overflow)?;
             self.compress_block(&block);
         }
         self.buffer.extend_from_slice(chunks.remainder());
@@ -171,8 +171,9 @@ impl SerializableSha256State {
             .ok_or(OciAdapterError::Overflow)?;
         buffer.extend_from_slice(&bit_length.to_be_bytes());
         for chunk in buffer.chunks_exact(64) {
-            let block: [u8; 64] =
-                chunk.try_into().map_err(|_error| OciAdapterError::Overflow)?;
+            let block: [u8; 64] = chunk
+                .try_into()
+                .map_err(|_error| OciAdapterError::Overflow)?;
             let generic = GenericArray::clone_from_slice(&block);
             compress256(&mut state, &[generic]);
         }
@@ -566,9 +567,7 @@ pub async fn upload_body_integrity(
             sha256.update(slice);
             blake3.update(slice);
             total_length = total_length
-                .checked_add(
-                    u64::try_from(read).map_err(|_error| OciAdapterError::Overflow)?,
-                )
+                .checked_add(u64::try_from(read).map_err(|_error| OciAdapterError::Overflow)?)
                 .ok_or(OciAdapterError::Overflow)?;
         }
         let sha256_hex = hex::encode(sha256.finalize());
@@ -583,10 +582,7 @@ pub async fn upload_body_integrity(
 /// # Errors
 ///
 /// Returns an error when the upload session cannot be deleted.
-pub async fn delete_upload_session(
-    root: &Path,
-    session_id: &str,
-) -> Result<(), OciAdapterError> {
+pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), OciAdapterError> {
     validate_upload_session_id(session_id)?;
     let metadata_path = upload_metadata_path(root, session_id);
     let body_path = upload_body_path(root, session_id);
@@ -715,12 +711,11 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
         if observed != digest_hex {
             return Err(OciAdapterError::ExpectedBodyHashMismatch);
         }
-        return backend
-            .put_sha256_addressed_object_bytes_if_absent(
-                object_key,
-                digest_hex,
-                Vec::new(),
-            );
+        return backend.put_sha256_addressed_object_bytes_if_absent(
+            object_key,
+            digest_hex,
+            Vec::new(),
+        );
     };
 
     let observed = multipart.sha256_state.finalize_hex()?;
@@ -750,12 +745,11 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
         let _ignored = backend
             .abort_resumable_object_upload(&temporary_object_key, &multipart.upload_id)
             .await;
-        return backend
-            .put_sha256_addressed_object_bytes_if_absent(
-                object_key,
-                digest_hex,
-                Vec::new(),
-            );
+        return backend.put_sha256_addressed_object_bytes_if_absent(
+            object_key,
+            digest_hex,
+            Vec::new(),
+        );
     }
 
     backend
@@ -889,8 +883,8 @@ pub async fn purge_expired_upload_sessions(
                 continue;
             }
         };
-        let missing_local_body = !session.use_s3_multipart
-            && fs::metadata(upload_body_path(root, stem)).await.is_err();
+        let missing_local_body =
+            !session.use_s3_multipart && fs::metadata(upload_body_path(root, stem)).await.is_err();
         if upload_session_expired(&session, ttl_seconds, now_unix_seconds) || missing_local_body {
             delete_upload_session(root, stem).await?;
         }
@@ -984,15 +978,12 @@ async fn write_upload_tail(
             Err(error) => return Err(OciAdapterError::Io(error)),
         }
     }
-    fs::write(path, bytes)
-        .await
-        .map_err(OciAdapterError::Io)
+    fs::write(path, bytes).await.map_err(OciAdapterError::Io)
 }
 
 fn unix_now_seconds_checked() -> Result<u64, OciAdapterError> {
     shardline_server_core::unix_now_seconds_checked().map_err(|_e| OciAdapterError::Overflow)
 }
-
 
 fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {

@@ -6,19 +6,19 @@ use serde_json::{from_slice, json, to_vec};
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_storage::ObjectKey;
 
+use super::helpers::legacy_record_path;
 use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_METADATA_DATABASE_FILE_NAME, LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS,
     LegacyQuarantineCandidateRecord, LocalIndexStore, LocalIndexStoreError, LocalRecordKind,
     LocalRecordStore, StoredObjectPresenceRecord,
 };
-use super::helpers::legacy_record_path;
 use crate::{
     DedupeShardMapping, DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord,
     IndexStore, LifecycleStore, MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState,
-    QuarantineCandidate, ReconstructionStore, ReconstructionTerm, RecordMutation, RecordStore, RecordTraversal, RetentionHold,
-    WebhookDelivery, XorbId, parse_xet_hash_hex, test_invariant_error::LocalSqliteInvariantError,
-    xet_hash_hex_string,
+    QuarantineCandidate, ReconstructionStore, ReconstructionTerm, RecordMutation, RecordStore,
+    RecordTraversal, RetentionHold, WebhookDelivery, XorbId, parse_xet_hash_hex,
+    test_invariant_error::LocalSqliteInvariantError, xet_hash_hex_string,
 };
 
 fn sample_repository_scope() -> Result<RepositoryScope, Box<dyn Error>> {
@@ -167,16 +167,14 @@ async fn exercise_local_record_store_commit_file_version_metadata_is_atomic()
     let latest_locator = RecordTraversal::latest_record_locator(&store, &record);
     let version_locator = RecordTraversal::version_record_locator(&store, &record);
     if RecordTraversal::record_locator_exists(&store, &latest_locator).await? {
-        return Err(LocalSqliteInvariantError::new(
-            "latest locator survived failed transaction",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("latest locator survived failed transaction").into(),
+        );
     }
     if RecordTraversal::record_locator_exists(&store, &version_locator).await? {
-        return Err(LocalSqliteInvariantError::new(
-            "version locator survived failed transaction",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("version locator survived failed transaction").into(),
+        );
     }
 
     Ok(())
@@ -268,9 +266,7 @@ fn exercise_local_sqlite_connection_enables_defensive_settings() -> Result<(), B
     let connection = store.open_connection()?;
 
     if !connection.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)? {
-        return Err(
-            LocalSqliteInvariantError::new("sqlite defensive mode was not enabled").into(),
-        );
+        return Err(LocalSqliteInvariantError::new("sqlite defensive mode was not enabled").into());
     }
 
     let trusted_schema =
@@ -341,10 +337,9 @@ async fn exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim()
     let version_locator = RecordTraversal::version_record_locator(&store, &record);
     let loaded = RecordTraversal::read_record_bytes(&store, &version_locator).await?;
     if loaded != corrupt_bytes {
-        return Err(LocalSqliteInvariantError::new(
-            "sqlite record read normalized corrupt bytes",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("sqlite record read normalized corrupt bytes").into(),
+        );
     }
 
     Ok(())
@@ -461,16 +456,18 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                 }
             }
             4 => {
-                local_index_store
-                    .insert_reconstruction(&reconstruction.0, &reconstruction.1)?;
-                memory_index_store
-                    .insert_reconstruction(&reconstruction.0, &reconstruction.1)?;
+                local_index_store.insert_reconstruction(&reconstruction.0, &reconstruction.1)?;
+                memory_index_store.insert_reconstruction(&reconstruction.0, &reconstruction.1)?;
             }
             5 => {
-                let local_deleted =
-                    ReconstructionStore::delete_reconstruction(&local_index_store, &reconstruction.0)?;
-                let memory_deleted =
-                    ReconstructionStore::delete_reconstruction(&memory_index_store, &reconstruction.0)?;
+                let local_deleted = ReconstructionStore::delete_reconstruction(
+                    &local_index_store,
+                    &reconstruction.0,
+                )?;
+                let memory_deleted = ReconstructionStore::delete_reconstruction(
+                    &memory_index_store,
+                    &reconstruction.0,
+                )?;
                 if local_deleted != memory_deleted {
                     return Err(LocalSqliteInvariantError::new(
                         "reconstruction delete behavior diverged from memory",
@@ -543,8 +540,7 @@ async fn exercise_local_sqlite_matches_memory_adapters_across_state_machine_oper
                 }
             }
             13 => {
-                let local_recorded =
-                    local_index_store.record_webhook_delivery(webhook_delivery)?;
+                let local_recorded = local_index_store.record_webhook_delivery(webhook_delivery)?;
                 let memory_recorded =
                     memory_index_store.record_webhook_delivery(webhook_delivery)?;
                 if local_recorded != memory_recorded {
@@ -770,9 +766,7 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
     let latest_locator = RecordTraversal::latest_record_locator(&record_store, &record);
     let version_locator = RecordTraversal::version_record_locator(&record_store, &record);
     if !RecordTraversal::record_locator_exists(&record_store, &latest_locator).await? {
-        return Err(
-            LocalSqliteInvariantError::new("latest legacy record was not imported").into(),
-        );
+        return Err(LocalSqliteInvariantError::new("latest legacy record was not imported").into());
     }
     if !RecordTraversal::record_locator_exists(&record_store, &version_locator).await? {
         return Err(
@@ -789,12 +783,12 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
         .into());
     }
     if ReconstructionStore::reconstruction(&index_store, &file_id)? != Some(reconstruction) {
-        return Err(
-            LocalSqliteInvariantError::new("reconstruction row was not imported").into(),
-        );
+        return Err(LocalSqliteInvariantError::new("reconstruction row was not imported").into());
     }
-    if !ReconstructionStore::contains_xorb(&index_store, &XorbId::new(parse_xet_hash_hex(&xorb_hash)?))?
-    {
+    if !ReconstructionStore::contains_xorb(
+        &index_store,
+        &XorbId::new(parse_xet_hash_hex(&xorb_hash)?),
+    )? {
         return Err(LocalSqliteInvariantError::new("xorb marker was not imported").into());
     }
     if DedupeStore::dedupe_shard_mapping(&index_store, &parse_xet_hash_hex(&dedupe_chunk_hash)?)?
@@ -805,9 +799,7 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
     if LifecycleStore::quarantine_candidate(&index_store, quarantine_candidate.object_key())?
         != Some(quarantine_candidate)
     {
-        return Err(
-            LocalSqliteInvariantError::new("quarantine candidate was not imported").into(),
-        );
+        return Err(LocalSqliteInvariantError::new("quarantine candidate was not imported").into());
     }
     if LifecycleStore::retention_hold(&index_store, retention_hold.object_key())?
         != Some(retention_hold)
@@ -824,10 +816,9 @@ async fn exercise_local_sqlite_imports_legacy_filesystem_metadata() -> Result<()
         provider_state.repo(),
     )? != Some(provider_state)
     {
-        return Err(LocalSqliteInvariantError::new(
-            "provider repository state was not imported",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("provider repository state was not imported").into(),
+        );
     }
 
     let connection = open_sqlite_connection(storage.path())?;
@@ -976,8 +967,8 @@ fn sample_state_machine_dedupe_mappings() -> Result<Vec<DedupeShardMapping>, Box
     ])
 }
 
-fn sample_state_machine_quarantine_candidates()
--> Result<Vec<QuarantineCandidate>, Box<dyn Error>> {
+fn sample_state_machine_quarantine_candidates() -> Result<Vec<QuarantineCandidate>, Box<dyn Error>>
+{
     Ok(vec![
         QuarantineCandidate::new(ObjectKey::parse("aa/aaaaaaaa")?, 4, 10, 20)?,
         QuarantineCandidate::new(ObjectKey::parse("bb/bbbbbbbb")?, 8, 11, 21)?,
@@ -1099,9 +1090,7 @@ const fn next_state_machine_value(state: u64) -> u64 {
 fn state_machine_index(state: u64, shift: u32, len: usize) -> Result<usize, Box<dyn Error>> {
     let len_u64 = u64::try_from(len)?;
     if len_u64 == 0 {
-        return Err(
-            LocalSqliteInvariantError::new("state-machine fixture list was empty").into(),
-        );
+        return Err(LocalSqliteInvariantError::new("state-machine fixture list was empty").into());
     }
     let shifted = state.checked_shr(shift).unwrap_or(0);
     let bounded = shifted
@@ -1138,10 +1127,9 @@ async fn assert_local_sqlite_matches_memory_state(
     if canonical_record_entries(local_record_store, false).await?
         != canonical_record_entries(memory_record_store, false).await?
     {
-        return Err(LocalSqliteInvariantError::new(
-            "version-record state diverged from memory",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("version-record state diverged from memory").into(),
+        );
     }
 
     for record in &fixtures.records {
@@ -1175,22 +1163,18 @@ async fn assert_local_sqlite_matches_memory_state(
         if ReconstructionStore::contains_xorb(local_index_store, xorb_id)?
             != ReconstructionStore::contains_xorb(memory_index_store, xorb_id)?
         {
-            return Err(LocalSqliteInvariantError::new(
-                "xorb marker state diverged from memory",
-            )
-            .into());
+            return Err(
+                LocalSqliteInvariantError::new("xorb marker state diverged from memory").into(),
+            );
         }
     }
 
     if canonical_dedupe_mappings(DedupeStore::list_dedupe_shard_mappings(local_index_store)?)
-        != canonical_dedupe_mappings(DedupeStore::list_dedupe_shard_mappings(
-            memory_index_store,
-        )?)
+        != canonical_dedupe_mappings(DedupeStore::list_dedupe_shard_mappings(memory_index_store)?)
     {
-        return Err(LocalSqliteInvariantError::new(
-            "dedupe mapping state diverged from memory",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("dedupe mapping state diverged from memory").into(),
+        );
     }
 
     if canonical_quarantine_candidates(LifecycleStore::list_quarantine_candidates(
@@ -1207,10 +1191,9 @@ async fn assert_local_sqlite_matches_memory_state(
     if canonical_retention_holds(LifecycleStore::list_retention_holds(local_index_store)?)
         != canonical_retention_holds(LifecycleStore::list_retention_holds(memory_index_store)?)
     {
-        return Err(LocalSqliteInvariantError::new(
-            "retention hold state diverged from memory",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("retention hold state diverged from memory").into(),
+        );
     }
 
     if canonical_webhook_deliveries(LifecycleStore::list_webhook_deliveries(local_index_store)?)
@@ -1218,10 +1201,9 @@ async fn assert_local_sqlite_matches_memory_state(
             memory_index_store,
         )?)
     {
-        return Err(LocalSqliteInvariantError::new(
-            "webhook delivery state diverged from memory",
-        )
-        .into());
+        return Err(
+            LocalSqliteInvariantError::new("webhook delivery state diverged from memory").into(),
+        );
     }
 
     if canonical_provider_states(LifecycleStore::list_provider_repository_states(
@@ -1363,9 +1345,7 @@ fn canonical_quarantine_candidates(
     canonical
 }
 
-fn canonical_retention_holds(
-    holds: Vec<RetentionHold>,
-) -> Vec<(String, String, u64, Option<u64>)> {
+fn canonical_retention_holds(holds: Vec<RetentionHold>) -> Vec<(String, String, u64, Option<u64>)> {
     let mut canonical = holds
         .into_iter()
         .map(|hold| {
@@ -1400,9 +1380,7 @@ fn canonical_webhook_deliveries(
     canonical
 }
 
-fn canonical_provider_states(
-    states: Vec<ProviderRepositoryState>,
-) -> Vec<CanonicalProviderState> {
+fn canonical_provider_states(states: Vec<ProviderRepositoryState>) -> Vec<CanonicalProviderState> {
     let mut canonical = states
         .into_iter()
         .map(|state| {

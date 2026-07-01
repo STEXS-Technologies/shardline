@@ -8,8 +8,7 @@ use crate::{
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
     upload_ingest::RequestBodyReader,
     xet_adapter::{
-        XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes,
-        xorb_object_key,
+        XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes, xorb_object_key,
     },
 };
 

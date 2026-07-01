@@ -5,8 +5,8 @@ use rusqlite::{Connection, params};
 use serde_json::{from_slice, to_vec};
 use shardline_index::{
     DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord, LocalIndexStore,
-    ReconstructionStore, ReconstructionTerm, RecordMutation, RecordTraversal, StoredObjectId, parse_xet_hash_hex,
-    xet_hash_hex_string,
+    ReconstructionStore, ReconstructionTerm, RecordMutation, RecordTraversal, StoredObjectId,
+    parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
 use tokio::{fs, time::sleep};
@@ -358,7 +358,8 @@ async fn index_rebuild_restores_repository_scoped_latest_records() {
     let first_locator = RecordTraversal::latest_record_locator(&record_store, &first_record);
     let second_locator = RecordTraversal::latest_record_locator(&record_store, &second_record);
     let removed_first = RecordMutation::delete_record_locator(&record_store, &first_locator).await;
-    let removed_second = RecordMutation::delete_record_locator(&record_store, &second_locator).await;
+    let removed_second =
+        RecordMutation::delete_record_locator(&record_store, &second_locator).await;
     assert!(removed_first.is_ok());
     assert!(removed_second.is_ok());
 

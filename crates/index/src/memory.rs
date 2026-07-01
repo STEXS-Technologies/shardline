@@ -10,11 +10,10 @@ use shardline_storage::ObjectKey;
 use thiserror::Error;
 
 use crate::{
-    AsyncIndexStore, DedupeShardMapping, DedupeStore,
-    FileId, FileReconstruction, FileRecord, IndexStoreFuture, LifecycleStore, ProviderRepositoryState,
-    QuarantineCandidate, ReconstructionStore, RecordMutation, RecordStoreFuture,
-    RecordTraversal, RepositoryRecordScope, RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId,
-    xet_hash_hex_string,
+    AsyncIndexStore, DedupeShardMapping, DedupeStore, FileId, FileReconstruction, FileRecord,
+    IndexStoreFuture, LifecycleStore, ProviderRepositoryState, QuarantineCandidate,
+    ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope,
+    RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId, xet_hash_hex_string,
 };
 
 /// In-memory implementation of [`IndexStore`].
@@ -1042,8 +1041,8 @@ mod tests {
     use crate::{
         DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore,
         LifecycleStore, LocalIndexStore, QuarantineCandidate, ReconstructionStore,
-        ReconstructionTerm, RecordMutation, RecordTraversal, RepositoryRecordScope, RetentionHold, WebhookDelivery,
-        XorbId,
+        ReconstructionTerm, RecordMutation, RecordTraversal, RepositoryRecordScope, RetentionHold,
+        WebhookDelivery, XorbId,
     };
 
     #[test]

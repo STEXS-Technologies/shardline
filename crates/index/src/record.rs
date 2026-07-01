@@ -302,7 +302,10 @@ pub trait RecordTraversal {
         repository: &'operation RepositoryRecordScope,
     ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error>;
 
-    visit_repository_locators_async!(visit_repository_latest_record_locators, list_repository_latest_record_locators);
+    visit_repository_locators_async!(
+        visit_repository_latest_record_locators,
+        list_repository_latest_record_locators
+    );
 
     /// Visits visible latest-file records for one repository across all revisions.
     fn visit_repository_latest_records<'operation, Visitor, VisitorError>(
@@ -384,7 +387,10 @@ pub trait RecordTraversal {
         })
     }
 
-    visit_repository_locators_async!(visit_repository_version_record_locators, list_repository_version_record_locators);
+    visit_repository_locators_async!(
+        visit_repository_version_record_locators,
+        list_repository_version_record_locators
+    );
 
     /// Visits immutable version records for one repository across all revisions.
     fn visit_repository_version_records<'operation, Visitor, VisitorError>(
@@ -456,7 +462,6 @@ pub trait RecordTraversal {
 /// Provides record-writing and deletion methods.
 /// Use as a trait bound when only mutation access to records is needed.
 pub trait RecordMutation: RecordTraversal {
-
     /// Writes or replaces an immutable version record.
     fn write_version_record<'operation>(
         &'operation self,
@@ -486,7 +491,6 @@ pub trait RecordMutation: RecordTraversal {
 pub trait RecordStore: RecordTraversal + RecordMutation {}
 
 impl<T: RecordTraversal + RecordMutation> RecordStore for T {}
-
 
 #[cfg(test)]
 mod tests {

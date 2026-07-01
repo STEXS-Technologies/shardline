@@ -8,7 +8,11 @@
         clippy::arithmetic_side_effects,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        unused_imports,
+        unused_variables,
+        unused_mut,
+        dead_code,
     )
 )]
 
@@ -81,7 +85,7 @@ pub use record::{
     RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope, StoredRecord,
 };
 pub use store::{
-    AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore, ReconstructionStore,
-    Repository,
+    AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
+    ReconstructionStore, Repository,
 };
 pub use xet_hash::{parse_xet_hash_hex, xet_hash_hex_string};

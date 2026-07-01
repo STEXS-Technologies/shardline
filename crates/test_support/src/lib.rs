@@ -1,14 +1,11 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        clippy::shadow_unrelated,
-        clippy::let_underscore_must_use,
-        clippy::format_push_string
-    )
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::shadow_unrelated,
+    clippy::let_underscore_must_use,
+    clippy::format_push_string
 )]
 
 //! Test support utilities shared by Shardline workspace crates.

@@ -3,18 +3,22 @@
     clippy::expect_used,
     clippy::panic,
     clippy::arithmetic_side_effects,
+    clippy::float_arithmetic,
     clippy::indexing_slicing,
     clippy::dbg_macro,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::print_stdout,
-    clippy::print_stderr
+    clippy::print_stderr,
+    clippy::missing_const_for_fn,
+    clippy::undocumented_unsafe_blocks,
+    clippy::let_underscore_must_use,
+    clippy::unwrap_in_result
 )]
 
 use std::{
     sync::{
-        Arc,
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -63,8 +67,9 @@ impl BenchmarkResult {
         if self.latencies_ms.is_empty() {
             return 0.0;
         }
-        let idx = ((p / 100.0) * f64::from(u32::try_from(self.latencies_ms.len()).unwrap_or(u32::MAX)))
-            .ceil() as usize;
+        let idx = ((p / 100.0)
+            * f64::from(u32::try_from(self.latencies_ms.len()).unwrap_or(u32::MAX)))
+        .ceil() as usize;
         let idx = idx.saturating_sub(1).min(self.latencies_ms.len() - 1);
         self.latencies_ms[idx]
     }
@@ -256,7 +261,8 @@ async fn run_download_loop(
 }
 
 fn parse_config() -> BenchmarkConfig {
-    let base_url = std::env::var("BENCH_URL").unwrap_or_else(|_| "http://127.0.0.1:18080".to_owned());
+    let base_url =
+        std::env::var("BENCH_URL").unwrap_or_else(|_| "http://127.0.0.1:18080".to_owned());
     let token = std::env::var("BENCH_TOKEN").ok();
     let concurrency: usize = std::env::var("BENCH_CONCURRENCY")
         .unwrap_or_else(|_| "10".to_owned())
@@ -293,17 +299,11 @@ fn print_result(label: &str, result: &BenchmarkResult) {
     eprintln!("  Failed:          {}", result.failed_requests);
     eprintln!("  RPS:             {:.2}", result.rps());
     eprintln!("  Error rate:      {:.2}%", result.error_rate());
-    eprintln!(
-        "  Latency min:     {:.2}ms",
-        result.min_latency()
-    );
+    eprintln!("  Latency min:     {:.2}ms", result.min_latency());
     eprintln!("  Latency P50:     {:.2}ms", result.p50());
     eprintln!("  Latency P95:     {:.2}ms", result.p95());
     eprintln!("  Latency P99:     {:.2}ms", result.p99());
-    eprintln!(
-        "  Latency max:     {:.2}ms",
-        result.max_latency()
-    );
+    eprintln!("  Latency max:     {:.2}ms", result.max_latency());
     if result.peak_memory_bytes > 0 {
         eprintln!(
             "  Peak RSS:        {:.2} MB",
@@ -387,7 +387,11 @@ async fn main() {
 
         let mut handles = Vec::with_capacity(config.concurrency);
         for _ in 0..config.concurrency {
-            let permit = semaphore.clone().acquire_owned().await.expect("semaphore open");
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore open");
             let client = client.clone();
             let url = upload_url.clone();
             let token = config.token.clone();
@@ -414,7 +418,11 @@ async fn main() {
 
         let mut handles = Vec::with_capacity(config.concurrency);
         for _ in 0..config.concurrency {
-            let permit = semaphore.clone().acquire_owned().await.expect("semaphore open");
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore open");
             let client = client.clone();
             let url = upload_url.clone();
             let token = config.token.clone();
@@ -448,7 +456,11 @@ async fn main() {
 
         let mut handles = Vec::with_capacity(config.concurrency);
         for _ in 0..config.concurrency {
-            let permit = semaphore.clone().acquire_owned().await.expect("semaphore open");
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore open");
             let client = client.clone();
             let url = download_url.clone();
             let token = config.token.clone();
@@ -482,7 +494,11 @@ async fn main() {
 
         let mut handles = Vec::with_capacity(config.concurrency);
         for i in 0..config.concurrency {
-            let permit = semaphore.clone().acquire_owned().await.expect("semaphore open");
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore open");
             let client = client.clone();
             let upload_url = upload_url.clone();
             let download_url = download_url.clone();

@@ -4,9 +4,9 @@ use shardline_index::{FileRecord, parse_xet_hash_hex};
 use shardline_protocol::{ByteRange, ShardlineHash};
 
 use crate::{
-    InvalidReconstructionResponseError, InvalidSerializedShardError, ServerError,
+    BazelCacheKind, InvalidReconstructionResponseError, InvalidSerializedShardError, ServerError,
     app::{parse_oci_path, parse_upload_content_range},
-    BazelCacheKind, bazel_cache_object_key,
+    bazel_cache_object_key,
     config::ShardMetadataLimits,
     lfs_object_key,
     lifecycle_repair::{

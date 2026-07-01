@@ -1,4 +1,4 @@
-use prometheus::{Registry, Encoder, TextEncoder};
+use prometheus::{Encoder, Registry, TextEncoder};
 
 use crate::{
     CasMetrics, encode_metrics, metrics, record_download, record_fsck_run, record_gc_run,
@@ -58,8 +58,10 @@ fn record_download_increments_counter_and_bytes() {
 #[test]
 fn record_reconstruction_increments_counters_and_observations() {
     let (registry, m) = new_registry_and_metrics();
-    m.reconstruction.record(true, std::time::Duration::from_millis(10), 5);
-    m.reconstruction.record(false, std::time::Duration::from_millis(20), 3);
+    m.reconstruction
+        .record(true, std::time::Duration::from_millis(10), 5);
+    m.reconstruction
+        .record(false, std::time::Duration::from_millis(20), 3);
     let output = encode(&registry);
     assert!(
         output.contains("shardline_reconstruction_requests_total 2"),
@@ -134,14 +136,8 @@ fn encode_metrics_outputs_prometheus_text_format() {
     record_fsck_run(std::time::Duration::from_millis(10), 0);
     let output = encode_metrics();
     assert!(!output.is_empty());
-    assert!(
-        output.contains("# HELP"),
-        "expected HELP lines in output"
-    );
-    assert!(
-        output.contains("# TYPE"),
-        "expected TYPE lines in output"
-    );
+    assert!(output.contains("# HELP"), "expected HELP lines in output");
+    assert!(output.contains("# TYPE"), "expected TYPE lines in output");
     assert!(
         output.contains("shardline_"),
         "expected shardline-prefixed metrics"
@@ -172,7 +168,7 @@ fn cas_metrics_new_creates_independent_registries() {
     let r1 = Registry::new();
     let r2 = Registry::new();
     let m1 = CasMetrics::new(&r1);
-    let m2 = CasMetrics::new(&r2);
+    let _m2 = CasMetrics::new(&r2);
     m1.transfer.record_upload("http", 100);
     let out1 = encode(&r1);
     let out2 = encode(&r2);

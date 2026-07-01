@@ -1,10 +1,10 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use shardline_gc::{quarantine_record_path, quarantine_root};
 use shardline_server_core::{
     parse_stored_file_record_bytes, validate_content_hash, validate_identifier,
 };
-use shardline_gc::{quarantine_record_path, quarantine_root};
 use std::path::Path;
 
 fuzz_target!(|data: &[u8]| {

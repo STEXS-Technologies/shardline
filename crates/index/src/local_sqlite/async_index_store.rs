@@ -204,9 +204,9 @@ impl AsyncIndexStore for LocalIndexStore {
         owner: &'operation str,
         repo: &'operation str,
     ) -> IndexStoreFuture<'operation, Option<ProviderRepositoryState>, Self::Error> {
-        Box::pin(async move {
-            LifecycleStore::provider_repository_state(self, provider, owner, repo)
-        })
+        Box::pin(
+            async move { LifecycleStore::provider_repository_state(self, provider, owner, repo) },
+        )
     }
 
     fn list_provider_repository_states(
@@ -224,9 +224,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Visitor: FnMut(ProviderRepositoryState) -> Result<(), VisitorError> + Send + 'operation,
         VisitorError: Send + 'operation,
     {
-        Box::pin(async move {
-            LifecycleStore::visit_provider_repository_states(self, visitor)
-        })
+        Box::pin(async move { LifecycleStore::visit_provider_repository_states(self, visitor) })
     }
 
     fn upsert_provider_repository_state<'operation>(

@@ -29,8 +29,6 @@ pub enum HubApiError {
     #[error("forbidden")]
     Forbidden,
 
-
-
     /// Invalid authentication token.
     #[error("invalid token")]
     InvalidToken,
@@ -51,8 +49,6 @@ pub enum HubApiError {
     #[error("cas error: {0}")]
     CasError(String),
 
-
-
     /// Pkt-line encoding error.
     #[error("protocol error: {0}")]
     PktLine(#[from] crate::git::pktline::PktLineError),
@@ -65,9 +61,10 @@ pub enum HubApiError {
 impl IntoResponse for HubApiError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            Self::Io(_) | Self::Json(_) | Self::CasError(_) | Self::PktLine(_) | Self::Pack(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
-            }
+            Self::Io(_) | Self::Json(_) | Self::CasError(_) | Self::PktLine(_) | Self::Pack(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_owned(),
+            ),
             Self::NotFound | Self::RepoNotFound | Self::RevisionNotFound => {
                 (StatusCode::NOT_FOUND, self.to_string())
             }
@@ -94,14 +91,12 @@ mod tests {
     fn status_and_body(error: HubApiError) -> (StatusCode, String) {
         let response = error.into_response();
         let status = response.status();
-        let body = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async {
-                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                String::from_utf8(bytes.to_vec()).unwrap()
-            });
+        let body = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        });
         (status, body)
     }
 
@@ -156,7 +151,7 @@ mod tests {
 
     #[test]
     fn io_error_maps_to_500() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk failure");
+        let io_err = std::io::Error::other("disk failure");
         let (status, body) = status_and_body(HubApiError::Io(io_err));
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(body.contains("internal error"));
@@ -183,8 +178,14 @@ mod tests {
         assert_eq!(HubApiError::Unauthorized.to_string(), "unauthorized");
         assert_eq!(HubApiError::Forbidden.to_string(), "forbidden");
         assert_eq!(HubApiError::InvalidToken.to_string(), "invalid token");
-        assert_eq!(HubApiError::RepoNotFound.to_string(), "repository not found");
-        assert_eq!(HubApiError::RevisionNotFound.to_string(), "revision not found");
+        assert_eq!(
+            HubApiError::RepoNotFound.to_string(),
+            "repository not found"
+        );
+        assert_eq!(
+            HubApiError::RevisionNotFound.to_string(),
+            "revision not found"
+        );
         assert_eq!(
             HubApiError::PathValidation("x".into()).to_string(),
             "invalid path: x"

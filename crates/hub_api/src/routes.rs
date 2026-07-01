@@ -22,12 +22,7 @@ use shardline_protocol::TokenScope;
 ///
 /// This fires in the background after a commit. Failures are logged but do not
 /// block the commit response.
-async fn deliver_webhook_events(
-    state: &HubState,
-    repo_id: &str,
-    event: &str,
-    revision: &str,
-) {
+async fn deliver_webhook_events(state: &HubState, repo_id: &str, event: &str, revision: &str) {
     static WEBHOOK_DELIVERY_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(16));
 
     let client = match &state.http_client {
@@ -166,26 +161,11 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/api/{type}/search", get(repo_search))
         .route("/api/{type}/{ns}/{repo}", post(repo_create_type))
         .route("/api/{type}/{ns}/{repo}", get(repo_info))
-        .route(
-            "/api/{type}/{ns}/{repo}/modelcard",
-            get(repo_modelcard),
-        )
-        .route(
-            "/api/{type}/{ns}/{repo}/revisions",
-            get(repo_revisions),
-        )
-        .route(
-            "/api/{type}/{ns}/{repo}/preupload/{rev}",
-            post(preupload),
-        )
-        .route(
-            "/api/{type}/{ns}/{repo}/commit/{rev}",
-            post(commit),
-        )
-        .route(
-            "/api/{type}/{ns}/{repo}/tree/{rev}/{*path}",
-            get(file_tree),
-        )
+        .route("/api/{type}/{ns}/{repo}/modelcard", get(repo_modelcard))
+        .route("/api/{type}/{ns}/{repo}/revisions", get(repo_revisions))
+        .route("/api/{type}/{ns}/{repo}/preupload/{rev}", post(preupload))
+        .route("/api/{type}/{ns}/{repo}/commit/{rev}", post(commit))
+        .route("/api/{type}/{ns}/{repo}/tree/{rev}/{*path}", get(file_tree))
         .route(
             "/{type}/{ns}/{repo}/resolve/{rev}/{*path}",
             get(resolve_file),
@@ -194,14 +174,8 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/lfs/objects/{oid}", put(lfs_upload))
         .route("/lfs/objects/{oid}", get(lfs_download))
         // Git Smart HTTP endpoints
-        .route(
-            "/{type}/{ns}/{repo}/info/refs",
-            get(git::info_refs),
-        )
-        .route(
-            "/{type}/{ns}/{repo}/HEAD",
-            get(git_head),
-        )
+        .route("/{type}/{ns}/{repo}/info/refs", get(git::info_refs))
+        .route("/{type}/{ns}/{repo}/HEAD", get(git_head))
         .route(
             "/{type}/{ns}/{repo}/git-upload-pack",
             post(git::upload_pack),
@@ -211,10 +185,7 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
             post(git::receive_pack),
         )
         // Dataset viewer endpoints
-        .route(
-            "/api/datasets/{ns}/{repo}/parquet",
-            get(dataset_parquet),
-        )
+        .route("/api/datasets/{ns}/{repo}/parquet", get(dataset_parquet))
         .route(
             "/api/datasets/{ns}/{repo}/first-rows",
             get(dataset_first_rows),
@@ -264,9 +235,7 @@ const fn repo_type_path(rt: HubRepoType) -> &'static str {
 
 // ---- Whoami ----
 
-async fn whoami(
-    headers: axum::http::HeaderMap,
-) -> Result<Json<WhoamiResponse>, HubApiError> {
+async fn whoami(headers: axum::http::HeaderMap) -> Result<Json<WhoamiResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("whoami", "GET", 200);
     let state = crate::state::get();
     let name = state
@@ -362,9 +331,8 @@ async fn repo_create_type(
     shardline_metrics::record_hub_api_request("repo_create_type", "POST", 201);
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Write)?;
-    let rt = HubRepoType::parse_str(&repo_type).ok_or_else(|| {
-        HubApiError::PathValidation(format!("invalid repo type: {repo_type}"))
-    })?;
+    let rt = HubRepoType::parse_str(&repo_type)
+        .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{ns}/{repo}");
     let private = body
         .get("private")
@@ -397,9 +365,7 @@ fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> RepoResponse 
 
 // ---- Repo list (requires Read) ----
 
-async fn repo_list(
-    headers: axum::http::HeaderMap,
-) -> Result<Json<RepoListResponse>, HubApiError> {
+async fn repo_list(headers: axum::http::HeaderMap) -> Result<Json<RepoListResponse>, HubApiError> {
     shardline_metrics::record_hub_api_request("repo_list", "GET", 200);
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Read)?;
@@ -529,9 +495,8 @@ async fn repo_info(
     shardline_metrics::record_hub_api_request("repo_info", "GET", 200);
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Read)?;
-    let _rt = HubRepoType::parse_str(&repo_type).ok_or_else(|| {
-        HubApiError::PathValidation(format!("invalid repo type: {repo_type}"))
-    })?;
+    let _rt = HubRepoType::parse_str(&repo_type)
+        .ok_or_else(|| HubApiError::PathValidation(format!("invalid repo type: {repo_type}")))?;
     let name = format!("{ns}/{repo}");
     let entry = state
         .store
@@ -663,8 +628,9 @@ async fn apply_commit(
         }
         format!("{:016x}", h.finish())
     };
-    let commit_sha = shardline_index::hub::HubRepo::compute_commit_sha(parent_sha, &parsed.message, &files_hash)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let commit_sha =
+        shardline_index::hub::HubRepo::compute_commit_sha(parent_sha, &parsed.message, &files_hash)
+            .map_err(|e| HubApiError::CasError(e.to_string()))?;
 
     state
         .store
@@ -672,7 +638,13 @@ async fn apply_commit(
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     state
         .store
-        .create_revision(repo_id, Some(parent_sha), &commit_sha, "main", &parsed.message)
+        .create_revision(
+            repo_id,
+            Some(parent_sha),
+            &commit_sha,
+            "main",
+            &parsed.message,
+        )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
 
     // Fire webhook deliveries in the background (non-blocking).
@@ -808,10 +780,7 @@ async fn lfs_batch(
         .objects
         .iter()
         .map(|obj| {
-            let exists = state
-                .store
-                .has_lfs_object(&obj.oid)
-                .unwrap_or(false);
+            let exists = state.store.has_lfs_object(&obj.oid).unwrap_or(false);
             let actions = match request.operation {
                 LfsBatchOperation::Download => {
                     if exists {
@@ -923,8 +892,14 @@ async fn lfs_upload(
 async fn lfs_download(
     headers: axum::http::HeaderMap,
     Path(oid): Path<String>,
-) -> Result<(StatusCode, [(axum::http::header::HeaderName, &'static str); 1], Vec<u8>), HubApiError>
-{
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Vec<u8>,
+    ),
+    HubApiError,
+> {
     shardline_metrics::record_hub_api_request("lfs_download", "GET", 200);
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Read)?;
@@ -950,13 +925,10 @@ async fn git_head(
     let state = crate::state::get();
     authorize(state, &headers, TokenScope::Read)?;
     let repo_id = format!("{repo_type}/{ns}/{repo}");
-    let revisions = state
-        .store
-        .list_revisions(&repo_id)
-        .map_err(|e| {
-            tracing::debug!("failed to list revisions for {repo_id}: {e}");
-            HubApiError::RepoNotFound
-        })?;
+    let revisions = state.store.list_revisions(&repo_id).map_err(|e| {
+        tracing::debug!("failed to list revisions for {repo_id}: {e}");
+        HubApiError::RepoNotFound
+    })?;
 
     // Find HEAD revision — prefer explicit HEAD, then empty, then fall back to latest.
     let head_sha = revisions
@@ -966,7 +938,9 @@ async fn git_head(
         .map(|r| r.sha.as_str())
         .unwrap_or("0000000000000000000000000000000000000000");
 
-    Ok(format!("ref: refs/heads/main\n{head_sha} refs/heads/main\n"))
+    Ok(format!(
+        "ref: refs/heads/main\n{head_sha} refs/heads/main\n"
+    ))
 }
 
 // ---- Dataset viewer endpoints ----
@@ -1001,7 +975,9 @@ async fn dataset_parquet(
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     let parquet_files: Vec<DatasetParquetFile> = files
         .iter()
-        .filter(|f| f.path.ends_with(".parquet") || f.path.ends_with(".csv") || f.path.ends_with(".jsonl"))
+        .filter(|f| {
+            f.path.ends_with(".parquet") || f.path.ends_with(".csv") || f.path.ends_with(".jsonl")
+        })
         .map(|f| DatasetParquetFile {
             path: f.path.clone(),
             size: f.size,
@@ -1042,15 +1018,18 @@ async fn dataset_first_rows(
         .store
         .get_files(&commit_sha)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    let data_file = find_dataset_file(&files, &query.config, &query.split)
-        .ok_or_else(|| HubApiError::PathValidation("no data file found for config/split".to_owned()))?;
-    let content = data_file
-        .inline_content
-        .as_deref()
-        .ok_or_else(|| HubApiError::PathValidation("file content not available inline".to_owned()))?;
+    let data_file = find_dataset_file(&files, &query.config, &query.split).ok_or_else(|| {
+        HubApiError::PathValidation("no data file found for config/split".to_owned())
+    })?;
+    let content = data_file.inline_content.as_deref().ok_or_else(|| {
+        HubApiError::PathValidation("file content not available inline".to_owned())
+    })?;
     let limit = query.limit.min(1000);
     let rows = parse_rows_from_content(content, &data_file.path, 0, limit)?;
-    let columns = rows.first().map(|r| r.columns.keys().cloned().collect()).unwrap_or_default();
+    let columns = rows
+        .first()
+        .map(|r| r.columns.keys().cloned().collect())
+        .unwrap_or_default();
     Ok(Json(DatasetFirstRowsResponse { columns, rows }))
 }
 
@@ -1083,15 +1062,18 @@ async fn dataset_viewer(
         .store
         .get_files(&commit_sha)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    let data_file = find_dataset_file(&files, &query.config, &split)
-        .ok_or_else(|| HubApiError::PathValidation("no data file found for config/split".to_owned()))?;
-    let content = data_file
-        .inline_content
-        .as_deref()
-        .ok_or_else(|| HubApiError::PathValidation("file content not available inline".to_owned()))?;
+    let data_file = find_dataset_file(&files, &query.config, &split).ok_or_else(|| {
+        HubApiError::PathValidation("no data file found for config/split".to_owned())
+    })?;
+    let content = data_file.inline_content.as_deref().ok_or_else(|| {
+        HubApiError::PathValidation("file content not available inline".to_owned())
+    })?;
     let length = query.length.min(10000);
     let rows = parse_rows_from_content(content, &data_file.path, query.offset, length)?;
-    let columns = rows.first().map(|r| r.columns.keys().cloned().collect()).unwrap_or_default();
+    let columns = rows
+        .first()
+        .map(|r| r.columns.keys().cloned().collect())
+        .unwrap_or_default();
     Ok(Json(DatasetViewerResponse {
         columns,
         rows,
@@ -1149,7 +1131,11 @@ fn parse_rows_from_content(
 
 /// Parses JSONL (newline-delimited JSON) rows.
 #[allow(clippy::arithmetic_side_effects)]
-fn parse_jsonl_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<DatasetRow>, HubApiError> {
+fn parse_jsonl_rows(
+    text: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<DatasetRow>, HubApiError> {
     let mut rows = Vec::new();
     for (i, line) in text.lines().enumerate() {
         if i < offset {
@@ -1162,15 +1148,12 @@ fn parse_jsonl_rows(text: &str, offset: usize, limit: usize) -> Result<Vec<Datas
         if line.is_empty() {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| HubApiError::PathValidation(format!("invalid JSON at line {}: {e}", i + 1)))?;
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            HubApiError::PathValidation(format!("invalid JSON at line {}: {e}", i + 1))
+        })?;
         let columns = value
             .as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            })
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
         rows.push(DatasetRow { columns });
     }
@@ -1387,9 +1370,17 @@ async fn webhook_create(
         .ok_or(HubApiError::RepoNotFound)?;
     let webhook = state
         .store
-        .create_webhook(&name, &request.url, &request.events, request.secret.as_deref())
+        .create_webhook(
+            &name,
+            &request.url,
+            &request.events,
+            request.secret.as_deref(),
+        )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
-    Ok((StatusCode::CREATED, Json(webhook_response_from_hub(&webhook))))
+    Ok((
+        StatusCode::CREATED,
+        Json(webhook_response_from_hub(&webhook)),
+    ))
 }
 
 /// Lists webhooks for a repository.

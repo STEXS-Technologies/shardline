@@ -24,8 +24,8 @@ const MDB_SHARD_HEADER_VERSION: u64 = 2;
 const MDB_SHARD_FOOTER_VERSION: u64 = 1;
 
 const MDB_SHARD_HEADER_TAG: [u8; 32] = [
-    b'H', b'F', b'R', b'e', b'p', b'o', b'M', b'e', b't', b'a', b'D', b'a', b't', b'a', 0, 85,
-    105, 103, 69, 106, 123, 129, 87, 131, 165, 189, 217, 92, 205, 209, 74, 169,
+    b'H', b'F', b'R', b'e', b'p', b'o', b'M', b'e', b't', b'a', b'D', b'a', b't', b'a', 0, 85, 105,
+    103, 69, 106, 123, 129, 87, 131, 165, 189, 217, 92, 205, 209, 74, 169,
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -213,7 +213,8 @@ impl MDBShardInfo {
         }
 
         // Write footer
-        footer.file_info_offset = MDBShardFileHeader::default().serialize(&mut std::io::sink())
+        footer.file_info_offset = MDBShardFileHeader::default()
+            .serialize(&mut std::io::sink())
             .unwrap_or(0) as u64;
         footer.xorb_info_offset = 0;
         footer.footer_offset = 0;
@@ -307,17 +308,11 @@ impl MDBShardInfo {
     }
 
     pub fn total_num_chunks(&self) -> usize {
-        self.xorb_infos
-            .iter()
-            .map(|x| x.chunks.len())
-            .sum()
+        self.xorb_infos.iter().map(|x| x.chunks.len()).sum()
     }
 
     pub fn materialized_bytes(&self) -> u64 {
-        self.file_infos
-            .iter()
-            .map(|f| f.file_size())
-            .sum()
+        self.file_infos.iter().map(|f| f.file_size()).sum()
     }
 
     pub fn stored_bytes(&self) -> u64 {

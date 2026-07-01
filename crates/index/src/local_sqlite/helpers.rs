@@ -24,7 +24,7 @@ use shardline_storage::{
 
 use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
-    LegacyQuarantineCandidateRecord, LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS,
+    LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS, LegacyQuarantineCandidateRecord,
     LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
     MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, SqliteExecutor,
     StoredObjectPresenceRecord, i64_to_u64, invalid_metadata_path_error,
@@ -32,15 +32,9 @@ use super::{
 };
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
-    QuarantineCandidate, RetentionHold, WebhookDelivery,
-    WebhookDeliveryError,
-    parse_xet_hash_hex,
-    provider::parse_repository_provider,
-    record_key::record_key as shared_record_key,
-    record_key::{
-        repository_scope_key as shared_repository_scope_key,
-    },
-    xet_hash_hex_string,
+    QuarantineCandidate, RetentionHold, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
+    provider::parse_repository_provider, record_key::record_key as shared_record_key,
+    record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
 pub(super) fn initialize_local_metadata_root(root: &Path) -> Result<(), LocalIndexStoreError> {
@@ -49,9 +43,7 @@ pub(super) fn initialize_local_metadata_root(root: &Path) -> Result<(), LocalInd
     Ok(())
 }
 
-pub(super) fn ensure_sqlite_database_path_is_safe(
-    path: &Path,
-) -> Result<(), LocalIndexStoreError> {
+pub(super) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), LocalIndexStoreError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(invalid_metadata_path_error()),
         Ok(metadata) if metadata.is_file() => Ok(()),
@@ -211,10 +203,9 @@ fn local_metadata_has_rows(connection: &Connection) -> Result<bool, LocalIndexSt
         "shardline_provider_repository_states",
     ];
     for table in tables {
-        assert!(
-            is_valid_local_table_name(table),
-            "table name must be a valid identifier: {table}"
-        );
+        if !is_valid_local_table_name(table) {
+            return Err(LocalIndexStoreError::InvalidTableName);
+        }
         let exists = connection.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"),
             [],
@@ -1112,7 +1103,9 @@ pub(super) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::IntegerOutOfRange
         | other @ LocalIndexStoreError::InvalidRecordKind
         | other @ LocalIndexStoreError::InvalidLegacyImportState
-        | other @ LocalIndexStoreError::InvalidRepoType(_) => {
+        | other @ LocalIndexStoreError::InvalidRepoType(_)
+        | other @ LocalIndexStoreError::BlockingTask
+        | other @ LocalIndexStoreError::InvalidTableName => {
             SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(other))
         }
     })?;

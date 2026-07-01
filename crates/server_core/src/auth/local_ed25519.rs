@@ -26,9 +26,7 @@ impl LocalEd25519Provider {
 
 impl AuthProvider for LocalEd25519Provider {
     fn verify_token(&self, token: &str) -> Result<TokenClaims, AuthError> {
-        self.signer
-            .verify_now(token)
-            .map_err(AuthError::from)
+        self.signer.verify_now(token).map_err(AuthError::from)
     }
 
     fn mint_token(&self, claims: &TokenClaims) -> Result<String, AuthError> {

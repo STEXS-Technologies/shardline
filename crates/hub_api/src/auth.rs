@@ -43,9 +43,7 @@ impl HubAuth {
         let header = headers
             .get(AUTHORIZATION)
             .ok_or(HubApiError::Unauthorized)?;
-        let header = header
-            .to_str()
-            .map_err(|e| {
+        let header = header.to_str().map_err(|e| {
             tracing::debug!("invalid authorization header encoding: {e}");
             HubApiError::InvalidToken
         })?;

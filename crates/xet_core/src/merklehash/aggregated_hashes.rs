@@ -11,9 +11,8 @@ fn next_merge_cut(hashes: &[(MerkleHash, u64)]) -> usize {
 
     let end = MAX_GROUP_SIZE.min(hashes.len());
 
-    for i in 2..end {
-        let h = hashes[i].0;
-        if h % AGGREGATED_HASHES_MEAN_TREE_BRANCHING_FACTOR == 0 {
+    for (i, (h, _)) in hashes.iter().enumerate().take(end).skip(2) {
+        if *h % AGGREGATED_HASHES_MEAN_TREE_BRANCHING_FACTOR == 0 {
             return i + 1;
         }
     }
@@ -65,7 +64,8 @@ fn write_decimal_u64(buf: &mut [u8], pos: &mut usize, val: u64) {
     *pos += len;
 }
 
-const MAX_MERGE_BUF_SIZE: usize = (2 * AGGREGATED_HASHES_MEAN_TREE_BRANCHING_FACTOR as usize + 1) * 88;
+const MAX_MERGE_BUF_SIZE: usize =
+    (2 * AGGREGATED_HASHES_MEAN_TREE_BRANCHING_FACTOR as usize + 1) * 88;
 
 #[inline]
 fn write_hash_entry(buf: &mut [u8], pos: &mut usize, total_len: &mut u64, h: &MerkleHash, s: u64) {
@@ -132,7 +132,7 @@ pub fn file_hash_with_salt(chunks: &[(MerkleHash, u64)], salt: &[u8; 32]) -> Mer
     if chunks.is_empty() {
         return MerkleHash::default();
     }
-    let key_bytes: [u8; 32] = (*salt).into();
+    let key_bytes: [u8; 32] = *salt;
     let aggregated = aggregated_node_hash(chunks);
     let agg_bytes: [u8; 32] = aggregated.into();
     let digest = blake3::keyed_hash(&key_bytes, &agg_bytes);

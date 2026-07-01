@@ -4,10 +4,12 @@ use rusqlite::{OptionalExtension, params};
 use shardline_protocol::unix_now_seconds_lossy;
 
 use super::{
-    LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, LocalRecordStore,
-    i64_to_u64, record_not_found_error,
+    LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, LocalRecordStore, i64_to_u64,
+    record_not_found_error,
 };
-use crate::{FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope};
+use crate::{
+    FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope,
+};
 
 impl RecordTraversal for LocalRecordStore {
     type Error = LocalIndexStoreError;
@@ -20,7 +22,7 @@ impl RecordTraversal for LocalRecordStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || store.list_record_locators(LocalRecordKind::Latest))
                 .await
-                .expect("record task panicked")
+                .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -35,7 +37,7 @@ impl RecordTraversal for LocalRecordStore {
                 store.list_repository_record_locators(LocalRecordKind::Latest, &repository)
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -44,9 +46,11 @@ impl RecordTraversal for LocalRecordStore {
     ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || store.list_record_locators(LocalRecordKind::Version))
-                .await
-                .expect("record task panicked")
+            tokio::task::spawn_blocking(move || {
+                store.list_record_locators(LocalRecordKind::Version)
+            })
+            .await
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -61,7 +65,7 @@ impl RecordTraversal for LocalRecordStore {
                 store.list_repository_record_locators(LocalRecordKind::Version, &repository)
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -73,11 +77,12 @@ impl RecordTraversal for LocalRecordStore {
         let locator = locator.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                store.read_record_bytes_raw(&locator)?
+                store
+                    .read_record_bytes_raw(&locator)?
                     .ok_or_else(record_not_found_error)
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -93,7 +98,7 @@ impl RecordTraversal for LocalRecordStore {
                 store.read_record_bytes_raw(&locator)
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -116,7 +121,7 @@ impl RecordTraversal for LocalRecordStore {
                 Ok(exists != 0)
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -142,7 +147,7 @@ impl RecordTraversal for LocalRecordStore {
                 Ok(Duration::from_secs(i64_to_u64(value)?))
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -179,7 +184,7 @@ impl RecordMutation for LocalRecordStore {
                 Ok(())
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -202,7 +207,7 @@ impl RecordMutation for LocalRecordStore {
                 Ok(())
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -225,7 +230,7 @@ impl RecordMutation for LocalRecordStore {
                 Ok(())
             })
             .await
-            .expect("record task panicked")
+            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
         })
     }
 

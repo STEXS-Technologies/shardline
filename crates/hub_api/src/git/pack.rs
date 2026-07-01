@@ -4,8 +4,8 @@
 //! `git clone` and `git fetch` operations. This is a minimal
 //! implementation that generates non-delta packs.
 
-use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use flate2::write::ZlibEncoder;
 use sha1::{Digest, Sha1};
 use std::io::Write;
 
@@ -165,9 +165,7 @@ fn write_object(out: &mut Vec<u8>, obj: &GitObject) -> Result<(), PackError> {
 
     // Zlib-compress the object content
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(&obj.data)
-        .map_err(PackError::Zlib)?;
+    encoder.write_all(&obj.data).map_err(PackError::Zlib)?;
     let compressed = encoder.finish().map_err(PackError::Zlib)?;
     out.extend_from_slice(&compressed);
     Ok(())
@@ -192,12 +190,15 @@ pub fn create_commit_object(
     let mut commit = format!("tree {}\n", hex::encode(tree_sha1));
     if let Some(parent) = parent_sha1 {
         use std::fmt::Write;
-        writeln!(&mut commit, "parent {}", hex::encode(parent)).expect("write to String never fails");
+        writeln!(&mut commit, "parent {}", hex::encode(parent))
+            .expect("write to String never fails");
     }
     {
         use std::fmt::Write;
-        writeln!(&mut commit, "author {author} {timestamp} +0000").expect("write to String never fails");
-        writeln!(&mut commit, "committer {author} {timestamp} +0000").expect("write to String never fails");
+        writeln!(&mut commit, "author {author} {timestamp} +0000")
+            .expect("write to String never fails");
+        writeln!(&mut commit, "committer {author} {timestamp} +0000")
+            .expect("write to String never fails");
     }
     commit.push('\n');
     commit.push_str(message);
@@ -244,11 +245,7 @@ pub fn empty_pack() -> Result<Vec<u8>, PackError> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -285,7 +282,12 @@ mod tests {
     #[test]
     fn commit_object_format() {
         let tree_sha1 = [0xab; 20];
-        let commit = create_commit_object(&tree_sha1, None, "Test User <test@example.com>", "Initial commit");
+        let commit = create_commit_object(
+            &tree_sha1,
+            None,
+            "Test User <test@example.com>",
+            "Initial commit",
+        );
         let content = String::from_utf8(commit.data).unwrap();
         assert!(content.starts_with(&format!("tree {}", hex::encode(tree_sha1))));
         assert!(content.contains("Initial commit"));

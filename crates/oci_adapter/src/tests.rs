@@ -25,9 +25,10 @@ fn max_sessions() -> NonZeroUsize {
 #[tokio::test]
 async fn create_upload_session_returns_valid_session_id() {
     let root = temp_root();
-    let session_id = create_upload_session(root.path(), "my-repo", None, ttl(), max_sessions(), false)
-        .await
-        .expect("create_upload_session failed");
+    let session_id =
+        create_upload_session(root.path(), "my-repo", None, ttl(), max_sessions(), false)
+            .await
+            .expect("create_upload_session failed");
     assert!(!session_id.is_empty());
     assert!(
         session_id.len() <= 64,
@@ -43,9 +44,10 @@ async fn create_upload_session_returns_valid_session_id() {
 #[tokio::test]
 async fn create_upload_session_persists_metadata() {
     let root = temp_root();
-    let session_id = create_upload_session(root.path(), "test-repo", None, ttl(), max_sessions(), false)
-        .await
-        .unwrap();
+    let session_id =
+        create_upload_session(root.path(), "test-repo", None, ttl(), max_sessions(), false)
+            .await
+            .unwrap();
     let session = read_upload_session(root.path(), &session_id, ttl())
         .await
         .expect("read_upload_session failed");
@@ -56,9 +58,10 @@ async fn create_upload_session_persists_metadata() {
 #[tokio::test]
 async fn create_s3_multipart_session_persists_metadata() {
     let root = temp_root();
-    let session_id = create_upload_session(root.path(), "s3-repo", None, ttl(), max_sessions(), true)
-        .await
-        .unwrap();
+    let session_id =
+        create_upload_session(root.path(), "s3-repo", None, ttl(), max_sessions(), true)
+            .await
+            .unwrap();
     let session = read_upload_session(root.path(), &session_id, ttl())
         .await
         .unwrap();
@@ -70,7 +73,10 @@ async fn create_s3_multipart_session_persists_metadata() {
 async fn create_upload_session_rejects_invalid_repository() {
     let root = temp_root();
     let result = create_upload_session(root.path(), "", None, ttl(), max_sessions(), false).await;
-    assert!(matches!(result, Err(OciAdapterError::InvalidRepositoryName)));
+    assert!(matches!(
+        result,
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
 }
 
 #[tokio::test]

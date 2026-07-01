@@ -3,7 +3,7 @@ mod support;
 use std::{
     env::var,
     error::Error,
-    fs::{create_dir_all, read_to_string, write as write_file},
+    fs::{create_dir_all, write as write_file},
     path::PathBuf,
     process::Command,
 };
@@ -40,6 +40,7 @@ fn gc_schedule_install_rejects_symlinked_working_directory() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn exercise_gc_schedule_install_and_uninstall() -> Result<(), Box<dyn Error>> {
     let sandbox = tempfile::tempdir()?;
     let output_dir = sandbox.path().join("systemd");

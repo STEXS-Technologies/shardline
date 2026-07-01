@@ -137,12 +137,9 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
         }
 
         if let Some(file) = parsed.get("file") {
-            let path = file
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    HubApiError::PathValidation(format!("line {line_idx}: missing file path"))
-                })?;
+            let path = file.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                HubApiError::PathValidation(format!("line {line_idx}: missing file path"))
+            })?;
             validate_commit_path(path)?;
             let content_b64 = file
                 .get("content")

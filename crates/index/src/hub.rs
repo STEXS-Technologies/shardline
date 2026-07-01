@@ -56,7 +56,11 @@ impl HubRepo {
     /// # Errors
     ///
     /// Returns an error if formatting the hash fails.
-    pub fn compute_commit_sha(parent_sha: &str, message: &str, files_hash: &str) -> Result<String, std::fmt::Error> {
+    pub fn compute_commit_sha(
+        parent_sha: &str,
+        message: &str,
+        files_hash: &str,
+    ) -> Result<String, std::fmt::Error> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
@@ -182,7 +186,11 @@ pub trait HubStore: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the storage backend operation fails.
-    fn resolve_revision(&self, repo_id: &str, revision: &str) -> Result<Option<String>, Self::Error>;
+    fn resolve_revision(
+        &self,
+        repo_id: &str,
+        revision: &str,
+    ) -> Result<Option<String>, Self::Error>;
 
     /// Stores file entries for a given commit SHA.
     ///
@@ -265,7 +273,9 @@ pub struct BoxedHubStore {
 
 impl Clone for BoxedHubStore {
     fn clone(&self) -> Self {
-        Self { inner: Arc::clone(&self.inner) }
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
@@ -333,10 +343,7 @@ trait ErasedHubStore: Send + Sync {
         oid: &str,
     ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>>;
 
-    fn has_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
+    fn has_lfs_object(&self, oid: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
 
     fn create_webhook(
         &self,
@@ -379,13 +386,11 @@ impl<T: HubStore> ErasedHubStore for T {
         &self,
         repo_id: &str,
     ) -> Result<Option<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
-        T::get_repo(self, repo_id)
-            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+        T::get_repo(self, repo_id).map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
-        T::list_repos(self)
-            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+        T::list_repos(self).map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
     fn search_repos(
@@ -461,10 +466,7 @@ impl<T: HubStore> ErasedHubStore for T {
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
-    fn has_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    fn has_lfs_object(&self, oid: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         T::has_lfs_object(self, oid)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
@@ -509,8 +511,12 @@ impl<T: HubStore> ErasedHubStore for T {
 
 impl BoxedHubStore {
     /// Creates a new `BoxedHubStore` from any `HubStore` implementation.
-    pub fn new(store: impl HubStore<Error = Box<dyn std::error::Error + Send + Sync>> + 'static) -> Self {
-        Self { inner: Arc::new(store) }
+    pub fn new(
+        store: impl HubStore<Error = Box<dyn std::error::Error + Send + Sync>> + 'static,
+    ) -> Self {
+        Self {
+            inner: Arc::new(store),
+        }
     }
 
     /// Creates a new `BoxedHubStore` from a value implementing `HubStore` with any error type.
@@ -553,9 +559,7 @@ impl BoxedHubStore {
     /// # Errors
     ///
     /// Returns an error when the storage backend operation fails.
-    pub fn list_repos(
-        &self,
-    ) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn list_repos(&self) -> Result<Vec<HubRepo>, Box<dyn std::error::Error + Send + Sync>> {
         self.inner.list_repos()
     }
 
@@ -586,7 +590,8 @@ impl BoxedHubStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
-        self.inner.create_revision(repo_id, parent_sha, new_sha, ref_name, message)
+        self.inner
+            .create_revision(repo_id, parent_sha, new_sha, ref_name, message)
     }
 
     /// Lists all revisions.
@@ -774,7 +779,8 @@ where
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
-        T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message).map_err(Into::into)
+        T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(Into::into)
     }
 
     fn list_revisions(
@@ -822,10 +828,7 @@ where
         T::get_lfs_object(&self.0, oid).map_err(Into::into)
     }
 
-    fn has_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    fn has_lfs_object(&self, oid: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         T::has_lfs_object(&self.0, oid).map_err(Into::into)
     }
 

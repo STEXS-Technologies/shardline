@@ -33,8 +33,14 @@ impl AuthProvider for PassthroughProvider {
         )
         .map_err(|e| AuthError::ProviderError(e.to_string()))?;
 
-        TokenClaims::new("passthrough", "anonymous", TokenScope::Write, repository, u64::MAX)
-            .map_err(|e| AuthError::ProviderError(e.to_string()))
+        TokenClaims::new(
+            "passthrough",
+            "anonymous",
+            TokenScope::Write,
+            repository,
+            u64::MAX,
+        )
+        .map_err(|e| AuthError::ProviderError(e.to_string()))
     }
 
     fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {

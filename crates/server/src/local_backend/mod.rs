@@ -6,7 +6,7 @@ pub(crate) mod records;
 mod xorbs;
 
 use shardline_index::{
-    FileChunkRecord, ReconstructionStore, LocalIndexStore, LocalRecordStore, RecordTraversal,
+    FileChunkRecord, LocalIndexStore, LocalRecordStore, ReconstructionStore, RecordTraversal,
 };
 use shardline_storage::{ObjectPrefix, ObjectStore};
 
@@ -152,7 +152,8 @@ impl LocalBackend {
             let _object_store_reachable = object_store.metadata(&probe_key)?;
         }
         let _latest = RecordTraversal::list_latest_record_locators(&self.record_store).await?;
-        let _reconstructions = ReconstructionStore::list_reconstruction_file_ids(&self.index_store)?;
+        let _reconstructions =
+            ReconstructionStore::list_reconstruction_file_ids(&self.index_store)?;
         Ok(())
     }
 
@@ -167,10 +168,9 @@ impl LocalBackend {
         let mut chunks = 0_u64;
         let mut chunk_bytes = 0_u64;
         crate::object_store::visit_object_prefix(&object_store, &prefix, |metadata| {
-            let is_chunk = crate::chunk_store::chunk_hash_from_chunk_object_key_if_present(
-                metadata.key(),
-            )?
-            .is_some();
+            let is_chunk =
+                crate::chunk_store::chunk_hash_from_chunk_object_key_if_present(metadata.key())?
+                    .is_some();
             if is_chunk {
                 chunks = checked_increment(chunks)?;
                 chunk_bytes = checked_add(chunk_bytes, metadata.length())?;

@@ -1,8 +1,8 @@
 use std::sync::{Mutex, Once, OnceLock};
 
 use shardline_hub_api::routes::HubState;
-use shardline_index::hub::BoxedHubStore;
 use shardline_index::LocalIndexStore;
+use shardline_index::hub::BoxedHubStore;
 use tempfile::TempDir;
 
 pub(crate) static INIT: Once = Once::new();
@@ -61,8 +61,7 @@ pub(crate) fn setup() {
         let root = tmp.path().to_path_buf();
         let db_path = root.join("metadata.sqlite3");
         let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
-        conn.execute_batch(HUB_SCHEMA)
-            .expect("execute schema");
+        conn.execute_batch(HUB_SCHEMA).expect("execute schema");
         drop(conn);
 
         let store = LocalIndexStore::open(root);

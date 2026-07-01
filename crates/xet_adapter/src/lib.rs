@@ -46,8 +46,8 @@ pub use reconstruction::{
 };
 pub use shard_store::{
     dedupe_shard_mapping, parse_uploaded_shard, parse_uploaded_shard_with_metrics,
-    resolve_dedupe_shard_object, retained_shard_chunk_hashes, shard_hash_from_object_key_if_present,
-    shard_object_key,
+    resolve_dedupe_shard_object, retained_shard_chunk_hashes,
+    shard_hash_from_object_key_if_present, shard_object_key,
 };
 pub use xorb::{
     DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbParseError, XorbVisitError,

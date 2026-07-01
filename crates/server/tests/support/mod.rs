@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 pub use shardline_test_support::InvariantError as ServerE2eInvariantError;
 
 use std::{
@@ -20,7 +22,7 @@ use shardline_server::{
     ServerByteStream, ServerConfig, ServerError, ServerFrontend,
     test_invariant_error::ServerTestInvariantError,
 };
-use tokio::{net::TcpListener, sync::OwnedSemaphorePermit, time::sleep};
+use tokio::{net::TcpListener, time::sleep};
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;

@@ -19,7 +19,7 @@ impl RepositoryScopeCacheKey {
             provider: provider_token(scope.provider()),
             owner: Arc::from(scope.owner()),
             repo: Arc::from(scope.name()),
-            revision: scope.revision().map(|r| Arc::from(r)),
+            revision: scope.revision().map(Arc::from),
         }
     }
 

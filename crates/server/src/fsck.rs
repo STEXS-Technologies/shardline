@@ -2,15 +2,15 @@ use shardline_fsck::run_fsck_with_stores;
 use shardline_index::{LocalIndexStore, LocalRecordStore, PostgresIndexStore, PostgresRecordStore};
 
 use crate::{
-    ServerConfig, ServerError, error::{IndexError, ObjectStoreError},
+    ServerConfig, ServerError,
+    error::{IndexError, ObjectStoreError},
     object_store::object_store_from_config,
     postgres_backend::connect_postgres_metadata_pool,
 };
 
 pub use shardline_fsck::{
     FsckError, FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,
-    LocalFsckIssueKind, LocalFsckReport, ProviderRepositoryStateTimestampField,
-    run_local_fsck,
+    LocalFsckIssueKind, LocalFsckReport, ProviderRepositoryStateTimestampField, run_local_fsck,
 };
 
 /// Runs integrity checks against the configured metadata backend and local chunk storage.

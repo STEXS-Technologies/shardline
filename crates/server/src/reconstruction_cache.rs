@@ -282,10 +282,11 @@ mod tests {
         MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES, ReconstructionCacheService,
         SharedReconstructionCache,
     };
-    use crate::xet_adapter::{
-        ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm, ReconstructionUrlRange,
-    };
     use crate::FileReconstructionResponse;
+    use crate::xet_adapter::{
+        ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
+        ReconstructionUrlRange,
+    };
 
     #[derive(Debug)]
     struct BrokenCache;

@@ -14,8 +14,8 @@ use shardline_index::{
 };
 use shardline_protocol::{HashParseError, HttpRangeParseError, TokenCodecError};
 pub use shardline_server_core::{
-    InvalidLifecycleMetadataError, InvalidReconstructionResponseError,
-    InvalidSerializedShardError, ParseStoredFileRecordError,
+    InvalidLifecycleMetadataError, InvalidReconstructionResponseError, InvalidSerializedShardError,
+    ParseStoredFileRecordError,
 };
 use shardline_storage::{LocalObjectStoreError, ObjectPrefixError, S3ObjectStoreError};
 use thiserror::Error;
@@ -457,9 +457,7 @@ impl From<ProviderEventsError> for ServerError {
             ProviderEventsError::PostgresMetadata(e) => {
                 Self::Index(IndexError::PostgresMetadata(e))
             }
-            ProviderEventsError::WebhookDelivery(e) => {
-                Self::Index(IndexError::WebhookDelivery(e))
-            }
+            ProviderEventsError::WebhookDelivery(e) => Self::Index(IndexError::WebhookDelivery(e)),
             ProviderEventsError::ObjectStore(e) => Self::from(e),
             ProviderEventsError::ParseStoredFileRecord(e) => Self::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -524,7 +522,9 @@ impl From<OciAdapterError> for ServerError {
 impl From<shardline_protocol_adapters::ProtocolError> for ServerError {
     fn from(error: shardline_protocol_adapters::ProtocolError) -> Self {
         match error {
-            shardline_protocol_adapters::ProtocolError::InvalidContentHash => Self::InvalidContentHash,
+            shardline_protocol_adapters::ProtocolError::InvalidContentHash => {
+                Self::InvalidContentHash
+            }
         }
     }
 }
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn io_error_maps_to_500() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         assert_eq!(
             status_for(&ServerError::Io(io_err)),
             StatusCode::INTERNAL_SERVER_ERROR

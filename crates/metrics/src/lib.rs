@@ -11,17 +11,17 @@
     )
 )]
 
+pub mod backend;
+pub mod fsck;
+pub mod gc;
+pub mod middleware;
+pub mod protocol;
+pub mod provider;
+pub mod reconstruction;
 pub mod storage;
+pub mod system;
 pub mod transfer;
 pub mod xet;
-pub mod protocol;
-pub mod reconstruction;
-pub mod gc;
-pub mod fsck;
-pub mod backend;
-pub mod provider;
-pub mod system;
-pub mod middleware;
 
 #[cfg(test)]
 mod tests;
@@ -30,16 +30,16 @@ use std::sync::LazyLock;
 
 use prometheus::{Registry, TextEncoder};
 
+use backend::StorageBackendMetrics;
+use fsck::FsckMetrics;
+use gc::GcMetrics;
+use protocol::ProtocolMetrics;
+use provider::ProviderMetrics;
+use reconstruction::ReconstructionMetrics;
 use storage::StorageMetrics;
+use system::SystemMetrics;
 use transfer::TransferMetrics;
 use xet::XetMetrics;
-use protocol::ProtocolMetrics;
-use reconstruction::ReconstructionMetrics;
-use gc::GcMetrics;
-use fsck::FsckMetrics;
-use backend::StorageBackendMetrics;
-use provider::ProviderMetrics;
-use system::SystemMetrics;
 
 /// Central metrics registry for the entire Shardline CAS backend.
 pub struct CasMetrics {
@@ -96,7 +96,9 @@ pub fn registry() -> &'static Registry {
 pub fn encode_metrics() -> String {
     let encoder = TextEncoder::new();
     let metric_families = REGISTRY.gather();
-    encoder.encode_to_string(&metric_families).unwrap_or_default()
+    encoder
+        .encode_to_string(&metric_families)
+        .unwrap_or_default()
 }
 
 // ── Convenience free functions ──────────────────────────────────────────
@@ -142,7 +144,9 @@ pub fn record_reconstruction_cache_miss() {
 }
 
 pub fn record_gc_run(duration: std::time::Duration, objects_collected: u64, bytes_collected: u64) {
-    metrics().gc.record_run(duration, objects_collected, bytes_collected);
+    metrics()
+        .gc
+        .record_run(duration, objects_collected, bytes_collected);
 }
 
 pub fn record_fsck_run(duration: std::time::Duration, errors_found: u64) {
@@ -150,7 +154,9 @@ pub fn record_fsck_run(duration: std::time::Duration, errors_found: u64) {
 }
 
 pub fn record_hub_api_request(endpoint: &str, method: &str, status: u16) {
-    metrics().protocol.record_hub_api_request(endpoint, method, status);
+    metrics()
+        .protocol
+        .record_hub_api_request(endpoint, method, status);
 }
 
 pub fn record_hub_api_commit(operation: &str) {

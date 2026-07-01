@@ -27,11 +27,15 @@ pub(crate) fn parse_sha256_digest(value: &str) -> Result<String, ServerError> {
     core_ps::parse_sha256_digest(value)
 }
 
-pub(crate) fn scope_namespace(repository_scope: Option<&shardline_protocol::RepositoryScope>) -> String {
+pub(crate) fn scope_namespace(
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
+) -> String {
     core_ps::scope_namespace(repository_scope)
 }
 
-pub fn shared_sha256_object_key(digest_hex: &str) -> Result<shardline_storage::ObjectKey, ServerError> {
+pub fn shared_sha256_object_key(
+    digest_hex: &str,
+) -> Result<shardline_storage::ObjectKey, ServerError> {
     core_ps::shared_sha256_object_key(digest_hex)
 }
 

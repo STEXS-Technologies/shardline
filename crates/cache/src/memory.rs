@@ -24,9 +24,7 @@ struct EvictionKey(Instant, u64);
 
 impl Ord for EvictionKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .cmp(&other.0)
-            .then_with(|| self.1.cmp(&other.1))
+        self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
     }
 }
 
@@ -130,10 +128,10 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
 
             let mut inner = self.inner.write().await;
 
-            if let Some(entry) = inner.entries.get(key) {
-                if entry.expires_at > now {
-                    return Ok(Some(entry.payload.as_ref().clone()));
-                }
+            if let Some(entry) = inner.entries.get(key)
+                && entry.expires_at > now
+            {
+                return Ok(Some(entry.payload.as_ref().clone()));
             }
 
             if let Some(notify) = inner.loading.get(key) {
@@ -142,10 +140,10 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 notify.notified().await;
 
                 let read_inner = self.inner.read().await;
-                if let Some(entry) = read_inner.entries.get(key) {
-                    if entry.expires_at > Instant::now() {
-                        return Ok(Some(entry.payload.as_ref().clone()));
-                    }
+                if let Some(entry) = read_inner.entries.get(key)
+                    && entry.expires_at > Instant::now()
+                {
+                    return Ok(Some(entry.payload.as_ref().clone()));
                 }
                 return Ok(None);
             }

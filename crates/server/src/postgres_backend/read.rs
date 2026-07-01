@@ -58,9 +58,9 @@ impl super::PostgresBackend {
                 .await
                 .map_err(PostgresMetadataStoreError::from)?;
             if registered_name.is_none() {
-                return Err(ServerError::Index(IndexError::MissingRequiredMetadataTable(
-                    table_name.to_owned(),
-                )));
+                return Err(ServerError::Index(
+                    IndexError::MissingRequiredMetadataTable(table_name.to_owned()),
+                ));
             }
         }
 
@@ -424,6 +424,8 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::WebhookDelivery(_)
         | PostgresMetadataStoreError::IntegerOutOfRange
         | PostgresMetadataStoreError::InvalidRecordKind
-        | PostgresMetadataStoreError::InvalidRepoType(_) => ServerError::Index(IndexError::PostgresMetadata(error)),
+        | PostgresMetadataStoreError::InvalidRepoType(_) => {
+            ServerError::Index(IndexError::PostgresMetadata(error))
+        }
     }
 }

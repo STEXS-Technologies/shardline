@@ -388,14 +388,16 @@ fn register_hub_routes(
                     tracing::warn!("failed to create hub directory: {e}");
                 }
                 let sqlite_store = shardline_index::LocalIndexStore::new(hub_root)
-                    .map_err(|e| ServerError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-                Ok(shardline_index::hub::BoxedHubStore::from_store(sqlite_store))
+                    .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
+                Ok(shardline_index::hub::BoxedHubStore::from_store(
+                    sqlite_store,
+                ))
             },
             |pg_url| -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
                 let pool = sqlx::postgres::PgPoolOptions::new()
                     .max_connections(16)
                     .connect_lazy(pg_url)
-                    .map_err(|e| ServerError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
                 let pg_store = shardline_index::PostgresIndexStore::new(pool);
                 Ok(shardline_index::hub::BoxedHubStore::from_store(pg_store))
             },

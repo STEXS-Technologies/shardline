@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{
-    AsyncIndexStore, FileRecordStorageLayout, RecordStore, RecordTraversal, StoredRecord, xet_hash_hex_string,
+    AsyncIndexStore, FileRecordStorageLayout, RecordStore, RecordTraversal, StoredRecord,
+    xet_hash_hex_string,
 };
 use shardline_storage::{ObjectKey, ObjectPrefix, ObjectStore};
 

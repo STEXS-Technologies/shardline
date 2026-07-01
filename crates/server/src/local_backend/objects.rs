@@ -1,7 +1,7 @@
 use shardline_protocol::ByteRange;
 use shardline_storage::{
-    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore,
-    PutOutcome,
+    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix,
+    ObjectStore, PutOutcome,
 };
 
 use super::LocalBackend;
@@ -19,10 +19,8 @@ impl LocalBackend {
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, ServerError> {
         tokio::task::block_in_place(|| {
-            let integrity = ObjectIntegrity::new(
-                super::chunk_hash(&bytes),
-                u64::try_from(bytes.len())?,
-            );
+            let integrity =
+                ObjectIntegrity::new(super::chunk_hash(&bytes), u64::try_from(bytes.len())?);
             Ok(self.object_store().put_if_absent(
                 object_key,
                 ObjectBody::from_vec(bytes),
@@ -39,10 +37,8 @@ impl LocalBackend {
     ) -> Result<PutOutcome, ServerError> {
         tokio::task::block_in_place(|| {
             let canonical_key = shared_sha256_object_key(digest_hex)?;
-            let integrity = ObjectIntegrity::new(
-                super::chunk_hash(&bytes),
-                u64::try_from(bytes.len())?,
-            );
+            let integrity =
+                ObjectIntegrity::new(super::chunk_hash(&bytes), u64::try_from(bytes.len())?);
             let canonical_outcome = self.object_store().put_if_absent(
                 &canonical_key,
                 ObjectBody::from_vec(bytes),
@@ -73,10 +69,8 @@ impl LocalBackend {
         bytes: Vec<u8>,
     ) -> Result<(), ServerError> {
         tokio::task::block_in_place(|| {
-            let integrity = ObjectIntegrity::new(
-                super::chunk_hash(&bytes),
-                u64::try_from(bytes.len())?,
-            );
+            let integrity =
+                ObjectIntegrity::new(super::chunk_hash(&bytes), u64::try_from(bytes.len())?);
             Ok(self.object_store().put_overwrite(
                 object_key,
                 ObjectBody::from_vec(bytes),
@@ -181,10 +175,8 @@ impl LocalBackend {
     ) -> Result<DeleteOutcome, ServerError> {
         let object_store = self.object_store();
         let object_key = object_key.clone();
-        tokio::task::spawn_blocking(move || {
-            Ok(object_store.delete_if_present(&object_key)?)
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
+        tokio::task::spawn_blocking(move || Ok(object_store.delete_if_present(&object_key)?))
+            .await
+            .map_err(ServerError::BlockingTask)?
     }
 }

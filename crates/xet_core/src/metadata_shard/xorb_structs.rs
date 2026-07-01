@@ -220,7 +220,8 @@ impl MDBXorbInfoView {
         data: Bytes,
     ) -> std::io::Result<Self> {
         let n = header.num_entries as usize;
-        let n_bytes = size_of::<XorbChunkSequenceHeader>() + n * size_of::<XorbChunkSequenceEntry>();
+        let n_bytes =
+            size_of::<XorbChunkSequenceHeader>() + n * size_of::<XorbChunkSequenceEntry>();
         if data.len() < n_bytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -244,8 +245,8 @@ impl MDBXorbInfoView {
 
     pub fn chunk(&self, idx: usize) -> XorbChunkSequenceEntry {
         XorbChunkSequenceEntry::deserialize(&mut Cursor::new(
-            &self.data
-                [(size_of::<XorbChunkSequenceHeader>() + idx * size_of::<XorbChunkSequenceEntry>())..],
+            &self.data[(size_of::<XorbChunkSequenceHeader>()
+                + idx * size_of::<XorbChunkSequenceEntry>())..],
         ))
         .expect("bookkeeping error on data bounds")
     }

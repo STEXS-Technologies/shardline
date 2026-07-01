@@ -177,10 +177,7 @@ impl fmt::Debug for CacheConfig {
             .field("adapter", &self.adapter)
             .field("ttl_seconds", &self.ttl_seconds)
             .field("memory_max_entries", &self.memory_max_entries)
-            .field(
-                "redis_url",
-                &self.redis_url.as_ref().map(|_url| "***"),
-            )
+            .field("redis_url", &self.redis_url.as_ref().map(|_url| "***"))
             .finish()
     }
 }
@@ -190,10 +187,7 @@ impl fmt::Debug for ProviderConfig {
         formatter
             .debug_struct("ProviderConfig")
             .field("config_path", &self.config_path)
-            .field(
-                "api_key",
-                &self.api_key.as_ref().map(|_key| "***"),
-            )
+            .field("api_key", &self.api_key.as_ref().map(|_key| "***"))
             .field("token_issuer", &self.token_issuer)
             .field("token_ttl_seconds", &self.token_ttl_seconds)
             .finish()
@@ -643,8 +637,7 @@ impl ServerConfig {
 
         self.cache.adapter = ReconstructionCacheAdapter::Redis;
         self.cache.ttl_seconds = reconstruction_cache_ttl_seconds;
-        self.cache.redis_url =
-            Some(SecretString::new(reconstruction_cache_redis_url));
+        self.cache.redis_url = Some(SecretString::new(reconstruction_cache_redis_url));
         Ok(self)
     }
 
@@ -1253,7 +1246,9 @@ pub enum ServerConfigError {
     #[error("jwks auth provider requires SHARDLINE_AUTH_JWKS_URL")]
     MissingJwksUrl,
     /// Hub frontend requires an auth provider to be configured.
-    #[error("hub frontend requires auth configuration (SHARDLINE_AUTH_PROVIDER with token signing key or oidc/jwks)")]
+    #[error(
+        "hub frontend requires auth configuration (SHARDLINE_AUTH_PROVIDER with token signing key or oidc/jwks)"
+    )]
     HubRequiresAuth,
 }
 

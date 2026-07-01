@@ -19,7 +19,7 @@ pub fn parse_sha256_digest<E: ProtocolValidation>(value: &str) -> Result<String,
     let Some(hash_hex) = value.strip_prefix("sha256:") else {
         return Err(E::invalid_digest());
     };
-    validate_content_hash(hash_hex).map_err(|_| E::invalid_digest())?;
+    validate_content_hash(hash_hex).map_err(|_error| E::invalid_digest())?;
     Ok(hash_hex.to_owned())
 }
 
@@ -43,13 +43,11 @@ pub fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> String {
 }
 
 pub fn object_key<E: ProtocolValidation>(value: &str) -> Result<ObjectKey, E> {
-    ObjectKey::parse(value).map_err(|_| E::invalid_content_hash())
+    ObjectKey::parse(value).map_err(|_error| E::invalid_content_hash())
 }
 
-pub fn shared_sha256_object_key<E: ProtocolValidation>(
-    digest_hex: &str,
-) -> Result<ObjectKey, E> {
-    validate_content_hash(digest_hex).map_err(|_| E::invalid_content_hash())?;
+pub fn shared_sha256_object_key<E: ProtocolValidation>(digest_hex: &str) -> Result<ObjectKey, E> {
+    validate_content_hash(digest_hex).map_err(|_error| E::invalid_content_hash())?;
     object_key(&format!("protocols/shared/sha256/{digest_hex}"))
 }
 
@@ -165,26 +163,26 @@ mod tests {
             digest.unwrap_or_default(),
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
-        assert!(parse_sha256_digest::<ValidateContentHashError>(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        )
-        .is_err());
-        assert!(parse_sha256_digest::<ValidateContentHashError>(
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
-        )
-        .is_err());
+        assert!(
+            parse_sha256_digest::<ValidateContentHashError>(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_sha256_digest::<ValidateContentHashError>(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn oci_repository_validator_rejects_traversal_and_uppercase() {
         assert!(validate_oci_repository_name::<ValidateContentHashError>("team/assets").is_ok());
         assert!(validate_oci_repository_name::<ValidateContentHashError>("../assets").is_err());
-        assert!(
-            validate_oci_repository_name::<ValidateContentHashError>("Team/assets").is_err()
-        );
-        assert!(
-            validate_oci_repository_name::<ValidateContentHashError>("team//assets").is_err()
-        );
+        assert!(validate_oci_repository_name::<ValidateContentHashError>("Team/assets").is_err());
+        assert!(validate_oci_repository_name::<ValidateContentHashError>("team//assets").is_err());
     }
 
     #[test]
@@ -197,17 +195,15 @@ mod tests {
 
     #[test]
     fn upload_session_validator_accepts_hex_and_hyphen_only() {
-        assert!(
-            validate_upload_session_id::<ValidateContentHashError>("0000000000000001").is_ok()
-        );
+        assert!(validate_upload_session_id::<ValidateContentHashError>("0000000000000001").is_ok());
         assert!(validate_upload_session_id::<ValidateContentHashError>("dead-beef").is_ok());
+        assert!(validate_upload_session_id::<ValidateContentHashError>("session_1").is_err());
         assert!(
-            validate_upload_session_id::<ValidateContentHashError>("session_1").is_err()
+            validate_upload_session_id::<ValidateContentHashError>(
+                &"a".repeat(MAX_UPLOAD_SESSION_ID_BYTES + 1)
+            )
+            .is_err()
         );
-        assert!(validate_upload_session_id::<ValidateContentHashError>(
-            &"a".repeat(MAX_UPLOAD_SESSION_ID_BYTES + 1)
-        )
-        .is_err());
     }
 
     #[test]
@@ -223,20 +219,21 @@ mod tests {
             validate_oci_repository_scope::<ValidateContentHashError>("team/assets", Some(&scope))
                 .is_ok()
         );
-        assert!(validate_oci_repository_scope::<ValidateContentHashError>(
-            "team/assets/cache",
-            Some(&scope)
-        )
-        .is_ok());
+        assert!(
+            validate_oci_repository_scope::<ValidateContentHashError>(
+                "team/assets/cache",
+                Some(&scope)
+            )
+            .is_ok()
+        );
         assert!(
             validate_oci_repository_scope::<ValidateContentHashError>("team/other", Some(&scope))
                 .is_err()
         );
-        assert!(validate_oci_repository_scope::<ValidateContentHashError>(
-            "other/assets",
-            Some(&scope)
-        )
-        .is_err());
+        assert!(
+            validate_oci_repository_scope::<ValidateContentHashError>("other/assets", Some(&scope))
+                .is_err()
+        );
     }
 
     #[test]

@@ -1,4 +1,10 @@
 #![deny(unsafe_code)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate
+)]
 #![cfg_attr(
     test,
     allow(
@@ -790,10 +796,18 @@ pub trait OpsRecordStore: RecordStore {
     fn locator_display(&self, locator: &<Self as RecordTraversal>::Locator) -> String;
 
     /// Extracts the file identifier implied by a locator.
-    fn locator_file_id(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String>;
+    fn locator_file_id(
+        &self,
+        locator: &<Self as RecordTraversal>::Locator,
+        kind: OpsRecordKind,
+    ) -> Option<String>;
 
     /// Extracts the immutable content hash implied by a version locator.
-    fn locator_content_hash(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String>;
+    fn locator_content_hash(
+        &self,
+        locator: &<Self as RecordTraversal>::Locator,
+        kind: OpsRecordKind,
+    ) -> Option<String>;
 }
 
 impl OpsRecordStore for LocalRecordStore {
@@ -801,11 +815,19 @@ impl OpsRecordStore for LocalRecordStore {
         locator.record_key().to_owned()
     }
 
-    fn locator_file_id(&self, locator: &<Self as RecordTraversal>::Locator, _kind: OpsRecordKind) -> Option<String> {
+    fn locator_file_id(
+        &self,
+        locator: &<Self as RecordTraversal>::Locator,
+        _kind: OpsRecordKind,
+    ) -> Option<String> {
         Some(locator.file_id().to_owned())
     }
 
-    fn locator_content_hash(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String> {
+    fn locator_content_hash(
+        &self,
+        locator: &<Self as RecordTraversal>::Locator,
+        kind: OpsRecordKind,
+    ) -> Option<String> {
         if kind != OpsRecordKind::Version {
             return None;
         }
@@ -819,11 +841,19 @@ impl OpsRecordStore for PostgresRecordStore {
         locator.record_key().to_owned()
     }
 
-    fn locator_file_id(&self, locator: &<Self as RecordTraversal>::Locator, _kind: OpsRecordKind) -> Option<String> {
+    fn locator_file_id(
+        &self,
+        locator: &<Self as RecordTraversal>::Locator,
+        _kind: OpsRecordKind,
+    ) -> Option<String> {
         Some(locator.file_id().to_owned())
     }
 
-    fn locator_content_hash(&self, locator: &<Self as RecordTraversal>::Locator, kind: OpsRecordKind) -> Option<String> {
+    fn locator_content_hash(
+        &self,
+        locator: &<Self as RecordTraversal>::Locator,
+        kind: OpsRecordKind,
+    ) -> Option<String> {
         if kind != OpsRecordKind::Version {
             return None;
         }
@@ -1106,7 +1136,8 @@ mod tests {
 
     #[test]
     fn parse_stored_file_record_bytes_oversized() {
-        let valid = r#"{"file_id":"test","content_hash":"aa","total_bytes":0,"chunk_size":0,"chunks":[]}"#;
+        let valid =
+            r#"{"file_id":"test","content_hash":"aa","total_bytes":0,"chunk_size":0,"chunks":[]}"#;
         assert!(parse_stored_file_record_bytes(valid.as_bytes()).is_ok());
 
         let oversized = vec![0u8; (MAX_LOCAL_RECORD_METADATA_BYTES + 1) as usize];

@@ -3,14 +3,13 @@ use std::{num::NonZeroUsize, path::PathBuf};
 use shardline_index::{PostgresIndexStore, PostgresRecordStore};
 
 use crate::{
-    ServerError, ServerFrontend,
-    config::default_upload_max_in_flight_chunks,
+    ServerError, ServerFrontend, config::default_upload_max_in_flight_chunks,
     object_store::ServerObjectStore,
 };
 
-mod upload;
 mod read;
 mod stats;
+mod upload;
 
 pub(super) use read::*;
 
@@ -142,11 +141,10 @@ mod tests {
 
     use serde_json::to_vec;
     use shardline_index::{
-        FileChunkRecord, FileRecord, RecordMutation, RecordStoreFuture,
-        RecordTraversal, RepositoryRecordScope,
+        FileChunkRecord, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
+        RepositoryRecordScope,
     };
 
-    use RecordTraversal as _;
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use sqlx::{PgPool, postgres::PgPoolOptions, query};
     use thiserror::Error;

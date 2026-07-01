@@ -23,7 +23,10 @@ impl<S> Layer<S> for MetricsLayer {
     type Service = MetricsService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        MetricsService { inner, metrics: self.metrics.clone() }
+        MetricsService {
+            inner,
+            metrics: self.metrics.clone(),
+        }
     }
 }
 
@@ -61,12 +64,22 @@ where
             let status = response.status().as_u16();
             let elapsed = start.elapsed();
 
-            metrics.transfer.record_upload_duration(elapsed.as_secs_f64());
-            metrics.transfer.record_download_duration(elapsed.as_secs_f64());
+            metrics
+                .transfer
+                .record_upload_duration(elapsed.as_secs_f64());
+            metrics
+                .transfer
+                .record_download_duration(elapsed.as_secs_f64());
 
             metrics.system.connection_closed();
 
-            tracing::debug!(method, path, status, duration_ms = elapsed.as_millis() as u64, "http request");
+            tracing::debug!(
+                method,
+                path,
+                status,
+                duration_ms = elapsed.as_millis() as u64,
+                "http request"
+            );
 
             Ok(response)
         })
