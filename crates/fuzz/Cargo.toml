@@ -21,9 +21,12 @@ hex.workspace = true
 libfuzzer-sys.workspace = true
 object_store = { workspace = true, default-features = true }
 shardline.workspace = true
+shardline-fsck.workspace = true
+shardline-gc.workspace = true
 shardline-hub-api.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
+shardline-rebuild.workspace = true
 shardline-server.workspace = true
 shardline-server-core.workspace = true
 shardline-storage.workspace = true
@@ -149,6 +152,36 @@ doc = false
 [[bin]]
 name = "shardline_hub_api_commit"
 path = "fuzz_targets/shardline/hub_api_commit.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_fsck_checks"
+path = "fuzz_targets/shardline/fsck_checks.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_gc_reachability"
+path = "fuzz_targets/shardline/gc_reachability.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_index_sqlite"
+path = "fuzz_targets/shardline/index_sqlite.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_hub_api_routes"
+path = "fuzz_targets/shardline/hub_api_routes.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_rebuild_candidates"
+path = "fuzz_targets/shardline/rebuild_candidates.rs"
 test = false
 doc = false
 
