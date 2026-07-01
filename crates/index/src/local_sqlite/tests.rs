@@ -63,7 +63,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_record_store_commit_file_version_metadata_is_atomic() {
     let result = exercise_local_record_store_commit_file_version_metadata_is_atomic().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -73,7 +73,7 @@ async fn local_record_store_commit_file_version_metadata_is_atomic() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_record_store_commit_native_shard_metadata_is_atomic() {
     let result = exercise_local_record_store_commit_native_shard_metadata_is_atomic().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -93,7 +93,7 @@ fn local_metadata_root_normalizes_gc_suffix_to_parent_database() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_sqlite_imports_legacy_filesystem_metadata() {
     let result = exercise_local_sqlite_imports_legacy_filesystem_metadata().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -123,7 +123,7 @@ fn local_sqlite_rejects_invalid_legacy_import_state() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_record_store_reads_corrupt_sqlite_bytes_verbatim() {
     let result = exercise_local_record_store_reads_corrupt_sqlite_bytes_verbatim().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -133,7 +133,7 @@ async fn local_record_store_reads_corrupt_sqlite_bytes_verbatim() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_sqlite_matches_memory_adapters_across_state_machine_operations() {
     let result =
         exercise_local_sqlite_matches_memory_adapters_across_state_machine_operations().await;

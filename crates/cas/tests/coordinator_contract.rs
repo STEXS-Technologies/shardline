@@ -396,6 +396,7 @@ const fn provider_key(provider: RepositoryProvider) -> &'static str {
         RepositoryProvider::GitHub => "github",
         RepositoryProvider::GitLab => "gitlab",
         RepositoryProvider::Gitea => "gitea",
+        RepositoryProvider::Codeberg => "codeberg",
         RepositoryProvider::Generic => "generic",
     }
 }

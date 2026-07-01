@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::sync::{
     Arc, LazyLock, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -12,7 +11,6 @@ use shardline_storage::{
     BeginMultipartUploadResult, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey,
     ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
 };
-#[cfg(test)]
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::{
@@ -43,12 +41,9 @@ pub struct BenchmarkBackend {
     backend: ServerBackend,
 }
 
-#[cfg(test)]
 static REPOSITORY_REFERENCE_PROBE_COUNT: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
 static REPOSITORY_REFERENCE_PROBE_FILTER: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
-#[cfg(test)]
 static REPOSITORY_REFERENCE_PROBE_TEST_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
 
@@ -238,7 +233,6 @@ impl ServerBackend {
         hash_hex: &str,
         repository_scope: &RepositoryScope,
     ) -> Result<bool, ServerError> {
-        #[cfg(test)]
         count_repository_reference_probe_for_tests(hash_hex);
         match self {
             Self::Local(backend) => {
@@ -899,7 +893,6 @@ fn compose_benchmark_object_key_prefix(
     }
 }
 
-#[cfg(test)]
 pub fn reset_repository_reference_probe_count_for_hash(hash_hex: &str) {
     REPOSITORY_REFERENCE_PROBE_COUNT.store(0, Ordering::Relaxed);
     let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
@@ -909,12 +902,10 @@ pub fn reset_repository_reference_probe_count_for_hash(hash_hex: &str) {
     }
 }
 
-#[cfg(test)]
 pub fn repository_reference_probe_count() -> usize {
     REPOSITORY_REFERENCE_PROBE_COUNT.load(Ordering::Relaxed)
 }
 
-#[cfg(test)]
 pub fn clear_repository_reference_probe_filter() {
     let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
     match filter {
@@ -923,7 +914,6 @@ pub fn clear_repository_reference_probe_filter() {
     }
 }
 
-#[cfg(test)]
 pub async fn lock_repository_reference_probe_test() -> OwnedMutexGuard<()> {
     REPOSITORY_REFERENCE_PROBE_TEST_LOCK
         .clone()
@@ -931,7 +921,6 @@ pub async fn lock_repository_reference_probe_test() -> OwnedMutexGuard<()> {
         .await
 }
 
-#[cfg(test)]
 fn count_repository_reference_probe_for_tests(hash_hex: &str) {
     let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
     let matches_filter = match filter {

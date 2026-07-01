@@ -26,7 +26,7 @@ use common::{app, setup};
 
 // ---- Dataset viewer tests ----
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_lists_data_files() {
     setup();
     let store = shardline_hub_api::state::get_for_test().store.clone();
@@ -85,7 +85,7 @@ async fn dataset_parquet_lists_data_files() {
     assert!(paths.contains(&"default/test/data.csv"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_jsonl_data() {
     setup();
     let store = shardline_hub_api::state::get_for_test().store.clone();
@@ -128,7 +128,7 @@ async fn dataset_first_rows_returns_jsonl_data() {
     assert_eq!(rows[1]["columns"]["name"], "bob");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
     setup();
     let store = shardline_hub_api::state::get_for_test().store.clone();
@@ -170,7 +170,7 @@ async fn dataset_first_rows_returns_csv_data() {
     assert_eq!(rows[0]["columns"]["value"], 100);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_viewer_returns_paginated_rows() {
     setup();
     let store = shardline_hub_api::state::get_for_test().store.clone();
@@ -214,7 +214,7 @@ async fn dataset_viewer_returns_paginated_rows() {
     assert_eq!(rows[1]["columns"]["index"], 4);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_rejects_non_dataset_repo() {
     setup();
     let store = shardline_hub_api::state::get_for_test().store.clone();
@@ -241,7 +241,7 @@ async fn dataset_parquet_rejects_non_dataset_repo() {
 
 // ---- Webhook tests ----
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_crud_lifecycle() {
     setup();
     let store = shardline_hub_api::state::get_for_test().store.clone();
@@ -326,7 +326,7 @@ async fn webhook_crud_lifecycle() {
     assert!(webhooks.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_create_rejects_nonexistent_repo() {
     setup();
 

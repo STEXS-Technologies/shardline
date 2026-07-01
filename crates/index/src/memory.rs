@@ -1073,7 +1073,7 @@ mod tests {
         });
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_satisfies_record_store_lifecycle_contract() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record();
@@ -1132,7 +1132,7 @@ mod tests {
         assert!(pruned.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_lists_repository_versions_across_revisions_only() {
         let store = MemoryRecordStore::new();
         let main_scope =

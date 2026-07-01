@@ -94,7 +94,7 @@ async fn collect_body_bytes(response: axum::response::Response) -> Vec<u8> {
 
 // ---- Tests ----
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_endpoint() {
     setup();
     let response = app()
@@ -112,7 +112,7 @@ async fn health_endpoint() {
     assert_eq!(json["status"], "ok");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_refs_upload_pack_empty_repo() {
     setup();
     let repo_id = format!("models/test-{}/empty", std::process::id());
@@ -142,7 +142,7 @@ async fn info_refs_upload_pack_empty_repo() {
     assert!(body_str.contains("side-band-64k"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_refs_upload_pack_with_refs() {
     setup();
     let uid = std::process::id();
@@ -173,7 +173,7 @@ async fn info_refs_upload_pack_with_refs() {
     assert!(body_str.contains("capabilities^{}"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_refs_invalid_service() {
     setup();
     let uid = std::process::id();
@@ -199,7 +199,7 @@ async fn info_refs_invalid_service() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_refs_nonexistent_repo() {
     setup();
     let response = app()
@@ -218,7 +218,7 @@ async fn info_refs_nonexistent_repo() {
     assert!(body_str.contains("capabilities^{}"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_pack_empty_repo() {
     setup();
     let uid = std::process::id();
@@ -253,7 +253,7 @@ async fn upload_pack_empty_repo() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_pack_with_files() {
     setup();
     let uid = std::process::id();
@@ -311,7 +311,7 @@ async fn upload_pack_with_files() {
     assert!(num_objects >= 5, "expected at least 5 objects, got {num_objects}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_pack_with_lfs_files() {
     setup();
     let uid = std::process::id();
@@ -382,7 +382,7 @@ async fn upload_pack_with_lfs_files() {
     assert!(has_lfs_pointer, "expected LFS pointer blob in pack");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn receive_pack_push() {
     setup();
     let uid = std::process::id();
@@ -419,7 +419,7 @@ async fn receive_pack_push() {
     assert!(body_str.contains("ok refs/heads/main"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn receive_pack_empty_update() {
     setup();
     let uid = std::process::id();
@@ -452,7 +452,7 @@ async fn receive_pack_empty_update() {
     assert!(body_str.contains("unpack ok"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_head_endpoint() {
     setup();
     let uid = std::process::id();
@@ -481,7 +481,7 @@ async fn git_head_endpoint() {
     assert!(body_str.contains(&commit_sha));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_head_nonexistent_repo() {
     setup();
     let response = app()
@@ -500,7 +500,7 @@ async fn git_head_nonexistent_repo() {
     assert!(body_str.contains("0000000000000000000000000000000000000000"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_refs_receive_pack_requires_write() {
     setup();
     let uid = std::process::id();

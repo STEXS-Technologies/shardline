@@ -122,7 +122,7 @@ async fn gc_active_retention_holds_exclude_chunks_from_orphans() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gc_dry_run_keeps_expired_retention_holds() {
     let result = exercise_gc_dry_run_keeps_expired_retention_holds().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -132,7 +132,7 @@ async fn gc_dry_run_keeps_expired_retention_holds() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gc_mutating_run_prunes_expired_retention_holds() {
     let result = exercise_gc_mutating_run_prunes_expired_retention_holds().await;
     let error = result.as_ref().err().map(ToString::to_string);
