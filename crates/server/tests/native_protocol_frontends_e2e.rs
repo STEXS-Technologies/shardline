@@ -83,6 +83,7 @@ async fn native_git_lfs_pull_and_fetch_all_work_against_shardline_lfs_frontend()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires external bazel binary and cache infrastructure"]
 async fn native_bazel_remote_cache_flow_works_against_shardline_http_cache_frontend() {
     if bazel_program().is_none() {
         return;
@@ -97,6 +98,7 @@ async fn native_bazel_remote_cache_flow_works_against_shardline_http_cache_front
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires external bazel binary and cache infrastructure"]
 async fn native_bazel_remote_cache_toplevel_download_flow_works_against_shardline_http_cache_frontend()
  {
     if bazel_program().is_none() {
