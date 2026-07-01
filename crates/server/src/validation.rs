@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ensure_directory_rejects_symlinked_directory() {
         use std::os::unix::fs::symlink;
 

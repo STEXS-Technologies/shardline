@@ -77,12 +77,15 @@ pub mod test_fixtures;
 pub mod test_invariant_error;
 
 pub use app::ProtocolMetrics;
-pub use app::{AppState, acquire_chunk_transfer_permit, full_byte_stream_response};
-pub use backend::{ServerBackend, BenchmarkBackend};
-#[cfg(test)]
+pub use app::{
+    AppState, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
+    MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES, MAX_PROVIDER_WEBHOOK_BODY_BYTES,
+    acquire_chunk_transfer_permit, full_byte_stream_response,
+};
 pub use backend::{
-    clear_repository_reference_probe_filter, lock_repository_reference_probe_test,
-    repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
+    ServerBackend, BenchmarkBackend, clear_repository_reference_probe_filter,
+    lock_repository_reference_probe_test, repository_reference_probe_count,
+    reset_repository_reference_probe_count_for_hash,
 };
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
 pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
@@ -136,7 +139,11 @@ pub use lifecycle_repair::{
     run_lifecycle_repair, run_local_lifecycle_repair,
 };
 pub use local_backend::LocalBackend;
-pub use model::{HealthResponse, ProviderTokenIssueRequest, ProviderTokenIssueResponse, ReadyResponse, ServerStatsResponse};
+pub use model::{
+    GitLfsAuthenticateResponse, HealthResponse, ProviderTokenIssueRequest,
+    ProviderTokenIssueResponse, ProviderWebhookResponse, ReadyResponse, ServerStatsResponse,
+    XetCasTokenResponse,
+};
 pub use rebuild::{
     IndexRebuildIssueDetail, IndexRebuildReconstructionPlanDetail, LocalIndexRebuildIssue,
     LocalIndexRebuildIssueKind, LocalIndexRebuildReport, run_index_rebuild,
@@ -151,8 +158,9 @@ pub use storage_migration::{
     run_storage_migration,
 };
 pub use xet_adapter::{
-    FileReconstructionResponse, XorbUploadResponse, decode_serialized_xorb_chunks,
-    try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+    BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
+    XorbUploadResponse, decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
+    validate_serialized_xorb,
 };
 
 use object_store::object_store_from_config;

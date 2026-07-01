@@ -17,7 +17,7 @@ use crate::{
     upload_ingest::RequestBodyReader,
 };
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_reuses_unchanged_chunks() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -74,7 +74,7 @@ async fn local_backend_reuses_unchanged_chunks() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_stats_fail_closed_on_symlinked_file_inventory_escape() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -120,7 +120,7 @@ async fn local_backend_stats_fail_closed_on_symlinked_file_inventory_escape() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_ready_rejects_symlinked_metadata_database_path() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -167,7 +167,7 @@ async fn local_backend_ready_rejects_symlinked_metadata_database_path() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_new_rejects_symlinked_root_ancestor() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -201,7 +201,7 @@ async fn local_backend_new_rejects_symlinked_root_ancestor() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_file_record_rejects_oversized_metadata_before_reading() {
     use shardline_server_core::MAX_LOCAL_RECORD_METADATA_BYTES;
     let temp = tempfile::tempdir();
@@ -248,7 +248,7 @@ async fn local_backend_file_record_rejects_oversized_metadata_before_reading() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xorb_upload_is_idempotent_and_keeps_serialized_body_readable() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -288,7 +288,7 @@ async fn xorb_upload_is_idempotent_and_keeps_serialized_body_readable() {
     assert_eq!(stored_length, u64::try_from(body.len()).unwrap_or(0));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shard_registration_rejects_missing_xorb_without_creating_file() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -326,7 +326,7 @@ async fn shard_registration_rejects_missing_xorb_without_creating_file() {
     assert!(matches!(latest, Err(ServerError::NotFound)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shard_registration_creates_reconstruction_after_xorbs_exist() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -386,7 +386,7 @@ async fn shard_registration_creates_reconstruction_after_xorbs_exist() {
     assert_eq!(bytes, b"aaaabbbb");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn successful_xorb_upload_does_not_create_incoming_body_file() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -417,7 +417,7 @@ async fn successful_xorb_upload_does_not_create_incoming_body_file() {
     assert!(matches!(incoming_exists, Ok(false)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn successful_shard_upload_does_not_create_staging_directories() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -459,7 +459,7 @@ async fn successful_shard_upload_does_not_create_staging_directories() {
     assert!(matches!(shard_workspace_exists, Ok(false)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_scope_namespaces_records_for_same_file_id() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -524,7 +524,7 @@ async fn repository_scope_namespaces_records_for_same_file_id() {
     assert_eq!(right_bytes, b"ccccdddd");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_references_xorb_fails_closed_on_misplaced_legacy_scope_metadata() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -599,7 +599,7 @@ async fn repository_references_xorb_fails_closed_on_misplaced_legacy_scope_metad
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_chunk_for_file_version_rejects_unreferenced_chunk() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -649,7 +649,7 @@ async fn read_chunk_for_file_version_rejects_unreferenced_chunk() {
     assert!(matches!(read, Err(ServerError::NotFound)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_ready_succeeds_for_initialized_storage() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -677,7 +677,7 @@ async fn local_backend_ready_succeeds_for_initialized_storage() {
     assert!(ready.is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_ready_fails_when_local_chunk_root_is_missing() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
@@ -707,7 +707,7 @@ async fn local_backend_ready_fails_when_local_chunk_root_is_missing() {
     assert!(ready.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_ready_fails_when_metadata_database_path_is_directory() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());

@@ -71,7 +71,7 @@ mod tests {
     use super::run_config_check;
     use crate::{ServerConfig, ServerConfigError, ServerError, ServerRole};
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_check_reports_local_backend_for_initialized_storage() {
         let storage = shardline_test_support::TempStorage::new();
         let config = ServerConfig::new(
@@ -95,7 +95,7 @@ mod tests {
         assert!(!report.provider_tokens_enabled);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transfer_role_config_check_disables_reconstruction_cache() {
         let storage = shardline_test_support::TempStorage::new();
         let config = ServerConfig::new(
@@ -117,7 +117,7 @@ mod tests {
         assert!(!report.provider_tokens_enabled);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_check_rejects_missing_signing_key_for_served_routes() {
         let storage = shardline_test_support::TempStorage::new();
         let config = ServerConfig::new(

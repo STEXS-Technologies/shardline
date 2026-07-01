@@ -62,7 +62,7 @@ async fn local_latest_record_bytes(
     Ok(RecordTraversal::read_record_bytes(record_store, &locator).await?)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_creates_holds_for_matching_repository_versions() {
     let result = exercise_repository_deleted_creates_holds_for_matching_repository_versions().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -72,7 +72,7 @@ async fn repository_deleted_creates_holds_for_matching_repository_versions() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_removes_stale_latest_without_version_record() {
     let result = exercise_repository_deleted_removes_stale_latest_without_version_record().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -82,7 +82,7 @@ async fn repository_deleted_removes_stale_latest_without_version_record() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() {
     let result = exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -92,7 +92,7 @@ async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn access_changed_records_provider_repository_state_without_mutating_file_metadata() {
     let result =
         exercise_access_changed_records_provider_repository_state_without_mutating_file_metadata()
@@ -104,7 +104,7 @@ async fn access_changed_records_provider_repository_state_without_mutating_file_
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revision_pushed_records_provider_repository_state_without_mutating_file_metadata() {
     let result =
         exercise_revision_pushed_records_provider_repository_state_without_mutating_file_metadata()
@@ -116,7 +116,7 @@ async fn revision_pushed_records_provider_repository_state_without_mutating_file
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn access_change_and_revision_push_state_survives_reordering() {
     let result = exercise_access_change_and_revision_push_state_survives_reordering().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -126,7 +126,7 @@ async fn access_change_and_revision_push_state_survives_reordering() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_webhook_delivery_is_ignored_after_first_application() {
     let result = exercise_duplicate_webhook_delivery_is_ignored_after_first_application().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -136,7 +136,7 @@ async fn duplicate_webhook_delivery_is_ignored_after_first_application() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn matching_delivery_ids_in_different_repositories_are_not_replay_collisions() {
     let result =
         exercise_matching_delivery_ids_in_different_repositories_are_not_replay_collisions().await;
@@ -147,7 +147,7 @@ async fn matching_delivery_ids_in_different_repositories_are_not_replay_collisio
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_webhook_application_can_retry_same_delivery() {
     let result = exercise_failed_webhook_application_can_retry_same_delivery().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -157,7 +157,7 @@ async fn failed_webhook_application_can_retry_same_delivery() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_rename_migrates_records_to_new_scope() {
     let result = exercise_repository_rename_migrates_records_to_new_scope().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -167,7 +167,7 @@ async fn repository_rename_migrates_records_to_new_scope() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_rename_removes_old_scope_latest_without_version_record() {
     let result = exercise_repository_rename_removes_old_scope_latest_without_version_record().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -177,7 +177,7 @@ async fn repository_rename_removes_old_scope_latest_without_version_record() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_rename_rejects_conflicting_target_metadata() {
     let result = exercise_repository_rename_rejects_conflicting_target_metadata().await;
     let error = result.as_ref().err().map(ToString::to_string);
@@ -187,7 +187,7 @@ async fn repository_rename_rejects_conflicting_target_metadata() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn previously_recorded_webhook_delivery_is_a_no_op() {
     let result = exercise_previously_recorded_webhook_delivery_is_a_no_op().await;
     let error = result.as_ref().err().map(ToString::to_string);

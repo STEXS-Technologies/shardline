@@ -241,7 +241,7 @@ mod tests {
         assert!(local_root.starts_with(root.path()));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repository_reference_lookup_stays_repository_scoped_and_avoids_global_latest_walks() {
         let scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));

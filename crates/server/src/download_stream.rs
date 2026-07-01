@@ -176,7 +176,7 @@ mod tests {
     use super::{local_object_byte_range_stream, local_object_byte_stream};
     use crate::error::ObjectStoreError;
     use crate::ServerError;
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_stream_reads_object_in_segments() {
         let storage = shardline_test_support::TempStorage::new();
         let object_store = LocalObjectStore::new(storage.path_buf());
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(observed, bytes);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_stream_rejects_index_length_mismatch() {
         let storage = shardline_test_support::TempStorage::new();
         let object_store = LocalObjectStore::new(storage.path_buf());
@@ -249,7 +249,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_range_stream_reads_only_requested_range() {
         let storage = shardline_test_support::TempStorage::new();
         let object_store = LocalObjectStore::new(storage.path_buf());

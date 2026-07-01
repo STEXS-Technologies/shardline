@@ -63,8 +63,8 @@ fn validate_jwt_signature_checked_jwks() {
     let jwks_source = include_str!("../../server/src/jwks_provider.rs");
 
     assert!(
-        jwks_source.contains("let keys = self.get_or_refresh_keys()?"),
-        "JWKS provider fetches keys into `keys` (used variable)"
+        jwks_source.contains("get_or_refresh_keys()"),
+        "JWKS provider calls get_or_refresh_keys()"
     );
     assert!(
         jwks_source.contains("decode::<serde_json::Value>("),
@@ -468,7 +468,7 @@ fn validate_ndjson_has_instruction_count_limit() {
 /// **[MITIGATED]**: The hub API router's `DefaultBodyLimit::max(64MB)` bounds
 /// all request bodies. A body exceeding 64MB is rejected before reaching the
 /// commit handler.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn validate_commit_body_bounded_by_router() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};

@@ -394,7 +394,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_service_uses_cached_payload_after_first_load() {
         let ttl_seconds = NonZeroU64::new(60).map_or(NonZeroU64::MIN, |value| value);
         let adapter: SharedReconstructionCache = Arc::new(MemoryReconstructionCache::new(
@@ -429,7 +429,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_service_falls_back_to_loader_when_cache_adapter_errors() {
         let adapter: SharedReconstructionCache = Arc::new(BrokenCache);
         let cache = ReconstructionCacheService::for_tests("broken", adapter);
@@ -448,7 +448,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_service_falls_back_to_loader_when_cached_payload_exceeds_bound() {
         let put_calls = Arc::new(AtomicUsize::new(0));
         let adapter: SharedReconstructionCache = Arc::new(StaticCache {
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(put_calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_service_skips_put_when_loaded_payload_exceeds_bound() {
         let put_calls = Arc::new(AtomicUsize::new(0));
         let stored_payloads = Arc::new(Mutex::new(Vec::new()));
