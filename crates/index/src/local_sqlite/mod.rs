@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, QuarantineCandidateError,
-    ReconstructionTerm, RecordStore, RepositoryRecordScope, RetentionHoldError, StoredObjectId,
+    ReconstructionTerm, RecordStore, RecordTraversal, RepositoryRecordScope, RetentionHoldError, StoredObjectId,
     WebhookDeliveryError, XorbId,
     parse_xet_hash_hex,
     record_key::repository_record_scope_key as shared_repository_record_scope_key,

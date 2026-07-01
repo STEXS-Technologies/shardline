@@ -247,8 +247,11 @@ pub enum FileRecordInvariantError {
     TotalBytesMismatch,
 }
 
-/// Durable file-record adapter contract.
-pub trait RecordStore {
+/// Read-only record traversal capability.
+///
+/// Provides all locator-listing, record-reading, and visitor methods.
+/// Use as a trait bound when only read access to records is needed.
+pub trait RecordTraversal {
     /// Adapter-specific failure type.
     type Error;
     /// Adapter-specific record locator.
@@ -429,6 +432,31 @@ pub trait RecordStore {
         record: &'operation FileRecord,
     ) -> RecordStoreFuture<'operation, Option<Vec<u8>>, Self::Error>;
 
+    /// Returns whether a record locator exists.
+    fn record_locator_exists<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, bool, Self::Error>;
+
+    /// Returns a locator modification timestamp relative to Unix epoch.
+    fn modified_since_epoch<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, Duration, Self::Error>;
+
+    /// Computes the visible latest-record locator for a domain record.
+    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator;
+
+    /// Computes the immutable version-record locator for a domain record.
+    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator;
+}
+
+/// Write/delete record mutation capability.
+///
+/// Provides record-writing and deletion methods.
+/// Use as a trait bound when only mutation access to records is needed.
+pub trait RecordMutation: RecordTraversal {
+
     /// Writes or replaces an immutable version record.
     fn write_version_record<'operation>(
         &'operation self,
@@ -447,27 +475,18 @@ pub trait RecordStore {
         locator: &'operation Self::Locator,
     ) -> RecordStoreFuture<'operation, (), Self::Error>;
 
-    /// Returns whether a record locator exists.
-    fn record_locator_exists<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, bool, Self::Error>;
-
     /// Removes empty latest-record containers after stale record deletion.
     fn prune_empty_latest_records(&self) -> RecordStoreFuture<'_, (), Self::Error>;
-
-    /// Returns a locator modification timestamp relative to Unix epoch.
-    fn modified_since_epoch<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, Duration, Self::Error>;
-
-    /// Computes the visible latest-record locator for a domain record.
-    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator;
-
-    /// Computes the immutable version-record locator for a domain record.
-    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator;
 }
+
+/// Combined read + write record-store contract.
+///
+/// Automatically implemented for all types that implement both
+/// [`RecordTraversal`] and [`RecordMutation`].
+pub trait RecordStore: RecordTraversal + RecordMutation {}
+
+impl<T: RecordTraversal + RecordMutation> RecordStore for T {}
+
 
 #[cfg(test)]
 mod tests {

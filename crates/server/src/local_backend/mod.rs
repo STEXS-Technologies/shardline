@@ -6,7 +6,7 @@ pub(crate) mod records;
 mod xorbs;
 
 use shardline_index::{
-    FileChunkRecord, ReconstructionStore, LocalIndexStore, LocalRecordStore, RecordStore,
+    FileChunkRecord, ReconstructionStore, LocalIndexStore, LocalRecordStore, RecordTraversal,
 };
 use shardline_storage::{ObjectPrefix, ObjectStore};
 
@@ -151,7 +151,7 @@ impl LocalBackend {
                 .map_err(|_error| ServerError::InvalidContentHash)?;
             let _object_store_reachable = object_store.metadata(&probe_key)?;
         }
-        let _latest = RecordStore::list_latest_record_locators(&self.record_store).await?;
+        let _latest = RecordTraversal::list_latest_record_locators(&self.record_store).await?;
         let _reconstructions = ReconstructionStore::list_reconstruction_file_ids(&self.index_store)?;
         Ok(())
     }
@@ -179,7 +179,7 @@ impl LocalBackend {
             Ok(())
         })?;
         let files = u64::try_from(
-            RecordStore::list_latest_record_locators(&self.record_store)
+            RecordTraversal::list_latest_record_locators(&self.record_store)
                 .await?
                 .len(),
         )?;

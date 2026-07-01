@@ -1,4 +1,4 @@
-use shardline_index::RecordStore;
+use shardline_index::RecordTraversal;
 use shardline_storage::ObjectPrefix;
 
 use crate::{
@@ -29,7 +29,7 @@ impl super::PostgresBackend {
             Ok(())
         })?;
         let mut files = 0_u64;
-        RecordStore::visit_latest_record_locators(&self.record_store, |_locator| {
+        RecordTraversal::visit_latest_record_locators(&self.record_store, |_locator| {
             files = checked_increment(files)?;
             Ok::<(), ServerError>(())
         })

@@ -8,7 +8,7 @@ use serde_json::to_vec;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord,
     IndexStore, IndexStoreFuture, LifecycleStore, LocalIndexStore, LocalIndexStoreError,
-    ProviderRepositoryState, QuarantineCandidate, RecordStore, RetentionHold, WebhookDelivery,
+    ProviderRepositoryState, QuarantineCandidate, RecordMutation, RecordTraversal, RetentionHold, WebhookDelivery,
     XorbId, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
@@ -38,32 +38,32 @@ async fn local_latest_record_exists(
     record_store: &LocalRecordStore,
     record: &FileRecord,
 ) -> Result<bool, Box<dyn Error>> {
-    let locator = RecordStore::latest_record_locator(record_store, record);
-    Ok(RecordStore::record_locator_exists(record_store, &locator).await?)
+    let locator = RecordTraversal::latest_record_locator(record_store, record);
+    Ok(RecordTraversal::record_locator_exists(record_store, &locator).await?)
 }
 
 async fn local_version_record_exists(
     record_store: &LocalRecordStore,
     record: &FileRecord,
 ) -> Result<bool, Box<dyn Error>> {
-    let locator = RecordStore::version_record_locator(record_store, record);
-    Ok(RecordStore::record_locator_exists(record_store, &locator).await?)
+    let locator = RecordTraversal::version_record_locator(record_store, record);
+    Ok(RecordTraversal::record_locator_exists(record_store, &locator).await?)
 }
 
 async fn local_version_record_bytes(
     record_store: &LocalRecordStore,
     record: &FileRecord,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let locator = RecordStore::version_record_locator(record_store, record);
-    Ok(RecordStore::read_record_bytes(record_store, &locator).await?)
+    let locator = RecordTraversal::version_record_locator(record_store, record);
+    Ok(RecordTraversal::read_record_bytes(record_store, &locator).await?)
 }
 
 async fn local_latest_record_bytes(
     record_store: &LocalRecordStore,
     record: &FileRecord,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let locator = RecordStore::latest_record_locator(record_store, record);
-    Ok(RecordStore::read_record_bytes(record_store, &locator).await?)
+    let locator = RecordTraversal::latest_record_locator(record_store, record);
+    Ok(RecordTraversal::read_record_bytes(record_store, &locator).await?)
 }
 
 #[tokio::test]
@@ -277,12 +277,12 @@ async fn exercise_repository_deleted_creates_holds_for_matching_repository_versi
             packed_end: 4,
         }],
     };
-    RecordStore::write_latest_record(&record_store, &matching_record).await?;
-    RecordStore::write_latest_record(&record_store, &matching_release_record).await?;
-    RecordStore::write_latest_record(&record_store, &other_record).await?;
-    RecordStore::write_version_record(&record_store, &matching_record).await?;
-    RecordStore::write_version_record(&record_store, &matching_release_record).await?;
-    RecordStore::write_version_record(&record_store, &other_record).await?;
+    RecordMutation::write_latest_record(&record_store, &matching_record).await?;
+    RecordMutation::write_latest_record(&record_store, &matching_release_record).await?;
+    RecordMutation::write_latest_record(&record_store, &other_record).await?;
+    RecordMutation::write_version_record(&record_store, &matching_record).await?;
+    RecordMutation::write_version_record(&record_store, &matching_release_record).await?;
+    RecordMutation::write_version_record(&record_store, &other_record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -386,9 +386,9 @@ async fn exercise_repository_deleted_removes_stale_latest_without_version_record
             packed_end: 4,
         }],
     };
-    RecordStore::write_latest_record(&record_store, &stale_record).await?;
-    RecordStore::write_version_record(&record_store, &healthy_record).await?;
-    RecordStore::write_latest_record(&record_store, &healthy_record).await?;
+    RecordMutation::write_latest_record(&record_store, &stale_record).await?;
+    RecordMutation::write_version_record(&record_store, &healthy_record).await?;
+    RecordMutation::write_latest_record(&record_store, &healthy_record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -462,8 +462,8 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
             packed_end: u64::try_from(normalized_xorb.len())?,
         }],
     };
-    RecordStore::write_version_record(&record_store, &record).await?;
-    RecordStore::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -527,8 +527,8 @@ async fn exercise_access_changed_records_provider_repository_state_without_mutat
             packed_end: 4,
         }],
     };
-    RecordStore::write_version_record(&record_store, &record).await?;
-    RecordStore::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -601,8 +601,8 @@ async fn exercise_revision_pushed_records_provider_repository_state_without_muta
             packed_end: 4,
         }],
     };
-    RecordStore::write_version_record(&record_store, &record).await?;
-    RecordStore::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -748,8 +748,8 @@ async fn exercise_duplicate_webhook_delivery_is_ignored_after_first_application(
             packed_end: 4,
         }],
     };
-    RecordStore::write_latest_record(&record_store, &record).await?;
-    RecordStore::write_version_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -871,8 +871,8 @@ async fn exercise_failed_webhook_application_can_retry_same_delivery() -> Result
             packed_end: 4,
         }],
     };
-    RecordStore::write_latest_record(&record_store, &record).await?;
-    RecordStore::write_version_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -961,10 +961,10 @@ async fn exercise_repository_rename_migrates_records_to_new_scope() -> Result<()
             packed_end: 4,
         }],
     };
-    RecordStore::write_version_record(&record_store, &main_record).await?;
-    RecordStore::write_latest_record(&record_store, &main_record).await?;
-    RecordStore::write_version_record(&record_store, &release_record).await?;
-    RecordStore::write_latest_record(&record_store, &release_record).await?;
+    RecordMutation::write_version_record(&record_store, &main_record).await?;
+    RecordMutation::write_latest_record(&record_store, &main_record).await?;
+    RecordMutation::write_version_record(&record_store, &release_record).await?;
+    RecordMutation::write_latest_record(&record_store, &release_record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -1043,8 +1043,8 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<()
             packed_end: 4,
         }],
     };
-    RecordStore::write_version_record(&record_store, &record).await?;
-    RecordStore::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
 
     let recorded_delivery = WebhookDelivery::new(
         RepositoryProvider::GitHub,
@@ -1130,9 +1130,9 @@ async fn exercise_repository_rename_removes_old_scope_latest_without_version_rec
             packed_end: 4,
         }],
     };
-    RecordStore::write_latest_record(&record_store, &stale_record).await?;
-    RecordStore::write_version_record(&record_store, &healthy_record).await?;
-    RecordStore::write_latest_record(&record_store, &healthy_record).await?;
+    RecordMutation::write_latest_record(&record_store, &stale_record).await?;
+    RecordMutation::write_version_record(&record_store, &healthy_record).await?;
+    RecordMutation::write_latest_record(&record_store, &healthy_record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
@@ -1216,10 +1216,10 @@ async fn exercise_repository_rename_rejects_conflicting_target_metadata()
             packed_end: 4,
         }],
     };
-    RecordStore::write_version_record(&record_store, &source_record).await?;
-    RecordStore::write_latest_record(&record_store, &source_record).await?;
-    RecordStore::write_version_record(&record_store, &conflicting_target_record).await?;
-    RecordStore::write_latest_record(&record_store, &conflicting_target_record).await?;
+    RecordMutation::write_version_record(&record_store, &source_record).await?;
+    RecordMutation::write_latest_record(&record_store, &source_record).await?;
+    RecordMutation::write_version_record(&record_store, &conflicting_target_record).await?;
+    RecordMutation::write_latest_record(&record_store, &conflicting_target_record).await?;
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,

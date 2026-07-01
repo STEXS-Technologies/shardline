@@ -27,7 +27,7 @@ use std::{
 use serde_json::Error as JsonError;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileId, LocalIndexStoreError, MemoryIndexStoreError,
-    MemoryRecordStoreError, PostgresMetadataStoreError, RecordStore, parse_xet_hash_hex,
+    MemoryRecordStoreError, PostgresMetadataStoreError, RecordMutation, RecordTraversal, parse_xet_hash_hex,
     xet_hash_hex_string,
 };
 use shardline_protocol::HashParseError;
@@ -357,7 +357,7 @@ where
         issues: Vec::new(),
     };
     let mut candidates = HashMap::new();
-    RecordStore::visit_version_records(record_store, |entry| {
+    RecordTraversal::visit_version_records(record_store, |entry| {
         report.scanned_version_records = checked_increment(report.scanned_version_records)?;
         collect_candidate(record_store, entry, &mut candidates, &mut report)
     })
@@ -365,11 +365,11 @@ where
 
     let mut desired_latest_paths = HashSet::new();
     for candidate in candidates.values() {
-        let latest_path = RecordStore::latest_record_locator(record_store, &candidate.record);
+        let latest_path = RecordTraversal::latest_record_locator(record_store, &candidate.record);
         desired_latest_paths.insert(latest_path.clone());
 
         let record_bytes = serde_json::to_vec(&candidate.record)?;
-        let existing_bytes = RecordStore::read_latest_record_bytes(record_store, &candidate.record)
+        let existing_bytes = RecordTraversal::read_latest_record_bytes(record_store, &candidate.record)
             .await
             .map_err(Into::into)?;
 
@@ -378,14 +378,14 @@ where
             continue;
         }
 
-        RecordStore::write_latest_record(record_store, &candidate.record)
+        RecordMutation::write_latest_record(record_store, &candidate.record)
             .await
             .map_err(Into::into)?;
         report.rebuilt_latest_records = checked_increment(report.rebuilt_latest_records)?;
     }
 
     let mut stale_latest_paths = Vec::new();
-    RecordStore::visit_latest_record_locators(record_store, |path| {
+    RecordTraversal::visit_latest_record_locators(record_store, |path| {
         if !desired_latest_paths.contains(&path) {
             stale_latest_paths.push(path);
         }
@@ -394,14 +394,14 @@ where
     })
     .await?;
     for path in stale_latest_paths {
-        RecordStore::delete_record_locator(record_store, &path)
+        RecordMutation::delete_record_locator(record_store, &path)
             .await
             .map_err(Into::into)?;
         report.removed_stale_latest_records =
             checked_increment(report.removed_stale_latest_records)?;
     }
 
-    RecordStore::prune_empty_latest_records(record_store)
+    RecordMutation::prune_empty_latest_records(record_store)
         .await
         .map_err(Into::into)?;
 

@@ -10,7 +10,7 @@ use axum::body::Bytes;
 use shardline_index::{
     DedupeStore, FileChunkRecord, FileRecord, LifecycleStore, LocalIndexStore, MemoryIndexStore,
     MemoryRecordStore, PostgresIndexStore, PostgresRecordStore, QuarantineCandidate,
-    ReconstructionStore, RecordStore, RetentionHold, WebhookDelivery,
+    ReconstructionStore, RecordMutation, RecordTraversal, RetentionHold, WebhookDelivery,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use shardline_storage::ObjectKey;
@@ -182,8 +182,8 @@ async fn exercise_lifecycle_repair_scans_large_metadata_inventory() -> Result<()
                 packed_end: 32,
             }],
         };
-        RecordStore::write_latest_record(&record_store, &record).await?;
-        RecordStore::write_version_record(&record_store, &record).await?;
+        RecordMutation::write_latest_record(&record_store, &record).await?;
+        RecordMutation::write_version_record(&record_store, &record).await?;
 
         let object_key = chunk_object_key(&chunk_hash)?;
         let object_path = storage.path().join("chunks").join(object_key.as_str());
@@ -343,8 +343,8 @@ async fn exercise_lifecycle_repair_reconciles_postgres_index_adapter() -> Result
             packed_end: 4,
         }],
     };
-    RecordStore::write_latest_record(&record_store, &record).await?;
-    RecordStore::write_version_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
 
     let live_object_key = chunk_object_key(&chunk_hash)?;
     let live_path = storage.path().join(live_object_key.as_str());
@@ -447,7 +447,7 @@ async fn exercise_lifecycle_repair_reconciles_memory_index_adapter() -> Result<(
             packed_end: 4,
         }],
     };
-    RecordStore::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_latest_record(&record_store, &record).await?;
     let live_object_key = chunk_object_key(&chunk_hash)?;
     let live_path = storage.path().join(live_object_key.as_str());
     let live_parent = live_path

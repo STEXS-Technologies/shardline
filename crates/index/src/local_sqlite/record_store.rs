@@ -7,9 +7,11 @@ use super::{
     LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, LocalRecordStore,
     i64_to_u64, record_not_found_error,
 };
-use crate::{FileRecord, RecordStore, RecordStoreFuture, RepositoryRecordScope};
+use crate::{FileRecord, RecordMutation, RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope};
 
-impl RecordStore for LocalRecordStore {
+use RecordTraversal as _;
+
+impl RecordTraversal for LocalRecordStore {
     type Error = LocalIndexStoreError;
     type Locator = LocalRecordLocator;
 
@@ -75,6 +77,61 @@ impl RecordStore for LocalRecordStore {
         })
     }
 
+    fn record_locator_exists<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            tokio::task::block_in_place(|| {
+                let connection = self.open_connection()?;
+                let exists = connection.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM shardline_file_records WHERE record_key = ?1
+                     )",
+                    params![locator.record_key()],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                Ok(exists != 0)
+            })
+        })
+    }
+
+    fn modified_since_epoch<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
+        Box::pin(async move {
+            tokio::task::block_in_place(|| {
+                let connection = self.open_connection()?;
+                let value = connection
+                    .query_row(
+                        "SELECT updated_at_unix_seconds
+                         FROM shardline_file_records
+                         WHERE record_key = ?1",
+                        params![locator.record_key()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .ok_or_else(record_not_found_error)?;
+                Ok(Duration::from_secs(i64_to_u64(value)?))
+            })
+        })
+    }
+
+    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
+        super::helpers::local_record_locator(LocalRecordKind::Latest, record, None)
+    }
+
+    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
+        super::helpers::local_record_locator(
+            LocalRecordKind::Version,
+            record,
+            Some(record.content_hash.clone()),
+        )
+    }
+}
+
+impl RecordMutation for LocalRecordStore {
     fn write_version_record<'operation>(
         &'operation self,
         record: &'operation FileRecord,
@@ -132,60 +189,7 @@ impl RecordStore for LocalRecordStore {
         })
     }
 
-    fn record_locator_exists<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, bool, Self::Error> {
-        Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let connection = self.open_connection()?;
-                let exists = connection.query_row(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM shardline_file_records WHERE record_key = ?1
-                     )",
-                    params![locator.record_key()],
-                    |row| row.get::<_, i64>(0),
-                )?;
-                Ok(exists != 0)
-            })
-        })
-    }
-
     fn prune_empty_latest_records(&self) -> RecordStoreFuture<'_, (), Self::Error> {
         Box::pin(async move { Ok(()) })
-    }
-
-    fn modified_since_epoch<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
-        Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let connection = self.open_connection()?;
-                let value = connection
-                    .query_row(
-                        "SELECT updated_at_unix_seconds
-                         FROM shardline_file_records
-                         WHERE record_key = ?1",
-                        params![locator.record_key()],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?
-                    .ok_or_else(record_not_found_error)?;
-                Ok(Duration::from_secs(i64_to_u64(value)?))
-            })
-        })
-    }
-
-    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        super::helpers::local_record_locator(LocalRecordKind::Latest, record, None)
-    }
-
-    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        super::helpers::local_record_locator(
-            LocalRecordKind::Version,
-            record,
-            Some(record.content_hash.clone()),
-        )
     }
 }

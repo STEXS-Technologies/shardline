@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use shardline_index::{FileRecord, FileRecordInvariantError, RecordStore, StoredRecord};
+use shardline_index::{FileRecord, FileRecordInvariantError, RecordTraversal, StoredRecord};
 use shardline_protocol::{RepositoryScope, TokenClaimsError};
 use shardline_server_core::{
     OpsRecordStore, provider_directory, validate_content_hash, validate_identifier,
@@ -102,7 +102,7 @@ where
         return Ok(());
     }
 
-    let expected_path = RecordStore::version_record_locator(record_store, &record);
+    let expected_path = RecordTraversal::version_record_locator(record_store, &record);
     if expected_path != path {
         push_issue(
             report,

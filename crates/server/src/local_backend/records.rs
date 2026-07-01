@@ -1,7 +1,7 @@
 use std::io::ErrorKind;
 
 use shardline_index::{
-    FileRecord, LocalIndexStoreError, LocalRecordStore, RecordStore, RepositoryRecordScope,
+    FileRecord, LocalIndexStoreError, LocalRecordStore, RecordTraversal, RepositoryRecordScope,
 };
 use shardline_protocol::RepositoryScope;
 
@@ -29,7 +29,7 @@ pub(super) async fn read_record(
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
-        let locator = RecordStore::version_record_locator(record_store, &record);
+        let locator = RecordTraversal::version_record_locator(record_store, &record);
         read_record_bytes(record_store, &locator).await?
     } else {
         let record = FileRecord {
@@ -40,7 +40,7 @@ pub(super) async fn read_record(
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
-        let locator = RecordStore::latest_record_locator(record_store, &record);
+        let locator = RecordTraversal::latest_record_locator(record_store, &record);
         read_record_bytes(record_store, &locator).await?
     };
     parse_stored_file_record_bytes(&bytes)
@@ -48,9 +48,9 @@ pub(super) async fn read_record(
 
 async fn read_record_bytes(
     record_store: &LocalRecordStore,
-    locator: &<LocalRecordStore as RecordStore>::Locator,
+    locator: &<LocalRecordStore as RecordTraversal>::Locator,
 ) -> Result<Vec<u8>, ServerError> {
-    match RecordStore::read_record_bytes(record_store, locator).await {
+    match RecordTraversal::read_record_bytes(record_store, locator).await {
         Ok(bytes) => Ok(bytes),
         Err(LocalIndexStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => {
             Err(ServerError::NotFound)

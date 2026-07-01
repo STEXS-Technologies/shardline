@@ -12,10 +12,12 @@ use thiserror::Error;
 use crate::{
     AsyncIndexStore, DedupeShardMapping, DedupeStore,
     FileId, FileReconstruction, FileRecord, IndexStoreFuture, LifecycleStore, ProviderRepositoryState,
-    QuarantineCandidate, ReconstructionStore, RecordStore, RecordStoreFuture,
-    RepositoryRecordScope, RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId,
+    QuarantineCandidate, ReconstructionStore, RecordMutation, RecordStore, RecordStoreFuture,
+    RecordTraversal, RepositoryRecordScope, RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId,
     xet_hash_hex_string,
 };
+
+use RecordTraversal as _;
 
 /// In-memory implementation of [`IndexStore`].
 #[derive(Debug, Clone, Default)]
@@ -586,7 +588,7 @@ impl MemoryRecordStore {
     }
 }
 
-impl RecordStore for MemoryRecordStore {
+impl RecordTraversal for MemoryRecordStore {
     type Error = MemoryRecordStoreError;
     type Locator = MemoryRecordLocator;
 
@@ -843,6 +845,50 @@ impl RecordStore for MemoryRecordStore {
         })
     }
 
+    fn record_locator_exists<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move { Ok(self.record_entry(locator)?.is_some()) })
+    }
+
+    fn modified_since_epoch<'operation>(
+        &'operation self,
+        locator: &'operation Self::Locator,
+    ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
+        Box::pin(async move {
+            self.record_entry(locator)?
+                .map(|entry| entry.modified_since_epoch)
+                .ok_or(MemoryRecordStoreError::RecordNotFound)
+        })
+    }
+
+    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
+        MemoryRecordLocator {
+            kind: MemoryRecordKind::Latest,
+            repository_scope: record
+                .repository_scope
+                .as_ref()
+                .map(MemoryRepositoryScope::from_protocol),
+            file_id: record.file_id.clone(),
+            content_hash: None,
+        }
+    }
+
+    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
+        MemoryRecordLocator {
+            kind: MemoryRecordKind::Version,
+            repository_scope: record
+                .repository_scope
+                .as_ref()
+                .map(MemoryRepositoryScope::from_protocol),
+            file_id: record.file_id.clone(),
+            content_hash: Some(record.content_hash.clone()),
+        }
+    }
+}
+
+impl RecordMutation for MemoryRecordStore {
     fn write_version_record<'operation>(
         &'operation self,
         record: &'operation FileRecord,
@@ -879,50 +925,8 @@ impl RecordStore for MemoryRecordStore {
         })
     }
 
-    fn record_locator_exists<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, bool, Self::Error> {
-        Box::pin(async move { Ok(self.record_entry(locator)?.is_some()) })
-    }
-
     fn prune_empty_latest_records(&self) -> RecordStoreFuture<'_, (), Self::Error> {
         Box::pin(async move { Ok(()) })
-    }
-
-    fn modified_since_epoch<'operation>(
-        &'operation self,
-        locator: &'operation Self::Locator,
-    ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
-        Box::pin(async move {
-            self.record_entry(locator)?
-                .map(|entry| entry.modified_since_epoch)
-                .ok_or(MemoryRecordStoreError::RecordNotFound)
-        })
-    }
-
-    fn latest_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        MemoryRecordLocator {
-            kind: MemoryRecordKind::Latest,
-            repository_scope: record
-                .repository_scope
-                .as_ref()
-                .map(MemoryRepositoryScope::from_protocol),
-            file_id: record.file_id.clone(),
-            content_hash: None,
-        }
-    }
-
-    fn version_record_locator(&self, record: &FileRecord) -> Self::Locator {
-        MemoryRecordLocator {
-            kind: MemoryRecordKind::Version,
-            repository_scope: record
-                .repository_scope
-                .as_ref()
-                .map(MemoryRepositoryScope::from_protocol),
-            file_id: record.file_id.clone(),
-            content_hash: Some(record.content_hash.clone()),
-        }
     }
 }
 
@@ -1040,7 +1044,7 @@ mod tests {
     use crate::{
         DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord, IndexStore,
         LifecycleStore, LocalIndexStore, QuarantineCandidate, ReconstructionStore,
-        ReconstructionTerm, RecordStore, RepositoryRecordScope, RetentionHold, WebhookDelivery,
+        ReconstructionTerm, RecordMutation, RecordTraversal, RepositoryRecordScope, RetentionHold, WebhookDelivery,
         XorbId,
     };
 

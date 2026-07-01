@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_slice, json, to_vec};
 use sha2::{Digest, Sha256};
 use shardline_index::{
-    FileChunkRecord, FileRecord, LocalRecordStore, RecordStore, RepositoryRecordScope,
+    FileChunkRecord, FileRecord, LocalRecordStore, RecordTraversal, RepositoryRecordScope,
     parse_xet_hash_hex,
 };
 use shardline_protocol::{RepositoryProvider, TokenScope};
@@ -1846,12 +1846,12 @@ async fn read_version_records(
     let record_store = LocalRecordStore::open(storage_root.to_path_buf());
     let repository_scope = RepositoryRecordScope::new(RepositoryProvider::Generic, owner, repo);
     let locators =
-        RecordStore::list_repository_version_record_locators(&record_store, &repository_scope)
+        RecordTraversal::list_repository_version_record_locators(&record_store, &repository_scope)
             .await?;
 
     let mut records: Vec<FileRecord> = Vec::with_capacity(locators.len());
     for locator in &locators {
-        let record_bytes = RecordStore::read_record_bytes(&record_store, locator).await?;
+        let record_bytes = RecordTraversal::read_record_bytes(&record_store, locator).await?;
         records.push(from_slice(&record_bytes)?);
     }
     records.sort_by(|left, right| left.file_id.cmp(&right.file_id));

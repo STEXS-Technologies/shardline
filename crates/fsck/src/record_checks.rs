@@ -1,7 +1,7 @@
 use std::{io::Cursor, path::Path};
 
 use shardline_index::{
-    FileChunkRecord, FileRecord, RecordStore, StoredRecord, parse_xet_hash_hex, xet_hash_hex_string,
+    FileChunkRecord, FileRecord, RecordMutation, RecordTraversal, StoredRecord, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_server_core::{
     OpsRecordStore, ServerObjectStore, checked_add, checked_increment, chunk_hash,
@@ -45,7 +45,7 @@ where
     match record_kind {
         RecordKind::Latest => {
             let mut pending_version_record_checks = Vec::new();
-            RecordStore::visit_latest_records(record_store, |entry| {
+            RecordTraversal::visit_latest_records(record_store, |entry| {
                 report.latest_records = checked_increment(report.latest_records)?;
                 inspect_latest_record(
                     record_store,
@@ -59,7 +59,7 @@ where
             .await?;
 
             for check in pending_version_record_checks {
-                if !RecordStore::record_locator_exists(record_store, &check.version_locator)
+                if !RecordTraversal::record_locator_exists(record_store, &check.version_locator)
                     .await
                     .map_err(Into::into)?
                 {
@@ -80,7 +80,7 @@ where
             Ok(())
         }
         RecordKind::Version => {
-            RecordStore::visit_version_records(record_store, |entry| {
+            RecordTraversal::visit_version_records(record_store, |entry| {
                 report.version_records = checked_increment(report.version_records)?;
                 let _record = inspect_record_bytes(
                     record_store,
@@ -505,7 +505,7 @@ where
     RecordAdapter: OpsRecordStore + Sync,
     RecordAdapter::Error: Into<FsckError>,
 {
-    let version_bytes = RecordStore::read_record_bytes(record_store, &check.version_locator)
+    let version_bytes = RecordTraversal::read_record_bytes(record_store, &check.version_locator)
         .await
         .map_err(Into::into)?;
     let version_record = match parse_stored_file_record_bytes(&version_bytes) {
