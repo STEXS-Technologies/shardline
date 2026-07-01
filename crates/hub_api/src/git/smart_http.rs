@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::pack::{GitObject, ObjectType, create_commit_object, empty_pack, generate_pack};
+use super::pack::{GitObject, ObjectType, PackError, create_commit_object, empty_pack, generate_pack};
 use super::pktline::{self, FLUSH};
 use crate::error::HubApiError;
 use shardline_index::hub::HubFileEntry;
@@ -243,7 +243,7 @@ pub async fn receive_pack(
         return build_report_response(&[]);
     }
 
-    let objects = parse_pack_data(&pack_data);
+    let objects = parse_pack_data(&pack_data).unwrap_or_default();
     let mut results = Vec::new();
 
     for (_old_sha, new_sha, refname) in &updates {
@@ -641,20 +641,20 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
 }
 
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
+fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
     if data.len() < 12 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     if &data[0..4] != b"PACK" {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     let num_objects = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
 
     if version != 2 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut objects = Vec::new();
@@ -678,7 +678,7 @@ fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
             pos += 1;
             shift += 7;
             if shift >= 64 {
-                return Vec::new();
+                return Err(PackError::ShiftOverflow);
             }
             _size |= ((current & 0x7f) as u64) << shift;
         }
@@ -730,7 +730,7 @@ fn parse_pack_data(data: &[u8]) -> Vec<GitObject> {
         }
     }
 
-    objects
+    Ok(objects)
 }
 
 /// Maximum allowed decompressed size for zlib data (512 MB).

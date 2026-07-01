@@ -16,6 +16,8 @@ pub enum PackError {
     Zlib(std::io::Error),
     /// Too many objects to fit in the pack header (exceeds u32::MAX).
     TooManyObjects,
+    /// Variable-length integer shift exceeds 63 bits.
+    ShiftOverflow,
 }
 
 impl std::fmt::Display for PackError {
@@ -23,6 +25,7 @@ impl std::fmt::Display for PackError {
         match self {
             Self::Zlib(e) => write!(f, "zlib compression failed: {e}"),
             Self::TooManyObjects => write!(f, "too many objects for pack file"),
+            Self::ShiftOverflow => write!(f, "variable-length integer shift overflow"),
         }
     }
 }
@@ -31,7 +34,7 @@ impl std::error::Error for PackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Zlib(e) => Some(e),
-            Self::TooManyObjects => None,
+            Self::TooManyObjects | Self::ShiftOverflow => None,
         }
     }
 }
