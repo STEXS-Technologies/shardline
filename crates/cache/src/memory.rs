@@ -169,7 +169,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
     ) -> ReconstructionCacheFuture<'operation, ()> {
         Box::pin(async move {
             let now = Instant::now();
-            let expires_at = now.checked_add(self.ttl).map_or(now, |value| value);
+            let expires_at = now.checked_add(self.ttl).unwrap_or(now);
             let mut inner = self.inner.write().await;
             if !inner.entries.contains_key(key) && inner.entries.len() >= self.max_entries.get() {
                 inner.evict_oldest();
@@ -226,8 +226,8 @@ mod tests {
 
     #[tokio::test]
     async fn memory_cache_evicts_oldest_entry_when_capacity_is_full() {
-        let max_entries = NonZeroUsize::new(2).map_or(NonZeroUsize::MIN, |value| value);
-        let ttl_seconds = NonZeroU64::new(60).map_or(NonZeroU64::MIN, |value| value);
+        let max_entries = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
         let cache = MemoryReconstructionCache::new(ttl_seconds, max_entries);
         let first = ReconstructionCacheKey::latest("asset-1.bin", None);
         let second = ReconstructionCacheKey::latest("asset-2.bin", None);
@@ -251,7 +251,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn memory_cache_expires_entries_after_ttl() {
-        let ttl_seconds = NonZeroU64::new(1).map_or(NonZeroU64::MIN, |value| value);
+        let ttl_seconds = NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN);
         let cache = MemoryReconstructionCache::new(ttl_seconds, NonZeroUsize::MIN);
         let key = ReconstructionCacheKey::latest("asset.bin", None);
         assert!(cache.put(&key, b"payload").await.is_ok());

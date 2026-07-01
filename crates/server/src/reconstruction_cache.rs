@@ -197,8 +197,8 @@ where
     Load: Fn() -> LoadFuture,
     LoadFuture: Future<Output = Result<FileReconstructionResponse, ServerError>>,
 {
-    let ttl_seconds = NonZeroU64::new(60).map_or(NonZeroU64::MIN, |value| value);
-    let max_entries = NonZeroUsize::new(8).map_or(NonZeroUsize::MIN, |value| value);
+    let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+    let max_entries = NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN);
     let adapter: SharedReconstructionCache =
         Arc::new(MemoryReconstructionCache::new(ttl_seconds, max_entries));
     let cache = ReconstructionCacheService::for_tests("memory-bench", adapter);
@@ -397,7 +397,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_service_uses_cached_payload_after_first_load() {
-        let ttl_seconds = NonZeroU64::new(60).map_or(NonZeroU64::MIN, |value| value);
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
         let adapter: SharedReconstructionCache = Arc::new(MemoryReconstructionCache::new(
             ttl_seconds,
             NonZeroUsize::MIN,

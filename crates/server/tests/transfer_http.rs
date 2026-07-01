@@ -898,7 +898,7 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
     let Ok(storage) = storage else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4).map_or(NonZeroUsize::MIN, |value| value);
+    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -969,7 +969,7 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_streams_exact_expected_bytes() {
-    let chunk_size = NonZeroUsize::new(4).map_or(NonZeroUsize::MIN, |value| value);
+    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let response = full_byte_stream_response(
         test_byte_stream(vec![
@@ -990,7 +990,7 @@ async fn full_transfer_response_streams_exact_expected_bytes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_rejects_short_stream() {
-    let chunk_size = NonZeroUsize::new(4).map_or(NonZeroUsize::MIN, |value| value);
+    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let response = full_byte_stream_response(
         test_byte_stream(vec![Ok(Bytes::from_static(b"abc"))]),
@@ -1004,7 +1004,7 @@ async fn full_transfer_response_rejects_short_stream() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_rejects_oversized_frame() {
-    let chunk_size = NonZeroUsize::new(4).map_or(NonZeroUsize::MIN, |value| value);
+    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let response = full_byte_stream_response(
         test_byte_stream(vec![Ok(Bytes::from_static(b"abcde"))]),
@@ -1018,7 +1018,7 @@ async fn full_transfer_response_rejects_oversized_frame() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_accepts_frame_larger_than_stream_buffer() {
-    let chunk_size = NonZeroUsize::new(4).map_or(NonZeroUsize::MIN, |value| value);
+    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let total_length_u64 = STREAM_READ_BUFFER_BYTES.saturating_add(1);
     let total_length = usize::try_from(total_length_u64).unwrap_or(0);

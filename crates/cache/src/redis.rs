@@ -181,7 +181,7 @@ mod tests {
             return;
         };
 
-        let ttl_seconds = NonZeroU64::new(60).map_or(NonZeroU64::MIN, |value| value);
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
         let cache = RedisReconstructionCache::new(&redis_url, ttl_seconds);
         assert!(cache.is_ok());
         let Ok(cache) = cache else {

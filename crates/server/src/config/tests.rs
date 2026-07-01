@@ -142,7 +142,7 @@ fn server_config_allows_non_zero_upload_parallelism_override() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
     let chunk_size = NonZeroUsize::MIN;
-    let upload_budget = NonZeroUsize::new(32).map_or(NonZeroUsize::MIN, |value| value);
+    let upload_budget = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
     let config = ServerConfig::new(
         bind_addr,
         "https://assets.example.test".to_owned(),
@@ -159,7 +159,7 @@ fn server_config_allows_non_zero_chunk_size_override() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
     let chunk_size = NonZeroUsize::MIN;
-    let override_chunk_size = NonZeroUsize::new(4_096).map_or(NonZeroUsize::MIN, |value| value);
+    let override_chunk_size = NonZeroUsize::new(4_096).unwrap_or(NonZeroUsize::MIN);
     let config = ServerConfig::new(
         bind_addr,
         "https://assets.example.test".to_owned(),
@@ -176,7 +176,7 @@ fn server_config_allows_non_zero_transfer_budget_override() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
     let chunk_size = NonZeroUsize::MIN;
-    let transfer_budget = NonZeroUsize::new(32).map_or(NonZeroUsize::MIN, |value| value);
+    let transfer_budget = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
     let config = ServerConfig::new(
         bind_addr,
         "https://assets.example.test".to_owned(),
@@ -238,7 +238,7 @@ fn adaptive_transfer_default_scales_with_parallelism_and_caps() {
 fn server_config_allows_max_request_body_override() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
-    let max_request_body_bytes = NonZeroUsize::new(1024).map_or(NonZeroUsize::MIN, |value| value);
+    let max_request_body_bytes = NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN);
     let config = ServerConfig::new(
         bind_addr,
         "https://assets.example.test".to_owned(),
@@ -255,10 +255,10 @@ fn server_config_allows_shard_metadata_limit_override() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
     let limits = ShardMetadataLimits::new(
-        NonZeroUsize::new(1_000_000).map_or(NonZeroUsize::MIN, |value| value),
-        NonZeroUsize::new(1_000_000).map_or(NonZeroUsize::MIN, |value| value),
-        NonZeroUsize::new(4_000_000).map_or(NonZeroUsize::MIN, |value| value),
-        NonZeroUsize::new(4_000_000).map_or(NonZeroUsize::MIN, |value| value),
+        NonZeroUsize::new(1_000_000).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(1_000_000).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(4_000_000).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(4_000_000).unwrap_or(NonZeroUsize::MIN),
     );
     let config = ServerConfig::new(
         bind_addr,
@@ -405,7 +405,7 @@ fn server_config_allows_oci_registry_token_limits_override() {
 fn server_config_accepts_non_empty_redis_reconstruction_cache_url() {
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
     let root_dir = PathBuf::from("/tmp/shardline");
-    let ttl = NonZeroU64::new(60).map_or(NonZeroU64::MIN, |value| value);
+    let ttl = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
     let config = ServerConfig::new(
         bind_addr,
         "https://assets.example.test".to_owned(),
