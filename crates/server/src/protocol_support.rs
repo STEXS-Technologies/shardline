@@ -1,135 +1,64 @@
-use sha2::{Digest, Sha256};
-use shardline_protocol::RepositoryScope;
-use shardline_storage::ObjectKey;
+use shardline_server_core::protocol_support as core_ps;
 
-use crate::{ServerError, validation::validate_content_hash};
+use crate::ServerError;
 
-const MAX_UPLOAD_SESSION_ID_BYTES: usize = 64;
+impl core_ps::ProtocolValidation for ServerError {
+    fn invalid_digest() -> Self {
+        Self::InvalidDigest
+    }
+    fn invalid_content_hash() -> Self {
+        Self::InvalidContentHash
+    }
+    fn invalid_repository_name() -> Self {
+        Self::InvalidRepositoryName
+    }
+    fn not_found() -> Self {
+        Self::NotFound
+    }
+    fn invalid_manifest_reference() -> Self {
+        Self::InvalidManifestReference
+    }
+    fn invalid_upload_session() -> Self {
+        Self::InvalidUploadSession
+    }
+}
 
 pub(crate) fn parse_sha256_digest(value: &str) -> Result<String, ServerError> {
-    let Some(hash_hex) = value.strip_prefix("sha256:") else {
-        return Err(ServerError::InvalidDigest);
-    };
-    validate_content_hash(hash_hex).map_err(|_error| ServerError::InvalidDigest)?;
-    Ok(hash_hex.to_owned())
+    core_ps::parse_sha256_digest(value)
 }
 
-pub(crate) fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> String {
-    repository_scope.map_or_else(
-        || "global".to_owned(),
-        |scope| {
-            let mut hasher = Sha256::new();
-            hasher.update(scope.provider().as_str().as_bytes());
-            hasher.update([0]);
-            hasher.update(scope.owner().as_bytes());
-            hasher.update([0]);
-            hasher.update(scope.name().as_bytes());
-            hasher.update([0]);
-            if let Some(revision) = scope.revision() {
-                hasher.update(revision.as_bytes());
-            }
-            hex::encode(hasher.finalize())
-        },
-    )
+pub(crate) fn scope_namespace(repository_scope: Option<&shardline_protocol::RepositoryScope>) -> String {
+    core_ps::scope_namespace(repository_scope)
 }
 
-pub(crate) fn object_key(value: &str) -> Result<ObjectKey, ServerError> {
-    ObjectKey::parse(value).map_err(|_error| ServerError::InvalidContentHash)
-}
-
-/// Builds a shared SHA-256 object key for the given content digest.
-///
-/// # Errors
-///
-/// Returns [`ServerError::InvalidContentHash`] if `digest_hex` is not a valid 64-character
-/// hexadecimal content hash.
-pub fn shared_sha256_object_key(digest_hex: &str) -> Result<ObjectKey, ServerError> {
-    validate_content_hash(digest_hex)?;
-    object_key(&format!("protocols/shared/sha256/{digest_hex}"))
+pub fn shared_sha256_object_key(digest_hex: &str) -> Result<shardline_storage::ObjectKey, ServerError> {
+    core_ps::shared_sha256_object_key(digest_hex)
 }
 
 pub(crate) fn validate_oci_repository_name(value: &str) -> Result<(), ServerError> {
-    if value.is_empty() || value.starts_with('/') || value.ends_with('/') || value.contains('\\') {
-        return Err(ServerError::InvalidRepositoryName);
-    }
-
-    for segment in value.split('/') {
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || !segment.bytes().all(|byte| {
-                byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || matches!(byte, b'.' | b'_' | b'-')
-            })
-        {
-            return Err(ServerError::InvalidRepositoryName);
-        }
-    }
-
-    Ok(())
+    core_ps::validate_oci_repository_name(value)
 }
 
 pub(crate) fn validate_oci_repository_scope(
     value: &str,
-    repository_scope: Option<&RepositoryScope>,
+    repository_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> Result<(), ServerError> {
-    let Some(repository_scope) = repository_scope else {
-        return Ok(());
-    };
-
-    let expected_root = format!(
-        "{}/{}",
-        repository_scope.owner().to_ascii_lowercase(),
-        repository_scope.name().to_ascii_lowercase()
-    );
-    if value == expected_root
-        || value
-            .strip_prefix(&expected_root)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-    {
-        return Ok(());
-    }
-
-    Err(ServerError::NotFound)
+    core_ps::validate_oci_repository_scope(value, repository_scope)
 }
 
 pub(crate) fn validate_oci_tag(value: &str) -> Result<(), ServerError> {
-    let mut bytes = value.bytes();
-    let Some(first) = bytes.next() else {
-        return Err(ServerError::InvalidManifestReference);
-    };
-    if !(first.is_ascii_alphanumeric() || first == b'_') {
-        return Err(ServerError::InvalidManifestReference);
-    }
-    if value.len() > 128
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
-    {
-        return Err(ServerError::InvalidManifestReference);
-    }
-
-    Ok(())
+    core_ps::validate_oci_tag(value)
 }
 
 pub(crate) fn validate_upload_session_id(value: &str) -> Result<(), ServerError> {
-    if value.is_empty()
-        || value.len() > MAX_UPLOAD_SESSION_ID_BYTES
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-    {
-        return Err(ServerError::InvalidUploadSession);
-    }
-
-    Ok(())
+    core_ps::validate_upload_session_id(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_UPLOAD_SESSION_ID_BYTES, parse_sha256_digest, shared_sha256_object_key,
-        validate_oci_repository_name, validate_oci_repository_scope, validate_oci_tag,
-        validate_upload_session_id,
+        parse_sha256_digest, shared_sha256_object_key, validate_oci_repository_name,
+        validate_oci_repository_scope, validate_oci_tag, validate_upload_session_id,
     };
     use crate::ServerError;
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
@@ -196,7 +125,7 @@ mod tests {
             Err(ServerError::InvalidUploadSession)
         ));
         assert!(matches!(
-            validate_upload_session_id(&"a".repeat(MAX_UPLOAD_SESSION_ID_BYTES + 1)),
+            validate_upload_session_id(&"a".repeat(65)),
             Err(ServerError::InvalidUploadSession)
         ));
     }

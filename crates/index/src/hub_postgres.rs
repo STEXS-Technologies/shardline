@@ -14,6 +14,18 @@ fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError
     HubRepoType::parse_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
 }
 
+/// Runs an async future to completion on the current tokio runtime.
+///
+/// Uses `block_in_place` to safely transition off the tokio worker thread,
+/// then `block_on` to drive the future. This is necessary because `HubStore`
+/// trait methods are synchronous but sqlx operations require async.
+fn block_on_async<F, T>(f: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+}
+
 impl HubStore for PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
@@ -28,48 +40,46 @@ impl HubStore for PostgresIndexStore {
         let name = name.to_owned();
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                sqlx::query(
-                    "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
-                     VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)
-                     ON CONFLICT (repo_id) DO UPDATE SET
-                       repo_type = EXCLUDED.repo_type,
-                       private = EXCLUDED.private,
-                       updated_at_unix_seconds = EXTRACT(EPOCH FROM now())::bigint",
-                )
-                .bind(&name)
-                .bind(repo_type_str)
-                .bind(private)
-                .bind(&initial_sha)
-                .execute(&pool)
-                .await?;
+        block_on_async(async {
+            sqlx::query(
+                "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
+                 VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)
+                 ON CONFLICT (repo_id) DO UPDATE SET
+                   repo_type = EXCLUDED.repo_type,
+                   private = EXCLUDED.private,
+                   updated_at_unix_seconds = EXTRACT(EPOCH FROM now())::bigint",
+            )
+            .bind(&name)
+            .bind(repo_type_str)
+            .bind(private)
+            .bind(&initial_sha)
+            .execute(&pool)
+            .await?;
 
-                sqlx::query(
-                    "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                     VALUES ($1, 'main', $2, NULL, NULL, EXTRACT(EPOCH FROM now())::bigint)
-                     ON CONFLICT (repo_id, sha) DO NOTHING",
-                )
-                .bind(&name)
-                .bind(&initial_sha)
-                .execute(&pool)
-                .await?;
+            sqlx::query(
+                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+                 VALUES ($1, 'main', $2, NULL, NULL, EXTRACT(EPOCH FROM now())::bigint)
+                 ON CONFLICT (repo_id, sha) DO NOTHING",
+            )
+            .bind(&name)
+            .bind(&initial_sha)
+            .execute(&pool)
+            .await?;
 
-                let row = sqlx::query(
-                    "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                     FROM shardline_hub_repos WHERE repo_id = $1",
-                )
-                .bind(&name)
-                .fetch_one(&pool)
-                .await?;
+            let row = sqlx::query(
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                 FROM shardline_hub_repos WHERE repo_id = $1",
+            )
+            .bind(&name)
+            .fetch_one(&pool)
+            .await?;
 
-                Ok(HubRepo {
-                    repo_id: row.try_get("repo_id")?,
-                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                    private: row.try_get::<bool, _>("private")?,
-                    default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                })
+            Ok(HubRepo {
+                repo_id: row.try_get("repo_id")?,
+                repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+                private: row.try_get::<bool, _>("private")?,
+                default_branch: row.try_get("default_branch")?,
+                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
             })
         })
     }
@@ -78,54 +88,50 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let row = sqlx::query(
-                    "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                     FROM shardline_hub_repos WHERE repo_id = $1",
-                )
-                .bind(&repo_id)
-                .fetch_optional(&pool)
-                .await?;
+        block_on_async(async {
+            let row = sqlx::query(
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                 FROM shardline_hub_repos WHERE repo_id = $1",
+            )
+            .bind(&repo_id)
+            .fetch_optional(&pool)
+            .await?;
 
-                let Some(row) = row else {
-                    return Ok(None);
-                };
+            let Some(row) = row else {
+                return Ok(None);
+            };
 
-                Ok(Some(HubRepo {
-                    repo_id: row.try_get("repo_id")?,
-                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                    private: row.try_get::<bool, _>("private")?,
-                    default_branch: row.try_get("default_branch")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                }))
-            })
+            Ok(Some(HubRepo {
+                repo_id: row.try_get("repo_id")?,
+                repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+                private: row.try_get::<bool, _>("private")?,
+                default_branch: row.try_get("default_branch")?,
+                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+            }))
         })
     }
 
     fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
         let pool = self.pool().clone();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut rows = sqlx::query(
-                    "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                     FROM shardline_hub_repos ORDER BY repo_id",
-                )
-                .fetch(&pool);
+        block_on_async(async {
+            let mut rows = sqlx::query(
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                 FROM shardline_hub_repos ORDER BY repo_id",
+            )
+            .fetch(&pool);
 
-                let mut repos = Vec::new();
-                while let Some(row) = rows.try_next().await? {
-                    repos.push(HubRepo {
-                        repo_id: row.try_get("repo_id")?,
-                        repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                        private: row.try_get::<bool, _>("private")?,
-                        default_branch: row.try_get("default_branch")?,
-                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                    });
-                }
-                Ok(repos)
-            })
+            let mut repos = Vec::new();
+            while let Some(row) = rows.try_next().await? {
+                repos.push(HubRepo {
+                    repo_id: row.try_get("repo_id")?,
+                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+                    private: row.try_get::<bool, _>("private")?,
+                    default_branch: row.try_get("default_branch")?,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                });
+            }
+            Ok(repos)
         })
     }
 
@@ -139,47 +145,45 @@ impl HubStore for PostgresIndexStore {
         let pattern = format!("{name_prefix}%");
         let limit = limit as i64;
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut rows = repo_type.map_or_else(
-                    || {
-                        sqlx::query(
-                            "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                             FROM shardline_hub_repos
-                             WHERE repo_id LIKE $1
-                             ORDER BY repo_id LIMIT $2",
-                        )
-                        .bind(&pattern)
-                        .bind(limit)
-                        .fetch(&pool)
-                    },
-                    |rt| {
-                        let rt_str = rt.as_str();
-                        sqlx::query(
-                            "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
-                             FROM shardline_hub_repos
-                             WHERE repo_id LIKE $1 AND repo_type = $2
-                             ORDER BY repo_id LIMIT $3",
-                        )
-                        .bind(&pattern)
-                        .bind(rt_str)
-                        .bind(limit)
-                        .fetch(&pool)
-                    },
-                );
+        block_on_async(async {
+            let mut rows = repo_type.map_or_else(
+                || {
+                    sqlx::query(
+                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                         FROM shardline_hub_repos
+                         WHERE repo_id LIKE $1
+                         ORDER BY repo_id LIMIT $2",
+                    )
+                    .bind(&pattern)
+                    .bind(limit)
+                    .fetch(&pool)
+                },
+                |rt| {
+                    let rt_str = rt.as_str();
+                    sqlx::query(
+                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                         FROM shardline_hub_repos
+                         WHERE repo_id LIKE $1 AND repo_type = $2
+                         ORDER BY repo_id LIMIT $3",
+                    )
+                    .bind(&pattern)
+                    .bind(rt_str)
+                    .bind(limit)
+                    .fetch(&pool)
+                },
+            );
 
-                let mut repos = Vec::new();
-                while let Some(row) = rows.try_next().await? {
-                    repos.push(HubRepo {
-                        repo_id: row.try_get("repo_id")?,
-                        repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
-                        private: row.try_get::<bool, _>("private")?,
-                        default_branch: row.try_get("default_branch")?,
-                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                    });
-                }
-                Ok(repos)
-            })
+            let mut repos = Vec::new();
+            while let Some(row) = rows.try_next().await? {
+                repos.push(HubRepo {
+                    repo_id: row.try_get("repo_id")?,
+                    repo_type: repo_type_from_str(&row.try_get::<String, _>("repo_type")?)?,
+                    private: row.try_get::<bool, _>("private")?,
+                    default_branch: row.try_get("default_branch")?,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                });
+            }
+            Ok(repos)
         })
     }
 
@@ -198,67 +202,65 @@ impl HubStore for PostgresIndexStore {
         let message = message.to_owned();
         let parent_sha = parent_sha.map(ToOwned::to_owned);
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                // Optimistic concurrency check
-                if let Some(ref parent) = parent_sha {
-                    let current_head: Option<String> = sqlx::query_scalar::<_, String>(
-                        "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",
-                    )
-                    .bind(&repo_id)
-                    .fetch_optional(&pool)
-                    .await?;
+        block_on_async(async {
+            // Optimistic concurrency check
+            if let Some(ref parent) = parent_sha {
+                let current_head: Option<String> = sqlx::query_scalar::<_, String>(
+                    "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",
+                )
+                .bind(&repo_id)
+                .fetch_optional(&pool)
+                .await?;
 
-                    match current_head {
-                        Some(ref head) if head != parent => {
-                            return Err(PostgresMetadataStoreError::RecordNotFound);
-                        }
-                        None => {
-                            return Err(PostgresMetadataStoreError::RecordNotFound);
-                        }
-                        _ => {}
+                match current_head {
+                    Some(ref head) if head != parent => {
+                        return Err(PostgresMetadataStoreError::RecordNotFound);
                     }
+                    None => {
+                        return Err(PostgresMetadataStoreError::RecordNotFound);
+                    }
+                    _ => {}
                 }
+            }
 
-                sqlx::query(
-                    "UPDATE shardline_hub_repos
-                     SET default_branch = $1, updated_at_unix_seconds = EXTRACT(EPOCH FROM now())::bigint
-                     WHERE repo_id = $2",
-                )
-                .bind(&new_sha)
-                .bind(&repo_id)
-                .execute(&pool)
-                .await?;
+            sqlx::query(
+                "UPDATE shardline_hub_repos
+                 SET default_branch = $1, updated_at_unix_seconds = EXTRACT(EPOCH FROM now())::bigint
+                 WHERE repo_id = $2",
+            )
+            .bind(&new_sha)
+            .bind(&repo_id)
+            .execute(&pool)
+            .await?;
 
-                sqlx::query(
-                    "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
-                     VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)",
-                )
-                .bind(&repo_id)
-                .bind(&ref_name)
-                .bind(&new_sha)
-                .bind(parent_sha.as_deref())
-                .bind(&message)
-                .execute(&pool)
-                .await?;
+            sqlx::query(
+                "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
+                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM now())::bigint)",
+            )
+            .bind(&repo_id)
+            .bind(&ref_name)
+            .bind(&new_sha)
+            .bind(parent_sha.as_deref())
+            .bind(&message)
+            .execute(&pool)
+            .await?;
 
-                let row = sqlx::query(
-                    "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
-                     FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2",
-                )
-                .bind(&repo_id)
-                .bind(&new_sha)
-                .fetch_one(&pool)
-                .await?;
+            let row = sqlx::query(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2",
+            )
+            .bind(&repo_id)
+            .bind(&new_sha)
+            .fetch_one(&pool)
+            .await?;
 
-                Ok(HubRevision {
-                    repo_id: row.try_get("repo_id")?,
-                    ref_name: row.try_get("ref_name")?,
-                    sha: row.try_get("sha")?,
-                    parent_sha: row.try_get("parent_sha")?,
-                    message: row.try_get("message")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                })
+            Ok(HubRevision {
+                repo_id: row.try_get("repo_id")?,
+                ref_name: row.try_get("ref_name")?,
+                sha: row.try_get("sha")?,
+                parent_sha: row.try_get("parent_sha")?,
+                message: row.try_get("message")?,
+                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
             })
         })
     }
@@ -267,29 +269,27 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut rows = sqlx::query(
-                    "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
-                     FROM shardline_hub_revisions WHERE repo_id = $1
-                     ORDER BY created_at_unix_seconds DESC",
-                )
-                .bind(&repo_id)
-                .fetch(&pool);
+        block_on_async(async {
+            let mut rows = sqlx::query(
+                "SELECT repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds
+                 FROM shardline_hub_revisions WHERE repo_id = $1
+                 ORDER BY created_at_unix_seconds DESC",
+            )
+            .bind(&repo_id)
+            .fetch(&pool);
 
-                let mut revisions = Vec::new();
-                while let Some(row) = rows.try_next().await? {
-                    revisions.push(HubRevision {
-                        repo_id: row.try_get("repo_id")?,
-                        ref_name: row.try_get("ref_name")?,
-                        sha: row.try_get("sha")?,
-                        parent_sha: row.try_get("parent_sha")?,
-                        message: row.try_get("message")?,
-                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                    });
-                }
-                Ok(revisions)
-            })
+            let mut revisions = Vec::new();
+            while let Some(row) = rows.try_next().await? {
+                revisions.push(HubRevision {
+                    repo_id: row.try_get("repo_id")?,
+                    ref_name: row.try_get("ref_name")?,
+                    sha: row.try_get("sha")?,
+                    parent_sha: row.try_get("parent_sha")?,
+                    message: row.try_get("message")?,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                });
+            }
+            Ok(revisions)
         })
     }
 
@@ -298,41 +298,39 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
         let revision = revision.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if revision.is_empty() || revision == "main" {
-                    let head: Option<String> = sqlx::query_scalar::<_, String>(
-                        "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",
-                    )
-                    .bind(&repo_id)
-                    .fetch_optional(&pool)
-                    .await?;
-                    return Ok(head);
-                }
-
-                let exists: bool = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2)",
+        block_on_async(async {
+            if revision.is_empty() || revision == "main" {
+                let head: Option<String> = sqlx::query_scalar::<_, String>(
+                    "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",
                 )
                 .bind(&repo_id)
-                .bind(&revision)
-                .fetch_one(&pool)
-                .await?;
-
-                if exists {
-                    return Ok(Some(revision));
-                }
-
-                let sha: Option<String> = sqlx::query_scalar::<_, String>(
-                    "SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1 AND ref_name = $2
-                     ORDER BY created_at_unix_seconds DESC LIMIT 1",
-                )
-                .bind(&repo_id)
-                .bind(&revision)
                 .fetch_optional(&pool)
                 .await?;
+                return Ok(head);
+            }
 
-                Ok(sha)
-            })
+            let exists: bool = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = $1 AND sha = $2)",
+            )
+            .bind(&repo_id)
+            .bind(&revision)
+            .fetch_one(&pool)
+            .await?;
+
+            if exists {
+                return Ok(Some(revision));
+            }
+
+            let sha: Option<String> = sqlx::query_scalar::<_, String>(
+                "SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1 AND ref_name = $2
+                 ORDER BY created_at_unix_seconds DESC LIMIT 1",
+            )
+            .bind(&repo_id)
+            .bind(&revision)
+            .fetch_optional(&pool)
+            .await?;
+
+            Ok(sha)
         })
     }
 
@@ -341,26 +339,24 @@ impl HubStore for PostgresIndexStore {
         let commit_sha = commit_sha.to_owned();
         let files = files.to_vec();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                for file in &files {
-                    sqlx::query(
-                        "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
-                         VALUES ($1, $2, $3, $4, $5, $6)
-                         ON CONFLICT (commit_sha, path)
-                         DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs, inline_content = EXCLUDED.inline_content",
-                    )
-                    .bind(&commit_sha)
-                    .bind(&file.path)
-                    .bind(u64_to_i64(file.size)?)
-                    .bind(&file.sha)
-                    .bind(file.is_lfs)
-                    .bind(&file.inline_content)
-                    .execute(&pool)
-                    .await?;
-                }
-                Ok(())
-            })
+        block_on_async(async {
+            for file in &files {
+                sqlx::query(
+                    "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (commit_sha, path)
+                     DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs, inline_content = EXCLUDED.inline_content",
+                )
+                .bind(&commit_sha)
+                .bind(&file.path)
+                .bind(u64_to_i64(file.size)?)
+                .bind(&file.sha)
+                .bind(file.is_lfs)
+                .bind(&file.inline_content)
+                .execute(&pool)
+                .await?;
+            }
+            Ok(())
         })
     }
 
@@ -368,27 +364,25 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
         let commit_sha = commit_sha.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut rows = sqlx::query(
-                    "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
-                     WHERE commit_sha = $1 ORDER BY path LIMIT 100000",
-                )
-                .bind(&commit_sha)
-                .fetch(&pool);
+        block_on_async(async {
+            let mut rows = sqlx::query(
+                "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
+                 WHERE commit_sha = $1 ORDER BY path LIMIT 100000",
+            )
+            .bind(&commit_sha)
+            .fetch(&pool);
 
-                let mut entries = Vec::new();
-                while let Some(row) = rows.try_next().await? {
-                    entries.push(HubFileEntry {
-                        path: row.try_get("path")?,
-                        size: i64_to_u64(row.try_get::<i64, _>("size")?)?,
-                        sha: row.try_get("sha")?,
-                        is_lfs: row.try_get::<bool, _>("is_lfs")?,
-                        inline_content: row.try_get("inline_content")?,
-                    });
-                }
-                Ok(entries)
-            })
+            let mut entries = Vec::new();
+            while let Some(row) = rows.try_next().await? {
+                entries.push(HubFileEntry {
+                    path: row.try_get("path")?,
+                    size: i64_to_u64(row.try_get::<i64, _>("size")?)?,
+                    sha: row.try_get("sha")?,
+                    is_lfs: row.try_get::<bool, _>("is_lfs")?,
+                    inline_content: row.try_get("inline_content")?,
+                });
+            }
+            Ok(entries)
         })
     }
 
@@ -397,20 +391,18 @@ impl HubStore for PostgresIndexStore {
         let oid = oid.to_owned();
         let data = data.to_vec();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                sqlx::query(
-                    "INSERT INTO shardline_hub_lfs_objects (oid, data, size, created_at_unix_seconds)
-                     VALUES ($1, $2, $3, EXTRACT(EPOCH FROM now())::bigint)
-                     ON CONFLICT (oid) DO UPDATE SET data = EXCLUDED.data, size = EXCLUDED.size",
-                )
-                .bind(&oid)
-                .bind(&data)
-                .bind(i64::try_from(data.len()).map_err(|_e| PostgresMetadataStoreError::IntegerOutOfRange)?)
-                .execute(&pool)
-                .await?;
-                Ok(())
-            })
+        block_on_async(async {
+            sqlx::query(
+                "INSERT INTO shardline_hub_lfs_objects (oid, data, size, created_at_unix_seconds)
+                 VALUES ($1, $2, $3, EXTRACT(EPOCH FROM now())::bigint)
+                 ON CONFLICT (oid) DO UPDATE SET data = EXCLUDED.data, size = EXCLUDED.size",
+            )
+            .bind(&oid)
+            .bind(&data)
+            .bind(i64::try_from(data.len()).map_err(|_e| PostgresMetadataStoreError::IntegerOutOfRange)?)
+            .execute(&pool)
+            .await?;
+            Ok(())
         })
     }
 
@@ -418,19 +410,17 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
         let oid = oid.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let row = sqlx::query("SELECT data FROM shardline_hub_lfs_objects WHERE oid = $1")
-                    .bind(&oid)
-                    .fetch_optional(&pool)
-                    .await?;
+        block_on_async(async {
+            let row = sqlx::query("SELECT data FROM shardline_hub_lfs_objects WHERE oid = $1")
+                .bind(&oid)
+                .fetch_optional(&pool)
+                .await?;
 
-                let Some(row) = row else {
-                    return Ok(None);
-                };
+            let Some(row) = row else {
+                return Ok(None);
+            };
 
-                Ok(Some(row.try_get::<Vec<u8>, _>("data")?))
-            })
+            Ok(Some(row.try_get::<Vec<u8>, _>("data")?))
         })
     }
 
@@ -438,16 +428,14 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
         let oid = oid.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let exists: bool = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM shardline_hub_lfs_objects WHERE oid = $1)",
-                )
-                .bind(&oid)
-                .fetch_one(&pool)
-                .await?;
-                Ok(exists)
-            })
+        block_on_async(async {
+            let exists: bool = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM shardline_hub_lfs_objects WHERE oid = $1)",
+            )
+            .bind(&oid)
+            .fetch_one(&pool)
+            .await?;
+            Ok(exists)
         })
     }
 
@@ -465,29 +453,27 @@ impl HubStore for PostgresIndexStore {
         let secret = secret.map(ToOwned::to_owned);
         let events_vec = events.to_vec();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let row = sqlx::query(
-                    "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
-                     VALUES (CONCAT('wh-', EXTRACT(EPOCH FROM now())::text, '-', (SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 5) AS bigint)), 0) + 1 FROM shardline_hub_webhooks WHERE repo_id = $1)::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
-                     RETURNING id, repo_id, url, events, secret, active, created_at_unix_seconds",
-                )
-                .bind(&repo_id)
-                .bind(&url)
-                .bind(&events_str)
-                .bind(secret.as_deref())
-                .fetch_one(&pool)
-                .await?;
+        block_on_async(async {
+            let row = sqlx::query(
+                "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
+                 VALUES (CONCAT('wh-', EXTRACT(EPOCH FROM now())::text, '-', (SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 5) AS bigint)), 0) + 1 FROM shardline_hub_webhooks WHERE repo_id = $1)::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
+                 RETURNING id, repo_id, url, events, secret, active, created_at_unix_seconds",
+            )
+            .bind(&repo_id)
+            .bind(&url)
+            .bind(&events_str)
+            .bind(secret.as_deref())
+            .fetch_one(&pool)
+            .await?;
 
-                Ok(HubWebhook {
-                    id: row.try_get("id")?,
-                    repo_id: row.try_get("repo_id")?,
-                    url: row.try_get("url")?,
-                    events: events_vec,
-                    secret: row.try_get("secret")?,
-                    active: row.try_get::<bool, _>("active")?,
-                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                })
+            Ok(HubWebhook {
+                id: row.try_get("id")?,
+                repo_id: row.try_get("repo_id")?,
+                url: row.try_get("url")?,
+                events: events_vec,
+                secret: row.try_get("secret")?,
+                active: row.try_get::<bool, _>("active")?,
+                created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
             })
         })
     }
@@ -496,30 +482,28 @@ impl HubStore for PostgresIndexStore {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut rows = sqlx::query(
-                    "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
-                     FROM shardline_hub_webhooks WHERE repo_id = $1",
-                )
-                .bind(&repo_id)
-                .fetch(&pool);
+        block_on_async(async {
+            let mut rows = sqlx::query(
+                "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
+                 FROM shardline_hub_webhooks WHERE repo_id = $1",
+            )
+            .bind(&repo_id)
+            .fetch(&pool);
 
-                let mut webhooks = Vec::new();
-                while let Some(row) = rows.try_next().await? {
-                    let events_str: String = row.try_get("events")?;
-                    webhooks.push(HubWebhook {
-                        id: row.try_get("id")?,
-                        repo_id: row.try_get("repo_id")?,
-                        url: row.try_get("url")?,
-                        events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                        secret: row.try_get("secret")?,
-                        active: row.try_get::<bool, _>("active")?,
-                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                    });
-                }
-                Ok(webhooks)
-            })
+            let mut webhooks = Vec::new();
+            while let Some(row) = rows.try_next().await? {
+                let events_str: String = row.try_get("events")?;
+                webhooks.push(HubWebhook {
+                    id: row.try_get("id")?,
+                    repo_id: row.try_get("repo_id")?,
+                    url: row.try_get("url")?,
+                    events: events_str.split(',').map(ToOwned::to_owned).collect(),
+                    secret: row.try_get("secret")?,
+                    active: row.try_get::<bool, _>("active")?,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                });
+            }
+            Ok(webhooks)
         })
     }
 
@@ -528,17 +512,15 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
         let webhook_id = webhook_id.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                sqlx::query(
-                    "DELETE FROM shardline_hub_webhooks WHERE repo_id = $1 AND id = $2",
-                )
-                .bind(&repo_id)
-                .bind(&webhook_id)
-                .execute(&pool)
-                .await?;
-                Ok(())
-            })
+        block_on_async(async {
+            sqlx::query(
+                "DELETE FROM shardline_hub_webhooks WHERE repo_id = $1 AND id = $2",
+            )
+            .bind(&repo_id)
+            .bind(&webhook_id)
+            .execute(&pool)
+            .await?;
+            Ok(())
         })
     }
 
@@ -547,32 +529,30 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
         let event = event.to_owned();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut rows = sqlx::query(
-                    "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
-                     FROM shardline_hub_webhooks
-                     WHERE repo_id = $1 AND active = true AND (',' || events || ',') LIKE ('%' || $2 || '%')",
-                )
-                .bind(&repo_id)
-                .bind(&event)
-                .fetch(&pool);
+        block_on_async(async {
+            let mut rows = sqlx::query(
+                "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
+                 FROM shardline_hub_webhooks
+                 WHERE repo_id = $1 AND active = true AND (',' || events || ',') LIKE ('%' || $2 || '%')",
+            )
+            .bind(&repo_id)
+            .bind(&event)
+            .fetch(&pool);
 
-                let mut webhooks = Vec::new();
-                while let Some(row) = rows.try_next().await? {
-                    let events_str: String = row.try_get("events")?;
-                    webhooks.push(HubWebhook {
-                        id: row.try_get("id")?,
-                        repo_id: row.try_get("repo_id")?,
-                        url: row.try_get("url")?,
-                        events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                        secret: row.try_get("secret")?,
-                        active: row.try_get::<bool, _>("active")?,
-                        created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
-                    });
-                }
-                Ok(webhooks)
-            })
+            let mut webhooks = Vec::new();
+            while let Some(row) = rows.try_next().await? {
+                let events_str: String = row.try_get("events")?;
+                webhooks.push(HubWebhook {
+                    id: row.try_get("id")?,
+                    repo_id: row.try_get("repo_id")?,
+                    url: row.try_get("url")?,
+                    events: events_str.split(',').map(ToOwned::to_owned).collect(),
+                    secret: row.try_get("secret")?,
+                    active: row.try_get::<bool, _>("active")?,
+                    created_at_unix_seconds: i64_to_u64(row.try_get::<i64, _>("created_at_unix_seconds")?)?,
+                });
+            }
+            Ok(webhooks)
         })
     }
 }

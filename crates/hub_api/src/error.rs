@@ -84,3 +84,114 @@ impl IntoResponse for HubApiError {
 struct ErrorBody {
     error: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    fn status_and_body(error: HubApiError) -> (StatusCode, String) {
+        let response = error.into_response();
+        let status = response.status();
+        let body = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                String::from_utf8(bytes.to_vec()).unwrap()
+            });
+        (status, body)
+    }
+
+    #[test]
+    fn not_found_maps_to_404() {
+        let (status, body) = status_and_body(HubApiError::NotFound);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("not found"));
+    }
+
+    #[test]
+    fn repo_not_found_maps_to_404() {
+        let (status, body) = status_and_body(HubApiError::RepoNotFound);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("repository not found"));
+    }
+
+    #[test]
+    fn revision_not_found_maps_to_404() {
+        let (status, body) = status_and_body(HubApiError::RevisionNotFound);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("revision not found"));
+    }
+
+    #[test]
+    fn unauthorized_maps_to_401() {
+        let (status, body) = status_and_body(HubApiError::Unauthorized);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("unauthorized"));
+    }
+
+    #[test]
+    fn invalid_token_maps_to_401() {
+        let (status, body) = status_and_body(HubApiError::InvalidToken);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("invalid token"));
+    }
+
+    #[test]
+    fn forbidden_maps_to_403() {
+        let (status, body) = status_and_body(HubApiError::Forbidden);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("forbidden"));
+    }
+
+    #[test]
+    fn path_validation_maps_to_400() {
+        let (status, body) = status_and_body(HubApiError::PathValidation("bad path".into()));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("invalid path: bad path"));
+    }
+
+    #[test]
+    fn io_error_maps_to_500() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk failure");
+        let (status, body) = status_and_body(HubApiError::Io(io_err));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("internal error"));
+    }
+
+    #[test]
+    fn json_error_maps_to_500() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let (status, body) = status_and_body(HubApiError::Json(json_err));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("internal error"));
+    }
+
+    #[test]
+    fn cas_error_maps_to_500() {
+        let (status, body) = status_and_body(HubApiError::CasError("oops".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("internal error"));
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(HubApiError::NotFound.to_string(), "not found");
+        assert_eq!(HubApiError::Unauthorized.to_string(), "unauthorized");
+        assert_eq!(HubApiError::Forbidden.to_string(), "forbidden");
+        assert_eq!(HubApiError::InvalidToken.to_string(), "invalid token");
+        assert_eq!(HubApiError::RepoNotFound.to_string(), "repository not found");
+        assert_eq!(HubApiError::RevisionNotFound.to_string(), "revision not found");
+        assert_eq!(
+            HubApiError::PathValidation("x".into()).to_string(),
+            "invalid path: x"
+        );
+        assert_eq!(
+            HubApiError::CasError("y".into()).to_string(),
+            "cas error: y"
+        );
+    }
+}

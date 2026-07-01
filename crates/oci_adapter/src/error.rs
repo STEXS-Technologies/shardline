@@ -60,3 +60,120 @@ pub enum OciAdapterError {
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_found_display_message() {
+        assert_eq!(OciAdapterError::NotFound.to_string(), "content not found");
+    }
+
+    #[test]
+    fn overflow_display_message() {
+        assert_eq!(OciAdapterError::Overflow.to_string(), "arithmetic overflow");
+    }
+
+    #[test]
+    fn invalid_content_hash_display_message() {
+        assert_eq!(
+            OciAdapterError::InvalidContentHash.to_string(),
+            "content hash must be 64 hexadecimal characters"
+        );
+    }
+
+    #[test]
+    fn invalid_digest_display_message() {
+        assert_eq!(
+            OciAdapterError::InvalidDigest.to_string(),
+            "digest must use sha256:<64 lowercase hex> format"
+        );
+    }
+
+    #[test]
+    fn invalid_repository_name_display_message() {
+        assert_eq!(
+            OciAdapterError::InvalidRepositoryName.to_string(),
+            "repository name was invalid"
+        );
+    }
+
+    #[test]
+    fn invalid_manifest_reference_display_message() {
+        assert_eq!(
+            OciAdapterError::InvalidManifestReference.to_string(),
+            "manifest reference was invalid"
+        );
+    }
+
+    #[test]
+    fn invalid_upload_session_display_message() {
+        assert_eq!(
+            OciAdapterError::InvalidUploadSession.to_string(),
+            "upload session identifier was invalid"
+        );
+    }
+
+    #[test]
+    fn too_many_upload_sessions_display_message() {
+        assert_eq!(
+            OciAdapterError::TooManyUploadSessions.to_string(),
+            "too many active oci upload sessions"
+        );
+    }
+
+    #[test]
+    fn expected_body_hash_mismatch_display_message() {
+        assert_eq!(
+            OciAdapterError::ExpectedBodyHashMismatch.to_string(),
+            "uploaded body hash did not match the expected sha256"
+        );
+    }
+
+    #[test]
+    fn io_error_display_message() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        assert_eq!(
+            OciAdapterError::Io(io_err).to_string(),
+            "local storage operation failed"
+        );
+    }
+
+    #[test]
+    fn json_error_display_message() {
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        assert_eq!(
+            OciAdapterError::Json(json_err).to_string(),
+            "json operation failed"
+        );
+    }
+
+    #[test]
+    fn numeric_conversion_error_display_message() {
+        let err: TryFromIntError = u8::try_from(-1i32).unwrap_err();
+        assert_eq!(
+            OciAdapterError::NumericConversion(err).to_string(),
+            "numeric conversion exceeded supported bounds"
+        );
+    }
+
+    #[test]
+    fn error_variant_debug_format() {
+        // Ensure all variants implement Debug (they derive it)
+        let variants = [
+            format!("{:?}", OciAdapterError::NotFound),
+            format!("{:?}", OciAdapterError::Overflow),
+            format!("{:?}", OciAdapterError::InvalidContentHash),
+            format!("{:?}", OciAdapterError::InvalidDigest),
+            format!("{:?}", OciAdapterError::InvalidRepositoryName),
+            format!("{:?}", OciAdapterError::InvalidManifestReference),
+            format!("{:?}", OciAdapterError::InvalidUploadSession),
+            format!("{:?}", OciAdapterError::TooManyUploadSessions),
+            format!("{:?}", OciAdapterError::ExpectedBodyHashMismatch),
+        ];
+        for v in &variants {
+            assert!(!v.is_empty());
+        }
+    }
+}

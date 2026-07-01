@@ -11,8 +11,10 @@ description = "Shared core types for the Shardline server ecosystem."
 
 [dependencies]
 blake3.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-storage.workspace = true

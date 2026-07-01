@@ -12,6 +12,12 @@ fn sqlite_store_error(error: &LocalIndexStoreError) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(error.to_string())
 }
 
+/// Opens a read-only connection to the hub SQLite database.
+///
+/// Each call opens a new connection because `rusqlite::Connection` is `!Send` and
+/// cannot be cached across threads. SQLite file opens are fast for local files,
+/// so per-call overhead is acceptable. Using `SQLITE_OPEN_NO_MUTEX` avoids
+/// unnecessary locking for single-writer access patterns.
 fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> {
     let database_path = root.join("metadata.sqlite3");
     let connection = Connection::open_with_flags(
@@ -22,6 +28,11 @@ fn open_hub_connection(root: &Path) -> Result<Connection, LocalIndexStoreError> 
     Ok(connection)
 }
 
+/// Opens a read-write connection to the hub SQLite database.
+///
+/// Same constraints as [`open_hub_connection`]: `rusqlite::Connection` is `!Send`,
+/// so connections are opened per-call rather than cached. `SQLITE_OPEN_NO_MUTEX`
+/// is safe here because only one writer operates at a time within each method.
 fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreError> {
     let database_path = root.join("metadata.sqlite3");
     let connection = Connection::open_with_flags(
