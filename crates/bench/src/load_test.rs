@@ -157,6 +157,7 @@ fn get_peak_memory_bytes() -> u64 {
     }
     #[cfg(target_os = "macos")]
     {
+        #[allow(deprecated)]
         unsafe {
             let mut info: libc::mach_task_basic_info = std::mem::zeroed();
             let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;

@@ -39,7 +39,7 @@ pub mod state;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{Method, header::HeaderValue};
-use tower_http::cors::{Any, CorsLayer, AllowOrigin};
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Builds the Hub API router with all registered routes.

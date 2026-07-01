@@ -1,7 +1,7 @@
 use std::{io::Cursor, path::Path};
 
 use shardline_index::{
-    FileChunkRecord, FileRecord, RecordMutation, RecordTraversal, StoredRecord, parse_xet_hash_hex, xet_hash_hex_string,
+    FileChunkRecord, FileRecord, RecordTraversal, StoredRecord, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_server_core::{
     OpsRecordStore, ServerObjectStore, checked_add, checked_increment, chunk_hash,
