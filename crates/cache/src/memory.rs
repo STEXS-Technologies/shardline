@@ -154,8 +154,8 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 drop(inner);
                 notify.notified().await;
 
-                let inner = self.inner.read().await;
-                if let Some(entry) = inner.entries.get(key) {
+                let read_inner = self.inner.read().await;
+                if let Some(entry) = read_inner.entries.get(key) {
                     if entry.expires_at > Instant::now() {
                         return Ok(Some(entry.payload.clone()));
                     }

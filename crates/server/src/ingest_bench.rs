@@ -17,6 +17,7 @@ use crate::{
 ///
 /// Returns [`ServerError`] when the identifier is invalid, arithmetic overflows, or the
 /// optional expected SHA-256 digest does not match the uploaded bytes.
+#[cfg(test)]
 pub async fn ingest_without_storage(
     chunk_size: NonZeroUsize,
     file_id: &str,

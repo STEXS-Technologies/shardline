@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::sync::{
     Arc, LazyLock, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -11,6 +12,7 @@ use shardline_storage::{
     BeginMultipartUploadResult, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey,
     ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
 };
+#[cfg(test)]
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::{

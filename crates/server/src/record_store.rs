@@ -1,7 +1,5 @@
 pub(crate) use shardline_index::LocalRecordStore;
 
-pub(crate) use shardline_server_core::MAX_LOCAL_RECORD_METADATA_BYTES;
-
 pub(crate) fn parse_stored_file_record_bytes(
     bytes: &[u8],
 ) -> Result<shardline_index::FileRecord, crate::ServerError> {
@@ -15,7 +13,7 @@ mod tests {
 
     #[test]
     fn parse_stored_file_record_bytes_rejects_oversized_metadata_before_json_parsing() {
-        use super::MAX_LOCAL_RECORD_METADATA_BYTES;
+        use shardline_server_core::MAX_LOCAL_RECORD_METADATA_BYTES;
         let oversized_len = usize::try_from(MAX_LOCAL_RECORD_METADATA_BYTES)
             .ok()
             .and_then(|length| length.checked_add(1));

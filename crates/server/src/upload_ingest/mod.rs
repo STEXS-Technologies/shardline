@@ -19,6 +19,7 @@ use chunk_store::{
 #[cfg(test)]
 use shardline_storage::ObjectStore;
 
+#[cfg(test)]
 use crate::config::default_upload_max_in_flight_chunks;
 use crate::{
     ServerError,

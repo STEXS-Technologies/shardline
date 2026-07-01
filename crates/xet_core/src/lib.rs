@@ -1,4 +1,11 @@
 #![deny(unsafe_code)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::missing_panics_doc
+)]
 #![cfg_attr(
     test,
     allow(

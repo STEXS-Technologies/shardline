@@ -12,9 +12,12 @@ use thiserror::Error;
 
 use shardline_storage::local_path::resolve_platform_symlinks;
 
+#[cfg(target_os = "linux")]
 use crate::local_output::{
     ensure_output_directory, remove_output_file_if_present, write_output_bytes,
 };
+#[cfg(not(target_os = "linux"))]
+use crate::local_output::remove_output_file_if_present;
 
 const DEFAULT_OUTPUT_DIR: &str = "/etc/systemd/system";
 const DEFAULT_UNIT_PREFIX: &str = "shardline-gc";
@@ -24,7 +27,9 @@ const DEFAULT_ENV_FILE: &str = "/etc/shardline/shardline.env";
 const DEFAULT_WORKING_DIRECTORY: &str = "/var/lib/shardline";
 const DEFAULT_SERVICE_USER: &str = "shardline";
 const DEFAULT_SERVICE_GROUP: &str = "shardline";
+#[cfg(any(target_os = "linux", test))]
 const MAX_SYSTEMD_ENV_FILE_BYTES: u64 = 65_536;
+#[cfg(any(target_os = "linux", test))]
 const MAX_SYSTEM_ACCOUNT_FILE_BYTES: u64 = 4_194_304;
 
 #[cfg(test)]
@@ -312,6 +317,7 @@ fn remove_if_present(path: &Path) -> io::Result<bool> {
     remove_output_file_if_present(path)
 }
 
+#[cfg(target_os = "linux")]
 fn resolve_install_options(
     options: &GcScheduleInstallOptions,
 ) -> Result<GcScheduleInstallOptions, GcScheduleError> {
@@ -375,11 +381,13 @@ fn resolve_install_options(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn validate_path_field(field: &'static str, path: &Path) -> Result<(), GcScheduleError> {
     let rendered = path.to_string_lossy();
     validate_text_field(field, rendered.as_ref())
 }
 
+#[cfg(target_os = "linux")]
 fn validate_absolute_path_field(field: &'static str, path: &Path) -> Result<(), GcScheduleError> {
     validate_path_field(field, path)?;
     if path.is_absolute() {
@@ -401,6 +409,7 @@ fn validate_text_field(field: &'static str, value: &str) -> Result<(), GcSchedul
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn resolve_binary_path(configured_binary_path: &Path) -> PathBuf {
     if configured_binary_path != Path::new(DEFAULT_BINARY_PATH) {
         return configured_binary_path.to_path_buf();
@@ -413,6 +422,7 @@ fn resolve_binary_path(configured_binary_path: &Path) -> PathBuf {
     configured_binary_path.to_path_buf()
 }
 
+#[cfg(target_os = "linux")]
 fn parse_env_file(path: &Path) -> Result<BTreeMap<String, String>, GcScheduleError> {
     let contents = read_text_file_with_limit("environment file", path, MAX_SYSTEMD_ENV_FILE_BYTES)?;
     let mut env = BTreeMap::new();
@@ -437,6 +447,7 @@ fn parse_env_file(path: &Path) -> Result<BTreeMap<String, String>, GcScheduleErr
     Ok(env)
 }
 
+#[cfg(target_os = "linux")]
 fn strip_wrapping_quotes(value: &str) -> &str {
     let Some(first) = value.chars().next() else {
         return value;
@@ -450,6 +461,7 @@ fn strip_wrapping_quotes(value: &str) -> &str {
     value
 }
 
+#[cfg(target_os = "linux")]
 fn validate_env_referenced_path(
     env: &BTreeMap<String, String>,
     field: &'static str,
@@ -468,6 +480,7 @@ fn validate_env_referenced_path(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn validate_user_exists(user: &str) -> Result<(), GcScheduleError> {
     let passwd = read_text_file_with_limit(
         "passwd database",
@@ -483,6 +496,7 @@ fn validate_user_exists(user: &str) -> Result<(), GcScheduleError> {
     Err(GcScheduleError::MissingUser(user.to_owned()))
 }
 
+#[cfg(target_os = "linux")]
 fn validate_group_exists(group: &str) -> Result<(), GcScheduleError> {
     let groups = read_text_file_with_limit(
         "group database",
@@ -665,6 +679,7 @@ fn take_matching_local_text_file_read_hook(
 #[cfg(not(test))]
 const fn run_before_local_text_file_read_hook_for_tests(_path: &Path) {}
 
+#[cfg(target_os = "linux")]
 fn render_service_unit(options: &GcScheduleInstallOptions) -> String {
     format!(
         "[Unit]\nDescription=Shardline garbage collection\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser={user}\nGroup={group}\nEnvironmentFile={env_file}\nExecStart={binary_path} gc --mark --sweep --retention-seconds {retention_seconds}\nWorkingDirectory={working_directory}\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nReadWritePaths={working_directory}\n",
@@ -677,6 +692,7 @@ fn render_service_unit(options: &GcScheduleInstallOptions) -> String {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn render_timer_unit(options: &GcScheduleInstallOptions) -> String {
     format!(
         "[Unit]\nDescription=Run Shardline garbage collection on a schedule\n\n[Timer]\nOnCalendar={calendar}\nPersistent=true\nUnit={unit_prefix}.service\n\n[Install]\nWantedBy=timers.target\n",
