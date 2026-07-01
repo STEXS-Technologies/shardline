@@ -11,7 +11,9 @@ use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, Token
 use shardline_server_core::{AuthError, AuthProvider};
 use tokio::sync::RwLock;
 
-const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+const MIN_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// JWKS authentication provider.
 ///
@@ -40,6 +42,7 @@ impl Clone for JwksProvider {
 struct CachedJwks {
     keys: Arc<Vec<Jwk>>,
     etag: Option<String>,
+    refresh_interval: Duration,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +107,9 @@ impl JwksProvider {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_owned());
 
+        let refresh_interval = parse_cache_max_age(response.headers())
+            .unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL);
+
         let jwks: JwksResponse = response
             .json()
             .await
@@ -116,6 +122,7 @@ impl JwksProvider {
             cached_keys: Arc::new(RwLock::new(Some(CachedJwks {
                 keys: Arc::new(jwks.keys),
                 etag,
+                refresh_interval,
             }))),
             background_handle: Arc::new(OnceLock::new()),
         })
@@ -136,9 +143,12 @@ impl JwksProvider {
     fn start_background_refresh(&self) {
         let provider = self.clone();
         let handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(JWKS_REFRESH_INTERVAL);
             loop {
-                interval.tick().await;
+                let interval = {
+                    let guard = provider.cached_keys.read().await;
+                    guard.as_ref().map(|c| c.refresh_interval).unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL)
+                };
+                tokio::time::sleep(interval).await;
                 if let Err(e) = provider.refresh_keys_if_changed().await {
                     tracing::warn!("JWKS background refresh failed: {e}");
                 }
@@ -174,6 +184,9 @@ impl JwksProvider {
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_owned());
 
+                let new_interval = parse_cache_max_age(response.headers())
+                    .unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL);
+
                 let jwks: JwksResponse = response.json().await.map_err(|e| {
                     AuthError::ProviderError(format!("JWKS refresh parse failed: {e}"))
                 })?;
@@ -181,6 +194,7 @@ impl JwksProvider {
                 let new_cache = CachedJwks {
                     keys: Arc::new(jwks.keys),
                     etag: new_etag,
+                    refresh_interval: new_interval,
                 };
 
                 *self.cached_keys.write().await = Some(new_cache);
@@ -342,4 +356,18 @@ fn build_decoding_key(jwk: &Jwk, algorithm: Algorithm) -> Result<DecodingKey, St
 fn base64_decode_url(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.decode(input)
+}
+
+/// Parse `Cache-Control: max-age=N` header and return a clamped refresh interval.
+fn parse_cache_max_age(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let cache_control = headers.get("cache-control")?.to_str().ok()?;
+    for directive in cache_control.split(',') {
+        let directive = directive.trim();
+        if let Some(val) = directive.strip_prefix("max-age=") {
+            let seconds: u64 = val.trim().parse().ok()?;
+            let duration = Duration::from_secs(seconds);
+            return Some(duration.clamp(MIN_JWKS_REFRESH_INTERVAL, MAX_JWKS_REFRESH_INTERVAL));
+        }
+    }
+    None
 }
