@@ -958,8 +958,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn configured_benchmark_backend_uses_local_runtime_configuration() {
-        let chunk_size = NonZeroUsize::new(4).map_or(NonZeroUsize::MIN, |value| value);
-        let upload_budget = NonZeroUsize::new(4).map_or(NonZeroUsize::MIN, |value| value);
+        let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+        let upload_budget = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
         let bind_addr = "127.0.0.1:8080".parse();
         assert!(bind_addr.is_ok());
         let Ok(bind_addr) = bind_addr else {
