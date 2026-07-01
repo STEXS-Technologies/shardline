@@ -30,12 +30,18 @@ jobs:
     env:
       CRATE_PACKAGES: >-
         shardline-protocol
-        shardline-test-support
         shardline-storage
         shardline-cache
         shardline-vcs
         shardline-index
         shardline-cas
+        shardline-server-core
+        shardline-metrics
+        shardline-oci-adapter
+        shardline-protocol-adapters
+        shardline-hub-api
+        shardline-xet-core
+        shardline-xet-adapter
         shardline-server
         shardline
     steps:

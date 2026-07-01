@@ -2976,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-bench"
-version = "0.0.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "libc",
