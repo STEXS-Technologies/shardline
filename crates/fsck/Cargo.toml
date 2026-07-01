@@ -1,6 +1,6 @@
 [package]
 name = "shardline-fsck"
-version = "1.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,6 +8,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/shardline-fsck"
 readme = "../../README.md"
 description = "Storage integrity checking logic for the Shardline server ecosystem."
+publish = false
 
 [dependencies]
 serde_json.workspace = true

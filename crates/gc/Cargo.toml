@@ -1,6 +1,6 @@
 [package]
 name = "shardline-gc"
-version = "1.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,6 +8,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/shardline-gc"
 readme = "../../README.md"
 description = "Garbage collection for Shardline chunk storage."
+publish = false
 
 [dependencies]
 serde.workspace = true

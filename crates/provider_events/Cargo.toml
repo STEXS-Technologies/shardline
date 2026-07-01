@@ -1,6 +1,6 @@
 [package]
 name = "shardline-provider-events"
-version = "1.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,6 +8,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/shardline-provider-events"
 readme = "../../README.md"
 description = "Provider webhook event processing for the Shardline server."
+publish = false
 
 [dependencies]
 serde_json.workspace = true
