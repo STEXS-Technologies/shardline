@@ -13,7 +13,7 @@ description = "Re-implementation of xet-core-structures surface area without xet
 blake3.workspace = true
 bytes.workspace = true
 countio = "0.3"
-lz4_flex = "0.11"
+lz4_flex = "0.13"
 serde = { workspace = true, features = ["derive"] }
 static_assertions = "1"
 thiserror.workspace = true

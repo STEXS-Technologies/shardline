@@ -20,7 +20,7 @@ workflows covered by this repository.
 - native external-client coverage for `git-lfs`, `bazel`/`bazelisk`, and `skopeo` across
   multiple command-path variants in the repository test matrix
 - provider-issued repository-scoped tokens and provider webhook handling for GitHub,
-  GitLab, Gitea, and the generic provider adapter
+  GitLab, Gitea, Codeberg, and the generic provider adapter
 - stock `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, and historical checkout
   coverage in the validated test matrix
 - sparse checkout behavior for Xet-tracked files

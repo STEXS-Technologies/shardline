@@ -54,8 +54,8 @@ Scope: Full workspace — security, code quality, architecture, dependencies, te
 
 ### Deferred
 
-- [x] **[HIGH]** God trait: `RecordStore` — split into `RecordTraversal`, `RecordMutation`, `RepositoryScopedRecords`. Deferred: ~5 impl sites + test mock impls need updating; high-risk refactor touching index, server, server_core, fsck, gc.
-- [x] **[MEDIUM]** `HubStore` has 15 methods — split into `HubRepoStore`, `HubRevisionStore`, `HubLfsStore`, `HubWebhookStore`. Deferred: requires trait bounds update across hub_api route handlers and tests.
+- [ ] **[HIGH]** God trait: `RecordStore` — split not yet implemented. Trait is still monolithic.
+- [ ] **[MEDIUM]** `HubStore` has 15 methods — split not yet implemented. Trait is still monolithic.
 - [x] **[HIGH]** `xet_adapter` depends on `server_core` (dependency inversion) — extract `ServerObjectStore` + related types into `shardline-storage-core`. Deferred: requires new crate creation + republish; blocks on xet ecosystem stabilization.
 - [x] **[MEDIUM]** `LocalBackend`/`PostgresBackend` share no common trait — define `trait MetadataBackend`. Deferred: requires unified async trait with associated types; 4+ impl sites to update.
 - [x] **[MEDIUM]** Duplicate `validate_content_hash` in 7 locations — consolidate into `protocol` or `server_core`

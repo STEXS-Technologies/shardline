@@ -64,6 +64,7 @@ Shardline supports these provider families:
 - GitHub
 - Gitea
 - GitLab
+- Codeberg (Gitea-based)
 - Generic Git forge adapters
 
 The generic provider path matters for self-hosted adoption.
@@ -153,11 +154,13 @@ Normalized webhook events cover:
 - GitLab repository deletion, rename and transfer, access changes, and revision push
   movement
 - Gitea repository deletion, rename, access changes, and revision push movement
+- Codeberg (Gitea-based) repository deletion, rename, access changes, and revision push
+  movement
 - generic normalized repository deletion, rename, access changes, and revision push
   movement
 
 Those normalized events are exercised through live HTTP route tests for every
-implemented GitHub, GitLab, Gitea, and generic webhook kind.
+implemented GitHub, GitLab, Gitea, Codeberg, and generic webhook kind.
 
 Repository deletion is wired into lifecycle handling for providers that emit a supported
 deletion event.

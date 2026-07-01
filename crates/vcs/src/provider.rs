@@ -9,6 +9,8 @@ pub enum ProviderKind {
     Gitea,
     /// GitLab repositories.
     GitLab,
+    /// Codeberg (Gitea-based) repositories.
+    Codeberg,
     /// A provider implemented through the generic integration boundary.
     Generic,
 }
@@ -21,6 +23,7 @@ impl ProviderKind {
             Self::GitHub => RepositoryProvider::GitHub,
             Self::Gitea => RepositoryProvider::Gitea,
             Self::GitLab => RepositoryProvider::GitLab,
+            Self::Codeberg => RepositoryProvider::Codeberg,
             Self::Generic => RepositoryProvider::Generic,
         }
     }

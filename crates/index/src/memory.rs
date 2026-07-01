@@ -460,6 +460,7 @@ const fn provider_sort_key(provider: RepositoryProvider) -> &'static str {
         RepositoryProvider::GitHub => "github",
         RepositoryProvider::Gitea => "gitea",
         RepositoryProvider::GitLab => "gitlab",
+        RepositoryProvider::Codeberg => "codeberg",
         RepositoryProvider::Generic => "generic",
     }
 }
@@ -998,6 +999,7 @@ enum MemoryRepositoryProvider {
     GitHub,
     Gitea,
     GitLab,
+    Codeberg,
     Generic,
 }
 
@@ -1007,6 +1009,7 @@ impl MemoryRepositoryProvider {
             RepositoryProvider::GitHub => Self::GitHub,
             RepositoryProvider::Gitea => Self::Gitea,
             RepositoryProvider::GitLab => Self::GitLab,
+            RepositoryProvider::Codeberg => Self::Codeberg,
             RepositoryProvider::Generic => Self::Generic,
         }
     }

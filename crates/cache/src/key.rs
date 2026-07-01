@@ -103,6 +103,7 @@ const fn provider_token(provider: RepositoryProvider) -> &'static str {
         RepositoryProvider::GitHub => "github",
         RepositoryProvider::Gitea => "gitea",
         RepositoryProvider::GitLab => "gitlab",
+        RepositoryProvider::Codeberg => "codeberg",
         RepositoryProvider::Generic => "generic",
     }
 }
