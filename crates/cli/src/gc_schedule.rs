@@ -1,15 +1,23 @@
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::env::current_exe;
 use std::{
-    collections::BTreeMap,
-    env::current_exe,
-    fs::{self, File, OpenOptions},
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
 };
+#[cfg(any(target_os = "linux", test))]
+use std::fs;
+#[cfg(any(target_os = "linux", test))]
+use std::fs::{File, OpenOptions};
+#[cfg(any(target_os = "linux", test))]
+use std::io::Read;
 
 use thiserror::Error;
 
+#[cfg(any(target_os = "linux", test))]
 use shardline_storage::local_path::resolve_platform_symlinks;
 
 #[cfg(target_os = "linux")]
@@ -512,6 +520,7 @@ fn validate_group_exists(group: &str) -> Result<(), GcScheduleError> {
     Err(GcScheduleError::MissingGroup(group.to_owned()))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn read_text_file_with_limit(
     field: &'static str,
     path: &Path,
@@ -542,6 +551,7 @@ fn read_text_file_with_limit(
 
 
 
+#[cfg(any(target_os = "linux", test))]
 #[cfg(unix)]
 fn open_local_text_file(path: &Path) -> Result<File, GcScheduleError> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -554,12 +564,14 @@ fn open_local_text_file(path: &Path) -> Result<File, GcScheduleError> {
         .open(&resolved)?)
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[cfg(not(unix))]
 fn open_local_text_file(path: &Path) -> Result<File, GcScheduleError> {
     ensure_regular_local_file_path(path)?;
     Ok(File::open(path)?)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn ensure_regular_local_file_path(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -572,6 +584,7 @@ fn ensure_regular_local_file_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn read_bounded_local_text_file(
     field: &'static str,
     path: &Path,
@@ -616,6 +629,7 @@ fn read_bounded_local_text_file(
     Ok(bytes)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn ensure_local_file_size_within_limit(
     field: &'static str,
     path: &Path,
@@ -677,6 +691,7 @@ fn take_matching_local_text_file_read_hook(
 }
 
 #[cfg(not(test))]
+#[cfg(any(target_os = "linux", test))]
 const fn run_before_local_text_file_read_hook_for_tests(_path: &Path) {}
 
 #[cfg(target_os = "linux")]

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use serde_json::to_vec;
-use shardline_index::{FileRecord, RecordMutation, RecordStore, RecordTraversal, RepositoryRecordScope};
+use shardline_index::{FileRecord, RecordStore, RecordTraversal, RepositoryRecordScope};
 use shardline_protocol::RepositoryScope;
 use shardline_vcs::RepositoryRef;
 
