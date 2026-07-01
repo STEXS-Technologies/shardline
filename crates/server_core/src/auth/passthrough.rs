@@ -1,6 +1,10 @@
+use std::sync::Once;
+
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 
 use crate::{AuthError, AuthProvider};
+
+static PASSTHROUGH_WARNING: Once = Once::new();
 
 /// Trust-all authentication provider for development mode.
 ///
@@ -11,6 +15,12 @@ pub struct PassthroughProvider;
 
 impl AuthProvider for PassthroughProvider {
     fn verify_token(&self, token: &str) -> Result<TokenClaims, AuthError> {
+        PASSTHROUGH_WARNING.call_once(|| {
+            tracing::warn!(
+                "SECURITY: PassthroughProvider is active — all tokens are accepted. \
+                 Do NOT use in production."
+            );
+        });
         if token.trim().is_empty() {
             return Err(AuthError::InvalidToken);
         }

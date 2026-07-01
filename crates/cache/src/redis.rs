@@ -1,6 +1,7 @@
-use std::{fmt, num::NonZeroU64};
+use std::{fmt, num::NonZeroU64, sync::Arc};
 
 use redis::AsyncCommands;
+use tokio::sync::Mutex;
 
 use crate::{
     AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheFuture,
@@ -10,10 +11,20 @@ use crate::{
 const RECONSTRUCTION_CACHE_PREFIX: &str = "shardline:reconstruction:v1";
 
 /// Redis-backed reconstruction cache adapter.
-#[derive(Clone)]
 pub struct RedisReconstructionCache {
     client: redis::Client,
+    connection: Arc<Mutex<Option<redis::aio::MultiplexedConnection>>>,
     ttl_seconds: NonZeroU64,
+}
+
+impl Clone for RedisReconstructionCache {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            connection: Arc::clone(&self.connection),
+            ttl_seconds: self.ttl_seconds,
+        }
+    }
 }
 
 impl fmt::Debug for RedisReconstructionCache {
@@ -39,8 +50,21 @@ impl RedisReconstructionCache {
 
         Ok(Self {
             client: redis::Client::open(redis_url)?,
+            connection: Arc::new(Mutex::new(None)),
             ttl_seconds,
         })
+    }
+
+    async fn get_connection(
+        &self,
+    ) -> Result<redis::aio::MultiplexedConnection, ReconstructionCacheError> {
+        let mut guard = self.connection.lock().await;
+        if let Some(ref conn) = *guard {
+            return Ok(conn.clone());
+        }
+        let conn = self.client.get_multiplexed_async_connection().await?;
+        *guard = Some(conn.clone());
+        Ok(conn)
     }
 
     fn redis_key(key: &ReconstructionCacheKey) -> String {
@@ -73,7 +97,7 @@ impl RedisReconstructionCache {
 impl AsyncReconstructionCache for RedisReconstructionCache {
     fn ready(&self) -> ReconstructionCacheFuture<'_, ()> {
         Box::pin(async move {
-            let mut connection = self.client.get_multiplexed_async_connection().await?;
+            let mut connection = self.get_connection().await?;
             let _pong: String = redis::cmd("PING").query_async(&mut connection).await?;
             Ok(())
         })
@@ -84,7 +108,7 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         key: &'operation ReconstructionCacheKey,
     ) -> ReconstructionCacheFuture<'operation, Option<Vec<u8>>> {
         Box::pin(async move {
-            let mut connection = self.client.get_multiplexed_async_connection().await?;
+            let mut connection = self.get_connection().await?;
             let redis_key = Self::redis_key(key);
             let value: Option<Vec<u8>> = connection.get(redis_key).await?;
             Ok(value)
@@ -97,7 +121,7 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         payload: &'operation [u8],
     ) -> ReconstructionCacheFuture<'operation, ()> {
         Box::pin(async move {
-            let mut connection = self.client.get_multiplexed_async_connection().await?;
+            let mut connection = self.get_connection().await?;
             let redis_key = Self::redis_key(key);
             let ttl_seconds = self.ttl_seconds.get();
             let _: () = connection
@@ -112,7 +136,7 @@ impl AsyncReconstructionCache for RedisReconstructionCache {
         key: &'operation ReconstructionCacheKey,
     ) -> ReconstructionCacheFuture<'operation, bool> {
         Box::pin(async move {
-            let mut connection = self.client.get_multiplexed_async_connection().await?;
+            let mut connection = self.get_connection().await?;
             let redis_key = Self::redis_key(key);
             let deleted: usize = connection.del(redis_key).await?;
             Ok(deleted > 0)

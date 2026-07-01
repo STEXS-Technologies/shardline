@@ -17,6 +17,7 @@ shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-storage.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

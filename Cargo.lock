@@ -3274,6 +3274,7 @@ dependencies = [
  "shardline-protocol",
  "shardline-storage",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -3343,6 +3344,7 @@ dependencies = [
  "bytes",
  "countio",
  "lz4_flex",
+ "proptest",
  "serde",
  "static_assertions",
  "thiserror",

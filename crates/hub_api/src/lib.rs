@@ -38,7 +38,8 @@ pub mod state;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use tower_http::cors::{Any, CorsLayer};
+use axum::http::{Method, header::HeaderValue};
+use tower_http::cors::{Any, CorsLayer, AllowOrigin};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Builds the Hub API router with all registered routes.
@@ -48,8 +49,17 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// serving requests.
 pub fn hub_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
+        .allow_origin([
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+            HeaderValue::from_static("http://localhost:8080"),
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::HEAD,
+        ])
         .allow_headers(Any);
 
     let security_headers = SetResponseHeaderLayer::overriding(

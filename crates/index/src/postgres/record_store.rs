@@ -6,7 +6,7 @@ use sqlx::{Postgres, Row, Transaction, postgres::PgRow, query, query_scalar, typ
 
 use super::{PostgresMetadataStoreError, PostgresRecordKind, PostgresRecordLocator, i64_to_u64};
 use crate::{
-    DedupeShardMapping, FileRecord, RecordMutation, RecordStore, RecordStoreFuture, RecordTraversal,
+    DedupeShardMapping, FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
     RepositoryRecordScope, StoredRecord, xet_hash_hex_string,
     record_key::record_key as shared_record_key,
     record_key::{
@@ -14,8 +14,6 @@ use crate::{
         repository_scope_key as shared_repository_scope_key,
     },
 };
-
-use RecordTraversal as _;
 
 impl super::PostgresRecordStore {
     /// Inserts or replaces an immutable version record.

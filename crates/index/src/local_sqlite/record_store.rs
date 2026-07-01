@@ -7,9 +7,7 @@ use super::{
     LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, LocalRecordStore,
     i64_to_u64, record_not_found_error,
 };
-use crate::{FileRecord, RecordMutation, RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope};
-
-use RecordTraversal as _;
+use crate::{FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope};
 
 impl RecordTraversal for LocalRecordStore {
     type Error = LocalIndexStoreError;
