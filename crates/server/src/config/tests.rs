@@ -461,13 +461,16 @@ fn server_config_accepts_non_empty_token_signing_key() {
         root_dir,
         chunk_size,
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
 
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
     };
-    assert_eq!(config.token_signing_key(), Some("signing-key".as_bytes()));
+    assert_eq!(
+        config.token_signing_key(),
+        Some("test-signing-key-32-bytes-long!!".as_bytes())
+    );
 }
 
 #[test]
@@ -481,7 +484,7 @@ fn server_config_accepts_provider_runtime_when_signing_is_enabled() {
         root_dir,
         chunk_size,
     )
-    .with_token_signing_key(b"signing-key".to_vec())
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .and_then(|config| {
         config.with_provider_runtime(
             PathBuf::from("/tmp/providers.json"),
@@ -648,7 +651,7 @@ fn server_config_rejects_oversized_provider_api_key() {
         root_dir,
         chunk_size,
     )
-    .with_token_signing_key(b"signing-key".to_vec())
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .and_then(|config| {
         config.with_provider_runtime(
             PathBuf::from("/tmp/providers.json"),
@@ -963,7 +966,7 @@ fn from_env_rejects_invalid_provider_ttl_before_reading_provider_api_key_file() 
         PathBuf::from("/tmp/shardline"),
         NonZeroUsize::MIN,
     )
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;
@@ -1034,7 +1037,7 @@ fn read_secret_file_bytes_accepts_projected_secret_symlink_within_directory() {
     assert!(data_dir_created.is_ok());
     let target = data_dir.join("target-secret");
     let link = temp.path().join("linked-secret");
-    let write = write_file(&target, b"signing-key");
+    let write = write_file(&target, b"test-signing-key-32-bytes-long!!");
     assert!(write.is_ok());
     let linked = symlink(Path::new("..data").join("target-secret"), &link);
     assert!(linked.is_ok());
@@ -1057,7 +1060,7 @@ fn read_secret_file_bytes_accepts_projected_secret_symlink_within_directory() {
     let Ok(bytes) = bytes else {
         return;
     };
-    assert_eq!(bytes, b"signing-key".to_vec());
+    assert_eq!(bytes, b"test-signing-key-32-bytes-long!!".to_vec());
 }
 
 #[cfg(unix)]
@@ -1073,7 +1076,7 @@ fn read_secret_file_bytes_rejects_symlinked_secret_path_outside_directory() {
     let Ok(outside) = outside else {
         return;
     };
-    let write = write_file(outside.path(), b"signing-key");
+    let write = write_file(outside.path(), b"test-signing-key-32-bytes-long!!");
     assert!(write.is_ok());
     let link = temp.path().join("linked-secret");
     let linked = symlink(outside.path(), &link);
@@ -1106,7 +1109,7 @@ fn read_secret_file_bytes_rejects_growth_after_validation_without_retaining_appe
     let Ok(temp) = temp else {
         return;
     };
-    let initial = b"signing-key";
+    let initial = b"test-signing-key-32-bytes-long!!";
     let write = write_file(temp.path(), initial);
     assert!(write.is_ok());
 
@@ -1135,7 +1138,7 @@ fn read_secret_file_bytes_rejects_growth_after_validation_without_retaining_appe
         },
     );
 
-    let expected = b"signing-key-rotated";
+    let expected = b"test-signing-key-32-bytes-long!!-rotated";
     assert!(bytes.is_ok());
     assert_eq!(bytes.unwrap(), expected.to_vec());
 }
@@ -1172,7 +1175,7 @@ fn server_config_runtime_validation_accepts_signed_transfer_role() {
         chunk_size,
     )
     .with_server_role(ServerRole::Transfer)
-    .with_token_signing_key(b"signing-key".to_vec());
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
     let Ok(config) = config else {
         return;

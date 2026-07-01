@@ -122,7 +122,7 @@ async fn exercise_role(
         NonZeroUsize::new(4).ok_or("chunk size")?,
     )
     .with_server_role(role)
-    .with_token_signing_key(b"signing-key".to_vec())?;
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
 
     let client = Client::new();
@@ -184,7 +184,7 @@ async fn start_frontend_role_runtime(
         NonZeroUsize::new(4).ok_or("chunk size")?,
     )
     .with_server_role(role)
-    .with_token_signing_key(b"signing-key".to_vec())?
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
     let server = spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
@@ -309,7 +309,7 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
     .with_server_role(ServerRole::Api)
-    .with_token_signing_key(b"signing-key".to_vec())?;
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
     let api_server = spawn(async move { serve_with_listener(api_config, api_listener).await });
 
     let transfer_listener =
@@ -323,7 +323,7 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
         NonZeroUsize::new(65_536).ok_or("chunk size")?,
     )
     .with_server_role(ServerRole::Transfer)
-    .with_token_signing_key(b"signing-key".to_vec())?;
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
     let transfer_server =
         spawn(async move { serve_with_listener(transfer_config, transfer_listener).await });
 
