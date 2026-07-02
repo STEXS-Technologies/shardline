@@ -3,7 +3,7 @@
 [![Status](https://img.shields.io/badge/status-stable%201.0.0-1f6feb)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
-**The open-source storage backend for large binary assets.**
+**The open-source storage backend for AI models, datasets, containers, and large binary assets.**
 
 Shardline is a self-hostable content-addressed storage (CAS) server. It accepts immutable object uploads, deduplicates content, and serves range-aware downloads. Run it standalone or pair it with GitHub, GitLab, or Gitea for repository-scoped storage.
 
