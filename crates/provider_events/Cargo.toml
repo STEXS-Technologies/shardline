@@ -8,7 +8,6 @@ homepage.workspace = true
 documentation = "https://docs.rs/shardline-provider-events"
 readme = "../../README.md"
 description = "Provider webhook event processing for the Shardline server."
-publish = false
 
 [dependencies]
 serde_json.workspace = true

@@ -8,7 +8,6 @@ homepage.workspace = true
 documentation = "https://docs.rs/shardline-rebuild"
 readme = "../../README.md"
 description = "Index rebuild logic for the Shardline server ecosystem."
-publish = false
 
 [dependencies]
 serde.workspace = true
