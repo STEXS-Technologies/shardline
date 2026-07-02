@@ -3300,7 +3300,6 @@ dependencies = [
  "proptest",
  "sha2",
  "shardline-protocol",
- "shardline-test-support",
  "tempfile",
  "thiserror",
  "tokio",
