@@ -3300,7 +3300,6 @@ dependencies = [
  "proptest",
  "sha2",
  "shardline-protocol",
- "shardline-test-support",
  "tempfile",
  "thiserror",
  "tokio",
@@ -3310,7 +3309,6 @@ dependencies = [
 name = "shardline-test-support"
 version = "1.0.0"
 dependencies = [
- "shardline-storage",
  "tempfile",
  "thiserror",
 ]
