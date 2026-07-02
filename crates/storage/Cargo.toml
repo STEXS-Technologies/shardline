@@ -27,6 +27,7 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 [dev-dependencies]
 hex.workspace = true
 proptest.workspace = true
+shardline-test-support.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 

@@ -17,5 +17,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 tempfile.workspace = true
 thiserror.workspace = true
 
+[features]
+docker = []
+
 [lints]
 workspace = true

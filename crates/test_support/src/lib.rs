@@ -39,7 +39,7 @@ use std::{
 use thiserror::Error;
 
 #[cfg(feature = "docker")]
-pub use docker::{DockerLocalStack, DockerLocalStackBuilder};
+pub use docker::{DockerLocalStack, DockerLocalStackBuilder, S3RawConfig};
 
 /// Error type for test-only invariant failures.
 #[derive(Debug, Error)]
