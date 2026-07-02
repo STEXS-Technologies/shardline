@@ -26,6 +26,7 @@
 //! );
 //! ```
 
+#[cfg(feature = "docker")]
 mod docker;
 
 use std::{
@@ -37,6 +38,7 @@ use std::{
 
 use thiserror::Error;
 
+#[cfg(feature = "docker")]
 pub use docker::{DockerLocalStack, DockerLocalStackBuilder};
 
 /// Error type for test-only invariant failures.
