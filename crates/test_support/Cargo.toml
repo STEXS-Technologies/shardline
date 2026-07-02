@@ -17,12 +17,5 @@ rustdoc-args = ["--cfg", "docsrs"]
 tempfile.workspace = true
 thiserror.workspace = true
 
-[features]
-docker = ["dep:shardline-storage"]
-
-[dependencies.shardline-storage]
-workspace = true
-optional = true
-
 [lints]
 workspace = true
