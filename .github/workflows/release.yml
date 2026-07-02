@@ -30,19 +30,24 @@ jobs:
     env:
       CRATE_PACKAGES: >-
         shardline-protocol
+        shardline-xet-core
+        shardline-metrics
         shardline-storage
         shardline-cache
         shardline-vcs
         shardline-index
         shardline-cas
         shardline-server-core
-        shardline-metrics
         shardline-oci-adapter
         shardline-protocol-adapters
-        shardline-hub-api
-        shardline-xet-core
         shardline-xet-adapter
+        shardline-provider-events
+        shardline-hub-api
+        shardline-fsck
+        shardline-gc
+        shardline-rebuild
         shardline-server
+        shardline-bench
         shardline
     steps:
       - name: Checkout
@@ -142,8 +147,9 @@ jobs:
               echo "${crate} ${version} already exists on crates.io; skipping"
               continue
             fi
-            if cargo publish --locked -p "${crate}" --token "${CARGO_REGISTRY_TOKEN}"; then
+            if cargo publish --locked -p "${crate}"; then
               echo "${crate} ${version} published successfully"
+              sleep 15
             else
               echo "::warning::Failed to publish ${crate} ${version} (may already exist from a parallel run); continuing"
             fi

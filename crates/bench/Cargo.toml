@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Benchmarks and load testing for the Shardline server ecosystem."
-publish = false
 
 [[bench]]
 name = "reconstruction"
