@@ -136,9 +136,14 @@ async fn start_local_cluster_runtime() -> Result<Option<LocalClusterRuntime>, Te
         .redis_url()
         .ok_or_else(|| ServerE2eInvariantError::new("redis url was unavailable"))?;
     let key_prefix = services.unique_s3_key_prefix("k8s-cluster-protocol-e2e");
-    let s3_config = services
-        .s3_config_with_prefix(Some(&key_prefix))
+    let raw = services
+        .s3_raw_config(Some(&key_prefix))
         .ok_or_else(|| ServerE2eInvariantError::new("minio s3 config was unavailable"))?;
+    let s3_config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
     let metrics_token = b"metrics-token".to_vec();
     let config = ServerConfig::new(
         addr,
