@@ -132,52 +132,52 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 7] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
-        up_sql: include_str!("../../../migrations/20260417000000_metadata_store.up.sql"),
-        down_sql: include_str!("../../../migrations/20260417000000_metadata_store.down.sql"),
+        up_sql: include_str!("../migrations/20260417000000_metadata_store.up.sql"),
+        down_sql: include_str!("../migrations/20260417000000_metadata_store.down.sql"),
     },
     DatabaseMigration {
         version: "20260417010000",
         name: "retention_holds",
-        up_sql: include_str!("../../../migrations/20260417010000_retention_holds.up.sql"),
-        down_sql: include_str!("../../../migrations/20260417010000_retention_holds.down.sql"),
+        up_sql: include_str!("../migrations/20260417010000_retention_holds.up.sql"),
+        down_sql: include_str!("../migrations/20260417010000_retention_holds.down.sql"),
     },
     DatabaseMigration {
         version: "20260418000000",
         name: "dedupe_shards",
-        up_sql: include_str!("../../../migrations/20260418000000_dedupe_shards.up.sql"),
-        down_sql: include_str!("../../../migrations/20260418000000_dedupe_shards.down.sql"),
+        up_sql: include_str!("../migrations/20260418000000_dedupe_shards.up.sql"),
+        down_sql: include_str!("../migrations/20260418000000_dedupe_shards.down.sql"),
     },
     DatabaseMigration {
         version: "20260418010000",
         name: "webhook_deliveries",
-        up_sql: include_str!("../../../migrations/20260418010000_webhook_deliveries.up.sql"),
-        down_sql: include_str!("../../../migrations/20260418010000_webhook_deliveries.down.sql"),
+        up_sql: include_str!("../migrations/20260418010000_webhook_deliveries.up.sql"),
+        down_sql: include_str!("../migrations/20260418010000_webhook_deliveries.down.sql"),
     },
     DatabaseMigration {
         version: "20260418020000",
         name: "provider_repository_states",
         up_sql: include_str!(
-            "../../../migrations/20260418020000_provider_repository_states.up.sql"
+            "../migrations/20260418020000_provider_repository_states.up.sql"
         ),
         down_sql: include_str!(
-            "../../../migrations/20260418020000_provider_repository_states.down.sql"
+            "../migrations/20260418020000_provider_repository_states.down.sql"
         ),
     },
     DatabaseMigration {
         version: "20260418110000",
         name: "provider_repository_reconciliation",
         up_sql: include_str!(
-            "../../../migrations/20260418110000_provider_repository_reconciliation.up.sql"
+            "../migrations/20260418110000_provider_repository_reconciliation.up.sql"
         ),
         down_sql: include_str!(
-            "../../../migrations/20260418110000_provider_repository_reconciliation.down.sql"
+            "../migrations/20260418110000_provider_repository_reconciliation.down.sql"
         ),
     },
     DatabaseMigration {
         version: "20260629000000",
         name: "hub_api",
-        up_sql: include_str!("../../../migrations/20260629000000_hub_api.up.sql"),
-        down_sql: include_str!("../../../migrations/20260629000000_hub_api.down.sql"),
+        up_sql: include_str!("../migrations/20260629000000_hub_api.up.sql"),
+        down_sql: include_str!("../migrations/20260629000000_hub_api.down.sql"),
     },
 ];
 
