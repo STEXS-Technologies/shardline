@@ -8,7 +8,6 @@ homepage.workspace = true
 documentation = "https://docs.rs/shardline-fsck"
 readme = "../../README.md"
 description = "Storage integrity checking logic for the Shardline server ecosystem."
-publish = false
 
 [dependencies]
 serde_json.workspace = true
