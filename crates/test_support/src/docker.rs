@@ -5,8 +5,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use shardline_storage::S3ObjectStoreConfig;
-
 const POSTGRES_IMAGE: &str = "postgres:16-alpine";
 const MINIO_IMAGE: &str = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z";
 const MINIO_MC_IMAGE: &str = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z";
@@ -88,20 +86,20 @@ impl DockerLocalStack {
             .map(|service| format!("redis://127.0.0.1:{}/", service.host_port))
     }
 
-    /// Returns an S3 object-store config for the MinIO service.
+    /// Returns raw S3 config tuple for the MinIO service:
+    /// `(bucket, region, endpoint, access_key, secret_key, session_token, key_prefix, allow_http)`.
     #[must_use]
-    pub fn s3_config_with_prefix(&self, key_prefix: Option<&str>) -> Option<S3ObjectStoreConfig> {
-        self.minio.as_ref().map(|service| {
-            S3ObjectStoreConfig::new(DEFAULT_S3_BUCKET.to_owned(), "us-east-1".to_owned())
-                .with_endpoint(Some(format!("http://127.0.0.1:{}", service.host_port)))
-                .with_credentials(
-                    Some(MINIO_ROOT_USER.to_owned()),
-                    Some(MINIO_ROOT_PASSWORD.to_owned()),
-                    None,
-                )
-                .with_key_prefix(key_prefix)
-                .with_allow_http(true)
-        })
+    pub fn s3_raw_config(&self, key_prefix: Option<&str>) -> Option<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, bool)> {
+        self.minio.as_ref().map(|service| (
+            DEFAULT_S3_BUCKET.to_owned(),
+            "us-east-1".to_owned(),
+            Some(format!("http://127.0.0.1:{}", service.host_port)),
+            Some(MINIO_ROOT_USER.to_owned()),
+            Some(MINIO_ROOT_PASSWORD.to_owned()),
+            None,
+            key_prefix.map(str::to_owned),
+            true,
+        ))
     }
 
     /// Returns a unique test key prefix suitable for isolated object-store runs.
