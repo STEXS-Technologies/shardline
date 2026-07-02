@@ -222,9 +222,9 @@ command = "cargo"
 args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Json", "--skip", "shardline-fuzz", "${@}"]
 
 [tasks.ci]
-description = "Run the core contributor CI checks, including dependency advisories"
+description = "Run the core contributor CI checks"
 workspace = false
-dependencies = ["format-check", "clippy", "test", "verify-release-binary", "check-migration-sync", "audit"]
+dependencies = ["format-check", "clippy", "test", "verify-release-binary", "check-migration-sync"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"
