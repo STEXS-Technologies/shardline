@@ -13,7 +13,7 @@ inputs:
   cargo-tools:
     description: Comma-separated cargo-installable tools for CI.
     required: false
-    default: cargo-make,cargo-nextest,cargo-audit
+    default: cargo-make,cargo-nextest
 
 runs:
   using: composite

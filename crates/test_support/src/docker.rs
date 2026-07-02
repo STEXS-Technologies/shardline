@@ -5,6 +5,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Raw S3 configuration returned by [`DockerLocalStack::s3_raw_config`].
+pub struct S3RawConfig {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub session_token: Option<String>,
+    pub key_prefix: Option<String>,
+    pub allow_http: bool,
+}
+
 const POSTGRES_IMAGE: &str = "postgres:16-alpine";
 const MINIO_IMAGE: &str = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z";
 const MINIO_MC_IMAGE: &str = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z";
@@ -86,20 +98,19 @@ impl DockerLocalStack {
             .map(|service| format!("redis://127.0.0.1:{}/", service.host_port))
     }
 
-    /// Returns raw S3 config tuple for the MinIO service:
-    /// `(bucket, region, endpoint, access_key, secret_key, session_token, key_prefix, allow_http)`.
+    /// Returns raw S3 config for the MinIO service.
     #[must_use]
-    pub fn s3_raw_config(&self, key_prefix: Option<&str>) -> Option<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, bool)> {
-        self.minio.as_ref().map(|service| (
-            DEFAULT_S3_BUCKET.to_owned(),
-            "us-east-1".to_owned(),
-            Some(format!("http://127.0.0.1:{}", service.host_port)),
-            Some(MINIO_ROOT_USER.to_owned()),
-            Some(MINIO_ROOT_PASSWORD.to_owned()),
-            None,
-            key_prefix.map(str::to_owned),
-            true,
-        ))
+    pub fn s3_raw_config(&self, key_prefix: Option<&str>) -> Option<S3RawConfig> {
+        self.minio.as_ref().map(|service| S3RawConfig {
+            bucket: DEFAULT_S3_BUCKET.to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint: Some(format!("http://127.0.0.1:{}", service.host_port)),
+            access_key: Some(MINIO_ROOT_USER.to_owned()),
+            secret_key: Some(MINIO_ROOT_PASSWORD.to_owned()),
+            session_token: None,
+            key_prefix: key_prefix.map(str::to_owned),
+            allow_http: true,
+        })
     }
 
     /// Returns a unique test key prefix suitable for isolated object-store runs.

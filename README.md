@@ -3,7 +3,7 @@
 [![Status](https://img.shields.io/badge/status-stable%201.0.0-1f6feb)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
-**The open-source storage backend for large binary assets.**
+**The open-source storage backend for AI models, datasets, containers, and large binary assets.**
 
 Shardline is a self-hostable content-addressed storage (CAS) server. It accepts immutable object uploads, deduplicates content, and serves range-aware downloads. Run it standalone or pair it with GitHub, GitLab, or Gitea for repository-scoped storage.
 
@@ -18,6 +18,16 @@ The first open-source, production-ready, multi-protocol CAS server with a Xet fr
 - **Self-hosted or cloud** — local filesystem, S3-compatible storage, Postgres metadata
 - **Production-ready** — health checks, migrations, integrity verification, garbage collection, backups
 - **Provider integration** — optional webhooks and token issuance for GitHub, GitLab, Gitea, Codeberg
+
+## Use cases
+
+| Use case | How Shardline helps |
+|----------|---------------------|
+| **AI model distribution** | Store model weights with automatic deduplication. Pull specific model versions by content hash. HuggingFace Hub API compatibility means existing `huggingface-cli` workflows work unchanged. |
+| **Game asset pipelines** | Deduplicate textures, meshes, and builds across versions. Content-addressed storage prevents asset corruption and enables safe caching. Range downloads stream large assets efficiently. |
+| **Binary/executable distribution** | Upload versioned executables and libraries. Each build gets a unique content hash — clients download exactly the version they need without recompilation. Deduplication shares unchanged binaries between releases. |
+| **Container images** | OCI Distribution frontend accepts `docker push` / `skopeo copy` directly. Deduplicate layers across images and tags. |
+| **Build artifact caching** | Bazel HTTP remote cache protocol speeds up CI builds. Deduplicate unchanged compilation outputs across branches. |
 
 ## Quick start
 

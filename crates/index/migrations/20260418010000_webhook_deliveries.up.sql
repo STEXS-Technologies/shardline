@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS shardline_webhook_deliveries (
     owner TEXT NOT NULL CHECK (length(trim(owner)) > 0),
     repo TEXT NOT NULL CHECK (length(trim(repo)) > 0),
     delivery_id TEXT NOT NULL CHECK (length(trim(delivery_id)) > 0),
-    processed_at_unix_seconds BIGINT NOT NULL CHECK (processed_at_unix_seconds >= 0),
+    processed_at_unix_seconds INTEGER NOT NULL CHECK (processed_at_unix_seconds >= 0),
     PRIMARY KEY (provider, owner, repo, delivery_id)
 );
 

@@ -52,7 +52,7 @@ shardline-server-core = { path = "../crates/server_core" }
 shardline-protocol = { path = "../crates/protocol" }
 shardline-index = { path = "../crates/index" }
 shardline-storage = { path = "../crates/storage" }
-shardline-test-support = { path = "../crates/test_support" }
+shardline-test-support = { path = "../crates/test_support", features = ["docker"] }
 shardline-vcs = { path = "../crates/vcs" }
 shardline-xet-core = { path = "../crates/xet_core" }
 blake3 = "1.8.3"

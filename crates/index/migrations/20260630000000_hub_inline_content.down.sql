@@ -1,1 +1,2 @@
-ALTER TABLE shardline_hub_file_entries DROP COLUMN IF EXISTS inline_content;
+-- SQLite does not support DROP COLUMN in versions < 3.35.0.
+-- The column will remain but be ignored.
