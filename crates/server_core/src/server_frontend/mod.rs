@@ -15,8 +15,6 @@ pub enum ServerFrontend {
     Oci,
     /// HuggingFace Hub API compatibility frontend.
     Hub,
-    /// Prometheus metrics endpoint.
-    Metrics,
 }
 
 impl ServerFrontend {
@@ -33,7 +31,6 @@ impl ServerFrontend {
             "bazel-http" => Ok(Self::BazelHttp),
             "oci" => Ok(Self::Oci),
             "hub" => Ok(Self::Hub),
-            "metrics" => Ok(Self::Metrics),
             _ => Err(ServerFrontendParseError),
         }
     }
@@ -47,7 +44,6 @@ impl ServerFrontend {
             Self::BazelHttp => "bazel-http",
             Self::Oci => "oci",
             Self::Hub => "hub",
-            Self::Metrics => "metrics",
         }
     }
 }

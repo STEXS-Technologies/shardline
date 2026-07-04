@@ -18,8 +18,7 @@ pub(crate) fn optional_chunk_container_keys(
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::Hub
-            | ServerFrontend::Metrics => {}
+            | ServerFrontend::Hub => {}
         }
     }
 
@@ -60,8 +59,7 @@ where
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::Hub
-            | ServerFrontend::Metrics => {}
+            | ServerFrontend::Hub => {}
         }
     }
 
