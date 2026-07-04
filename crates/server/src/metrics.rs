@@ -5,8 +5,7 @@ use std::{
     time::Instant,
 };
 
-use axum::{Router, body::Body, response::IntoResponse, routing::get};
-use prometheus::{Encoder, TextEncoder};
+use axum::body::Body;
 use tower::{Layer, Service};
 
 // Re-export all types and convenience functions from shardline-metrics.
@@ -144,24 +143,6 @@ pub const fn update_dedup_ratio(_numerator: u64, _denominator: u64) {
 }
 
 // ── Axum middleware & routes ─────────────────────────────────────────────
-
-pub(crate) fn metrics_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
-    Router::new().route("/metrics", get(prometheus_handler))
-}
-
-async fn prometheus_handler() -> impl IntoResponse {
-    let encoder = TextEncoder::new();
-    let metric_families = shardline_metrics::registry().gather();
-    let mut buffer = Vec::new();
-    if encoder.encode(&metric_families, &mut buffer).is_err() {
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    (
-        [(axum::http::header::CONTENT_TYPE, encoder.format_type())],
-        buffer,
-    )
-        .into_response()
-}
 
 #[derive(Clone)]
 pub(crate) struct MetricsLayer;

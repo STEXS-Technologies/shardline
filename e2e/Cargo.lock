@@ -3020,7 +3020,6 @@ dependencies = [
 name = "shardline-test-support"
 version = "1.0.0"
 dependencies = [
- "shardline-storage",
  "tempfile",
  "thiserror",
 ]
