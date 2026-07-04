@@ -23,8 +23,7 @@ pub(super) fn optional_chunk_container_keys(
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::Hub
-            | ServerFrontend::Metrics => {}
+            | ServerFrontend::Hub => {}
         }
     }
 
@@ -59,8 +58,7 @@ pub(super) fn managed_protocol_object_identity(
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::Hub
-            | ServerFrontend::Metrics => {}
+            | ServerFrontend::Hub => {}
         }
     }
 
@@ -96,8 +94,7 @@ where
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci
-            | ServerFrontend::Hub
-            | ServerFrontend::Metrics => {}
+            | ServerFrontend::Hub => {}
         }
     }
 
