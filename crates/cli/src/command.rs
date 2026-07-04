@@ -861,8 +861,6 @@ enum CliServerFrontend {
     Oci,
     /// Serve the HuggingFace Hub API compatibility frontend.
     Hub,
-    /// Serve the Prometheus metrics endpoint.
-    Metrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1175,7 +1173,6 @@ impl From<CliServerFrontend> for ServerFrontend {
             CliServerFrontend::BazelHttp => Self::BazelHttp,
             CliServerFrontend::Oci => Self::Oci,
             CliServerFrontend::Hub => Self::Hub,
-            CliServerFrontend::Metrics => Self::Metrics,
         }
     }
 }

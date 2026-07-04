@@ -46,6 +46,10 @@ path = "provider_token_flow.rs"
 name = "k8s_cluster_protocol_e2e"
 path = "k8s_cluster_protocol_e2e.rs"
 
+[[test]]
+name = "data_integrity"
+path = "data_integrity.rs"
+
 [dependencies]
 shardline-server = { path = "../crates/server" }
 shardline-server-core = { path = "../crates/server_core" }

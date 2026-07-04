@@ -36,7 +36,7 @@ use crate::{
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
     config::AuthProviderKind,
-    metrics::{MetricsLayer, metrics_routes},
+    metrics::MetricsLayer,
     provider::ProviderTokenService,
     reconstruction_cache::ReconstructionCacheService,
     server_frontend::ServerFrontend,
@@ -263,7 +263,6 @@ fn register_frontend_routes(
         ServerFrontend::BazelHttp => Ok(register_bazel_routes(app, role)),
         ServerFrontend::Oci => Ok(register_oci_routes(app, role)),
         ServerFrontend::Hub => register_hub_routes(app, app_state),
-        ServerFrontend::Metrics => Ok(app.merge(metrics_routes::<Arc<AppState>>())),
     }
 }
 
