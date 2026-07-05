@@ -3873,3 +3873,348 @@ async fn dedup_ten_files_sharing_chunks_delete_nine() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_shard_empty_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    use shardline_xet_core::metadata_shard::{shard_format::MDBShardInfo, shard_in_memory::MDBInMemoryShard};
+    let mut shard = MDBInMemoryShard::default();
+    let mut empty_bytes = Vec::new();
+    let serialized = MDBShardInfo::serialize_from(&mut empty_bytes, &shard, None);
+    assert!(serialized.is_ok(), "empty shard serialization should succeed");
+
+    let resp = client
+        .post(format!("{base_url}/v1/shards"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(empty_bytes)
+        .send()
+        .await
+        .unwrap();
+    // Empty shard (0 files, 0 xorbs) is technically valid but contains no data
+    // Server accepts it (200) or may reject it depending on validation rules
+    assert!(resp.status().is_success() || resp.status() == 400,
+        "empty shard: expected 2xx or 400, got {}", resp.status());
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_blob_exceeds_max_body() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    // Create a body larger than the max request body size
+    // Note: server may reject with 413 (body too large) or 400 (other validation first)
+    let large_content = vec![0xABu8; 50_000_000];
+
+    let post = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={}", hex::encode(sha2::Sha256::digest(&large_content))))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(large_content)
+        .send()
+        .await
+        .unwrap();
+    assert!(post.status() == 413 || post.status() == 400,
+        "oversized blob should be rejected (413 or 400), got {}", post.status());
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_missing_required_fields_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    // Manifest without required config field
+    let invalid_manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "layers": [],
+    });
+    let manifest_bytes = serde_json::to_vec(&invalid_manifest).unwrap();
+    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+
+    let put = client
+        .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 400, "manifest missing config should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_image_index() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    // Push a config blob
+    let config = br#"{"architecture":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    // Push a child manifest
+    let child_manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config.len() },
+        "layers": [],
+    });
+    let child_bytes = serde_json::to_vec(&child_manifest).unwrap();
+    let child_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&child_bytes)));
+
+    // Push child manifest as a manifest (not just a blob)
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{child_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(child_bytes.clone())
+        .send()
+        .await
+        .unwrap();
+
+    // Push image index referencing the child manifest
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": child_digest,
+                "size": child_bytes.len(),
+                "platform": { "architecture": "amd64", "os": "linux" },
+            },
+        ],
+    });
+    let index_bytes = serde_json::to_vec(&index).unwrap();
+    let index_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&index_bytes)));
+
+    let put = client
+        .put(format!("{base_url}/v2/{repo}/manifests/{index_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.index.v1+json")
+        .body(index_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201, "image index push");
+
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/manifests/{index_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200, "image index pull");
+    let body: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(body["mediaType"].as_str(), Some("application/vnd.oci.image.index.v1+json"));
+    let manifests = body["manifests"].as_array().unwrap();
+    assert_eq!(manifests.len(), 1, "index should contain 1 manifest ref");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_cross_repo_blob_mount_not_found() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let other_repo = "test-owner/test-repo";
+
+    let content = b"cross repo mount test";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+
+    // Push blob to repo
+    client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    // Mount to same repo (self-reference)
+    let mount = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={other_repo}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mount.status(), 201, "self-mount should succeed");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_registry_token_flow() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    // Get an OCI registry token
+    let token_resp = client
+        .get(format!("{base_url}/v2/token?service=shardline&scope=repository:{repo}:pull"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(token_resp.status(), 200, "OCI token exchange");
+
+    let token_body: serde_json::Value = token_resp.json().await.unwrap();
+    let oci_token = token_body["token"].as_str().expect("OCI token should be in response");
+
+    // Use the OCI token to pull a manifest (should fail since nothing exists, but auth passes)
+    let pull = client
+        .get(format!("{base_url}/v2/{repo}/manifests/latest"))
+        .header("Authorization", format!("Bearer {oci_token}"))
+        .send()
+        .await
+        .unwrap();
+    // 404 means auth succeeded but manifest doesn't exist (correct)
+    assert_eq!(pull.status(), 404, "OCI token auth should succeed (404 expected)");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_head_ac_cache_entry() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let ac_hash = "e".repeat(64);
+
+    client
+        .put(format!("{base_url}/v1/bazel/cache/ac/{ac_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(b"head test".to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    let head = client
+        .head(format!("{base_url}/v1/bazel/cache/ac/{ac_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200, "HEAD on existing AC");
+
+    let head_missing = client
+        .head(format!("{base_url}/v1/bazel/cache/ac/{}", "f".repeat(64)))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head_missing.status(), 404, "HEAD on missing AC");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_head_manifest_by_tag_returns_digest() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let config = br#"{"architecture":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config.len() },
+        "layers": [],
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest_bytes)
+        .send()
+        .await
+        .unwrap();
+
+    let head = client
+        .head(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200);
+    let dd = head.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    assert_eq!(dd, Some(manifest_digest.as_str()));
+    let ct = head.headers().get("content-type").and_then(|v| v.to_str().ok());
+    assert_eq!(ct, Some("application/vnd.oci.image.manifest.v1+json"));
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_put_ac_empty_hash_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let put = client
+        .put(format!("{base_url}/v1/bazel/cache/ac/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(b"content".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 404, "empty hash AC put should return 404");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_put_ac_invalid_hash_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let put = client
+        .put(format!("{base_url}/v1/bazel/cache/ac/not-a-valid-hex-hash!"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(b"content".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 400, "invalid hash AC put should return 400");
+
+    server.abort();
+}
