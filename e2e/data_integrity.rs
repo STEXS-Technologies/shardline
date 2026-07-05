@@ -3740,3 +3740,136 @@ async fn dedup_identical_content_different_frontends() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedup_three_files_sharing_chunks_delete_middle() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // Create 3 files where B's content contains A's content, and C's content
+    // contains B's. With 4-byte chunks, they share chunks at the storage layer.
+    let file_a = b"\x01\x02\x03\x04";
+    let file_b = b"\x01\x02\x03\x04\x05\x06\x07\x08";
+    let file_c = b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c";
+
+    let oid_a = hex::encode(sha2::Sha256::digest(file_a));
+    let oid_b = hex::encode(sha2::Sha256::digest(file_b));
+    let oid_c = hex::encode(sha2::Sha256::digest(file_c));
+
+    // Upload all 3
+    for (oid, content) in [(&oid_a, file_a.as_slice()), (&oid_b, file_b.as_slice()), (&oid_c, file_c.as_slice())] {
+        let resp = client
+            .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(content.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "upload {oid}");
+    }
+
+    // Delete middle file (B)
+    let del = client
+        .delete(format!("{base_url}/v1/lfs/objects/{oid_b}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 202, "delete middle file");
+
+    // Verify A still works
+    let get_a = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid_a}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_a.status(), 200, "file A should still exist");
+    assert_eq!(get_a.bytes().await.unwrap().as_ref(), file_a);
+
+    // Verify C still works
+    let get_c = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid_c}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_c.status(), 200, "file C should still exist");
+    assert_eq!(get_c.bytes().await.unwrap().as_ref(), file_c);
+
+    // Verify B is gone
+    let get_b = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid_b}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_b.status(), 404, "file B should be gone");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedup_ten_files_sharing_chunks_delete_nine() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // Create 10 files of increasing size (4, 8, 12, ... 40 bytes) so they share chunks
+    let mut oids = Vec::with_capacity(10);
+    let mut contents = Vec::with_capacity(10);
+    for i in 0..10 {
+        let size = (i + 1) * 4;
+        let content: Vec<u8> = (0..size).map(|b| (b % 256) as u8).collect();
+        let oid = hex::encode(sha2::Sha256::digest(&content));
+        oids.push(oid);
+        contents.push(content);
+    }
+
+    // Upload all 10
+    for (oid, content) in oids.iter().zip(contents.iter()) {
+        let resp = client
+            .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(content.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "upload {oid}");
+    }
+
+    // Delete files 0-8 (9 files), keep file 9
+    for i in 0..9 {
+        let del = client
+            .delete(format!("{base_url}/v1/lfs/objects/{}", oids[i]))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(del.status(), 202, "delete file {i}");
+    }
+
+    // Verify file 9 (the last one) still works
+    let get_last = client
+        .get(format!("{base_url}/v1/lfs/objects/{}", oids[9]))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_last.status(), 200, "last file should still exist");
+    assert_eq!(get_last.bytes().await.unwrap().as_ref(), contents[9].as_slice());
+
+    // Verify first file is gone
+    let get_first = client
+        .get(format!("{base_url}/v1/lfs/objects/{}", oids[0]))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_first.status(), 404, "first file should be gone after delete");
+
+    server.abort();
+}
