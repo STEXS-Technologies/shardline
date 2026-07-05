@@ -4936,3 +4936,125 @@ async fn hub_dataset_and_model_operations() {
 
     server.abort();
 }
+
+fn create_hub_db(storage: &std::path::Path) {
+    let hub_root = storage.join("hub");
+    std::fs::create_dir_all(&hub_root).unwrap();
+    let conn = rusqlite::Connection::open(hub_root.join("metadata.sqlite3")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
+            repo_id TEXT PRIMARY KEY, repo_type TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 0,
+            default_branch TEXT NOT NULL, created_at_unix_seconds INTEGER NOT NULL,
+            updated_at_unix_seconds INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
+            repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
+            parent_sha TEXT, message TEXT, created_at_unix_seconds INTEGER NOT NULL,
+            PRIMARY KEY (repo_id, sha)
+        );
+        CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
+            ON shardline_hub_revisions (repo_id, ref_name);
+        CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
+            commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
+            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
+            PRIMARY KEY (commit_sha, path)
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
+            oid TEXT PRIMARY KEY, data BLOB NOT NULL, created_at_unix_seconds INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id TEXT NOT NULL,
+            url TEXT NOT NULL, events TEXT NOT NULL, secret TEXT,
+            created_at_unix_seconds INTEGER NOT NULL
+        );"
+    ).unwrap();
+}
+
+async fn start_hub_server() -> (String, String, tempfile::TempDir, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>) {
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    create_hub_db(storage.path());
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Hub].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap();
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    wait_for_health(&base_url, &client).await;
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    (base_url, token, storage, server)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_prometheus_format() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+    assert!(ct.starts_with("text/plain"));
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("# HELP"));
+    assert!(body.contains("# TYPE"));
+    assert!(body.contains("shardline_up"));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_gauge_and_histogram() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let body = client.get(format!("{base_url}/metrics")).send().await.unwrap().text().await.unwrap();
+
+    assert!(body.contains("shardline_up 1"));
+    assert!(body.contains("shardline_auth_enabled"));
+    assert!(body.contains("shardline_chunk_size_bytes"));
+    assert!(body.contains("shardline_max_request_body_bytes"));
+    assert!(body.contains("_bucket{"));
+    assert!(body.contains("_count"));
+    assert!(body.contains("_sum"));
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_auth_required() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
+        Ok(config.with_metrics_token(b"secret-metrics-token".to_vec())?)
+    }).await.unwrap();
+    let client = Client::new();
+
+    let no_auth = client.get(format!("{base_url}/metrics")).send().await.unwrap();
+    assert_eq!(no_auth.status(), 401);
+
+    let wrong = client.get(format!("{base_url}/metrics"))
+        .header("Authorization", "Bearer wrong-token")
+        .send().await.unwrap();
+    assert_eq!(wrong.status(), 401);
+
+    let ok = client.get(format!("{base_url}/metrics"))
+        .header("Authorization", "Bearer secret-metrics-token")
+        .send().await.unwrap();
+    assert_eq!(ok.status(), 200);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_counter_exists() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+
+    let body = client.get(format!("{base_url}/metrics")).send().await.unwrap().text().await.unwrap();
+
+    assert!(body.contains("shardline_upload_bytes_total"), "upload counter");
+    assert!(body.contains("shardline_download_bytes_total"), "download counter");
+    assert!(body.contains("shardline_upload_requests_total"), "upload req counter");
+    assert!(body.contains("shardline_download_requests_total"), "download req counter");
+    assert!(body.contains("shardline_range_requests_total"), "range req counter");
+
+    server.abort();
+}
