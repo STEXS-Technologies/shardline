@@ -119,7 +119,7 @@ async fn health_check_returns_200() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
     let resp = client.get(format!("{base_url}/healthz")).send().await.unwrap();
-    assert!(resp.status().is_success(), "health check failed");
+    assert_eq!(resp.status(), 200, "health check failed: {}", resp.status());
     server.abort();
 }
 
@@ -306,7 +306,8 @@ async fn lfs_batch_download_returns_actions() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "LFS batch failed: {status} body: {body:?}");
     assert!(body.get("objects").is_some(), "LFS batch response missing objects: {body:?}");
-    // Object may not exist (404 per-object) - that's expected for non-existent OIDs
+    // Object may not exist (404 per-object with error) — that's expected for non-existent OIDs
+    // The batch request itself succeeds (200) regardless of per-object status
     server.abort();
 }
 
@@ -2464,8 +2465,8 @@ async fn oci_list_tags_empty_repository() {
     assert_eq!(tags.status(), 200);
     let body: serde_json::Value = tags.json().await.unwrap();
     assert_eq!(body["name"].as_str(), Some("test-owner/test-repo"));
-    let names = body["tags"].as_array();
-    assert!(names.is_none() || names.unwrap().is_empty(), "empty repo should have no tags");
+    let names = body["tags"].as_array().expect("tags field should be an array");
+    assert!(names.is_empty(), "empty repo should have no tags, got {names:?}");
 
     server.abort();
 }
@@ -3293,7 +3294,7 @@ async fn oci_manifest_list_tags_pagination() {
     assert_eq!(tags.status(), 200);
     let body: serde_json::Value = tags.json().await.unwrap();
     let names = body["tags"].as_array().unwrap();
-    assert!(names.len() <= 2, "pagination n=2 should limit results");
+    assert_eq!(names.len(), 2, "pagination n=2 should return exactly 2 results, got {names:?}");
     assert_eq!(body["name"].as_str(), Some("test-owner/test-repo"));
 
     server.abort();
@@ -3816,9 +3817,9 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     let after_chunks = after["chunks"].as_u64().expect("chunks field missing in stats");
     let after_files = after["files"].as_u64().expect("files field missing in stats");
 
-    // Chunks should reflect the uploaded content
-    // LFS object upload stores content by hash; duplicate uploads don't create new chunks
-    assert!(after_chunks >= before_chunks, "chunks should not decrease");
+    // Dedup: uploading the same content 3 times should NOT increase chunk count
+    // The first upload creates chunks, subsequent uploads reuse them
+    assert_eq!(after_chunks, before_chunks, "dedup failed: chunks increased from {before_chunks} to {after_chunks}");
 
     server.abort();
 }
@@ -4010,7 +4011,7 @@ async fn dedup_ten_files_sharing_chunks_delete_nine() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn xet_shard_empty_rejected() {
+async fn xet_shard_empty_accepted() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
@@ -5945,7 +5946,7 @@ async fn body_limit_exact_file_size_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn body_limit_one_byte_less_rejected() {
+async fn body_limit_one_byte_over_rejected() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
         Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
     }).await.unwrap();
