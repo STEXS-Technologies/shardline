@@ -2326,3 +2326,312 @@ async fn oci_list_tags_empty_repository() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_overlapping_ranges() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = vec![0xABu8; 200];
+    let oid = hex::encode(sha2::Sha256::digest(&content));
+
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.clone())
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Range", "bytes=10-30")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), &content[10..=30]);
+
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Range", "bytes=20-50")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), &content[20..=50]);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_range_exact_chunk_boundary() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // Chunk size is 4 bytes. Create 8 bytes, request bytes 3-4 (spans boundary)
+    let content = b"abcdefgh";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    // Range exactly at chunk boundary start (byte 4 = start of chunk 2)
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Range", "bytes=4-7")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), &content[4..=7]);
+
+    // Range exactly at chunk boundary end (byte 3 = end of chunk 1)
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Range", "bytes=0-3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), &content[0..=3]);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_single_object() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"single batch object";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({
+            "operation": "download",
+            "transfers": ["basic"],
+            "objects": [{"oid": oid, "size": content.len()}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200);
+    let body: serde_json::Value = batch.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 1);
+    assert!(objects[0]["actions"].is_object(), "single object should have download actions");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_multiple_objects() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let contents: Vec<(String, Vec<u8>)> = (0..5).map(|i| {
+        let c = format!("batch object {i}");
+        let oid = hex::encode(sha2::Sha256::digest(c.as_bytes()));
+        (oid, c.into_bytes())
+    }).collect();
+
+    for (oid, bytes) in &contents {
+        client
+            .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(bytes.clone())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let objects: Vec<serde_json::Value> = contents.iter().map(|(oid, bytes)| {
+        serde_json::json!({"oid": oid, "size": bytes.len()})
+    }).collect();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({
+            "operation": "download",
+            "transfers": ["basic"],
+            "objects": objects,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200);
+    let body: serde_json::Value = batch.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 5, "all 5 objects should be in response");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_unknown_transfer_adapter_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({
+            "operation": "download",
+            "transfers": ["unknown-adapter"],
+            "objects": [],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 422, "unknown transfer should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_empty_objects_array() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({
+            "operation": "download",
+            "transfers": ["basic"],
+            "objects": [],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200, "empty objects array should be accepted");
+    let body: serde_json::Value = batch.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    assert!(objects.is_empty(), "empty request should return empty response");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_missing_required_fields_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({
+            "objects": [],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 422, "missing operation should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_invalid_json_body_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .body("not valid json".to_owned())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 400, "invalid JSON body should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_excessive_cardinality_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let objects: Vec<serde_json::Value> = (0..2000).map(|i| {
+        serde_json::json!({"oid": format!("{i:064x}"), "size": 1})
+    }).collect();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({
+            "operation": "download",
+            "transfers": ["basic"],
+            "objects": objects,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 422, "excessive batch cardinality should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_hash_mismatch_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"actual content here";
+    let wrong_oid = hex::encode(sha2::Sha256::digest(b"different content"));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{wrong_oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 400, "hash mismatch should return 400");
+
+    server.abort();
+}
