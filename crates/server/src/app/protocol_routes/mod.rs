@@ -3,7 +3,7 @@ mod lfs;
 pub(super) mod oci;
 
 pub(crate) use bazel::{bazel_get_ac, bazel_get_cas, bazel_put_ac, bazel_put_cas};
-pub(crate) use lfs::{lfs_batch, lfs_get_object, lfs_head_object, lfs_put_object};
+pub(crate) use lfs::{lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_put_object};
 pub(crate) use oci::parse_oci_path;
 pub(crate) use oci::{
     oci_api_dispatch, oci_dispatch, oci_registry_token, oci_transfer_dispatch, oci_v2_root,
