@@ -49,8 +49,8 @@ use operational::{
     upload_xorb,
 };
 use protocol_routes::{
-    bazel_get_ac, bazel_get_cas, bazel_put_ac, bazel_put_cas, lfs_batch, lfs_get_object,
-    lfs_head_object, lfs_put_object, oci_api_dispatch, oci_dispatch, oci_registry_token,
+    bazel_get_ac, bazel_get_cas, bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object,
+    lfs_get_object, lfs_head_object, lfs_put_object, oci_api_dispatch, oci_dispatch, oci_registry_token,
     oci_transfer_dispatch, oci_v2_root,
 };
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -296,11 +296,12 @@ fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
         app = app.route("/v1/lfs/objects/batch", post(lfs_batch));
     }
     if role.serves_transfer() {
-        app = app.route(
+        app = app        .route(
             "/v1/lfs/objects/{oid}",
             get(lfs_get_object)
                 .head(lfs_head_object)
-                .put(lfs_put_object),
+                .put(lfs_put_object)
+                .delete(lfs_delete_object),
         );
     }
     app

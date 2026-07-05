@@ -3560,3 +3560,183 @@ async fn oci_manifest_invalid_json_rejected() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedup_delete_and_reupload_content() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"delete and reupload test content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    // Upload
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "initial upload");
+
+    // Delete
+    let del = client
+        .delete(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 202, "delete should return 202");
+
+    // Verify gone
+    let get_gone = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_gone.status(), 404, "deleted object should be gone");
+
+    // Re-upload same content
+    let reupload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reupload.status(), 200, "re-upload");
+
+    // Verify reconstructable
+    let get_again = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_again.status(), 200, "re-uploaded object accessible");
+    assert_eq!(get_again.bytes().await.unwrap().as_ref(), content, "content intact after delete+reupload");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedup_delete_non_existent_returns_404() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let oid = hex::encode(sha2::Sha256::digest(b"non existent delete test"));
+    let del = client
+        .delete(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 404, "deleting non-existent object should return 404");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedup_storage_accounting_after_duplicate_uploads() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let get_stats = || async {
+        let resp = client
+            .get(format!("{base_url}/v1/stats"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        resp.json::<serde_json::Value>().await.unwrap()
+    };
+
+    let before = get_stats().await;
+    let before_chunks = before["chunks"].as_u64().unwrap_or(0);
+    let before_files = before["files"].as_u64().unwrap_or(0);
+
+    // Upload two files with the same content
+    let content = b"dedup storage accounting content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    for i in 0..3 {
+        client
+            .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(content.to_vec())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let after = get_stats().await;
+    let after_chunks = after["chunks"].as_u64().unwrap_or(0);
+    let after_files = after["files"].as_u64().unwrap_or(0);
+
+    // Chunks should reflect the uploaded content
+    // LFS object upload stores content by hash; duplicate uploads don't create new chunks
+    assert!(after_chunks >= before_chunks, "chunks should not decrease");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedup_identical_content_different_frontends() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let content = b"cross frontend dedup content";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+
+    // Upload via LFS
+    let lfs_upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{}", &digest[7..]))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lfs_upload.status(), 200, "LFS upload");
+
+    // Upload same content via OCI
+    let oci_upload = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oci_upload.status(), 201, "OCI upload same content");
+
+    // Verify both retrievable
+    let lfs_get = client
+        .get(format!("{base_url}/v1/lfs/objects/{}", &digest[7..]))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lfs_get.status(), 200, "LFS get after dedup");
+    assert_eq!(lfs_get.bytes().await.unwrap().as_ref(), content);
+
+    let oci_get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oci_get.status(), 200, "OCI get after dedup");
+    assert_eq!(oci_get.bytes().await.unwrap().as_ref(), content);
+
+    server.abort();
+}

@@ -12,6 +12,7 @@ use axum::{
 };
 use serde_json::json;
 use shardline_protocol::TokenScope;
+use shardline_storage::DeleteOutcome;
 
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
@@ -186,4 +187,18 @@ pub(crate) async fn lfs_put_object(
         .put_sha256_addressed_object_stream_if_absent(&object_key, &oid, body)
         .await?;
     Ok(StatusCode::OK)
+}
+
+#[tracing::instrument(skip(state, headers))]
+pub(crate) async fn lfs_delete_object(
+    State(state): State<Arc<AppState>>,
+    Path(oid): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ServerError> {
+    let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let object_key = lfs_object_key(&oid, auth.as_ref().map(scope_from_auth))?;
+    match state.backend.delete_object_if_present(&object_key).await? {
+        DeleteOutcome::Deleted => Ok(StatusCode::ACCEPTED),
+        DeleteOutcome::NotFound => Err(ServerError::NotFound),
+    }
 }
