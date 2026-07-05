@@ -336,3 +336,136 @@ async fn lfs_head_non_existent_object() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_binary_content_with_null_bytes() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content: Vec<u8> = (0..255).cycle().take(4096).collect();
+    let oid = hex::encode(sha2::Sha256::digest(&content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "binary upload failed");
+
+    let download = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), 200, "binary download failed");
+    let downloaded = download.bytes().await.unwrap();
+    assert_eq!(downloaded.as_ref(), content.as_slice(), "binary round trip mismatch");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_empty_content_round_trip() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content: Vec<u8> = vec![];
+    let oid = hex::encode(sha2::Sha256::digest(&content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "empty upload failed: {}", upload.status());
+
+    let download = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), 200, "empty download failed");
+    let downloaded = download.bytes().await.unwrap();
+    assert!(downloaded.is_empty(), "downloaded empty content should be empty");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_get_returns_application_octet_stream_content_type() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"content type test";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.test+json")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "upload failed");
+
+    let download = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), 200, "download failed");
+    let ct = download.headers().get("content-type").and_then(|v| v.to_str().ok());
+    assert!(ct.is_some(), "content-type header missing on GET");
+    // LFS objects always return application/octet-stream
+    assert_eq!(ct.unwrap(), "application/octet-stream", "LFS content-type should be octet-stream");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_get_returns_content_digest_header() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"digest test content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "text/plain")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "upload failed");
+
+    let download = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), 200, "download failed");
+    let digest = download.headers().get("Docker-Content-Digest").and_then(|v| v.to_str().ok());
+    assert!(digest.is_some(), "Docker-Content-Digest header missing on GET");
+    let digest = digest.unwrap();
+    assert!(!digest.is_empty(), "digest should not be empty");
+    assert_eq!(digest, format!("sha256:{oid}"), "digest should match expected format");
+
+    server.abort();
+}
