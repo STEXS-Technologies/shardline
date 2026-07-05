@@ -704,7 +704,9 @@ async fn local_backend_ready_fails_when_local_chunk_root_is_missing() {
 
     let ready = backend.ready().await;
 
-    assert!(ready.is_err());
+    assert!(ready.is_ok(), "ready() should recreate missing chunk root");
+    let chunks_exist = fs::metadata(temp.path().join("chunks")).await;
+    assert!(chunks_exist.is_ok(), "chunks directory should be recreated");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

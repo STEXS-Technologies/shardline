@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-/// Repository type for Hub API.
+pub use super::hub_local_sqlite::ensure_hub_tables;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubRepoType {
     Model,

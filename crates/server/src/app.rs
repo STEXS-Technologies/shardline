@@ -387,8 +387,12 @@ fn register_hub_routes(
                 if let Err(e) = std::fs::create_dir_all(&hub_root) {
                     tracing::warn!("failed to create hub directory: {e}");
                 }
-                let sqlite_store = shardline_index::LocalIndexStore::new(hub_root)
+                let sqlite_store = shardline_index::LocalIndexStore::new(hub_root.clone())
                     .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
+                // Ensure hub-specific tables exist
+                if let Err(e) = shardline_index::hub::ensure_hub_tables(&hub_root) {
+                    tracing::warn!("failed to create hub tables: {e}");
+                }
                 Ok(shardline_index::hub::BoxedHubStore::from_store(
                     sqlite_store,
                 ))
