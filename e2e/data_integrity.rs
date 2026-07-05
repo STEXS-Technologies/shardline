@@ -567,15 +567,12 @@ async fn lfs_range_request_beyond_end_returns_416() {
     server.abort();
 }
 
-// NOTE: Suffix ranges (bytes=-N) are not supported by the server's range
-// parser (parse_http_byte_range rejects suffix syntax as InvalidSyntax).
-// This is a spec compliance gap per RFC 7233 section 2.1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_suffix_range_returns_400_known_limitation() {
+async fn lfs_suffix_range_returns_last_n_bytes() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let content = b"test content";
+    let content = b"test content for suffix range verification";
     let oid = hex::encode(sha2::Sha256::digest(content));
     let upload = client
         .put(format!("{base_url}/v1/lfs/objects/{oid}"))
@@ -593,6 +590,9 @@ async fn lfs_suffix_range_returns_400_known_limitation() {
         .send()
         .await
         .unwrap();
-    assert_eq!(download.status(), 400, "suffix range returns 400 (known bug - should be 206)");
+    assert_eq!(download.status(), 206, "suffix range should return 206 Partial Content");
+    let body = download.bytes().await.unwrap();
+    let expected = &content[content.len() - 10..];
+    assert_eq!(body.as_ref(), expected, "suffix range bytes mismatch");
     server.abort();
 }

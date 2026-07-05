@@ -157,7 +157,16 @@ pub fn parse_http_byte_range(
         return Err(HttpRangeParseError::InvalidSyntax);
     };
     if raw_start.is_empty() {
-        return Err(HttpRangeParseError::InvalidSyntax);
+        // Suffix range: bytes=-N (last N bytes)
+        let suffix_len = raw_end
+            .parse::<u64>()
+            .map_err(|_error| HttpRangeParseError::InvalidNumber)?;
+        if suffix_len == 0 {
+            return Err(HttpRangeParseError::InvalidSyntax);
+        }
+        let start = resource_length.saturating_sub(suffix_len);
+        let end = resource_length.saturating_sub(1);
+        return ByteRange::new(start, end).map_err(|_error| HttpRangeParseError::InvalidSyntax);
     }
 
     let start = raw_start
@@ -292,10 +301,6 @@ mod tests {
             Err(HttpRangeParseError::MissingBytesUnit)
         );
         assert_eq!(
-            parse_http_byte_range("bytes=-10", 10),
-            Err(HttpRangeParseError::InvalidSyntax)
-        );
-        assert_eq!(
             parse_http_byte_range("bytes=1-2,4-5", 10),
             Err(HttpRangeParseError::InvalidSyntax)
         );
@@ -314,11 +319,23 @@ mod tests {
     }
 
     #[test]
-    fn http_byte_range_rejects_suffix_and_multi_range_forms() {
+    fn http_byte_range_accepts_suffix_and_rejects_multi_range_forms() {
+        let suffix = parse_http_byte_range("bytes=-1", 10);
+        let expected = ByteRange::new(9, 9);
+        assert!(expected.is_ok());
         assert_eq!(
-            parse_http_byte_range("bytes=-1", 10),
-            Err(HttpRangeParseError::InvalidSyntax)
+            suffix,
+            expected.map_err(|_error| HttpRangeParseError::InvalidSyntax)
         );
+
+        let suffix_large = parse_http_byte_range("bytes=-100", 50);
+        let expected_large = ByteRange::new(0, 49);
+        assert!(expected_large.is_ok());
+        assert_eq!(
+            suffix_large,
+            expected_large.map_err(|_error| HttpRangeParseError::InvalidSyntax)
+        );
+
         assert_eq!(
             parse_http_byte_range("bytes=0-0,1-1", 10),
             Err(HttpRangeParseError::InvalidSyntax)
