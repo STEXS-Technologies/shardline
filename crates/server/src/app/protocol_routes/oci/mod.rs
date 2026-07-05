@@ -129,6 +129,7 @@ async fn oci_dispatch_parsed(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_LENGTH, total_length.to_string())
+                .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
                 .header("Docker-Content-Digest", format!("sha256:{digest_hex}"))
                 .body(Body::empty())
                 .map_err(|_error| ServerError::Overflow)?)
