@@ -3,16 +3,17 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use reqwest::Client;
 use sha2::Digest;
-use shardline_server::{ServerConfig, ServerFrontend, ServerRole, serve_with_listener};
+use shardline_server::{LocalGcOptions, ServerConfig, ServerFrontend, ServerRole, serve_with_listener};
 use tokio::net::TcpListener;
 
 async fn start_server() -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
-    start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp]).await
+    start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await
 }
 
 async fn start_server_with(
     role: Option<ServerRole>,
     frontends: &[ServerFrontend],
+    modify_config: impl FnOnce(ServerConfig) -> Result<ServerConfig, Box<dyn std::error::Error>>,
 ) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
     let storage = tempfile::tempdir()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
@@ -36,6 +37,7 @@ async fn start_server_with(
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
     )?;
+    let config = modify_config(config)?;
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     let client = Client::new();
     for _attempt in 0..50 {
@@ -150,7 +152,7 @@ async fn xet_write_token_issuance_succeeds() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_when_role_api_only() {
-    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet]).await.unwrap();
+    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], |c| Ok(c)).await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -178,7 +180,7 @@ async fn xet_routes_disabled_when_role_api_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_when_role_transfer_only() {
-    let (base_url, server) = start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Xet]).await.unwrap();
+    let (base_url, server) = start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Xet], |c| Ok(c)).await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -206,7 +208,7 @@ async fn xet_routes_disabled_when_role_transfer_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_without_xet_frontend() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp]).await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -235,7 +237,7 @@ async fn xet_routes_disabled_without_xet_frontend() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_routes_disabled_without_lfs_frontend() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci, ServerFrontend::BazelHttp]).await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -4640,6 +4642,297 @@ async fn oci_blob_delete_non_existent() {
         .await
         .unwrap();
     assert_eq!(del.status(), 404, "DELETE non-existent blob should return 404");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_objects_survive_gc_when_referenced() {
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    ).unwrap();
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    wait_for_health(&base_url, &client).await;
+
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let content = b"gc-test-object-content";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    server.abort();
+
+    let gc_options = shardline_server::LocalGcOptions {
+        mark: true,
+        sweep: true,
+        retention_seconds: 0,
+    };
+    let report = shardline_server::run_gc(
+        ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            "http://gc.local".to_owned(),
+            storage.path().to_path_buf(),
+            NonZeroUsize::new(4).unwrap(),
+        )
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap(),
+        gc_options,
+    )
+    .await
+    .unwrap();
+
+    let listener2 = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let base_url2 = format!("http://{addr2}");
+    let config2 = ServerConfig::new(
+        addr2,
+        base_url2.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
+    .with_provider_runtime(
+        write_provider_config(storage.path()).unwrap(),
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    ).unwrap();
+    let server2 = tokio::spawn(async { shardline_server::serve_with_listener(config2, listener2).await });
+    wait_for_health(&base_url2, &client).await;
+
+    let get = client
+        .get(format!("{base_url2}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200, "LFS object should survive GC when referenced");
+
+    server2.abort();
+}
+
+async fn wait_for_health(base_url: &str, client: &Client) {
+    for _attempt in 0..50 {
+        if let Ok(resp) = client.get(format!("{base_url}/healthz")).send().await {
+            if resp.status().is_success() {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("server did not become healthy at {base_url}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_upload_session_ttl_expiration() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |config| {
+        Ok(config.with_oci_upload_session_ttl_seconds(NonZeroU64::new(1).unwrap()))
+    })
+    .await
+    .unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let create = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 202, "session creation should succeed");
+    let location = create
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_owned();
+    let upload_url = format!("{base_url}{location}");
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let get = client
+        .get(&upload_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 404, "expired session should return 404");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_upload_max_active_sessions_rejected() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |config| {
+        Ok(config.with_oci_upload_max_active_sessions(NonZeroUsize::new(1).unwrap()))
+    })
+    .await
+    .unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let first = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 202, "first session should succeed");
+    let location = first
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_owned();
+    let _first_url = format!("{base_url}{location}");
+
+    let second = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 429, "second session should be rejected with 429");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_dataset_and_model_operations() {
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let hub_root = storage.path().join("hub");
+    std::fs::create_dir_all(&hub_root).unwrap();
+    let conn = rusqlite::Connection::open(hub_root.join("metadata.sqlite3")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
+            repo_id TEXT PRIMARY KEY,
+            repo_type TEXT NOT NULL CHECK (repo_type IN ('model', 'dataset', 'space')),
+            private INTEGER NOT NULL DEFAULT 0 CHECK (private IN (0, 1)),
+            default_branch TEXT NOT NULL,
+            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
+            updated_at_unix_seconds INTEGER NOT NULL CHECK (updated_at_unix_seconds >= 0)
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
+            repo_id TEXT NOT NULL,
+            ref_name TEXT NOT NULL,
+            sha TEXT NOT NULL,
+            parent_sha TEXT,
+            message TEXT,
+            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
+            PRIMARY KEY (repo_id, sha),
+            FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
+            ON shardline_hub_revisions (repo_id, ref_name);
+        CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
+            commit_sha TEXT NOT NULL,
+            path TEXT NOT NULL,
+            size INTEGER NOT NULL CHECK (size >= 0),
+            sha TEXT NOT NULL,
+            is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
+            inline_content BLOB,
+            PRIMARY KEY (commit_sha, path)
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
+            oid TEXT PRIMARY KEY,
+            data BLOB NOT NULL,
+            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0)
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id TEXT NOT NULL REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE,
+            url TEXT NOT NULL,
+            events TEXT NOT NULL,
+            secret TEXT,
+            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0)
+        );"
+    ).unwrap();
+    drop(conn);
+
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+    .with_server_frontends([ServerFrontend::Hub].iter().copied()).unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    ).unwrap();
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    wait_for_health(&base_url, &client).await;
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+
+    let create_dataset = client
+        .post(format!("{base_url}/api/repos/create"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
+        .send().await.unwrap();
+    assert_eq!(create_dataset.status(), 201, "dataset repo creation: {}", create_dataset.text().await.unwrap_or_default());
+
+    let parquet = client
+        .get(format!("{base_url}/api/datasets/test-owner/test-dataset/parquet"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert!(parquet.status() == 404 || parquet.status() == 200, "parquet: {}", parquet.status());
+
+    let create_model = client
+        .post(format!("{base_url}/api/repos/create"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"name": "test-owner/test-model", "type": "model", "private": false}))
+        .send().await.unwrap();
+    assert_eq!(create_model.status(), 201, "model repo creation");
+
+    let modelcard = client
+        .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert!(modelcard.status() == 200 || modelcard.status() == 404, "modelcard: {}", modelcard.status());
+
+    for url in [
+        format!("{base_url}/datasets/test-owner/test-dataset/resolve/main/nonexistent.parquet"),
+        format!("{base_url}/models/test-owner/test-model/resolve/main/model.bin"),
+    ] {
+        let resp = client.get(&url).header("Authorization", format!("Bearer {token}")).send().await.unwrap();
+        assert_eq!(resp.status(), 404, "non-existent resolve: {url}");
+    }
 
     server.abort();
 }
