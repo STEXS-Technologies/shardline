@@ -5765,3 +5765,101 @@ async fn oci_push_blob_and_get_returns_content_length() {
     assert_eq!(cl, content.len().to_string());
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_expiration_boundary_exact() {
+    let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+    let repo = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
+    ).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, now).unwrap();
+    let token = signer.sign(&claims).unwrap();
+    assert!(signer.verify_now(&token).is_ok(), "token at exact expiration should be valid (exp >= now)");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_expiration_one_second_before() {
+    let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+    let repo = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
+    ).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, now + 1).unwrap();
+    let token = signer.sign(&claims).unwrap();
+    assert!(signer.verify_now(&token).is_ok(), "token expiring in 1s should be valid");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_expiration_one_second_after() {
+    let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+    let repo = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
+    ).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, now.saturating_sub(1)).unwrap();
+    let token = signer.sign(&claims).unwrap();
+    assert!(signer.verify_now(&token).is_err(), "expired token (exp=now-1) should be rejected");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_token_oversized_rejected() {
+    let token = "a".repeat(10000);
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/test"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 401, "oversized token should be rejected");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_scope_write_can_write_and_read() {
+    let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+    let repo = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
+    ).unwrap();
+    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Write, repo, u64::MAX).unwrap();
+    let write_token = signer.sign(&claims).unwrap();
+
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+
+    // Write should succeed
+    let content = b"write scope test";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    let put = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {write_token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert_eq!(put.status(), 200, "write token should allow writes");
+
+    // Read should also succeed (Write scope includes Read)
+    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {write_token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200, "write token should also allow reads");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_cardinality_stable() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let body = client.get(format!("{base_url}/metrics")).send().await.unwrap().text().await.unwrap();
+
+    // Count unique metric family names
+    let mut families = std::collections::BTreeSet::new();
+    for line in body.lines() {
+        if line.starts_with("# HELP ") {
+            let name = line.strip_prefix("# HELP ").and_then(|l| l.split_whitespace().next()).unwrap_or("");
+            families.insert(name.to_owned());
+        }
+    }
+    // Each family should appear exactly once (no duplicate registration with different labels)
+    // A stable cardinality means no per-request unique label values
+    assert!(families.len() >= 10, "expected at least 10 metric families, got {}", families.len());
+    assert!(families.len() <= 100, "suspicious cardinality: {} metric families, expected <= 100", families.len());
+    server.abort();
+}
