@@ -349,9 +349,8 @@ async fn request_body_too_large_returns_413() {
         .send()
         .await
         .unwrap();
-    // 413 or 401 (auth first, then size check)
     let status = resp.status();
-    assert!(status == 413 || status == 401, "expected 413 or 401, got {status}");
+    assert_eq!(status, 413, "expected 413 for oversized body, got {status}");
     server.abort();
 }
 
@@ -834,15 +833,13 @@ async fn lfs_empty_range_returns_416() {
         .send()
         .await
         .unwrap();
-    // bytes=10-9 is syntactically invalid (start > end), returns 400
-    assert!(resp.status().as_u16() == 400 || resp.status().as_u16() == 416,
-        "invalid range should return 400 or 416, got {}", resp.status());
+    assert_eq!(resp.status(), 400, "start > end should return 400, got {}", resp.status());
 
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_range_with_negative_start_returns_416() {
+async fn lfs_range_with_negative_start_returns_400() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
@@ -3553,16 +3550,8 @@ async fn oci_delete_blob_referenced_rejected() {
         .send()
         .await
         .unwrap();
-    // OCI spec: deleting a referenced blob SHOULD be rejected (400/409)
-    // Current implementation: accepts 202 (TODO: add reference checking)
-    // Once reference checking is implemented, change this assertion to 400 or 409
-    if del.status() == 202 {
-        // Blob deleted despite being referenced — spec deviation, tracked in todo
-        eprintln!("WARN: referenced blob deletion accepted (202), should reject per OCI spec");
-    } else {
-        assert!(del.status() == 409 || del.status() == 400,
-            "deleting referenced blob should be rejected, got {}", del.status());
-    }
+    // OCI spec: deleting a referenced blob MUST be rejected (400)
+    assert_eq!(del.status(), 400, "deleting referenced blob should be rejected, got {}", del.status());
 
     // Verify blob still exists
     let get = client
@@ -3805,8 +3794,8 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     };
 
     let before = get_stats().await;
-    let before_chunks = before["chunks"].as_u64().unwrap_or(0);
-    let before_files = before["files"].as_u64().unwrap_or(0);
+    let before_chunks = before["chunks"].as_u64().expect("chunks field missing in stats");
+    let before_files = before["files"].as_u64().expect("files field missing in stats");
 
     // Upload two files with the same content
     let content = b"dedup storage accounting content";
@@ -3824,8 +3813,8 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     }
 
     let after = get_stats().await;
-    let after_chunks = after["chunks"].as_u64().unwrap_or(0);
-    let after_files = after["files"].as_u64().unwrap_or(0);
+    let after_chunks = after["chunks"].as_u64().expect("chunks field missing in stats");
+    let after_files = after["files"].as_u64().expect("files field missing in stats");
 
     // Chunks should reflect the uploaded content
     // LFS object upload stores content by hash; duplicate uploads don't create new chunks
@@ -4040,34 +4029,30 @@ async fn xet_shard_empty_rejected() {
         .send()
         .await
         .unwrap();
-    // Empty shard (0 files, 0 xorbs) is technically valid but contains no data
-    // Server accepts it (200) or may reject it depending on validation rules
-    assert!(resp.status().is_success() || resp.status() == 400,
-        "empty shard: expected 2xx or 400, got {}", resp.status());
+    assert!(resp.status().is_success(), "empty shard upload: expected 2xx, got {}", resp.status());
 
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_push_blob_exceeds_max_body() {
-    let (base_url, server) = start_server().await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |config| {
+        Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
+    }).await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let repo = "test-owner/test-repo";
 
-    // Create a body larger than the max request body size
-    // Note: server may reject with 413 (body too large) or 400 (other validation first)
-    let large_content = vec![0xABu8; 50_000_000];
+    let large_content = vec![0xABu8; 200];
 
     let post = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={}", hex::encode(sha2::Sha256::digest(&large_content))))
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest=sha256:{}", hex::encode(sha2::Sha256::digest(&large_content))))
         .header("Authorization", format!("Bearer {token}"))
         .body(large_content)
         .send()
         .await
         .unwrap();
-    assert!(post.status() == 413 || post.status() == 400,
-        "oversized blob should be rejected (413 or 400), got {}", post.status());
+    assert_eq!(post.status(), 413, "oversized blob should get 413, got {}", post.status());
 
     server.abort();
 }
@@ -4395,9 +4380,8 @@ async fn oci_anonymous_pull_allowed() {
         .send()
         .await
         .unwrap();
-    // No auth → either 401 (Unauthorized) or 404 (not found). Either is valid behavior.
-    assert!(resp.status() == 401 || resp.status() == 404,
-        "anonymous pull should return 401 or 404, got {}", resp.status());
+    // Anonymous access: server requires auth, returns 401
+    assert_eq!(resp.status(), 401, "anonymous pull should return 401, got {}", resp.status());
 
     server.abort();
 }
@@ -4451,12 +4435,14 @@ async fn oci_docker_schema2_manifest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bazel_put_oversized_body_rejected() {
-    let (base_url, server) = start_server().await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::BazelHttp], |config| {
+        Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
+    }).await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
     let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let big_body = vec![0u8; 68_000_000];
+    let big_body = vec![0u8; 200];
 
     let put = client
         .put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
@@ -4861,7 +4847,7 @@ async fn hub_dataset_and_model_operations() {
         .get(format!("{base_url}/api/datasets/test-owner/test-dataset/parquet"))
         .header("Authorization", format!("Bearer {token}"))
         .send().await.unwrap();
-    assert!(parquet.status() == 404 || parquet.status() == 200, "parquet: {}", parquet.status());
+    assert_eq!(parquet.status(), 200, "parquet on empty repo: {}", parquet.status());
 
     let create_model = client
         .post(format!("{base_url}/api/repos/create"))
@@ -4874,7 +4860,7 @@ async fn hub_dataset_and_model_operations() {
         .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
         .header("Authorization", format!("Bearer {token}"))
         .send().await.unwrap();
-    assert!(modelcard.status() == 200 || modelcard.status() == 404, "modelcard: {}", modelcard.status());
+    assert_eq!(modelcard.status(), 404, "modelcard on empty repo: {}", modelcard.status());
 
     for url in [
         format!("{base_url}/datasets/test-owner/test-dataset/resolve/main/nonexistent.parquet"),
@@ -5559,7 +5545,7 @@ async fn oci_manifest_push_invalid_media_type() {
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.unknown")
         .body(bytes).send().await.unwrap();
-    assert!(resp.status() == 400 || resp.status() == 404, "invalid media type: {}", resp.status());
+    assert_eq!(resp.status(), 400, "invalid media type should return 400, got {}", resp.status());
     server.abort();
 }
 
@@ -5622,7 +5608,7 @@ async fn lfs_batch_oversized_objects_field() {
         .header("Content-Type", "application/vnd.git-lfs+json")
         .json(&serde_json::json!({"operation": "download", "objects": many_objects, "transfers": ["basic"]}))
         .send().await.unwrap();
-    assert!(resp.status() == 422 || resp.status() == 200, "200 objects: {}", resp.status());
+    assert_eq!(resp.status(), 200, "200 objects within limit: {}", resp.status());
     server.abort();
 }
 
@@ -5652,7 +5638,7 @@ async fn oci_manifest_push_missing_config() {
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
         .body(bytes).send().await.unwrap();
-    assert!(resp.status() == 400 || resp.status() == 404, "no config: {}", resp.status());
+    assert_eq!(resp.status(), 400, "missing config should return 400, got {}", resp.status());
     server.abort();
 }
 
