@@ -568,7 +568,6 @@ async fn lfs_frontend_batch_reports_stored_object_size() -> Result<(), Box<dyn S
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "pre-existing failure — shard format parsing issue, needs investigation"]
 async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
 -> Result<(), Box<dyn StdError>> {
     let runtime = start_protocol_runtime(&[
@@ -674,10 +673,16 @@ async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
     let shard_upload = client
         .post(format!("{}/v1/shards", runtime.base_url()))
         .bearer_auth(&write_token)
-        .body(shard_body)
+        .header("Content-Type", "application/octet-stream")
+        .body(shard_body.to_vec())
         .send()
         .await?;
-    assert!(shard_upload.status().is_success());
+    let shard_status = shard_upload.status();
+    let shard_body_text = shard_upload.text().await?;
+    assert!(
+        shard_status.is_success(),
+        "shard upload failed: {shard_status} body: {shard_body_text}"
+    );
 
     let reconstruction = client
         .get(format!(

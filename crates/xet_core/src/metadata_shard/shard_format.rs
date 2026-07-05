@@ -207,12 +207,14 @@ impl MDBShardInfo {
         for file_info in &file_infos {
             file_info.serialize(writer)?;
         }
+        FileDataSequenceHeader::bookend().serialize(writer)?;
 
         for xorb_info in &xorb_infos {
             xorb_info.serialize(writer)?;
         }
+        XorbChunkSequenceHeader::bookend().serialize(writer)?;
 
-        // Write footer
+        // Write footer (for backward compatibility with code that reads it)
         footer.file_info_offset = MDBShardFileHeader::default()
             .serialize(&mut std::io::sink())
             .unwrap_or(0) as u64;

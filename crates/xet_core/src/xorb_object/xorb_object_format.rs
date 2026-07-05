@@ -635,18 +635,19 @@ impl SerializedXorbObject {
         let raw_num_bytes = xorb.num_bytes() as u64;
         let num_chunks = xorb.data.len();
 
-        let chunks_and_boundaries = xorb.xorb_info.chunks_and_boundaries();
-
-        xorb_object_info.num_chunks = chunks_and_boundaries.len() as u32;
+        xorb_object_info.num_chunks = xorb.data.len() as u32;
         xorb_object_info.chunk_boundary_offsets =
             Vec::with_capacity(xorb_object_info.num_chunks as usize);
-        xorb_object_info.chunk_hashes = chunks_and_boundaries
+        xorb_object_info.chunk_hashes = xorb
+            .data
             .iter()
-            .map(|(hash, _)| *hash)
+            .map(|chunk_data| crate::merklehash::compute_data_hash(chunk_data))
             .collect();
-        xorb_object_info.unpacked_chunk_offsets = chunks_and_boundaries
+        xorb_object_info.unpacked_chunk_offsets = xorb
+            .xorb_info
+            .chunk_boundaries
             .iter()
-            .map(|(_, unpacked_chunk_boundary)| *unpacked_chunk_boundary)
+            .copied()
             .collect();
 
         let size_upper_bound = xorb.num_bytes()
