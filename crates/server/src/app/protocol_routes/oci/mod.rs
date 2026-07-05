@@ -17,7 +17,11 @@ use axum::{
 };
 use shardline_protocol::TokenScope;
 
-use crate::ServerError;
+use crate::{
+    ServerError,
+    oci_adapter::{oci_blob_key, parse_reference},
+};
+use shardline_storage::DeleteOutcome;
 
 use super::{AppState, direct_object_response, scope_from_auth};
 use blob_upload::{
@@ -196,8 +200,38 @@ async fn oci_dispatch_parsed(
                 reference,
             },
         ) => oci_delete_manifest(state, &headers, &repository, &reference).await,
+        (
+            Method::DELETE,
+            OciPath::Blob {
+                repository,
+                digest_hex,
+            },
+        ) => oci_delete_blob(state, &headers, &repository, &digest_hex).await,
         _ => Err(ServerError::NotFound),
     }
+}
+
+async fn oci_delete_blob(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    repository: &str,
+    digest_hex: &str,
+) -> Result<Response, ServerError> {
+    let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
+    let scope = auth.as_ref().map(scope_from_auth);
+    let object_key = oci_blob_key(repository, digest_hex, scope)?;
+    match state
+        .backend
+        .delete_object_if_present(&object_key)
+        .await?
+    {
+        DeleteOutcome::Deleted => {}
+        DeleteOutcome::NotFound => return Err(ServerError::NotFound),
+    }
+    Ok(Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .body(Body::empty())
+        .map_err(|_error| ServerError::Overflow)?)
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -210,6 +244,7 @@ fn oci_route_served_by_api(method: &Method, path: &OciPath) -> bool {
         ) | (&Method::HEAD, OciPath::Manifest { .. })
             | (&Method::PUT, OciPath::Manifest { .. })
             | (&Method::DELETE, OciPath::Manifest { .. })
+            | (&Method::DELETE, OciPath::Blob { .. })
     )
 }
 
