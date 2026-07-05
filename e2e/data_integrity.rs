@@ -2635,3 +2635,249 @@ async fn lfs_upload_hash_mismatch_rejected() {
 
     server.abort();
 }
+
+async fn upload_xorb(client: &Client, base_url: &str, token: &str, content: &[u8]) -> String {
+    let (xorb, hash) = shardline_server::test_fixtures::single_chunk_xorb(content);
+    let resp = client
+        .post(format!("{base_url}/v1/xorbs/default/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(xorb.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "xorb upload failed for hash {hash}");
+    hash
+}
+
+async fn upload_shard(client: &Client, base_url: &str, token: &str, parts: &[(&[u8], &str)]) -> String {
+    use shardline_server::test_fixtures::single_file_shard;
+    let (shard, file_hash) = single_file_shard(parts);
+    let resp = client
+        .post(format!("{base_url}/v1/shards"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(shard.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "shard upload failed: {}", resp.status());
+    file_hash
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_write_token_uploads_xorb() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let hash = upload_xorb(&client, &base_url, &token, b"write token xorb test").await;
+    assert_eq!(hash.len(), 64, "xorb hash should be 64 hex chars");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_read_token_reconstructs_file() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let hash = upload_xorb(&client, &base_url, &token, b"read token reconstruction").await;
+    let file_hash = upload_shard(&client, &base_url, &token, &[(b"read token reconstruction", &hash)]).await;
+
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recon.status(), 200, "reconstruction should succeed");
+    let body: serde_json::Value = recon.json().await.unwrap();
+    assert!(body["terms"].is_array(), "reconstruction should have terms");
+    assert!(!body["terms"].as_array().unwrap().is_empty(), "should have at least one term");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_batch_reconstruction_single_file() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let hash = upload_xorb(&client, &base_url, &token, b"batch single recon").await;
+    let file_hash = upload_shard(&client, &base_url, &token, &[(b"batch single recon", &hash)]).await;
+
+    let batch = client
+        .get(format!("{base_url}/v1/reconstructions?file_id={file_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200, "batch reconstruction");
+    let body: serde_json::Value = batch.json().await.unwrap();
+    assert!(body["files"].is_object(), "batch response should have files map");
+    assert_eq!(body["files"].as_object().unwrap().len(), 1, "batch should return 1 file");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_batch_reconstruction_multiple_files() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let hash_a = upload_xorb(&client, &base_url, &token, b"batch multi A").await;
+    let hash_b = upload_xorb(&client, &base_url, &token, b"batch multi B").await;
+    let file_a = upload_shard(&client, &base_url, &token, &[(b"batch multi A content", &hash_a)]).await;
+    let file_b = upload_shard(&client, &base_url, &token, &[(b"batch multi B content", &hash_b)]).await;
+
+    let batch = client
+        .get(format!("{base_url}/v1/reconstructions?file_id={file_a}&file_id={file_b}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200, "batch multi reconstruction");
+    let body: serde_json::Value = batch.json().await.unwrap();
+    assert!(body["files"].is_object(), "batch response should have files map");
+    assert_eq!(body["files"].as_object().unwrap().len(), 2, "batch should return both files");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_batch_reconstruction_empty_file_id() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let batch = client
+        .get(format!("{base_url}/v1/reconstructions?file_id="))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 400, "empty file_id should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_batch_reconstruction_without_file_id() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let batch = client
+        .get(format!("{base_url}/v1/reconstructions"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200, "reconstructions without file_id");
+    let body: serde_json::Value = batch.json().await.unwrap();
+    let files = body["files"].as_object().unwrap();
+    assert!(files.is_empty(), "no file_id should return empty files map");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_batch_reconstruction_duplicate_file_id() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let hash = upload_xorb(&client, &base_url, &token, b"batch dedup recon").await;
+    let file_hash = upload_shard(&client, &base_url, &token, &[(b"batch dedup recon", &hash)]).await;
+
+    let batch = client
+        .get(format!("{base_url}/v1/reconstructions?file_id={file_hash}&file_id={file_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200, "duplicate file_id");
+    let body: serde_json::Value = batch.json().await.unwrap();
+    let files = body["files"].as_object().unwrap();
+    // Server deduplicates by file_id, so duplicates should return 1 entry
+    assert_eq!(files.len(), 1, "duplicate file_ids should be deduplicated");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_shard_single_chunk() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let hash = upload_xorb(&client, &base_url, &token, b"single chunk shard").await;
+    let file_hash = upload_shard(&client, &base_url, &token, &[(b"single chunk shard", &hash)]).await;
+    assert_eq!(file_hash.len(), 64, "file hash should be 64 hex chars");
+
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recon.status(), 200, "single chunk reconstruction");
+    let body: serde_json::Value = recon.json().await.unwrap();
+    assert_eq!(body["terms"].as_array().map(|a| a.len()), Some(1), "single chunk should have 1 term");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_shard_multiple_chunks() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let hash_a = upload_xorb(&client, &base_url, &token, b"multi chunk A").await;
+    let hash_b = upload_xorb(&client, &base_url, &token, b"multi chunk B").await;
+    let file_hash = upload_shard(&client, &base_url, &token, &[(b"multi chunk content A", &hash_a), (b"multi chunk content B", &hash_b)]).await;
+    assert_eq!(file_hash.len(), 64, "file hash should be 64 hex chars");
+
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recon.status(), 200, "multi chunk reconstruction");
+    let body: serde_json::Value = recon.json().await.unwrap();
+    assert_eq!(body["terms"].as_array().map(|a| a.len()), Some(2), "two chunks should have 2 terms");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_upload_operation() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({
+            "operation": "upload",
+            "transfers": ["basic"],
+            "objects": [{"oid": format!("{:064x}", 1), "size": 10}],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200, "upload operation batch should succeed");
+    let body: serde_json::Value = batch.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 1, "upload batch should return 1 object");
+    assert!(objects[0]["actions"].is_object(), "upload batch should include actions");
+
+    server.abort();
+}
