@@ -287,9 +287,29 @@ pub fn oci_tag_key(
     ))
 }
 
+/// Returns the object prefix for manifest digests in an OCI repository.
+///
 /// # Errors
 ///
-/// Returns an error when the repository or scope is invalid.
+/// Returns [`OciAdapterError`] when the repository name is invalid.
+pub fn oci_manifest_prefix(
+    repository: &str,
+    repository_scope: Option<&RepositoryScope>,
+) -> Result<ObjectPrefix, OciAdapterError> {
+    validate_repository(repository)?;
+    validate_oci_repository_scope(repository, repository_scope)?;
+    ObjectPrefix::parse(&format!(
+        "protocols/oci/{}/repos/{}/manifests/",
+        scope_namespace(repository_scope),
+        stable_hex_id(repository)
+    ))
+    .map_err(OciAdapterError::from)
+}
+
+/// # Errors
+///
+/// Returns [`OciAdapterError`] when the repository name is invalid or contains an
+/// unsafe path.
 pub fn oci_tag_prefix(
     repository: &str,
     repository_scope: Option<&RepositoryScope>,

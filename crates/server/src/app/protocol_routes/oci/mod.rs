@@ -16,12 +16,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use shardline_protocol::TokenScope;
+use shardline_storage::{DeleteOutcome, ObjectKey};
 
 use crate::{
     ServerError,
-    oci_adapter::{oci_blob_key, parse_reference},
+    oci_adapter::{oci_blob_key, oci_manifest_prefix},
 };
-use shardline_storage::DeleteOutcome;
 
 use super::{AppState, direct_object_response, scope_from_auth};
 use blob_upload::{
@@ -220,6 +220,26 @@ async fn oci_delete_blob(
     let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
     let scope = auth.as_ref().map(scope_from_auth);
     let object_key = oci_blob_key(repository, digest_hex, scope)?;
+
+    // Check if any manifest references this blob
+    let manifest_prefix = oci_manifest_prefix(repository, scope)?;
+    let manifest_keys: Vec<ObjectKey> = state
+        .backend
+        .list_object_flat_namespace_page(&manifest_prefix, None, 1000)?
+        .into_iter()
+        .map(|meta| meta.key().clone())
+        .collect();
+
+    for manifest_key in &manifest_keys {
+        let body = state.backend.read_object(manifest_key).await?;
+        let body_str = String::from_utf8_lossy(&body);
+        if body_str.contains(&format!("\"digest\":\"sha256:{digest_hex}\""))
+            || body_str.contains(&format!("\"digest\": \"sha256:{digest_hex}\""))
+        {
+            return Err(ServerError::InvalidManifestReference);
+        }
+    }
+
     match state
         .backend
         .delete_object_if_present(&object_key)
