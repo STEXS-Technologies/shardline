@@ -86,7 +86,6 @@ async fn repository_deleted_removes_stale_latest_without_version_record() {
     );
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() {
     let result = exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks().await;
@@ -438,11 +437,12 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
     let mut reader = Cursor::new(normalized_xorb.as_slice());
     let validated = validate_serialized_xorb(&mut reader, expected_xorb_hash)?;
     let range_end = u32::try_from(validated.chunks().len())?;
-    let mut chunk_hashes = Vec::new();
+    let mut chunk_hashes = std::collections::HashSet::new();
     try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded_chunk| {
-        chunk_hashes.push(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
+        chunk_hashes.insert(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
         Ok::<(), ServerError>(())
     })?;
+    let unique_chunk_count = u64::try_from(chunk_hashes.len())?;
     let upload = store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data)?;
     assert!(upload.was_inserted);
 
@@ -476,7 +476,7 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         apply_provider_webhook_with_stores(&record_store, &index_store, &object_store, &event)
             .await?;
     assert_eq!(outcome.affected_file_versions, 1);
-    assert_eq!(outcome.affected_chunks, u64::try_from(chunk_hashes.len())?);
+    assert_eq!(outcome.affected_chunks, unique_chunk_count);
     assert_eq!(
         outcome.applied_holds,
         u64::try_from(

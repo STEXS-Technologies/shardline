@@ -574,7 +574,6 @@ async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
     assert!(matches!(latest, Err(ServerError::NotFound)));
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects() {
     let storage = tempfile::tempdir();
@@ -633,7 +632,6 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     assert!(report.is_clean());
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_corrupt() {
     let storage = tempfile::tempdir();
