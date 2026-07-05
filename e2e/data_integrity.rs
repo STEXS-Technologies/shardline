@@ -3,24 +3,34 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use reqwest::Client;
 use sha2::Digest;
-use shardline_server::{ServerConfig, ServerFrontend, serve_with_listener};
+use shardline_server::{ServerConfig, ServerFrontend, ServerRole, serve_with_listener};
 use tokio::net::TcpListener;
 
 async fn start_server() -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
+    start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp]).await
+}
+
+async fn start_server_with(
+    role: Option<ServerRole>,
+    frontends: &[ServerFrontend],
+) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
     let storage = tempfile::tempdir()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let addr = listener.local_addr()?;
     let base_url = format!("http://{addr}");
     let config_path = write_provider_config(storage.path())?;
-    let config = ServerConfig::new(
+    let mut config = ServerConfig::new(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
-    .with_server_frontends([ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp].iter().copied())?
-    .with_provider_runtime(
+    .with_server_frontends(frontends.iter().copied())?;
+    if let Some(r) = role {
+        config = config.with_server_role(r);
+    }
+    let config = config.with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
         "test-issuer".to_owned(),
@@ -135,6 +145,120 @@ async fn xet_write_token_issuance_succeeds() {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     assert_eq!(status, 200, "token issuance failed: {status} body: {body}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_routes_disabled_when_role_api_only() {
+    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet]).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // API role serves read/write token, reconstruction, shard with provider key
+    let read_token = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_token.status(), 200, "api role should serve read token");
+
+    // Transfer routes (chunk reads/writes) should not be registered for API role
+    let chunk_read = client
+        .post(format!("{base_url}/v1/chunks/default/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chunk_read.status(), 404, "api role should not register chunk routes");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_routes_disabled_when_role_transfer_only() {
+    let (base_url, server) = start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Xet]).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // Transfer role serves chunk reads/writes
+    // POST to a GET-only chunk route should return 405 (route exists) not 404 (route missing)
+    let chunk_read = client
+        .post(format!("{base_url}/v1/chunks/default/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chunk_read.status(), 405, "transfer role should register chunk routes (POST to GET-only route returns 405)");
+
+    // API routes (read token, shard upload) should be disabled
+    let read_token = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_token.status(), 404, "transfer role should not serve read token");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_routes_disabled_without_xet_frontend() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp]).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let read_token = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_token.status(), 404, "xet routes should be 404 when xet frontend is disabled");
+
+    // LFS routes should still work
+    let lfs_batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lfs_batch.status(), 200, "lfs routes should work when xet frontend is disabled");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_routes_disabled_without_lfs_frontend() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci, ServerFrontend::BazelHttp]).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let lfs_batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lfs_batch.status(), 404, "lfs routes should be 404 when lfs frontend is disabled");
+
+    // Xet routes should still work
+    let read_token = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_token.status(), 200, "xet routes should work when lfs frontend is disabled");
+
     server.abort();
 }
 
