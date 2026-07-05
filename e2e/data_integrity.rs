@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use reqwest::Client;
+use sha2::Digest;
 use shardline_server::{ServerConfig, ServerFrontend, serve_with_listener};
 use tokio::net::TcpListener;
 
@@ -205,5 +206,133 @@ async fn request_body_too_large_returns_413() {
     // 413 or 401 (auth first, then size check)
     let status = resp.status();
     assert!(status == 413 || status == 401, "expected 413 or 401, got {status}");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_and_download_round_trip() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"hello lfs upload and download round trip test content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "LFS upload failed: {}", upload.status());
+
+    let download = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), 200, "LFS download failed: {}", download.status());
+    let downloaded = download.bytes().await.unwrap();
+    assert_eq!(downloaded.as_ref(), content, "LFS round trip bytes mismatch");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_download_large_file() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = vec![0xABu8; 65536];
+    let oid = hex::encode(sha2::Sha256::digest(&content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "LFS upload failed");
+
+    let download = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), 200, "LFS download failed");
+    let downloaded = download.bytes().await.unwrap();
+    assert_eq!(downloaded.to_vec(), content, "LFS large file round trip mismatch");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_download_non_existent_returns_404() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "expected 404 for non-existent LFS object");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_head_existing_object() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"head test content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 200, "LFS upload failed for HEAD test");
+
+    let head = client
+        .head(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200, "LFS HEAD for existing object failed");
+    assert!(head.headers().get("content-length").is_some(), "HEAD response missing content-length");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_head_non_existent_object() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let head = client
+        .head(format!("{base_url}/v1/lfs/objects/0000000000000000000000000000000000000000000000000000000000000000"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 404, "expected 404 for HEAD on non-existent LFS object");
+
     server.abort();
 }
