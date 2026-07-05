@@ -147,7 +147,7 @@ async fn xet_read_token_issuance_succeeds() {
         .await
         .unwrap();
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = resp.text().await.unwrap();
     assert_eq!(status, 200, "token issuance failed: {status} body: {body}");
     server.abort();
 }
@@ -165,7 +165,7 @@ async fn xet_write_token_issuance_succeeds() {
         .await
         .unwrap();
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = resp.text().await.unwrap();
     assert_eq!(status, 200, "token issuance failed: {status} body: {body}");
     server.abort();
 }
@@ -303,9 +303,9 @@ async fn lfs_batch_download_returns_actions() {
         .await
         .unwrap();
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    assert_eq!(status, 200, "LFS batch failed: {status} body: {body}");
-    assert!(body.contains("objects"), "LFS batch response missing objects: {body}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "LFS batch failed: {status} body: {body:?}");
+    assert!(body.get("objects").is_some(), "LFS batch response missing objects: {body:?}");
     // Object may not exist (404 per-object) - that's expected for non-existent OIDs
     server.abort();
 }
@@ -4841,7 +4841,7 @@ async fn hub_dataset_and_model_operations() {
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
         .send().await.unwrap();
-    assert_eq!(create_dataset.status(), 201, "dataset repo creation: {}", create_dataset.text().await.unwrap_or_default());
+    assert_eq!(create_dataset.status(), 201, "dataset repo creation: {}", create_dataset.text().await.unwrap());
 
     let parquet = client
         .get(format!("{base_url}/api/datasets/test-owner/test-dataset/parquet"))
@@ -4941,7 +4941,7 @@ async fn metrics_prometheus_format() {
     let client = Client::new();
     let resp = client.get(format!("{base_url}/metrics")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).expect("content-type header missing");
     assert!(ct.starts_with("text/plain"));
     let body = resp.text().await.unwrap();
     assert!(body.contains("# HELP"));
@@ -5023,7 +5023,7 @@ async fn readyz_returns_success() {
     let client = Client::new();
     let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = resp.text().await.unwrap();
     assert_eq!(status, 200, "readyz: {status} body={text}");
     let body: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(body["status"], "ok");
@@ -5221,7 +5221,7 @@ async fn lfs_upload_then_head() {
         .header("Authorization", format!("Bearer {token}"))
         .send().await.unwrap();
     assert_eq!(head.status(), 200);
-    let cl = head.headers().get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("0");
+    let cl = head.headers().get("content-length").and_then(|v| v.to_str().ok()).expect("content-length header missing on LFS HEAD");
     assert_eq!(cl, content.len().to_string());
     server.abort();
 }
@@ -5761,7 +5761,7 @@ async fn oci_push_blob_and_get_returns_content_length() {
     let resp = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
         .send().await.unwrap();
-    let cl = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("0");
+    let cl = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).expect("content-length header missing on OCI blob GET");
     assert_eq!(cl, content.len().to_string());
     server.abort();
 }
