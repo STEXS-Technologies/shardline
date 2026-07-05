@@ -145,7 +145,7 @@ impl LocalBackend {
     pub async fn ready(&self) -> Result<(), ServerError> {
         let object_store = self.object_store();
         if let Some(local_root) = object_store.local_root() {
-            ensure_directory(local_root).await?;
+            tokio::fs::create_dir_all(local_root).await?;
         } else {
             let probe_key = shardline_storage::ObjectKey::parse("health/probe")
                 .map_err(|_error| ServerError::InvalidContentHash)?;

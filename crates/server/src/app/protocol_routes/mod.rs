@@ -66,6 +66,7 @@ pub(super) async fn direct_object_response(
             .headers_mut()
             .insert("Docker-Content-Digest", digest_value);
     }
+    crate::metrics::record_download("lfs", total_length, 0.0, true);
     Ok(response)
 }
 

@@ -146,9 +146,7 @@ pub(crate) async fn oci_delete_manifest(
 ) -> Result<Response, ServerError> {
     let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
     let scope = auth.as_ref().map(scope_from_auth);
-    let crate::oci_adapter::OciReference::Digest(digest_hex) = parse_reference(reference)? else {
-        return Err(ServerError::InvalidManifestReference);
-    };
+    let digest_hex = resolve_manifest_digest(state, repository, reference, scope).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
     match state
         .backend

@@ -41,6 +41,41 @@ fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreErro
     Ok(connection)
 }
 
+/// Ensures the hub SQLite tables exist in the given root directory.
+/// Creates the database file and tables if they don't exist.
+pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = root.join("metadata.sqlite3");
+    let conn = Connection::open(&db_path)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
+            repo_id TEXT PRIMARY KEY, repo_type TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 0,
+            default_branch TEXT NOT NULL, created_at_unix_seconds INTEGER NOT NULL,
+            updated_at_unix_seconds INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
+            repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
+            parent_sha TEXT, message TEXT, created_at_unix_seconds INTEGER NOT NULL,
+            PRIMARY KEY (repo_id, sha)
+        );
+        CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
+            ON shardline_hub_revisions (repo_id, ref_name);
+        CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
+            commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
+            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
+            PRIMARY KEY (commit_sha, path)
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
+            oid TEXT PRIMARY KEY, data BLOB NOT NULL, created_at_unix_seconds INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id TEXT NOT NULL,
+            url TEXT NOT NULL, events TEXT NOT NULL, secret TEXT,
+            created_at_unix_seconds INTEGER NOT NULL
+        );"
+    )?;
+    Ok(())
+}
+
 const fn repo_type_to_str(t: HubRepoType) -> &'static str {
     t.as_str()
 }

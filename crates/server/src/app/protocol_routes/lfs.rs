@@ -186,6 +186,7 @@ pub(crate) async fn lfs_put_object(
         .backend
         .put_sha256_addressed_object_stream_if_absent(&object_key, &oid, body)
         .await?;
+    crate::metrics::record_upload("lfs", 0, 0.0, true);
     Ok(StatusCode::OK)
 }
 

@@ -13,6 +13,26 @@ async fn start_server() -> Result<(String, tokio::task::JoinHandle<Result<(), sh
 async fn start_server_with(
     role: Option<ServerRole>,
     frontends: &[ServerFrontend],
+    modify_config: impl Fn(ServerConfig) -> Result<ServerConfig, Box<dyn std::error::Error>> + Clone,
+) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match try_start_server(role, frontends, modify_config.clone()).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "failed to start server after 5 attempts".into()))
+}
+
+async fn try_start_server(
+    role: Option<ServerRole>,
+    frontends: &[ServerFrontend],
     modify_config: impl FnOnce(ServerConfig) -> Result<ServerConfig, Box<dyn std::error::Error>>,
 ) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
     let storage = tempfile::tempdir()?;
@@ -4827,78 +4847,8 @@ async fn oci_upload_max_active_sessions_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_dataset_and_model_operations() {
-    let storage = tempfile::tempdir().unwrap();
-    let config_path = write_provider_config(storage.path()).unwrap();
-    let hub_root = storage.path().join("hub");
-    std::fs::create_dir_all(&hub_root).unwrap();
-    let conn = rusqlite::Connection::open(hub_root.join("metadata.sqlite3")).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
-            repo_id TEXT PRIMARY KEY,
-            repo_type TEXT NOT NULL CHECK (repo_type IN ('model', 'dataset', 'space')),
-            private INTEGER NOT NULL DEFAULT 0 CHECK (private IN (0, 1)),
-            default_branch TEXT NOT NULL,
-            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-            updated_at_unix_seconds INTEGER NOT NULL CHECK (updated_at_unix_seconds >= 0)
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
-            repo_id TEXT NOT NULL,
-            ref_name TEXT NOT NULL,
-            sha TEXT NOT NULL,
-            parent_sha TEXT,
-            message TEXT,
-            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
-            PRIMARY KEY (repo_id, sha),
-            FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
-            ON shardline_hub_revisions (repo_id, ref_name);
-        CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
-            commit_sha TEXT NOT NULL,
-            path TEXT NOT NULL,
-            size INTEGER NOT NULL CHECK (size >= 0),
-            sha TEXT NOT NULL,
-            is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
-            inline_content BLOB,
-            PRIMARY KEY (commit_sha, path)
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
-            oid TEXT PRIMARY KEY,
-            data BLOB NOT NULL,
-            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0)
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_id TEXT NOT NULL REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE,
-            url TEXT NOT NULL,
-            events TEXT NOT NULL,
-            secret TEXT,
-            created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0)
-        );"
-    ).unwrap();
-    drop(conn);
-
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let base_url = format!("http://{addr}");
-    let config = ServerConfig::new(
-        addr,
-        base_url.clone(),
-        storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
-    )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-    .with_server_frontends([ServerFrontend::Hub].iter().copied()).unwrap()
-    .with_provider_runtime(
-        config_path,
-        b"test-api-key".to_vec(),
-        "test-issuer".to_owned(),
-        NonZeroU64::new(3600).unwrap(),
-    ).unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let (base_url, token, _storage, server) = start_hub_server().await;
     let client = Client::new();
-    wait_for_health(&base_url, &client).await;
-    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
 
     let create_dataset = client
         .post(format!("{base_url}/api/repos/create"))
@@ -4971,6 +4921,17 @@ fn create_hub_db(storage: &std::path::Path) {
 }
 
 async fn start_hub_server() -> (String, String, tempfile::TempDir, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>) {
+    for attempt in 0..5 {
+        match try_start_hub_server().await {
+            Ok(result) => return result,
+            Err(_) if attempt < 4 => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+            Err(e) => panic!("failed to start hub server: {e}"),
+        }
+    }
+    panic!("failed to start hub server after 5 attempts")
+}
+
+async fn try_start_hub_server() -> Result<(String, String, tempfile::TempDir, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
     create_hub_db(storage.path());
@@ -4985,7 +4946,7 @@ async fn start_hub_server() -> (String, String, tempfile::TempDir, tokio::task::
     let client = Client::new();
     wait_for_health(&base_url, &client).await;
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
-    (base_url, token, storage, server)
+    Ok((base_url, token, storage, server))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5077,15 +5038,13 @@ async fn readyz_returns_success() {
     let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    assert!(status == 200 || status == 503, "readyz: {status} body={text}");
-    if status == 200 {
-        let body: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(body["status"], "ok");
-        assert!(body["server_role"].is_string());
-        assert!(body["server_frontends"].is_array());
-        assert!(body["metadata_backend"].is_string());
-        assert!(body["object_backend"].is_string());
-    }
+    assert_eq!(status, 200, "readyz: {status} body={text}");
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["status"], "ok");
+    assert!(body["server_role"].is_string());
+    assert!(body["server_frontends"].is_array());
+    assert!(body["metadata_backend"].is_string());
+    assert!(body["object_backend"].is_string());
     server.abort();
 }
 
@@ -5094,7 +5053,7 @@ async fn readyz_without_auth() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
     let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
-    assert!(resp.status() == 200 || resp.status() == 503, "readyz should not require auth: {}", resp.status());
+    assert_eq!(resp.status(), 200, "readyz should not require auth: {}", resp.status());
     server.abort();
 }
 
@@ -5102,14 +5061,11 @@ async fn readyz_without_auth() {
 async fn readyz_metadata_backend_info() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
-    if resp.status() == 200 {
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["metadata_backend"], "local");
-        assert_eq!(body["object_backend"], "local");
-        assert_eq!(body["cache_backend"], "memory");
-        assert!(body["server_frontends"].as_array().map_or(false, |a| a.len() >= 4), "all frontends");
-    }
+    let body: serde_json::Value = client.get(format!("{base_url}/readyz")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(body["metadata_backend"], "local");
+    assert_eq!(body["object_backend"], "local");
+    assert_eq!(body["cache_backend"], "memory");
+    assert!(body["server_frontends"].as_array().map_or(false, |a| a.len() >= 4), "all frontends");
     server.abort();
 }
 
@@ -5415,7 +5371,7 @@ async fn oci_tag_list_empty_after_delete() {
         .header("Authorization", format!("Bearer {token}"))
         .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
     assert_eq!(list["tags"].as_array().map_or(0, |a| a.len()), 1, "tag present");
-    client.delete(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+    client.delete(format!("{base_url}/v2/{repo}/manifests/mytag"))
         .header("Authorization", format!("Bearer {token}"))
         .send().await.unwrap();
     let list2 = client.get(format!("{base_url}/v2/{repo}/tags/list"))
@@ -5533,10 +5489,10 @@ async fn xet_reconstruction_nonexistent_file() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v1/reconstructions/nonexistent-file-id"))
+    let resp = client.get(format!("{base_url}/v1/reconstructions/0000000000000000000000000000000000000000000000000000000000000000"))
         .header("Authorization", format!("Bearer {token}"))
         .send().await.unwrap();
-    assert!(resp.status() == 404 || resp.status() == 400, "nonexistent reconstruction: {}", resp.status());
+    assert_eq!(resp.status(), 404, "nonexistent reconstruction should 404");
     server.abort();
 }
 
