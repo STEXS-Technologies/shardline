@@ -5863,3 +5863,151 @@ async fn metrics_cardinality_stable() {
     assert!(families.len() <= 100, "suspicious cardinality: {} metric families, expected <= 100", families.len());
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_wrong_signing_key_rejected() {
+    let wrong_signer = shardline_protocol::TokenSigner::new(b"different-key-that-is-32-bytes-long!!!!!").unwrap();
+    let repo = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
+    ).unwrap();
+    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, u64::MAX).unwrap();
+    let token = wrong_signer.sign(&claims).unwrap();
+
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/test"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 401, "token signed with wrong key should be rejected");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_role_api_rejects_blob_upload() {
+    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let tags = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(tags.status(), 200, "api role should serve tag listing");
+
+    let content = b"role test";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    let upload = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert_eq!(upload.status(), 404, "api role should reject blob upload");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_role_transfer_serves_blobs() {
+    let (base_url, server) = start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let content = b"transfer blob test";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    let upload = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert_eq!(upload.status(), 201, "transfer role should serve blob upload");
+
+    let tags = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(tags.status(), 404, "transfer role should reject tag listing");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn body_limit_exact_file_size_succeeds() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
+        Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
+    }).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = vec![0x42u8; 100];
+    let oid = format!("{:x}", sha2::Sha256::digest(&content));
+    let resp = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "body exactly at limit should succeed");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn body_limit_one_byte_less_rejected() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
+        Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
+    }).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = vec![0x42u8; 101];
+    let oid = format!("{:x}", sha2::Sha256::digest(&content));
+    let resp = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 413, "body 1 byte over limit should be rejected");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_with_transfers_only_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 422, "batch without operation should be rejected (missing required field), got {}", resp.status());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_head_on_nonexistent_blob() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let head = client.head(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(head.status(), 404, "HEAD on non-existent blob should 404");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_read_ac_after_write() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"bazel read after write test";
+    let hash = hex::encode(sha2::Sha256::digest(content));
+
+    client.put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    let get = client.get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+    server.abort();
+}
