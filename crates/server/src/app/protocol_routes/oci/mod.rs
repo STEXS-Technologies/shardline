@@ -248,10 +248,10 @@ async fn oci_delete_blob(
         DeleteOutcome::Deleted => {}
         DeleteOutcome::NotFound => return Err(ServerError::NotFound),
     }
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::ACCEPTED)
         .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)?)
+        .map_err(|_error| ServerError::Overflow)
 }
 
 #[allow(clippy::missing_const_for_fn)]
