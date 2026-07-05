@@ -711,3 +711,38 @@ async fn oci_head_blob_existing() {
 
     server.abort();
 }
+
+fn mint_read_token(subject: &str, owner: &str, repo: &str, revision: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!")?;
+    let repository = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub,
+        owner,
+        repo,
+        Some(revision),
+    )?;
+    let claims = shardline_protocol::TokenClaims::new("local", subject, shardline_protocol::TokenScope::Read, repository, u64::MAX)?;
+    Ok(signer.sign(&claims)?)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_token_cannot_write() {
+    let (base_url, server) = start_server().await.unwrap();
+    let read_token = mint_read_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"attempted write with read token";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    let upload = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {read_token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 403, "read token should be rejected with 403 Forbidden");
+
+    server.abort();
+}
+
