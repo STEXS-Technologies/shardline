@@ -2881,3 +2881,331 @@ async fn lfs_batch_upload_operation() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_oversized_body_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let large_body = serde_json::json!({
+        "operation": "download",
+        "transfers": ["basic"],
+        "objects": (0..1050).map(|i| serde_json::json!({"oid": format!("{i:064x}"), "size": 1})).collect::<Vec<_>>(),
+    });
+    let body_bytes = serde_json::to_vec(&large_body).unwrap();
+
+    let batch = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .body(body_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 422, "oversized batch body should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_batch_reconstruction_many_file_ids() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // Use 100 file IDs (within practical limits)
+    let file_ids: String = (0..100).map(|i| format!("{:064x}", i)).collect::<Vec<_>>().join("&file_id=");
+    let batch = client
+        .get(format!("{base_url}/v1/reconstructions?file_id={file_ids}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), 200, "100 file IDs should be accepted");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_blob_empty_body() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"")));
+
+    let post = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(vec![])
+        .send()
+        .await
+        .unwrap();
+    // Empty body starts an upload session (202), then needs finalization
+    assert_eq!(post.status(), 202, "empty blob should start upload session");
+
+    let location = post.headers().get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") })
+        .unwrap();
+
+    let put = client
+        .put(format!("{location}?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(vec![])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201, "empty blob finalize should succeed");
+
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200, "empty blob pull");
+    assert_eq!(get.bytes().await.unwrap().len(), 0, "empty blob content");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_blob_digest_mismatch_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let content = b"some content";
+    let wrong_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"different content")));
+
+    let post = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={wrong_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 400, "digest mismatch should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_head_manifest_not_exists_returns_404() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let head = client
+        .head(format!("{base_url}/v2/{repo}/manifests/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 404, "HEAD non-existent manifest");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_head_blob_not_exists_returns_404() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let head = client
+        .head(format!("{base_url}/v2/{repo}/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 404, "HEAD non-existent blob");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_referenced_blob_missing_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let missing_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": missing_digest, "size": 1 },
+        "layers": [],
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+
+    let put = client
+        .put(format!("{base_url}/v2/{repo}/manifests/test-missing-ref"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 400, "manifest referencing missing blob should be rejected");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_push_and_delete() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let content = b"push delete test blob";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+
+    // Two-step upload: POST to start session, PUT with digest to finalize
+    let post = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 202);
+    let location = post.headers().get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") })
+        .unwrap();
+
+    let put = client
+        .put(format!("{location}?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201, "blob push should succeed");
+
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200, "blob pull after push");
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_list_tags_pagination() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let config = br#"{"architecture":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config.len() },
+        "layers": [],
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+
+    for tag in &["alpha", "beta", "gamma"] {
+        client
+            .put(format!("{base_url}/v2/{repo}/manifests/{tag}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(manifest_bytes.clone())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let tags = client
+        .get(format!("{base_url}/v2/{repo}/tags/list?n=2"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.status(), 200);
+    let body: serde_json::Value = tags.json().await.unwrap();
+    let names = body["tags"].as_array().unwrap();
+    assert!(names.len() <= 2, "pagination n=2 should limit results");
+    assert_eq!(body["name"].as_str(), Some("test-owner/test-repo"));
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_push_with_annotations() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let config = br#"{"architecture":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config.len() },
+        "layers": [],
+        "annotations": {
+            "org.opencontainers.image.description": "a test image",
+            "org.opencontainers.image.version": "1.0.0",
+        },
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest_bytes)
+        .send()
+        .await
+        .unwrap();
+
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    let body: serde_json::Value = get.json().await.unwrap();
+    let annotations = body["annotations"].as_object().unwrap();
+    assert_eq!(annotations["org.opencontainers.image.description"].as_str(), Some("a test image"));
+    assert_eq!(annotations["org.opencontainers.image.version"].as_str(), Some("1.0.0"));
+
+    server.abort();
+}
