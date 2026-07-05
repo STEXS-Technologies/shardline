@@ -19,7 +19,7 @@ async fn start_server() -> Result<(String, tokio::task::JoinHandle<Result<(), sh
         NonZeroUsize::new(4).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
-    .with_server_frontends([ServerFrontend::Xet, ServerFrontend::Lfs].iter().copied())?
+    .with_server_frontends([ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci].iter().copied())?
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
@@ -594,5 +594,120 @@ async fn lfs_suffix_range_returns_last_n_bytes() {
     let body = download.bytes().await.unwrap();
     let expected = &content[content.len() - 10..];
     assert_eq!(body.as_ref(), expected, "suffix range bytes mismatch");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_v2_root_returns_version_header() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client
+        .get(format!("{base_url}/v2/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "OCI v2 root failed");
+    let header = resp.headers().get("Docker-Distribution-API-Version")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(header, Some("registry/2.0"), "OCI version header missing");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_and_pull_blob() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"oci blob test content";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    let repo = "test-owner/test-repo";
+
+    let post = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 202, "OCI blob upload start failed: {}", post.status());
+    let location = post.headers().get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            if s.starts_with("http") {
+                s.to_owned()
+            } else {
+                format!("{base_url}{s}")
+            }
+        })
+        .expect("OCI upload location header missing");
+
+    let put = client
+        .put(format!("{location}?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201, "OCI blob finalize failed: {}", put.status());
+
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200, "OCI blob download failed");
+    let body = get.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), content, "OCI blob content mismatch");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_head_blob_existing() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"oci head blob test";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    let repo = "test-owner/test-repo";
+
+    let post = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 202, "OCI upload start failed");
+    let location = post.headers().get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") }
+        })
+        .unwrap();
+
+    client
+        .put(format!("{location}?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+
+    let head = client
+        .head(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200, "OCI HEAD blob failed");
+    let len = head.headers().get("content-length").and_then(|v| v.to_str().ok());
+    assert!(len.is_some(), "OCI HEAD missing content-length");
+    assert_eq!(len.unwrap(), content.len().to_string());
+
     server.abort();
 }
