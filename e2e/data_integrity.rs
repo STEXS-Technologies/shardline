@@ -4436,7 +4436,7 @@ async fn bazel_put_oversized_body_rejected() {
     let client = Client::new();
 
     let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let big_body = vec![0u8; 200_000_000];
+    let big_body = vec![0u8; 68_000_000];
 
     let put = client
         .put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
@@ -5056,5 +5056,770 @@ async fn metrics_counter_exists() {
     assert!(body.contains("shardline_download_requests_total"), "download req counter");
     assert!(body.contains("shardline_range_requests_total"), "range req counter");
 
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_check_body_valid_json() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/healthz")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_returns_success() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    assert!(status == 200 || status == 503, "readyz: {status} body={text}");
+    if status == 200 {
+        let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["status"], "ok");
+        assert!(body["server_role"].is_string());
+        assert!(body["server_frontends"].is_array());
+        assert!(body["metadata_backend"].is_string());
+        assert!(body["object_backend"].is_string());
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_without_auth() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
+    assert!(resp.status() == 200 || resp.status() == 503, "readyz should not require auth: {}", resp.status());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_metadata_backend_info() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
+    if resp.status() == 200 {
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["metadata_backend"], "local");
+        assert_eq!(body["object_backend"], "local");
+        assert_eq!(body["cache_backend"], "memory");
+        assert!(body["server_frontends"].as_array().map_or(false, |a| a.len() >= 4), "all frontends");
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_expired_token_rejected() {
+    let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+    let repo = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
+    ).unwrap();
+    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, 0).unwrap();
+    let token = signer.sign(&claims).unwrap();
+
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 401, "expired token should be rejected");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_token_missing_auth_header() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid")).send().await.unwrap();
+    assert_eq!(resp.status(), 401, "missing auth header should be 401");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_token_malformed_bearer() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid"))
+        .header("Authorization", "Bearer not-a-valid-token")
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 401, "malformed token should be 401");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_token_insufficient_scope() {
+    let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+    let repo = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
+    ).unwrap();
+    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, u64::MAX).unwrap();
+    let read_token = signer.sign(&claims).unwrap();
+
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let content = b"scope test data";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    let resp = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {read_token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 403, "read-only token should be forbidden from writing");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontend_only_xet() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let read_token = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    assert_eq!(read_token.status(), 200, "Xet frontend should serve Xet routes");
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 404, "Xet-only should not serve LFS");
+    let oci = client.get(format!("{base_url}/v2/test-owner/test-repo/tags/list"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(oci.status(), 404, "Xet-only should not serve OCI");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontend_only_lfs() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 200, "Lfs frontend should serve LFS batch");
+    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(xet.status(), 404, "Lfs-only should not serve Xet");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontend_only_oci() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v2/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "OCI frontend should serve OCI v2 root");
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 404, "Oci-only should not serve LFS");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontend_only_bazel() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"bazel test";
+    let hash = hex::encode(sha2::Sha256::digest(content));
+    let ac = client.put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert!(ac.status().is_success(), "Bazel frontend should serve Bazel");
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 404, "Bazel-only should not serve LFS");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn body_limit_rejected() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
+        Ok(config.with_max_request_body_bytes(NonZeroUsize::new(10).unwrap()))
+    }).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "download", "objects": [{"oid": "a".repeat(64), "size": 100}], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 413, "body over limit should be 413");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_then_head() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"head test content";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    let head = client.head(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    let cl = head.headers().get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("0");
+    assert_eq!(cl, content.len().to_string());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_overwrite_existing() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"overwrite me";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    let put1 = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert!(put1.status().is_success());
+    let put2 = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert!(put2.status().is_success(), "overwrite same OID should succeed");
+    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.text().await.unwrap(), String::from_utf8_lossy(content));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_download_with_accept_header() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"accept header test";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/octet-stream")
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), String::from_utf8_lossy(content));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_minimal_request() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "batch with only operation and transfers should work");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_blob_very_small() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let content = b"a";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    let resp = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201, "single byte blob should be accepted");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_push_by_tag_and_digest() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let config = br#"{"architecture":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec())
+        .send().await.unwrap();
+    let manifest = serde_json::json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config.len()}, "layers": []});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
+    let put = client.put(format!("{base_url}/v2/{repo}/manifests/latest"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(bytes.clone())
+        .send().await.unwrap();
+    assert_eq!(put.status(), 201, "push by tag");
+    let get_tag = client.get(format!("{base_url}/v2/{repo}/manifests/latest"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get_tag.status(), 200, "pull by tag");
+    let get_digest = client.get(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get_digest.status(), 200, "pull by digest after tag push");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_tag_list_empty_after_delete() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let config = br#"{"arch":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec()).send().await.unwrap();
+    let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
+    client.put(format!("{base_url}/v2/{repo}/manifests/mytag"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(bytes.clone()).send().await.unwrap();
+    let list = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+    assert_eq!(list["tags"].as_array().map_or(0, |a| a.len()), 1, "tag present");
+    client.delete(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    let list2 = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+    assert_eq!(list2["tags"].as_array().map_or(0, |a| a.len()), 0, "empty after delete");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_upload_cancel() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let create = client.post(format!("{base_url}/v2/{repo}/blobs/uploads"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(create.status(), 202);
+    let location = create.headers().get("location").and_then(|v| v.to_str().ok()).unwrap().to_owned();
+    let patch = client.patch(format!("{base_url}{location}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(b"some data".to_vec())
+        .send().await.unwrap();
+    assert_eq!(patch.status(), 202);
+    let del = client.delete(format!("{base_url}{location}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(del.status(), 204, "cancel upload");
+    let get = client.get(format!("{base_url}{location}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 404, "cancelled upload not found");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_v2_not_authorized() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v2/")).send().await.unwrap();
+    assert_eq!(resp.status(), 401, "v2/ should require auth");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_head_on_existing_blob() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let content = b"head blob test";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let head = client.head(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers().get("content-type").and_then(|v| v.to_str().ok()), Some("application/octet-stream"));
+    assert!(head.headers().get("content-length").is_some());
+    assert!(head.headers().get("docker-content-digest").is_some());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_ac_cache_not_found() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let get = client.get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 404);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_cas_cache_not_found() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let get = client.get(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 404);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_put_and_get_large_entry() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = vec![0xABu8; 100_000];
+    let hash = hex::encode(sha2::Sha256::digest(&content));
+    client.put(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.clone()).send().await.unwrap();
+    let get = client.get(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    let body = get.bytes().await.unwrap();
+    assert_eq!(body.len(), 100_000);
+    assert_eq!(body[0], 0xAB);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_reconstruction_nonexistent_file() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v1/reconstructions/nonexistent-file-id"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert!(resp.status() == 404 || resp.status() == 400, "nonexistent reconstruction: {}", resp.status());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_shard_upload_invalid_format() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.post(format!("{base_url}/v1/shards"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(b"not a valid shard".to_vec())
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400, "invalid shard format should 400");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_health_requests() {
+    let (base_url, server) = start_server().await.unwrap();
+    let client = Client::new();
+    let mut futs = Vec::new();
+    for _ in 0..20 {
+        let c = client.clone();
+        let u = base_url.clone();
+        futs.push(tokio::spawn(async move {
+            c.get(format!("{u}/healthz")).send().await
+        }));
+    }
+    for fut in futs {
+        let resp = fut.await.unwrap().unwrap();
+        assert!(resp.status().is_success(), "concurrent health: {}", resp.status());
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_with_content_type() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"ct test";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec()).send().await.unwrap();
+    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.headers().get("content-type").and_then(|v| v.to_str().ok()), Some("application/octet-stream"));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_push_invalid_media_type() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let manifest = serde_json::json!({"schemaVersion": 2, "mediaType": "application/vnd.unknown", "config": {}, "layers": []});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let resp = client.put(format!("{base_url}/v2/{repo}/manifests/test-invalid-media"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.unknown")
+        .body(bytes).send().await.unwrap();
+    assert!(resp.status() == 400 || resp.status() == 404, "invalid media type: {}", resp.status());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_blob_and_pull_by_digest() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let content = b"push and pull test data";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let get = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_tags_list_pagination_limit() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let config = br#"{"arch":"amd64"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec()).send().await.unwrap();
+    for i in 0..3 {
+        let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+            "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        client.put(format!("{base_url}/v2/{repo}/manifests/tag-{i}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(bytes).send().await.unwrap();
+    }
+    let list = client.get(format!("{base_url}/v2/{repo}/tags/list?n=2"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+    assert_eq!(list["tags"].as_array().map_or(0, |a| a.len()), 2, "paginated tag list");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_oversized_objects_field() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let many_objects: Vec<serde_json::Value> = (0..200).map(|i| serde_json::json!({
+        "oid": format!("{:064x}", i), "size": 100,
+    })).collect();
+    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "download", "objects": many_objects, "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert!(resp.status() == 422 || resp.status() == 200, "200 objects: {}", resp.status());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_empty_operation_field() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400, "empty operation should be rejected");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_push_missing_config() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let manifest = serde_json::json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "layers": []});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let resp = client.put(format!("{base_url}/v2/{repo}/manifests/no-config"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(bytes).send().await.unwrap();
+    assert!(resp.status() == 400 || resp.status() == 404, "no config: {}", resp.status());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_batch_reconstruction_no_file_ids() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.get(format!("{base_url}/v1/reconstructions"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({"file_ids": []}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "empty batch reconstruction");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_cross_repo_blob_mount_same_repo() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let content = b"cross-repo-same";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let mount = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(mount.status(), 201, "mount from same repo");
+    server.abort();
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_wrong_operation_rejected() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "invalid_op", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400, "invalid operation should be rejected");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_delete_unreferenced_succeeds() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let content = b"delete-me-blob";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let del = client.delete(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(del.status(), 202, "delete unreferenced blob");
+    let get = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 404, "deleted blob gone");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_get_returns_docker_content_digest() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"digest header test";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    let dcd = resp.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    assert!(dcd.is_some(), "docker-content-digest header should be present");
+    assert_eq!(dcd.unwrap(), format!("sha256:{oid}"));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_delete_existing_object_returns_202() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let content = b"lfs delete 202 test";
+    let oid = format!("{:x}", sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let del = client.delete(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(del.status(), 202, "LFS delete should return 202");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_blob_and_get_returns_content_length() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let content = b"content-length test data";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let resp = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    let cl = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("0");
+    assert_eq!(cl, content.len().to_string());
     server.abort();
 }
