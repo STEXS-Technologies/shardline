@@ -6157,3 +6157,55 @@ async fn oci_tags_list_pagination_exact_count() {
     assert_eq!(all["tags"].as_array().unwrap().len(), 5, "all 5 tags when n > total");
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_check_during_gc() {
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap();
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    // Upload some objects
+    for i in 0..3 {
+        let content = format!("gc health test content {i}");
+        let oid = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+        client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .body(content.into_bytes())
+            .send().await.unwrap();
+    }
+
+    // Run GC in background
+    let gc_config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        "http://gc.local".to_owned(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap();
+    let gc_handle = tokio::spawn(async move {
+        shardline_server::run_gc(gc_config, shardline_server::LocalGcOptions {
+            mark: true, sweep: true, retention_seconds: 0,
+        }).await
+    });
+
+    // Health check should remain healthy during GC
+    for _ in 0..10 {
+        let health = client.get(format!("{base_url}/healthz")).send().await.unwrap();
+        assert_eq!(health.status(), 200, "health should remain 200 during GC");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    gc_handle.await.unwrap().unwrap();
+    server.abort();
+}
