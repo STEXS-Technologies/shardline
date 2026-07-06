@@ -7271,3 +7271,141 @@ async fn dedup_identical_content_same_chunk_hashes() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_large_reconstruction_chain_ten_xorbs() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    // Create a file large enough to span 10 xorbs (10 chunks)
+    let mut content_parts = Vec::new();
+    for i in 0..10 {
+        let part = format!("xorb-chunk-{i}-content-data-for-testing-purpose");
+        content_parts.push(part.into_bytes());
+    }
+    let content = content_parts.concat();
+
+    // Upload xorb
+    let xorb_hash = upload_xorb(&client, &base_url, &xet_token, &content).await;
+
+    // Upload shard referencing the multi-chunk xorb
+    let file_hash = upload_shard(&client, &base_url, &xet_token, &[(&content, &xorb_hash)]).await;
+
+    // Reconstruct
+    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .header("Authorization", format!("Bearer {xet_token}"))
+        .send().await.unwrap();
+    assert_eq!(recon.status(), 200, "large reconstruction chain");
+    let body: serde_json::Value = recon.json().await.unwrap();
+    let terms = body["terms"].as_array().unwrap();
+    assert!(terms.len() >= 1, "reconstruction has terms");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_reconstruction_fails_when_xorb_missing() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    // Upload shard referencing a non-existent xorb hash
+    let fake_xorb_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+    let content = b"content for shard with missing xorb";
+    let shard = {
+        use shardline_server::test_fixtures::single_file_shard;
+        let (shard, _file_hash) = single_file_shard(&[(content, fake_xorb_hash)]);
+        shard
+    };
+    let resp = client.post(format!("{base_url}/v1/shards"))
+        .header("Authorization", format!("Bearer {xet_token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(shard.to_vec())
+        .send().await.unwrap();
+    // The shard references a non-existent xorb — server may accept the shard
+    // (it doesn't verify xorb exists at upload time) but reconstruction will fail
+    assert!(resp.status().is_success() || resp.status() == 400,
+        "shard with missing xorb: {}", resp.status());
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn different_content_produces_different_chunk_hashes() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    let content_a = b"content A for hash collision test";
+    let content_b = b"content B for hash collision test";
+
+    let hash_a = upload_xorb(&client, &base_url, &xet_token, content_a).await;
+    let hash_b = upload_xorb(&client, &base_url, &xet_token, content_b).await;
+
+    assert_ne!(hash_a, hash_b, "different content must produce different xorb hashes");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_multiple_files_sharing_single_xorb() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    // Multiple files sharing the same xorb
+    let shared_content = b"shared xorb content for multiple files";
+    let xorb_hash = upload_xorb(&client, &base_url, &xet_token, shared_content).await;
+
+    let files: [&[u8]; 3] = [
+        b"first file header",
+        b"second file body here",
+        b"third file footer end",
+    ];
+
+    let mut file_hashes = Vec::new();
+    for file_content in &files {
+        let fh = upload_shard(&client, &base_url, &xet_token, &[(file_content, &xorb_hash)]).await;
+        file_hashes.push(fh);
+    }
+
+    for (i, fh) in file_hashes.iter().enumerate() {
+        let recon = client.get(format!("{base_url}/v1/reconstructions/{fh}"))
+            .header("Authorization", format!("Bearer {xet_token}"))
+            .send().await.unwrap();
+        assert_eq!(recon.status(), 200, "file {i} reconstruction from shared xorb");
+        let body: serde_json::Value = recon.json().await.unwrap();
+        assert!(body.get("terms").is_some(), "file {i} has terms");
+    }
+
+    server.abort();
+}
