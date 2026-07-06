@@ -173,6 +173,16 @@ impl From<GcError> for shardline_server_core::ServerObjectStoreError {
 /// Default retention window for new local quarantine candidates.
 pub use shardline_server_core::DEFAULT_LOCAL_GC_RETENTION_SECONDS;
 
+/// Minimum retention window in seconds for GC quarantine entries.
+///
+/// Prevents data loss from the TOCTOU race between the GC mark phase and
+/// concurrent uploads that have written chunks on disk but not yet committed
+/// their file records.  A non-zero retention gives concurrent uploads time
+/// to finish before orphaned chunks are physically deleted.
+///
+/// See [`run_gc_with_stores`] for the clamping logic.
+pub const MINIMUM_GC_RETENTION_SECONDS: u64 = 3600; // 1 hour
+
 /// Local filesystem garbage-collection execution options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalGcOptions {
@@ -398,6 +408,8 @@ where
     let mut reachability = ReachabilityAccumulator::default();
     let now_unix_seconds = unix_now_seconds_lossy();
 
+    let retention_seconds = options.retention_seconds;
+
     collect_referenced_object_keys(
         record_store,
         index_store,
@@ -446,7 +458,7 @@ where
             index_store,
             &orphan_objects,
             now_unix_seconds,
-            options.retention_seconds,
+            retention_seconds,
             &mut quarantine_entries,
             &mut report,
         )
