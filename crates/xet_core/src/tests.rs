@@ -503,6 +503,31 @@ fn decompress_auto_errors() {
     );
 }
 
+#[test]
+fn byte_grouping_lz4_roundtrip() {
+    let data = b"byte grouping lz4 round trip test data for verification";
+    let compressed = CompressionScheme::ByteGrouping4LZ4.compress_from_slice(data).unwrap();
+    let decompressed = CompressionScheme::ByteGrouping4LZ4
+        .decompress_from_slice(&compressed)
+        .unwrap();
+    assert_eq!(&decompressed[..], &data[..]);
+}
+
+#[test]
+fn all_compression_schemes_roundtrip() {
+    let data = b"comprehensive round trip test across all compression schemes available in the system";
+    for scheme in &[
+        CompressionScheme::None,
+        CompressionScheme::LZ4,
+        CompressionScheme::ByteGrouping4LZ4,
+    ] {
+        let compressed = scheme.compress_from_slice(data).unwrap();
+        let decompressed = scheme.decompress_from_slice(&compressed).unwrap();
+        assert_eq!(&decompressed[..], &data[..],
+            "compression scheme {scheme:?} roundtrip failed");
+    }
+}
+
 // ============================================================================
 // XorbChunkHeader tests
 // ============================================================================
