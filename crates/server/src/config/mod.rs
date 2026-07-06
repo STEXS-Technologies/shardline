@@ -1093,18 +1093,30 @@ pub enum ServerConfigError {
     /// The chunk size was zero.
     #[error("chunk size must be greater than zero")]
     ZeroChunkSize,
+    /// The per-upload chunk processing window could not be parsed.
+    #[error("invalid upload max in-flight chunks")]
+    UploadMaxInFlightChunks(ParseIntError),
     /// The per-upload chunk processing window was zero.
     #[error("upload max in-flight chunks must be greater than zero")]
     ZeroUploadMaxInFlightChunks,
+    /// The transfer concurrency budget could not be parsed.
+    #[error("invalid transfer max in-flight chunks")]
+    TransferMaxInFlightChunks(ParseIntError),
     /// The transfer concurrency budget was zero.
     #[error("transfer max in-flight chunks must be greater than zero")]
     ZeroTransferMaxInFlightChunks,
     /// The reconstruction-cache adapter token was invalid.
     #[error("invalid reconstruction cache adapter")]
     InvalidReconstructionCacheAdapter,
+    /// The reconstruction-cache TTL could not be parsed.
+    #[error("invalid reconstruction cache ttl")]
+    ReconstructionCacheTtl(ParseIntError),
     /// The reconstruction-cache TTL was zero.
     #[error("reconstruction cache ttl must be greater than zero")]
     ZeroReconstructionCacheTtlSeconds,
+    /// The in-memory reconstruction-cache capacity could not be parsed.
+    #[error("invalid reconstruction cache memory max entries")]
+    ReconstructionCacheMemoryMaxEntries(ParseIntError),
     /// The in-memory reconstruction-cache capacity was zero.
     #[error("reconstruction cache memory max entries must be greater than zero")]
     ZeroReconstructionCacheMemoryMaxEntries,

@@ -155,7 +155,13 @@ impl LocalObjectStore {
         start_after: Option<&ObjectKey>,
         limit: usize,
     ) -> Result<Vec<ObjectMetadata>, LocalObjectStoreError> {
-        let directory = self.root.join(prefix.as_str());
+        let prefix_str = prefix.as_str();
+        if let Some(start_after) = start_after {
+            if !start_after.as_str().starts_with(prefix_str) {
+                return Err(LocalObjectStoreError::InvalidStartAfter);
+            }
+        }
+        let directory = self.root.join(prefix_str);
         let Some(entries) = read_dir_if_exists(&directory)? else {
             return Ok(Vec::new());
         };
@@ -315,6 +321,9 @@ pub enum LocalObjectStoreError {
     /// The target object path was not representable on disk.
     #[error("validated object key could not be mapped to a local path")]
     InvalidObjectPath,
+    /// The `start_after` key does not start with the requested prefix.
+    #[error("start_after key is outside the requested prefix")]
+    InvalidStartAfter,
 }
 
 fn verify_integrity(
