@@ -80,6 +80,7 @@ pub(crate) async fn oci_post_blob_upload(
 
     let session_id = create_upload_session(
         state.config.root_dir(),
+        Some(&state.backend),
         repository,
         scope,
         state.config.oci_upload_session_ttl_seconds(),

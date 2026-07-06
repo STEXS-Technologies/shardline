@@ -437,8 +437,9 @@ fn upload_tail_path(root: &Path, session_id: &str) -> PathBuf {
 /// # Errors
 ///
 /// Returns an error when the upload session cannot be created.
-pub async fn create_upload_session(
+pub async fn create_upload_session<B: OciBackend>(
     root: &Path,
+    backend: Option<&B>,
     repository: &str,
     repository_scope: Option<&RepositoryScope>,
     ttl_seconds: NonZeroU64,
@@ -449,7 +450,7 @@ pub async fn create_upload_session(
     validate_repository(repository)?;
     validate_oci_repository_scope(repository, repository_scope)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
-    purge_expired_upload_sessions(root, ttl_seconds, now_unix_seconds).await?;
+    purge_expired_upload_sessions::<B>(root, backend, ttl_seconds, now_unix_seconds).await?;
     let active_sessions = count_active_upload_sessions(root).await?;
     if active_sessions >= max_active_sessions.get() {
         return Err(OciAdapterError::TooManyUploadSessions);
@@ -855,8 +856,9 @@ async fn acquire_upload_session_file_lock(path: PathBuf) -> Result<OciFileLock, 
 /// # Errors
 ///
 /// Returns an error when expired upload sessions cannot be purged.
-pub async fn purge_expired_upload_sessions(
+pub async fn purge_expired_upload_sessions<B: OciBackend>(
     root: &Path,
+    backend: Option<&B>,
     ttl_seconds: NonZeroU64,
     now_unix_seconds: u64,
 ) -> Result<(), OciAdapterError> {
@@ -910,6 +912,17 @@ pub async fn purge_expired_upload_sessions(
         let missing_local_body =
             !session.use_s3_multipart && fs::metadata(upload_body_path(root, stem)).await.is_err();
         if upload_session_expired(&session, ttl_seconds, now_unix_seconds) || missing_local_body {
+            // Abort S3 multipart before removing local metadata so orphaned
+            // S3 uploads do not accumulate.
+            if let (Some(backend), Some(multipart)) = (&backend, &session.s3_multipart) {
+                if !multipart.upload_id.is_empty() {
+                    let temp_key = ObjectKey::parse(&multipart.temporary_object_key)
+                        .map_err(|_| OciAdapterError::InvalidContentHash)?;
+                    let _ = backend
+                        .abort_resumable_object_upload(&temp_key, &multipart.upload_id)
+                        .await;
+                }
+            }
             delete_upload_session(root, stem).await?;
         }
     }

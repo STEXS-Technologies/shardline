@@ -10,6 +10,13 @@ use thiserror::Error;
 
 use crate::{config::load_server_config, local_output::write_output_bytes};
 
+/// Minimum retention window in seconds for GC quarantine entries.
+///
+/// Prevents data loss from the TOCTOU race between the GC mark phase and
+/// concurrent uploads that have written chunks on disk but not yet committed
+/// their file records.
+const MINIMUM_GC_RETENTION_SECONDS: u64 = 3600; // 1 hour
+
 /// Garbage-collection runtime failure.
 #[derive(Debug, Error)]
 pub enum GcRuntimeError {
@@ -69,7 +76,11 @@ pub async fn run_gc_diagnostics(
     let options = LocalGcOptions {
         mark,
         sweep,
-        retention_seconds,
+        // Enforce a minimum retention to prevent data loss from the TOCTOU
+        // race between the GC mark phase (index scan) and the sweep phase
+        // (delete of orphaned chunks).  Concurrent uploads that have written
+        // chunks on disk but not yet committed file records need a grace period.
+        retention_seconds: retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS),
     };
     let config = load_server_config(root)?;
     let diagnostics = run_server_gc_diagnostics(config, options).await?;
