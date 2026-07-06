@@ -6705,7 +6705,6 @@ async fn concurrent_manifest_push_and_pull() {
     server.abort();
 }
 
-#[ignore = "needs Docker with overlay storage (podman VM issue)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_backend_lfs_round_trip() {
     let docker = shardline_test_support::DockerLocalStack::builder()
