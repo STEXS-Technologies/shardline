@@ -6209,3 +6209,166 @@ async fn health_check_during_gc() {
     gc_handle.await.unwrap().unwrap();
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_upload_and_reconstruct() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // Upload a file
+    let content = b"concurrent upload and reconstruct test data for shardline verification";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    // Read back while uploading again (simulate concurrent access)
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let c = client.clone();
+        let u = base_url.clone();
+        let t = token.clone();
+        let o = oid.clone();
+        handles.push(tokio::spawn(async move {
+            c.get(format!("{u}/v1/lfs/objects/{o}"))
+                .header("Authorization", format!("Bearer {t}"))
+                .send().await
+        }));
+    }
+    for i in 0..5 {
+        let c = client.clone();
+        let u = base_url.clone();
+        let t = token.clone();
+        let extra = format!("extra content {}", i);
+        let extra_oid = hex::encode(sha2::Sha256::digest(extra.as_bytes()));
+        handles.push(tokio::spawn(async move {
+            c.put(format!("{u}/v1/lfs/objects/{extra_oid}"))
+                .header("Authorization", format!("Bearer {t}"))
+                .body(extra.into_bytes())
+                .send().await
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await.unwrap().unwrap();
+        assert!(resp.status().is_success(), "concurrent op failed: {}", resp.status());
+    }
+
+    // Verify original content still correct
+    let verify = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(verify.status(), 200);
+    assert_eq!(verify.bytes().await.unwrap().as_ref(), content);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_content_type_preserved() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"metadata content type test";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/custom-test-type")
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    let ct = get.headers().get("content-type").and_then(|v| v.to_str().ok()).expect("content-type header");
+    // LFS always returns application/octet-stream regardless of upload content-type
+    assert_eq!(ct, "application/octet-stream");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunk_boundary_partial_last_chunk() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    // Chunk size is 4 bytes. Test files that end mid-chunk.
+    for (label, content) in [
+        ("one_byte", vec![0x01u8; 1]),
+        ("three_bytes", vec![0x02u8; 3]),
+        ("five_bytes", vec![0x03u8; 5]),
+        ("seven_bytes", vec![0x04u8; 7]),
+    ] {
+        let oid = hex::encode(sha2::Sha256::digest(&content));
+        client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .body(content.clone())
+            .send().await.unwrap();
+
+        let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send().await.unwrap();
+        assert_eq!(get.status(), 200, "{label}: GET after upload");
+        assert_eq!(get.bytes().await.unwrap().as_ref(), content.as_slice(), "{label}: content mismatch");
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_does_not_remove_referenced_chunks() {
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap();
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    let content = b"gc should not delete this content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    // Upload 3 more objects to ensure GC has work to do
+    for i in 0..3 {
+        let c = format!("extra object {i}");
+        let o = hex::encode(sha2::Sha256::digest(c.as_bytes()));
+        client.put(format!("{base_url}/v1/lfs/objects/{o}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .body(c.into_bytes())
+            .send().await.unwrap();
+    }
+
+    // Run GC with mark+sweep while server is live
+    let gc_config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        "http://gc.local".to_owned(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap();
+    let report = shardline_server::run_gc(gc_config, shardline_server::LocalGcOptions {
+        mark: true, sweep: true, retention_seconds: 0,
+    }).await.unwrap();
+
+    // Verify referenced objects still reconstruct
+    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200, "referenced object should survive GC");
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+
+    server.abort();
+}
