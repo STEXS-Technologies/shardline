@@ -484,12 +484,12 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         &self,
         object_key: &ObjectKey,
         upload_id: &str,
-        part_ids: Vec<String>,
+        parts: Vec<(usize, String)>,
     ) -> Result<(), shardline_oci_adapter::OciAdapterError> {
         match self {
             Self::Local(backend) => match backend.object_store() {
                 ServerObjectStore::S3(store) => store
-                    .complete_resumable_upload(object_key, upload_id, part_ids)
+                    .complete_resumable_upload(object_key, upload_id, parts)
                     .await
                     .map_err(shardline_oci_adapter::OciAdapterError::from),
                 ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
@@ -498,7 +498,7 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
             },
             Self::Postgres(backend) => match backend.object_store() {
                 ServerObjectStore::S3(store) => store
-                    .complete_resumable_upload(object_key, upload_id, part_ids)
+                    .complete_resumable_upload(object_key, upload_id, parts)
                     .await
                     .map_err(shardline_oci_adapter::OciAdapterError::from),
                 ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
@@ -663,7 +663,7 @@ async fn put_sha256_addressed_object_stream_if_absent_with_object_store(
             let canonical_outcome =
                 match store.begin_content_addressed_upload(&canonical_key).await? {
                     BeginMultipartUploadResult::AlreadyExists => PutOutcome::AlreadyExists,
-                    BeginMultipartUploadResult::Upload(mut upload) => {
+                    BeginMultipartUploadResult::Upload(mut upload, temp_key) => {
                         let mut sha256 = Sha256::new();
                         let mut total_length = 0_u64;
                         while let Some(bytes) = body.next_bytes().await? {
@@ -681,8 +681,9 @@ async fn put_sha256_addressed_object_stream_if_absent_with_object_store(
                             return Err(ServerError::ExpectedBodyHashMismatch);
                         }
                         let _total_length = total_length;
-                        upload.finish().await?;
-                        PutOutcome::Inserted
+                        store
+                            .finish_content_addressed_upload(upload, &temp_key, &canonical_key)
+                            .await?
                     }
                 };
             if canonical_key == *object_key {
