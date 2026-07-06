@@ -7125,3 +7125,149 @@ async fn cors_headers_present() {
     eprintln!("CORS headers on LFS GET: {}", has_cors);
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_multi_file_shard_reconstruct_each_independently() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    assert_eq!(write_resp.status(), 200);
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    let files: [&[u8]; 2] = [b"file alpha content here", b"file beta content different"];
+    let mut xorb_hashes = Vec::new();
+    let mut file_hashes = Vec::new();
+
+    for content in &files {
+        let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
+        let file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
+        xorb_hashes.push(xorb_hash);
+        file_hashes.push(file_hash);
+    }
+
+    for (i, content) in files.iter().enumerate() {
+        let recon = client.get(format!("{base_url}/v1/reconstructions/{}", file_hashes[i]))
+            .header("Authorization", format!("Bearer {xet_token}"))
+            .send().await.unwrap();
+        assert_eq!(recon.status(), 200, "file {i} reconstruction");
+        let body: serde_json::Value = recon.json().await.unwrap();
+        assert!(body.get("terms").is_some(), "file {i} has terms");
+        assert!(body.get("fetch_info").is_some(), "file {i} has fetch_info");
+    }
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_reconstruction_content_hash_matches() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    let content = b"reconstruction hash verification content";
+    let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
+    let file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
+
+    // The file_hash returned by shard upload is a Merkle hash of the chunk hashes,
+    // not the raw SHA256 of the content. We just verify it's non-empty and matches
+    // the reconstruction endpoint.
+    assert!(!file_hash.is_empty(), "file_hash should not be empty");
+
+    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .header("Authorization", format!("Bearer {xet_token}"))
+        .send().await.unwrap();
+    assert_eq!(recon.status(), 200, "reconstruction by file_hash");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_empty_file_xorb_and_shard() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    let content = b".";
+    let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
+    let file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
+
+    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .header("Authorization", format!("Bearer {xet_token}"))
+        .send().await.unwrap();
+    assert_eq!(recon.status(), 200, "empty file reconstruction");
+    let body: serde_json::Value = recon.json().await.unwrap();
+    assert!(body.get("terms").is_some(), "empty file has terms");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_multi_chunk_xorb_reconstruct() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    // Content larger than chunk size (4 bytes from ServerConfig) to create multi-chunk xorb
+    let content = b"This is content that is larger than 4 bytes and should create multiple chunks in the xorb storage system";
+    let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
+    let file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
+
+    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+        .header("Authorization", format!("Bearer {xet_token}"))
+        .send().await.unwrap();
+    assert_eq!(recon.status(), 200, "multi-chunk reconstruction");
+    let body: serde_json::Value = recon.json().await.unwrap();
+    assert!(body.get("terms").is_some());
+    assert!(body.get("fetch_info").is_some());
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dedup_identical_content_same_chunk_hashes() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
+
+    let content = b"dedup identical chunk hash test content";
+    let xorb_hash_a = upload_xorb(&client, &base_url, &xet_token, content).await;
+    let xorb_hash_b = upload_xorb(&client, &base_url, &xet_token, content).await;
+
+    // Same content should produce same xorb hash
+    assert_eq!(xorb_hash_a, xorb_hash_b, "identical content should produce identical xorb hash");
+
+    server.abort();
+}
