@@ -6372,3 +6372,122 @@ async fn gc_does_not_remove_referenced_chunks() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_stats_file_count_accurate() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let stats_before = client.get(format!("{base_url}/v1/stats"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+    let before_files = stats_before["files"].as_u64().unwrap();
+
+    // LFS uploads don't create index file records — stats only tracks
+    // reconstruction entries from Xet operations, not direct object storage.
+    let content = vec![0xABu8; 100];
+    let oid = hex::encode(sha2::Sha256::digest(&content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content)
+        .send().await.unwrap();
+
+    let stats_after = client.get(format!("{base_url}/v1/stats"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+    let after_files = stats_after["files"].as_u64().unwrap();
+    assert_eq!(after_files, before_files, "LFS upload should not affect index file count");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repository_namespace_isolation() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"data in default repo";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    // LFS uses repo-scoped namespacing via the token's repository scope.
+    // A token scoped to a different repo uses a different namespace.
+    let other_repo_scope = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub, "other-owner", "other-repo", Some("main"),
+    ).unwrap();
+    let other_claims = shardline_protocol::TokenClaims::new("local", "other-subject", shardline_protocol::TokenScope::Read, other_repo_scope, u64::MAX).unwrap();
+    let other_token = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap().sign(&other_claims).unwrap();
+
+    let resp = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {other_token}"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404, "object from different repo namespace should 404");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_update_preserves_previous_version() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let config = br#"{"arch":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec()).send().await.unwrap();
+
+    // Push manifest v1 to tag
+    let manifest_v1 = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[],
+        "annotations":{"version":"1"}});
+    let bytes_v1 = serde_json::to_vec(&manifest_v1).unwrap();
+    let digest_v1 = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes_v1)));
+    client.put(format!("{base_url}/v2/{repo}/manifests/latest"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(bytes_v1).send().await.unwrap();
+
+    // Push manifest v2 to same tag
+    let manifest_v2 = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[],
+        "annotations":{"version":"2"}});
+    let bytes_v2 = serde_json::to_vec(&manifest_v2).unwrap();
+    let digest_v2 = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes_v2)));
+    client.put(format!("{base_url}/v2/{repo}/manifests/latest"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(bytes_v2).send().await.unwrap();
+
+    // Pull by tag — should get v2 (latest)
+    let by_tag = client.get(format!("{base_url}/v2/{repo}/manifests/latest"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(by_tag.status(), 200);
+    let tag_body: serde_json::Value = by_tag.json().await.unwrap();
+    assert_eq!(tag_body["annotations"]["version"], "2", "tag should resolve to v2");
+
+    // Pull v1 by digest — should still exist
+    let by_digest_v1 = client.get(format!("{base_url}/v2/{repo}/manifests/{digest_v1}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(by_digest_v1.status(), 200, "v1 should still be accessible by digest");
+    let v1_body: serde_json::Value = by_digest_v1.json().await.unwrap();
+    assert_eq!(v1_body["annotations"]["version"], "1");
+
+    // Pull v2 by digest — should exist too
+    let by_digest_v2 = client.get(format!("{base_url}/v2/{repo}/manifests/{digest_v2}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(by_digest_v2.status(), 200, "v2 should also be accessible by digest");
+
+    server.abort();
+}
+
