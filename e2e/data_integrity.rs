@@ -6848,3 +6848,171 @@ async fn oci_push_manifest_with_subject_referrer() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_backend_lfs_round_trip() {
+    let docker = shardline_test_support::DockerLocalStack::builder()
+        .with_minio()
+        .start().unwrap();
+    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+    let s3 = docker.s3_raw_config(None).unwrap();
+
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
+        .with_endpoint(s3.endpoint)
+        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_key_prefix(s3.key_prefix.as_deref())
+        .with_allow_http(s3.allow_http);
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
+        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    // LFS round-trip
+    let content = b"s3 backend lfs test";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200, "s3 LFS GET");
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+
+    // OCI blob round-trip
+    let repo = "test-owner/test-repo";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"oci on s3")));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(b"oci on s3".to_vec()).send().await.unwrap();
+    let oci_get = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(oci_get.status(), 200, "s3 OCI GET");
+
+    // Bazel AC round-trip
+    let bazel_content = b"s3 bazel test";
+    let hash = hex::encode(sha2::Sha256::digest(bazel_content));
+    client.put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(bazel_content.to_vec()).send().await.unwrap();
+    let bazel_get = client.get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(bazel_get.status(), 200, "s3 Bazel GET");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_backend_dedup_cross_frontend() {
+    let docker = shardline_test_support::DockerLocalStack::builder()
+        .with_minio()
+        .start().unwrap();
+    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+    let s3 = docker.s3_raw_config(None).unwrap();
+
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
+        .with_endpoint(s3.endpoint)
+        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_key_prefix(s3.key_prefix.as_deref())
+        .with_allow_http(s3.allow_http);
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::Oci].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
+        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    let content = b"s3 cross-frontend dedup content";
+    let repo = "test-owner/test-repo";
+
+    let lfs_oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{lfs_oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+
+    let oid_digest = format!("sha256:{lfs_oid}");
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={oid_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+
+    let lfs = client.get(format!("{base_url}/v1/lfs/objects/{lfs_oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 200, "s3 LFS after dedup");
+    assert_eq!(lfs.bytes().await.unwrap().as_ref(), content);
+
+    let oci = client.get(format!("{base_url}/v2/{repo}/blobs/{oid_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(oci.status(), 200, "s3 OCI after dedup");
+    assert_eq!(oci.bytes().await.unwrap().as_ref(), content);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_backend_oci_manifest_push_pull() {
+    let docker = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .start().unwrap();
+    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+    let pg_url = docker.postgres_url().unwrap();
+
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Oci].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
+        .with_index_postgres_url(pg_url).unwrap();
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    let repo = "test-owner/test-repo";
+    let config_data = br#"{"arch":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config_data)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config_data.to_vec()).send().await.unwrap();
+
+    let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config_data.len()},"layers":[]});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
+    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(bytes).send().await.unwrap();
+
+    let get = client.get(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200, "pg OCI manifest pull");
+
+    server.abort();
+}
