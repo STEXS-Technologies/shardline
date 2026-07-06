@@ -220,17 +220,20 @@ impl super::PostgresRecordStore {
         repository: &RepositoryRecordScope,
     ) -> Result<Vec<PostgresRecordLocator>, PostgresMetadataStoreError> {
         let scope_key = shared_repository_record_scope_key(repository);
-        let scope_prefix = format!("{scope_key}%");
+        let escaped_prefix = format!(
+            "{}%",
+            scope_key.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+        );
         let rows = query(
             "SELECT record_key, record_kind, scope_key, file_id, content_hash
              FROM shardline_file_records
              WHERE record_kind = $1
-               AND (scope_key = $2 OR scope_key LIKE $3)
+               AND (scope_key = $2 OR scope_key LIKE $3 ESCAPE '\\')
              ORDER BY record_key",
         )
         .bind(kind.as_str())
         .bind(&scope_key)
-        .bind(&scope_prefix)
+        .bind(&escaped_prefix)
         .fetch_all(&self.pool)
         .await?;
 
@@ -250,7 +253,10 @@ impl super::PostgresRecordStore {
         Visitor: FnMut(StoredRecord<PostgresRecordLocator>) -> Result<(), VisitorError>,
     {
         let scope_key = shared_repository_record_scope_key(repository);
-        let scope_prefix = format!("{scope_key}%");
+        let escaped_prefix = format!(
+            "{}%",
+            scope_key.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+        );
         let mut rows = query(
             "SELECT record_key,
                     record_kind,
@@ -261,12 +267,12 @@ impl super::PostgresRecordStore {
                     FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT AS modified_since_epoch
              FROM shardline_file_records
              WHERE record_kind = $1
-               AND (scope_key = $2 OR scope_key LIKE $3)
+               AND (scope_key = $2 OR scope_key LIKE $3 ESCAPE '\\')
              ORDER BY record_key",
         )
         .bind(kind.as_str())
         .bind(&scope_key)
-        .bind(&scope_prefix)
+        .bind(&escaped_prefix)
         .fetch(&self.pool);
 
         while let Some(row) = rows

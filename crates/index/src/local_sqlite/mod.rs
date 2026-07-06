@@ -360,19 +360,23 @@ impl LocalRecordStore {
         collect_rows(rows)
     }
 
-    fn list_repository_record_locators(
+    fn escape_like(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+}
+
+fn list_repository_record_locators(
         &self,
         kind: LocalRecordKind,
         repository: &RepositoryRecordScope,
     ) -> Result<Vec<LocalRecordLocator>, LocalIndexStoreError> {
         let connection = self.open_connection()?;
         let scope_key = shared_repository_record_scope_key(repository);
-        let scope_prefix = format!("{scope_key}%");
+        let scope_prefix = format!("{}%", Self::escape_like(&scope_key));
         let mut statement = connection.prepare(
             "SELECT record_key, record_kind, scope_key, file_id, content_hash
              FROM shardline_file_records
              WHERE record_kind = ?1
-               AND (scope_key = ?2 OR scope_key LIKE ?3)
+               AND (scope_key = ?2 OR scope_key LIKE ?3 ESCAPE '\\')
              ORDER BY record_key",
         )?;
         let rows = statement.query_map(

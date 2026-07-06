@@ -1027,23 +1027,25 @@ impl ObjectStore for S3ObjectStore {
 
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         let location = self.location_for_key(key)?;
-        let Some(length) = range.len() else {
-            return Err(S3ObjectStoreError::RangeOutOfBounds);
-        };
-        let end_exclusive = range
-            .start()
-            .checked_add(length)
-            .ok_or(S3ObjectStoreError::RangeOutOfBounds)?;
-        let bytes = self.block_on(
+        let external_range = validated_external_range(range)?;
+        let result = self.block_on(
             self.inner
-                .get_range(&location, range.start()..end_exclusive),
+                .get_opts(&location, GetOptions::new().with_range(Some(external_range.clone()))),
         )?;
-        if u64::try_from(bytes.len()).map_err(|_error| S3ObjectStoreError::RangeOutOfBounds)?
-            != length
-        {
+        if result.range != external_range {
             return Err(S3ObjectStoreError::RangeOutOfBounds);
         }
-        Ok(bytes.to_vec())
+        let bytes = self.block_on(async {
+            let mut acc = Vec::new();
+            let mut stream = result.into_stream();
+            use futures_util::StreamExt;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                acc.extend_from_slice(&chunk);
+            }
+            Ok::<_, ExternalObjectStoreError>(acc)
+        })?;
+        Ok(bytes)
     }
 
     fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
@@ -1235,20 +1237,33 @@ fn existing_object_outcome(
         verify_integrity(expected_bytes, integrity)?;
         return Ok(PutOutcome::AlreadyExists);
     }
-    let range = ByteRange::new(
-        0,
-        existing_length
-            .checked_sub(1)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?,
-    )
-    .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-    let existing = store.read_range(key, range)?;
-    verify_integrity(&existing, integrity)?;
-    if existing == expected_bytes {
-        return Ok(PutOutcome::AlreadyExists);
-    }
 
-    Err(S3ObjectStoreError::ExistingObjectConflict)
+    // Stream-compare in chunks to avoid loading the full object into memory.
+    // Content-addressed keys always produce matching bytes for identical hashes,
+    // so a full in-memory comparison is unnecessary and causes OOM at 5GiB+.
+    let mut offset = 0_u64;
+    while offset < existing_length {
+        let remaining = existing_length
+            .checked_sub(offset)
+            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
+        let to_read = remaining.min(STREAM_COMPARE_CHUNK_BYTES as u64);
+        let end = offset
+            .checked_add(to_read)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
+        let range = ByteRange::new(offset, end)
+            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
+        let existing_chunk = store.read_range(key, range)?;
+        let expected_chunk = expected_bytes
+            .get(offset as usize..)
+            .and_then(|slice| slice.get(..to_read as usize))
+            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
+        if existing_chunk.as_slice() != expected_chunk {
+            return Err(S3ObjectStoreError::ExistingObjectConflict);
+        }
+        offset = end.saturating_add(1);
+    }
+    Ok(PutOutcome::AlreadyExists)
 }
 
 fn existing_object_outcome_from_file(
