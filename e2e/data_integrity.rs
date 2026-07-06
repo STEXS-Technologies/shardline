@@ -6491,3 +6491,216 @@ async fn oci_manifest_update_preserves_previous_version() {
     server.abort();
 }
 
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_blob_referential_integrity() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let config = br#"{"arch":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec()).send().await.unwrap();
+
+    let layer = br#"hello layer data"#;
+    let layer_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(layer)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={layer_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(layer.to_vec()).send().await.unwrap();
+
+    // Push manifest referencing config + layer
+    let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},
+        "layers":[{"mediaType":"application/octet-stream","digest":layer_digest,"size":layer.len()}]});
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest_bytes).send().await.unwrap();
+
+    // Push second manifest sharing same config blob
+    let manifest2 = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},
+        "layers":[],"annotations":{"version":"2"}});
+    let manifest2_bytes = serde_json::to_vec(&manifest2).unwrap();
+    let manifest2_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest2_bytes)));
+    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest2_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest2_bytes).send().await.unwrap();
+
+    // Both manifests should be independently retrievable
+    for (label, digest) in [("v1", &manifest_digest), ("v2", &manifest2_digest)] {
+        let get = client.get(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send().await.unwrap();
+        assert_eq!(get.status(), 200, "{label} manifest retrievable");
+    }
+
+    // Config blob should NOT be deletable (referenced by both manifests)
+    let del = client.delete(format!("{base_url}/v2/{repo}/blobs/{config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(del.status(), 400, "referenced blob must not be deletable");
+
+    // Layer blob should NOT be deletable (referenced by manifest v1)
+    let del_layer = client.delete(format!("{base_url}/v2/{repo}/blobs/{layer_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(del_layer.status(), 400, "referenced layer must not be deletable");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_with_existing_objects() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"lfs batch real object test content";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation": "download", "objects": [{"oid": oid, "size": content.len() as u64}], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 1);
+    let actions = objects[0]["actions"].as_object();
+    assert!(actions.is_some(), "existing object must have download actions");
+    assert!(objects[0]["actions"].get("download").is_some(), "download action must exist");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_stats_after_delete() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let content = b"stats after delete test";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    let stats_before_delete = client.get(format!("{base_url}/v1/stats"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+
+    client.delete(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+
+    let stats_after_delete = client.get(format!("{base_url}/v1/stats"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+
+    // Stats track index records, not LFS objects directly.
+    // LFS object deletion doesn't affect index file count.
+    assert_eq!(stats_before_delete["files"], stats_after_delete["files"],
+        "LFS delete should not change index file count");
+    assert_eq!(stats_before_delete["chunks"], stats_after_delete["chunks"],
+        "LFS delete should not change chunk count (CAS may retain data for other references)");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_mount_does_not_duplicate_storage() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let content = b"cross repo mount content";
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
+
+    // Upload blob
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec()).send().await.unwrap();
+
+    let stats_before_mount = client.get(format!("{base_url}/v1/stats"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+
+    // Mount same blob to same repo (verifies mount doesn't duplicate storage)
+    let mount = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(mount.status(), 201, "mount should succeed");
+
+    let stats_after_mount = client.get(format!("{base_url}/v1/stats"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+
+    assert_eq!(stats_before_mount["chunks"], stats_after_mount["chunks"],
+        "mount must not create duplicate chunks");
+    assert_eq!(stats_before_mount["chunk_bytes"], stats_after_mount["chunk_bytes"],
+        "mount must not increase chunk bytes");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_manifest_push_and_pull() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let config = br#"{"arch":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec()).send().await.unwrap();
+
+    let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
+
+    // Push manifest
+    client.put(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(bytes.clone()).send().await.unwrap();
+
+    // Concurrent reads
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        let c = client.clone();
+        let u = base_url.clone();
+        let r = repo.to_string();
+        let d = digest.clone();
+        let t = token.clone();
+        handles.push(tokio::spawn(async move {
+            c.get(format!("{u}/v2/{r}/manifests/{d}"))
+                .header("Authorization", format!("Bearer {t}"))
+                .send().await
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await.unwrap().unwrap();
+        assert_eq!(resp.status(), 200, "concurrent manifest pull");
+    }
+
+    server.abort();
+}
