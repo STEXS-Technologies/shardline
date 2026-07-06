@@ -61,11 +61,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let object_key = object_key.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::quarantine_candidate(&store, &object_key)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::quarantine_candidate(&store, &object_key)
             })
         }
 
@@ -74,11 +70,7 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'_, Vec<QuarantineCandidate>, Self::Error> {
             let store = self.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::list_quarantine_candidates(&store)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::list_quarantine_candidates(&store)
             })
         }
 
@@ -89,11 +81,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let candidate = candidate.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
             })
         }
 
@@ -104,11 +92,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let object_key = object_key.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::delete_quarantine_candidate(&store, &object_key)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::delete_quarantine_candidate(&store, &object_key)
             })
         }
 
@@ -119,20 +103,14 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let object_key = object_key.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::retention_hold(&store, &object_key)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::retention_hold(&store, &object_key)
             })
         }
 
         fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
             let store = self.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || LifecycleStore::list_retention_holds(&store))
-                    .await
-                    .expect("lifecycle task panicked")
+                LifecycleStore::list_retention_holds(&store)
             })
         }
 
@@ -143,11 +121,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let hold = hold.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::upsert_retention_hold(&store, &hold)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::upsert_retention_hold(&store, &hold)
             })
         }
 
@@ -158,11 +132,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let object_key = object_key.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::delete_retention_hold(&store, &object_key)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::delete_retention_hold(&store, &object_key)
             })
         }
 
@@ -173,11 +143,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let delivery = delivery.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::record_webhook_delivery(&store, &delivery)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::record_webhook_delivery(&store, &delivery)
             })
         }
 
@@ -186,9 +152,7 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'_, Vec<WebhookDelivery>, Self::Error> {
             let store = self.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || LifecycleStore::list_webhook_deliveries(&store))
-                    .await
-                    .expect("lifecycle task panicked")
+                LifecycleStore::list_webhook_deliveries(&store)
             })
         }
 
@@ -199,11 +163,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let delivery = delivery.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::delete_webhook_delivery(&store, &delivery)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::delete_webhook_delivery(&store, &delivery)
             })
         }
 
@@ -217,11 +177,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let owner = owner.to_owned();
             let repo = repo.to_owned();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::provider_repository_state(&store, provider, &owner, &repo)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::provider_repository_state(&store, provider, &owner, &repo)
             })
         }
 
@@ -230,11 +186,7 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'_, Vec<ProviderRepositoryState>, Self::Error> {
             let store = self.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::list_provider_repository_states(&store)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::list_provider_repository_states(&store)
             })
         }
 
@@ -245,11 +197,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let store = self.clone();
             let state = state.clone();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::upsert_provider_repository_state(&store, &state)
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::upsert_provider_repository_state(&store, &state)
             })
         }
 
@@ -263,13 +211,9 @@ macro_rules! impl_async_lifecycle_delegation {
             let owner = owner.to_owned();
             let repo = repo.to_owned();
             Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    LifecycleStore::delete_provider_repository_state(
-                        &store, provider, &owner, &repo,
-                    )
-                })
-                .await
-                .expect("lifecycle task panicked")
+                LifecycleStore::delete_provider_repository_state(
+                    &store, provider, &owner, &repo,
+                )
             })
         }
     };
