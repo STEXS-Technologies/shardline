@@ -24,6 +24,16 @@ use object_store::{
 };
 use shardline_protocol::{ByteRange, SecretString, ShardlineHash};
 use thiserror::Error;
+
+/// Returns `true` when the error is an S3 `AlreadyExists` or `Precondition` condition.
+fn is_already_exists(error: &object_store::Error) -> bool {
+    matches!(
+        error,
+        object_store::Error::AlreadyExists { .. }
+            | object_store::Error::Precondition { .. }
+    )
+}
+
 use tokio::{
     fs::File as TokioFile,
     io::AsyncReadExt,
@@ -592,11 +602,34 @@ impl S3ObjectStore {
         verify_integrity(body.as_slice(), integrity)?;
         let location = self.location_for_key(key)?;
         let bytes = body.into_bytes();
+
+        // Write to a temp key first to avoid destroying the existing object
+        // on partial multipart failure. Only copy to the live key after the
+        // new content is fully durable.
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_suffix = format!("tmp.{now_nanos}");
+        let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
+            .expect("temp key from valid key + suffix should be valid");
+        let temp_location = self.location_for_key(&temp_key)?;
         self.block_on(
             self.inner
-                .put_opts(&location, bytes.into(), PutMode::Overwrite.into()),
+                .put_opts(&temp_location, bytes.clone().into(), PutMode::Create.into()),
         )?;
-        Ok(())
+
+        // Atomically replace the live key with the temp content via copy,
+        // then remove the temp key.
+        let result = self
+            .block_on(self.inner.copy(&temp_location, &location))
+            .map_err(|error| {
+                // Best-effort cleanup of temp object
+                let _ = self.block_on(self.inner.delete(&temp_location));
+                error
+            });
+        let _ = self.block_on(self.inner.delete(&temp_location));
+        result
     }
 
     /// Streams a caller-validated local file into S3-compatible storage if the destination
