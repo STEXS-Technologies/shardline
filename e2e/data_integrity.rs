@@ -6704,3 +6704,148 @@ async fn concurrent_manifest_push_and_pull() {
 
     server.abort();
 }
+
+#[ignore = "needs Docker with overlay storage (podman VM issue)"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_backend_lfs_round_trip() {
+    let docker = shardline_test_support::DockerLocalStack::builder()
+        .with_postgres()
+        .start().unwrap();
+    let Some(docker) = docker else {
+        eprintln!("SKIP: Docker not available");
+        return;
+    };
+    let pg_url = docker.postgres_url().unwrap();
+
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
+        .with_index_postgres_url(pg_url).unwrap();
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    let content = b"postgres backend round trip test";
+    let oid = hex::encode(sha2::Sha256::digest(content));
+    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200, "postgres: LFS GET after PUT");
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_full_pipeline_upload_xorb_shard_reconstruct() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let write_resp = client
+        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    assert_eq!(write_resp.status(), 200, "write token issuance");
+    let write_text = write_resp.text().await.expect("write token body");
+    let write_body: serde_json::Value = serde_json::from_str(&write_text).expect("write token JSON");
+    let xet_token = write_body["accessToken"].as_str().expect(&format!("accessToken in response: {write_text}")).to_owned();
+
+    let content = b"xet full pipeline test content for verification";
+
+    // Upload xorb using test fixture
+    let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
+
+    // Upload shard using test fixture
+    let shard_file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
+
+    // Reconstruct the file — returns reconstruction metadata, not raw bytes
+    let recon = client.get(format!("{base_url}/v1/reconstructions/{shard_file_hash}"))
+        .header("Authorization", format!("Bearer {xet_token}"))
+        .send().await.unwrap();
+    assert_eq!(recon.status(), 200, "reconstruction should succeed");
+    let recon_body: serde_json::Value = recon.json().await.unwrap();
+    assert!(recon_body.get("terms").is_some(), "reconstruction should contain terms");
+    assert!(recon_body.get("fetch_info").is_some(), "reconstruction should contain fetch_info");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_body_limit_minimum_one() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        "http://test.local".to_owned(),
+        tempfile::tempdir().unwrap().path().to_path_buf(),
+        NonZeroUsize::new(1).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap()
+    .with_max_request_body_bytes(NonZeroUsize::new(1).unwrap());
+    assert_eq!(config.max_request_body_bytes().get(), 1, "body limit should be 1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_auth_provider_invalid_rejected() {
+    use shardline_server::AuthProviderKind;
+    let result = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        "http://test.local".to_owned(),
+        tempfile::tempdir().unwrap().path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Local);
+    assert_eq!(result.auth_provider(), AuthProviderKind::Local);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_push_manifest_with_subject_referrer() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+
+    let config = br#"{"arch":"amd64","os":"linux"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec()).send().await.unwrap();
+
+    // Push manifest without subject first
+    let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(manifest_bytes).send().await.unwrap();
+
+    // Push manifest referencing the first as subject (referrer)
+    let referrer = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+        "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[],
+        "subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":manifest_digest,"size":100}});
+    let referrer_bytes = serde_json::to_vec(&referrer).unwrap();
+    let referrer_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&referrer_bytes)));
+    let put = client.put(format!("{base_url}/v2/{repo}/manifests/{referrer_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(referrer_bytes).send().await.unwrap();
+    assert_eq!(put.status(), 201, "manifest with subject reference");
+
+    server.abort();
+}
