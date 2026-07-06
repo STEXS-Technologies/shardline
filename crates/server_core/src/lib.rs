@@ -153,7 +153,7 @@ pub fn validate_content_hash_with<E>(value: &str, error_fn: fn() -> E) -> Result
 ///
 /// Returns [`ServerObjectStoreError`] when the hash is malformed or the key cannot be created.
 pub fn chunk_object_key(hash_hex: &str) -> Result<ObjectKey, ServerObjectStoreError> {
-    validate_content_hash_with(hash_hex, || ServerObjectStoreError::Overflow)?;
+    validate_content_hash_with(hash_hex, || ServerObjectStoreError::InvalidContentHash)?;
     let prefix = hash_hex.get(..2).ok_or(ServerObjectStoreError::Overflow)?;
     let key = format!("{prefix}/{hash_hex}");
     ObjectKey::parse(&key).map_err(map_object_key_error)
@@ -1120,7 +1120,9 @@ mod tests {
 
     #[test]
     fn chunk_object_key_invalid_hash() {
-        assert!(chunk_object_key("short").is_err());
+        let err = chunk_object_key("short").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.to_lowercase().contains("hash"), "wrong error variant: {msg}");
     }
 
     #[test]

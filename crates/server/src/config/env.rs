@@ -90,14 +90,18 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     };
     let raw_upload_max_in_flight_chunks = var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS")
         .unwrap_or_else(|_error| default_upload_max_in_flight_chunks().get().to_string())
-        .parse::<usize>()?;
+        .parse::<usize>()
+        .map_err(ServerConfigError::UploadMaxInFlightChunks)?;
+    let raw_upload_max_in_flight_chunks = raw_upload_max_in_flight_chunks.min(1_000_000);
     let Some(upload_max_in_flight_chunks) = NonZeroUsize::new(raw_upload_max_in_flight_chunks)
     else {
         return Err(ServerConfigError::ZeroUploadMaxInFlightChunks);
     };
     let raw_transfer_max_in_flight_chunks = var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS")
         .unwrap_or_else(|_error| default_transfer_max_in_flight_chunks().get().to_string())
-        .parse::<usize>()?;
+        .parse::<usize>()
+        .map_err(ServerConfigError::TransferMaxInFlightChunks)?;
+    let raw_transfer_max_in_flight_chunks = raw_transfer_max_in_flight_chunks.min(1_000_000);
     let Some(transfer_max_in_flight_chunks) = NonZeroUsize::new(raw_transfer_max_in_flight_chunks)
     else {
         return Err(ServerConfigError::ZeroTransferMaxInFlightChunks);
@@ -107,7 +111,8 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     )?;
     let raw_reconstruction_cache_ttl_seconds = var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS")
         .unwrap_or_else(|_error| "30".to_owned())
-        .parse::<u64>()?;
+        .parse::<u64>()
+        .map_err(ServerConfigError::ReconstructionCacheTtl)?;
     let Some(reconstruction_cache_ttl_seconds) =
         NonZeroU64::new(raw_reconstruction_cache_ttl_seconds)
     else {
@@ -116,7 +121,8 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let raw_reconstruction_cache_memory_max_entries =
         var("SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES")
             .unwrap_or_else(|_error| "4096".to_owned())
-            .parse::<usize>()?;
+            .parse::<usize>()
+            .map_err(ServerConfigError::ReconstructionCacheMemoryMaxEntries)?;
     let Some(reconstruction_cache_memory_max_entries) =
         NonZeroUsize::new(raw_reconstruction_cache_memory_max_entries)
     else {
@@ -152,6 +158,8 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             .unwrap_or_else(|_error| "64".to_owned())
             .parse::<usize>()
             .map_err(ServerConfigError::OciRegistryTokenMaxInFlightRequests)?;
+    let raw_oci_registry_token_max_in_flight_requests =
+        raw_oci_registry_token_max_in_flight_requests.min(1_000_000);
     let Some(oci_registry_token_max_in_flight_requests) =
         NonZeroUsize::new(raw_oci_registry_token_max_in_flight_requests)
     else {
