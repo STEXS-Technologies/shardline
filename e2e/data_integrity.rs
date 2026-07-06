@@ -6012,3 +6012,148 @@ async fn bazel_read_ac_after_write() {
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontends_all_serves_everything() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let health = client.get(format!("{base_url}/healthz")).send().await.unwrap();
+    assert_eq!(health.status(), 200);
+
+    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    assert_eq!(xet.status(), 200, "xet route with all frontends");
+
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 200, "lfs route with all frontends");
+
+    let oci = client.get(format!("{base_url}/v2/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(oci.status(), 200, "oci route with all frontends");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontends_xet_lfs_pair() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 200, "lfs enabled");
+
+    let oci = client.get(format!("{base_url}/v2/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(oci.status(), 404, "oci should be disabled");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontends_xet_oci_pair() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let oci = client.get(format!("{base_url}/v2/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(oci.status(), 200, "oci enabled");
+
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 404, "lfs should be disabled");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontends_lfs_oci_pair() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 200, "lfs enabled");
+
+    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(xet.status(), 404, "xet should be disabled");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontends_xet_lfs_oci_triple() {
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+
+    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send().await.unwrap();
+    assert_eq!(xet.status(), 200, "xet route");
+
+    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
+        .send().await.unwrap();
+    assert_eq!(lfs.status(), 200, "lfs route");
+
+    let oci = client.get(format!("{base_url}/v2/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(oci.status(), 200, "oci route");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_tags_list_pagination_exact_count() {
+    let (base_url, server) = start_server().await.unwrap();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    let client = Client::new();
+    let repo = "test-owner/test-repo";
+    let config = br#"{"arch":"amd64"}"#;
+    let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
+    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(config.to_vec()).send().await.unwrap();
+    for i in 0..5 {
+        let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+            "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        client.put(format!("{base_url}/v2/{repo}/manifests/tag-{i}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(bytes).send().await.unwrap();
+    }
+    // Request page size 3 out of 5 tags
+    let page1 = client.get(format!("{base_url}/v2/{repo}/tags/list?n=3"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+    assert_eq!(page1["tags"].as_array().unwrap().len(), 3, "first page should have 3 tags");
+
+    // Request page size 10 (more than available)
+    let all = client.get(format!("{base_url}/v2/{repo}/tags/list?n=10"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+    assert_eq!(all["tags"].as_array().unwrap().len(), 5, "all 5 tags when n > total");
+    server.abort();
+}
