@@ -6,6 +6,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, ErrorKind, Read},
     path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(not(unix))]
@@ -278,7 +279,15 @@ fn open_existing_regular_file(path: &Path) -> io::Result<File> {
 
 #[cfg(not(unix))]
 fn write_temporary_file(path: &Path, bytes: &[u8]) -> io::Result<std::path::PathBuf> {
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("tmp-{pid}-{seq}-{now_nanos}"));
     match OpenOptions::new()
         .write(true)
         .create_new(true)

@@ -34,6 +34,19 @@ fn is_already_exists(error: &object_store::Error) -> bool {
     )
 }
 
+/// Generates a unique temp key derived from a canonical key using a monotonic
+/// counter and nanosecond timestamp.
+fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreError> {
+    let counter = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let suffix = format!("tmp.{counter}.{now_nanos}");
+    ObjectKey::parse(&format!("{}.{suffix}", key.as_str()))
+        .map_err(|_| S3ObjectStoreError::InvalidListedKey)
+}
+
 use tokio::{
     fs::File as TokioFile,
     io::AsyncReadExt,
@@ -54,7 +67,8 @@ pub enum BeginMultipartUploadResult {
     /// The destination already exists.
     AlreadyExists,
     /// The caller can stream bytes into the returned multipart writer.
-    Upload(S3MultipartUploadWriter),
+    /// The second field is a temp key used for TOCTOU-safe promotion.
+    Upload(S3MultipartUploadWriter, ObjectKey),
 }
 
 /// Multipart upload writer for direct request-body streaming into S3-compatible storage.
@@ -446,21 +460,15 @@ impl S3ObjectStore {
     /// validate the stream contents independently and concurrent writers for the same
     /// key can only be writing identical bytes.
     ///
-    /// # TOCTOU Race Window
+    /// # TOCTOU Safety
     ///
-    /// This method has a time-of-check-to-time-of-use window between the
-    /// `metadata()` existence probe (line 448) and the `put_multipart()` call
-    /// (line 453).  If two concurrent callers both see the key as absent and
-    /// both start multipart uploads, both will receive
-    /// [`BeginMultipartUploadResult::Upload`].  The final `finish()` on each
-    /// writer will race: the first to complete stores the object; the second
-    /// may fail with `AlreadyExists` if the S3 backend enforces
-    /// `S3ConditionalPut::ETagMatch` on multipart completion, or it may
-    /// silently overwrite.  This is safe because content-addressed keys
-    /// guarantee all concurrent writers are writing identical bytes — a
-    /// duplicate multipart upload for the same digest produces the same
-    /// object.  Callers must ensure they only write bytes matching the
-    /// content hash embedded in the key.
+    /// The initial existence check is a fast-path optimization only.  The multipart
+    /// upload is started on a **temp key** derived from the canonical key.  After the
+    /// caller streams data and calls [`S3ObjectStore::finish_content_addressed_upload`],
+    /// the content is atomically promoted to the canonical key via a conditional copy
+    /// (`CopyMode::Create`).  If a concurrent writer has already promoted the same
+    /// canonical key, the copy returns [`PutOutcome::AlreadyExists`] and the temp
+    /// content is discarded — eliminating the TOCTOU window.
     ///
     /// # Errors
     ///
@@ -474,7 +482,8 @@ impl S3ObjectStore {
             return Ok(BeginMultipartUploadResult::AlreadyExists);
         }
 
-        let location = self.location_for_key(key)?;
+        let temp_key = temp_key_for(key)?;
+        let location = self.location_for_key(&temp_key)?;
         let upload = self
             .inner
             .put_multipart(&location)
@@ -484,7 +493,46 @@ impl S3ObjectStore {
             S3MultipartUploadWriter {
                 writer: WriteMultipart::new_with_chunk_size(upload, STREAM_UPLOAD_CHUNK_BYTES),
             },
+            temp_key,
         ))
+    }
+
+    /// Finishes a content-addressed upload and atomically promotes the temp content
+    /// to the canonical key.
+    ///
+    /// After the caller has streamed all bytes through the writer returned by
+    /// [`begin_content_addressed_upload`], this method:
+    /// 1. Finalizes the multipart upload to the temp key.
+    /// 2. Atomically copies temp → canonical using [`CopyMode::Create`].
+    /// 3. Deletes the temp key.
+    ///
+    /// If the canonical key already exists (concurrent writer finished first),
+    /// returns [`PutOutcome::AlreadyExists`].  The content is identical since it
+    /// is content-addressed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`S3ObjectStoreError`] when the multipart finalization, conditional
+    /// copy, or cleanup fails.
+    pub async fn finish_content_addressed_upload(
+        &self,
+        upload: S3MultipartUploadWriter,
+        temp_key: &ObjectKey,
+        canonical_key: &ObjectKey,
+    ) -> Result<PutOutcome, S3ObjectStoreError> {
+        upload.finish().await?;
+
+        // Conditional copy — fails if canonical already exists.
+        match self.copy_object_if_absent(temp_key, canonical_key) {
+            Ok(outcome) => {
+                let _ = self.delete_if_present(temp_key);
+                Ok(outcome)
+            }
+            Err(error) => {
+                let _ = self.delete_if_present(temp_key);
+                Err(error)
+            }
+        }
     }
 
     /// Starts a resumable multipart upload at a temporary S3 location.
@@ -529,24 +577,45 @@ impl S3ObjectStore {
 
     /// Completes a resumable multipart upload once all parts are uploaded.
     ///
+    /// The `parts` parameter is a vector of `(part_number, etag)` tuples.  Part
+    /// numbers must be 0-indexed and consecutive from 0 (inclusive) to
+    /// `parts.len() - 1` (inclusive).  Duplicate or missing part numbers are
+    /// rejected.  Parts are sorted by part number before the S3 CompleteMultipartUpload
+    /// request is sent.
+    ///
     /// # Errors
     ///
-    /// Returns [`S3ObjectStoreError`] when the final completion request fails.
+    /// Returns [`S3ObjectStoreError`] when the final completion request fails or
+    /// part numbering is invalid.
     pub async fn complete_resumable_upload(
         &self,
         key: &ObjectKey,
         upload_id: &str,
-        part_ids: Vec<String>,
+        parts: Vec<(usize, String)>,
     ) -> Result<(), S3ObjectStoreError> {
+        let count = parts.len();
+        if count == 0 {
+            return Err(S3ObjectStoreError::InvalidUploadParts);
+        }
+
+        // Validate consecutive 0..count numbering.
+        let mut indexed: Vec<(usize, String)> = parts;
+        indexed.sort_by_key(|(part_number, _etag)| *part_number);
+        for (expected, (part_number, _etag)) in indexed.iter().enumerate() {
+            if *part_number != expected {
+                return Err(S3ObjectStoreError::InvalidUploadParts);
+            }
+        }
+
         let location = self.location_for_key(key)?;
         let multipart_id = upload_id.to_owned();
-        let parts = part_ids
+        let part_ids = indexed
             .into_iter()
-            .map(|content_id| PartId { content_id })
+            .map(|(_part_number, content_id)| PartId { content_id })
             .collect();
         let _result = self
             .inner
-            .complete_multipart(&location, &multipart_id, parts)
+            .complete_multipart(&location, &multipart_id, part_ids)
             .await
             .map_err(S3ObjectStoreError::External)?;
         Ok(())
@@ -690,7 +759,9 @@ impl S3ObjectStore {
             &location,
             CopyOptions::new().with_mode(CopyMode::Create),
         ));
-        self.delete_location_if_present(&temporary)?;
+        // Best-effort cleanup of temp object — ignore failure, the canonical
+        // copy already succeeded.
+        let _ = self.delete_location_if_present(&temporary);
         match copy_result {
             Ok(()) => Ok(PutOutcome::Inserted),
             Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
@@ -709,23 +780,13 @@ impl S3ObjectStore {
         }
     }
 
-    /// Streams a caller-validated content-addressed local file directly to its final key.
+    /// Streams a caller-validated content-addressed local file to a temp key and
+    /// atomically promotes it to the final key.
     ///
     /// This path is intended for immutable digest-addressed objects, where concurrent
-    /// writers for the same key can only be writing the same bytes. It avoids the
-    /// temporary-object plus copy step used by [`Self::put_file_if_absent`].
-    ///
-    /// # TOCTOU Race Window
-    ///
-    /// This method has a TOCTOU window between the `metadata()` existence probe
-    /// (line 586) and the multipart upload written by `stream_file_to_location`
-    /// (line 597).  Two concurrent callers that both see the key as absent will
-    /// both start streaming their file to the same final key.  The second
-    /// multipart upload to complete may fail with `AlreadyExists` (if the S3
-    /// backend enforces `S3ConditionalPut::ETagMatch` on multipart completion)
-    /// or may silently overwrite the first upload's bytes.  This is safe for
-    /// content-addressed keys because all concurrent writers write identical
-    /// bytes — either writer's output produces the same object content.
+    /// writers for the same key can only be writing the same bytes.  A temp key +
+    /// conditional copy eliminates the TOCTOU window between the existence check
+    /// and the write.
     ///
     /// # Errors
     ///
@@ -754,8 +815,35 @@ impl S3ObjectStore {
         }
 
         let location = self.location_for_key(key)?;
-        self.stream_file_to_location(&location, path)?;
-        Ok(PutOutcome::Inserted)
+        let temporary = temporary_upload_location(&self.key_prefix);
+        if let Err(error) = self.stream_file_to_location(&temporary, path) {
+            self.delete_location_if_present(&temporary)?;
+            return Err(error);
+        }
+
+        let copy_result = self.block_on(self.inner.copy_opts(
+            &temporary,
+            &location,
+            CopyOptions::new().with_mode(CopyMode::Create),
+        ));
+        // Best-effort cleanup — ignore failure, data is at the canonical key.
+        let _ = self.delete_location_if_present(&temporary);
+        match copy_result {
+            Ok(()) => Ok(PutOutcome::Inserted),
+            Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
+                ..
+            }))
+            | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
+                ..
+            })) => {
+                let existing_length = self
+                    .metadata(key)?
+                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
+                    .length();
+                existing_object_outcome_from_file(self, key, existing_length, path, integrity)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Copies an existing object to a new key if the destination key is absent.
@@ -1051,6 +1139,9 @@ pub enum S3ObjectStoreError {
     /// An object listed from S3 could not be represented as a validated object key.
     #[error("s3 listed an object outside the configured key prefix")]
     InvalidListedKey,
+    /// An upload parts list had missing, duplicate, or out-of-order part numbers.
+    #[error("upload parts list has invalid part numbering")]
+    InvalidUploadParts,
     /// Local temporary-file access failed.
     #[error("temporary file operation failed")]
     Io(#[from] IoError),

@@ -749,7 +749,7 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
         return Err(OciAdapterError::ExpectedBodyHashMismatch);
     }
 
-    let mut part_ids = multipart.uploaded_part_ids.clone();
+    let mut part_ids: Vec<String> = multipart.uploaded_part_ids.clone();
     let tail = read_upload_tail(root, session_id).await?;
     if !tail.is_empty() {
         let part_id = backend
@@ -773,8 +773,11 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
         );
     }
 
+    // Attach part numbers for ordering validation by the S3 backend.
+    let parts: Vec<(usize, String)> = part_ids.into_iter().enumerate().collect();
+
     backend
-        .complete_resumable_object_upload(&temporary_object_key, &multipart.upload_id, part_ids)
+        .complete_resumable_object_upload(&temporary_object_key, &multipart.upload_id, parts)
         .await?;
     let canonical_key = crate::protocol_support::shared_sha256_object_key(digest_hex)?;
     let canonical_outcome = backend.copy_object_if_absent(&temporary_object_key, &canonical_key)?;
