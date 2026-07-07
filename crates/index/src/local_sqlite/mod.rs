@@ -303,15 +303,21 @@ impl LocalRecordStore {
         &self,
         record: &FileRecord,
     ) -> Result<(), LocalIndexStoreError> {
-        let connection = self.open_connection()?;
-        let transaction = connection.unchecked_transaction()?;
-        let now = unix_now_seconds_lossy();
-        let version_locator = self.version_record_locator(record);
-        helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;
-        let latest_locator = self.latest_record_locator(record);
-        helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
-        transaction.commit()?;
-        Ok(())
+        let store = self.clone();
+        let record = record.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
+            let now = unix_now_seconds_lossy();
+            let version_locator = store.version_record_locator(&record);
+            helpers::upsert_file_record_row(&transaction, &version_locator, &record, now)?;
+            let latest_locator = store.latest_record_locator(&record);
+            helpers::upsert_file_record_row(&transaction, &latest_locator, &record, now)?;
+            transaction.commit()?;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .await
+        .map_err(|_| LocalIndexStoreError::BlockingTask)?
     }
 
     /// Atomically commits native shard metadata.
@@ -324,22 +330,29 @@ impl LocalRecordStore {
         records: &[FileRecord],
         dedupe_mappings: &[DedupeShardMapping],
     ) -> Result<(), LocalIndexStoreError> {
-        let connection = self.open_connection()?;
-        let transaction = connection.unchecked_transaction()?;
-        let now = unix_now_seconds_lossy();
-        for record in records {
-            let version_locator = self.version_record_locator(record);
-            helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;
-        }
-        for mapping in dedupe_mappings {
-            helpers::upsert_dedupe_mapping_row(&transaction, mapping, now)?;
-        }
-        for record in records {
-            let latest_locator = self.latest_record_locator(record);
-            helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
-        }
-        transaction.commit()?;
-        Ok(())
+        let store = self.clone();
+        let records = records.to_vec();
+        let dedupe_mappings = dedupe_mappings.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
+            let now = unix_now_seconds_lossy();
+            for record in &records {
+                let version_locator = store.version_record_locator(record);
+                helpers::upsert_file_record_row(&transaction, &version_locator, record, now)?;
+            }
+            for mapping in &dedupe_mappings {
+                helpers::upsert_dedupe_mapping_row(&transaction, mapping, now)?;
+            }
+            for record in &records {
+                let latest_locator = store.latest_record_locator(record);
+                helpers::upsert_file_record_row(&transaction, &latest_locator, record, now)?;
+            }
+            transaction.commit()?;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .await
+        .map_err(|_| LocalIndexStoreError::BlockingTask)?
     }
 
     fn list_record_locators(

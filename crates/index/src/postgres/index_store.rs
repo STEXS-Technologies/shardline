@@ -784,7 +784,7 @@ fn provider_repository_state_from_row(
 ) -> Result<ProviderRepositoryState, PostgresMetadataStoreError> {
     let provider_name = row.try_get::<String, _>("provider")?;
     let provider = parse_repository_provider(&provider_name, || {
-        PostgresMetadataStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
+        PostgresMetadataStoreError::InvalidRepoType(provider_name.clone())
     })?;
     Ok(ProviderRepositoryState::new(
         provider,
