@@ -497,6 +497,7 @@ where
     IndexAdapter::Error: Into<GcError>,
 {
     let mut quarantined_object_keys = HashSet::new();
+    let mut missing_object_keys = Vec::new();
 
     index_store
         .visit_quarantine_candidates(|candidate| {
@@ -514,20 +515,20 @@ where
                 );
             }
 
-            let Some(metadata) = object_store.metadata(candidate.object_key())? else {
-                return Err(
-                    InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
-                        object_key: candidate.object_key().as_str().to_owned(),
-                    }
-                    .into(),
+            let Ok(Some(_metadata)) = object_store.metadata(candidate.object_key()) else {
+                tracing::warn!(
+                    "quarantine candidate {} references a missing object — will auto-release",
+                    candidate.object_key().as_str(),
                 );
+                missing_object_keys.push(candidate.object_key().clone());
+                return Ok(());
             };
-            if metadata.length() != candidate.observed_length() {
+            if _metadata.length() != candidate.observed_length() {
                 return Err(
                     InvalidLifecycleMetadataError::QuarantineCandidateLengthMismatch {
                         object_key: candidate.object_key().as_str().to_owned(),
                         expected_length: candidate.observed_length(),
-                        observed_length: metadata.length(),
+                        observed_length: _metadata.length(),
                     }
                     .into(),
                 );
@@ -537,6 +538,11 @@ where
             Ok::<(), GcError>(())
         })
         .await?;
+
+    // Auto-release quarantine entries whose objects were deleted externally.
+    for key in &missing_object_keys {
+        let _ = index_store.delete_quarantine_candidate(key).await;
+    }
 
     index_store
         .visit_retention_holds(|hold| {

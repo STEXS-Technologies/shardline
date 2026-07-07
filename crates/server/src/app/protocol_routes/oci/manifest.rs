@@ -214,7 +214,11 @@ async fn validate_oci_manifest_document(
         return Err(ServerError::InvalidManifestReference);
     }
     if let Some(subject) = document.get("subject") {
-        let _subject_digest = validate_oci_descriptor(subject)?;
+        let subject_digest = validate_oci_descriptor(subject)?;
+        // Validate the referenced manifest exists, consistent with the
+        // treatment of layers and index manifests entries.
+        ensure_oci_manifest_exists(state, repository, repository_scope, &subject_digest)
+            .await?;
     }
 
     match normalized_media_type {
