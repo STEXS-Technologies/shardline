@@ -188,12 +188,19 @@ pub(crate) async fn lfs_put_object(
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let object_key = lfs_object_key(&oid, auth.as_ref().map(scope_from_auth))?;
+    let content_length = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let start = std::time::Instant::now();
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
         .put_sha256_addressed_object_stream_if_absent(&object_key, &oid, body)
         .await?;
-    crate::metrics::record_upload("lfs", 0, 0.0, true);
+    let elapsed = start.elapsed().as_secs_f64();
+    crate::metrics::record_upload("lfs", content_length, elapsed, true);
     Ok(StatusCode::OK)
 }
 
