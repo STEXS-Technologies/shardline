@@ -42,7 +42,8 @@ fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreError> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let suffix = format!("tmp.{counter}.{now_nanos}");
+    let pid = std::process::id();
+    let suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
     ObjectKey::parse(&format!("{}.{suffix}", key.as_str()))
         .map_err(|_| S3ObjectStoreError::InvalidListedKey)
 }
@@ -421,10 +422,15 @@ impl S3ObjectStore {
                 if !item.key().as_str().starts_with(prefix.as_str()) {
                     continue;
                 }
-                let Some(remainder) = item.key().as_str().strip_prefix(prefix.as_str()) else {
+                let key_str = item.key().as_str();
+                let Some(remainder) = key_str.strip_prefix(prefix.as_str()) else {
                     continue;
                 };
                 if remainder.is_empty() || remainder.contains('/') {
+                    continue;
+                }
+                // Skip temp upload artifacts (e.g., "key.xorb.tmp.0.12345").
+                if remainder.contains(".tmp.") {
                     continue;
                 }
                 metadata.push(item);
@@ -686,7 +692,7 @@ impl S3ObjectStore {
             .as_nanos();
         let temp_suffix = format!("tmp.{counter}.{now_nanos}");
         let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
-            .expect("temp key from valid key + suffix should be valid");
+            .map_err(|_| S3ObjectStoreError::InvalidListedKey)?;
         let temp_location = self.location_for_key(&temp_key)?;
         self.block_on(
             self.inner
@@ -755,7 +761,7 @@ impl S3ObjectStore {
         let temporary = temporary_upload_location(&self.key_prefix);
         let upload_result = self.stream_file_to_location(&temporary, path);
         if let Err(error) = upload_result {
-            self.delete_location_if_present(&temporary)?;
+            let _ = self.delete_location_if_present(&temporary);
             return Err(error);
         }
 
@@ -822,7 +828,7 @@ impl S3ObjectStore {
         let location = self.location_for_key(key)?;
         let temporary = temporary_upload_location(&self.key_prefix);
         if let Err(error) = self.stream_file_to_location(&temporary, path) {
-            self.delete_location_if_present(&temporary)?;
+            let _ = self.delete_location_if_present(&temporary);
             return Err(error);
         }
 
