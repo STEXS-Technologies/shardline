@@ -119,7 +119,8 @@ pub(super) fn apply_pending_local_migrations(
                     name,
                     applied_at_unix_seconds
                  )
-                 VALUES (?1, ?2, ?3)"
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT (version) DO NOTHING"
             ),
             params![
                 migration.version,
@@ -743,7 +744,7 @@ pub(super) fn provider_repository_state_from_row(
         SqliteError::FromSqlConversionFailure(
             0,
             Type::Text,
-            Box::new(WebhookDeliveryError::InvalidProvider),
+            Box::new(LocalIndexStoreError::InvalidRepoType(provider_name.clone())),
         )
     })?;
     Ok(ProviderRepositoryState::new(
