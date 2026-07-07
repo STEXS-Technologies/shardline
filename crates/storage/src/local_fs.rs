@@ -151,7 +151,10 @@ pub(crate) fn write_bytes_atomically(root: &Path, path: &Path, bytes: &[u8]) -> 
 
     #[cfg(not(unix))]
     {
-        let _ = root;
+        // Defense-in-depth: ensure the path stays within the root directory.
+        path.strip_prefix(root).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path escapes root")
+        })?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         let temporary = write_temporary_file(path, bytes)?;
@@ -312,12 +315,26 @@ const fn anchored_path_options() -> AnchoredPathOptions {
 }
 
 fn ensure_file_matches_bytes(mut file: File, expected: &[u8]) -> io::Result<()> {
-    let mut actual = Vec::new();
-    file.read_to_end(&mut actual)?;
-    if actual == expected {
-        return Ok(());
+    use std::io::Read;
+    const LOCAL_FILE_COMPARE_CHUNK_BYTES: usize = 256 * 1024;
+    let mut offset = 0_usize;
+    let mut buffer = vec![0_u8; LOCAL_FILE_COMPARE_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            if offset != expected.len() {
+                break;
+            }
+            return Ok(());
+        }
+        let chunk = &buffer[..read];
+        let expected_chunk = expected.get(offset..).and_then(|s| s.get(..read));
+        match expected_chunk {
+            Some(ec) if chunk == ec => {}
+            _ => break,
+        }
+        offset += read;
     }
-
     Err(io::Error::new(
         ErrorKind::AlreadyExists,
         "existing object did not match expected bytes",
