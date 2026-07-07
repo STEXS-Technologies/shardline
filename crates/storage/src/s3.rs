@@ -988,11 +988,13 @@ impl S3ObjectStore {
 
         match result {
             Ok(()) => {
-                let _result = store
-                    .complete_multipart(&dst, &upload_id, part_ids)
-                    .await
-                    .map_err(S3ObjectStoreError::External)?;
-                Ok(PutOutcome::Inserted)
+                match store.complete_multipart(&dst, &upload_id, part_ids).await {
+                    Ok(_) => Ok(PutOutcome::Inserted),
+                    Err(error) => {
+                        let _ = store.abort_multipart(&dst, &upload_id).await;
+                        Err(S3ObjectStoreError::External(error))
+                    }
+                }
             }
             Err(error) => {
                 let _ = store.abort_multipart(&dst, &upload_id).await;
