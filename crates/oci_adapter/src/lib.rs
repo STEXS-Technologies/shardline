@@ -606,25 +606,27 @@ pub async fn upload_body_integrity(
 /// Returns an error when the upload session cannot be deleted.
 pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), OciAdapterError> {
     validate_upload_session_id(session_id)?;
-    let metadata_path = upload_metadata_path(root, session_id);
-    let body_path = upload_body_path(root, session_id);
-    let tail_path = upload_tail_path(root, session_id);
-    match fs::remove_file(body_path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(OciAdapterError::Io(error)),
+    let paths = [
+        upload_body_path(root, session_id),
+        upload_tail_path(root, session_id),
+        upload_metadata_path(root, session_id),
+    ];
+    let mut first_error = None;
+    for path in &paths {
+        match fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(ref error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(OciAdapterError::Io(error));
+                }
+            }
+        }
     }
-    match fs::remove_file(tail_path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(OciAdapterError::Io(error)),
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
-    match fs::remove_file(metadata_path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(OciAdapterError::Io(error)),
-    }
-    Ok(())
 }
 
 /// # Errors
@@ -750,22 +752,32 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
         return Err(OciAdapterError::ExpectedBodyHashMismatch);
     }
 
+    // Save IDs before fallible operations so we can abort on failure.
+    let temp_key = temporary_object_key;
+    let upload_id = multipart.upload_id.clone();
+
     let mut part_ids: Vec<String> = multipart.uploaded_part_ids.clone();
     let tail = read_upload_tail(root, session_id).await?;
     if !tail.is_empty() {
-        let part_id = backend
+        match backend
             .upload_resumable_object_part(
-                &temporary_object_key,
-                &multipart.upload_id,
+                &temp_key,
+                &upload_id,
                 part_ids.len(),
                 Bytes::from(tail),
             )
-            .await?;
-        part_ids.push(part_id);
+            .await
+        {
+            Ok(part_id) => part_ids.push(part_id),
+            Err(error) => {
+                let _ = backend.abort_resumable_object_upload(&temp_key, &upload_id).await;
+                return Err(error);
+            }
+        }
     }
     if part_ids.is_empty() {
         let _ignored = backend
-            .abort_resumable_object_upload(&temporary_object_key, &multipart.upload_id)
+            .abort_resumable_object_upload(&temp_key, &upload_id)
             .await;
         return backend.put_sha256_addressed_object_bytes_if_absent(
             object_key,
@@ -777,13 +789,20 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     // Attach part numbers for ordering validation by the S3 backend.
     let parts: Vec<(usize, String)> = part_ids.into_iter().enumerate().collect();
 
-    backend
-        .complete_resumable_object_upload(&temporary_object_key, &multipart.upload_id, parts)
-        .await?;
+    match backend
+        .complete_resumable_object_upload(&temp_key, &upload_id, parts)
+        .await
+    {
+        Ok(()) => {}
+        Err(error) => {
+            let _ = backend.abort_resumable_object_upload(&temp_key, &upload_id).await;
+            return Err(error);
+        }
+    }
     let canonical_key = crate::protocol_support::shared_sha256_object_key(digest_hex)?;
-    let canonical_outcome = backend.copy_object_if_absent(&temporary_object_key, &canonical_key)?;
+    let canonical_outcome = backend.copy_object_if_absent(&temp_key, &canonical_key)?;
     let _deleted = backend
-        .delete_object_if_present(&temporary_object_key)
+        .delete_object_if_present(&temp_key)
         .await?;
     if canonical_key == *object_key {
         return Ok(canonical_outcome);
@@ -872,7 +891,9 @@ pub async fn purge_expired_upload_sessions<B: OciBackend>(
         let path = entry.path();
         match path.extension() {
             Some(extension) if extension == OsStr::new("json") => {}
-            Some(extension) if extension == OsStr::new("bin") => {
+            Some(extension)
+                if extension == OsStr::new("bin") || extension == OsStr::new("tail") =>
+            {
                 let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
                     continue;
                 };
@@ -980,6 +1001,9 @@ async fn ensure_s3_upload_started<B: OciBackend>(
         .await?
     else {
         session.s3_multipart = None;
+        // Overwrite the placeholder so on-disk state matches in-memory.
+        // A subsequent read will attempt S3 upload creation again.
+        let _ = persist_upload_session(root, session_id, session.clone()).await;
         return Err(OciAdapterError::NotFound);
     };
 
