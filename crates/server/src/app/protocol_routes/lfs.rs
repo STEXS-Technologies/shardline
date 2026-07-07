@@ -156,6 +156,7 @@ pub(crate) async fn lfs_get_object(
         &object_key,
         "application/octet-stream",
         Some(format!("sha256:{oid}")),
+        "lfs",
     )
     .await
 }
@@ -169,7 +170,13 @@ pub(crate) async fn lfs_head_object(
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     let object_key = lfs_object_key(&oid, auth.as_ref().map(scope_from_auth))?;
     let total_length = state.backend.object_length(&object_key).await?;
-    Ok((StatusCode::OK, [(CONTENT_LENGTH, total_length.to_string())]))
+    Ok((
+        StatusCode::OK,
+        [
+            (CONTENT_LENGTH, total_length.to_string()),
+            (CONTENT_TYPE, "application/octet-stream".to_owned()),
+        ],
+    ))
 }
 
 #[tracing::instrument(skip(state, headers, body), fields(oid))]

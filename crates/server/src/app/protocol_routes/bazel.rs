@@ -33,6 +33,7 @@ pub(crate) async fn bazel_get_ac(
         &object_key,
         "application/octet-stream",
         None,
+        "bazel",
     )
     .await
 }
@@ -76,6 +77,7 @@ pub(crate) async fn bazel_get_cas(
         &object_key,
         "application/octet-stream",
         None,
+        "bazel",
     )
     .await
 }

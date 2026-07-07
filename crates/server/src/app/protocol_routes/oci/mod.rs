@@ -114,6 +114,7 @@ async fn oci_dispatch_parsed(
                 &object_key,
                 "application/octet-stream",
                 Some(format!("sha256:{digest_hex}")),
+                "oci",
             )
             .await
         }
