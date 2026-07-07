@@ -690,7 +690,8 @@ impl S3ObjectStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let temp_suffix = format!("tmp.{counter}.{now_nanos}");
+        let pid = std::process::id();
+        let temp_suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
         let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
             .map_err(|_| S3ObjectStoreError::InvalidListedKey)?;
         let temp_location = self.location_for_key(&temp_key)?;
@@ -994,6 +995,15 @@ impl S3ObjectStore {
 
         match result {
             Ok(()) => {
+                // Re-check destination existence before completing.  A
+                // concurrent writer may have promoted content to the
+                // target key while we were uploading parts.
+                if self.metadata(destination)?.is_some() {
+                    let _ = store.abort_multipart(&dst, &upload_id).await;
+                    // Content is identical for content-addressed keys,
+                    // so returning AlreadyExists is correct.
+                    return Ok(PutOutcome::AlreadyExists);
+                }
                 match store.complete_multipart(&dst, &upload_id, part_ids).await {
                     Ok(_) => Ok(PutOutcome::Inserted),
                     Err(error) => {
@@ -1189,6 +1199,10 @@ impl ObjectStore for S3ObjectStore {
                 .map_err(Into::into)?
             {
                 let metadata = self.metadata_from_external(&entry).map_err(Into::into)?;
+                // Skip temp upload artifacts.
+                if metadata.key().as_str().contains(".tmp.") {
+                    continue;
+                }
                 visitor(metadata)?;
             }
 
