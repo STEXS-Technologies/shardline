@@ -44,10 +44,7 @@ impl HubStore for PostgresIndexStore {
             sqlx::query(
                 "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
                  VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)
-                 ON CONFLICT (repo_id) DO UPDATE SET
-                   repo_type = EXCLUDED.repo_type,
-                   private = EXCLUDED.private,
-                   updated_at_unix_seconds = EXTRACT(EPOCH FROM now())::bigint",
+                 ON CONFLICT (repo_id) DO NOTHING",
             )
             .bind(&name)
             .bind(repo_type_str)
@@ -475,7 +472,7 @@ impl HubStore for PostgresIndexStore {
         block_on_async(async {
             let row = sqlx::query(
                 "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
-                 VALUES (CONCAT('wh-', EXTRACT(EPOCH FROM now())::text, '-', (SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 5) AS bigint)), 0) + 1 FROM shardline_hub_webhooks WHERE repo_id = $1)::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
+                 VALUES (CONCAT('wh-', EXTRACT(EPOCH FROM now())::text, '-', ((SELECT COUNT(*) FROM shardline_hub_webhooks WHERE repo_id = $1))::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
                  RETURNING id, repo_id, url, events, secret, active, created_at_unix_seconds",
             )
             .bind(&repo_id)

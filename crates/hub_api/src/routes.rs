@@ -1336,6 +1336,10 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
             v6.is_loopback() // ::1
                 || v6.is_unspecified() // ::
                 || v6.is_unicast_link_local() // fe80::/10
+                || v6.is_unique_local() // fc00::/7 (RFC 4193)
+                || v6.to_ipv4_mapped().map_or(false, |v4| {
+                    is_private_ip(&std::net::IpAddr::V4(v4))
+                })
         }
     }
 }
