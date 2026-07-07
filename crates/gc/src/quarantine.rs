@@ -154,16 +154,21 @@ where
         let Some(orphan) = orphan else {
             continue;
         };
-        let _outcome = object_store
-            .delete_if_present(&orphan.object_key)
-            .map_err(Into::into)?;
-
+        // Remove the quarantine entry from the durable index first, then
+        // delete the object.  If the object delete fails, the quarantine
+        // entry is already cleaned up — the orphan will be re-discovered
+        // on the next GC scan.  The reverse order (object first, then
+        // index) would leave a permanently stuck state where the index
+        // references a non-existent object, blocking all future GC runs.
         let Some(removed_candidate) = quarantine_entries.remove(&object_key) else {
             continue;
         };
         index_store
             .delete_quarantine_candidate(removed_candidate.object_key())
             .await
+            .map_err(Into::into)?;
+        let _outcome = object_store
+            .delete_if_present(&orphan.object_key)
             .map_err(Into::into)?;
         report.deleted_chunks = checked_increment(report.deleted_chunks)?;
         report.deleted_bytes = checked_add(report.deleted_bytes, orphan.bytes)?;

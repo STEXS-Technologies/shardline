@@ -17,6 +17,7 @@ use axum::{
 };
 use shardline_protocol::TokenScope;
 use shardline_storage::{DeleteOutcome, ObjectKey};
+use serde_json::Value;
 
 use crate::{
     ServerError,
@@ -221,23 +222,28 @@ async fn oci_delete_blob(
     let scope = auth.as_ref().map(scope_from_auth);
     let object_key = oci_blob_key(repository, digest_hex, scope)?;
 
-    // Check if any manifest references this blob
+    // Check if any manifest references this blob by walking every page of
+    // manifest listings and parsing the JSON document for digest references.
     let manifest_prefix = oci_manifest_prefix(repository, scope)?;
-    let manifest_keys: Vec<ObjectKey> = state
-        .backend
-        .list_object_flat_namespace_page(&manifest_prefix, None, 1000)?
-        .into_iter()
-        .map(|meta| meta.key().clone())
-        .collect();
-
-    for manifest_key in &manifest_keys {
-        let body = state.backend.read_object(manifest_key).await?;
-        let body_str = String::from_utf8_lossy(&body);
-        if body_str.contains(&format!("\"digest\":\"sha256:{digest_hex}\""))
-            || body_str.contains(&format!("\"digest\": \"sha256:{digest_hex}\""))
-        {
-            return Err(ServerError::InvalidManifestReference);
+    let target_digest = format!("sha256:{digest_hex}");
+    let mut start_after: Option<ObjectKey> = None;
+    loop {
+        let page: Vec<ObjectKey> = state
+            .backend
+            .list_object_flat_namespace_page(&manifest_prefix, start_after.as_ref(), 1000)?
+            .into_iter()
+            .map(|meta| meta.key().clone())
+            .collect();
+        if page.is_empty() {
+            break;
         }
+        for manifest_key in &page {
+            let body = state.backend.read_object(manifest_key).await?;
+            if manifest_references_digest(&body, &target_digest) {
+                return Err(ServerError::InvalidManifestReference);
+            }
+        }
+        start_after = page.last().cloned();
     }
 
     match state
@@ -252,6 +258,37 @@ async fn oci_delete_blob(
         .status(StatusCode::ACCEPTED)
         .body(Body::empty())
         .map_err(|_error| ServerError::Overflow)
+}
+
+/// Returns `true` if the JSON document (OCI manifest or index) contains a
+/// reference to `target_digest` anywhere in its descriptor tree.
+fn manifest_references_digest(body: &[u8], target_digest: &str) -> bool {
+    let Ok(doc) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let mut refs = Vec::new();
+    collect_digest_refs(&doc, &mut refs);
+    refs.iter().any(|d| *d == target_digest)
+}
+
+fn collect_digest_refs<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(digest)) = map.get("digest") {
+                out.push(digest.as_str());
+                return;
+            }
+            for v in map.values() {
+                collect_digest_refs(v, out);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                collect_digest_refs(v, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[allow(clippy::missing_const_for_fn)]

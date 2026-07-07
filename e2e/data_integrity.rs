@@ -3087,23 +3087,8 @@ async fn oci_push_blob_empty_body() {
         .send()
         .await
         .unwrap();
-    // Empty body starts an upload session (202), then needs finalization
-    assert_eq!(post.status(), 202, "empty blob should start upload session");
-
-    let location = post.headers().get("location")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") })
-        .unwrap();
-
-    let put = client
-        .put(format!("{location}?digest={digest}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/octet-stream")
-        .body(vec![])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(put.status(), 201, "empty blob finalize should succeed");
+    // Empty body with digest is stored directly (201), consistent with OCI spec.
+    assert_eq!(post.status(), 201, "empty blob should complete directly");
 
     let get = client
         .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))

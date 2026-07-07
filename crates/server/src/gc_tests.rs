@@ -941,8 +941,8 @@ async fn exercise_gc_fails_closed_on_missing_quarantined_object_metadata()
     index_store.upsert_quarantine_candidate(&candidate)?;
 
     let result = run_local_gc(storage.path().to_path_buf(), LocalGcOptions::mark_only(60)).await;
-    assert!(matches!(result, Err(GcError::InvalidLifecycleMetadata(_))));
-    assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_some());
+    assert!(result.is_ok(), "gc should auto-release missing quarantine entries: {result:?}");
+    assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_none());
 
     Ok(())
 }

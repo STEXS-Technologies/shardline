@@ -65,17 +65,15 @@ pub(crate) async fn oci_post_blob_upload(
     if let Some(digest) = query.get("digest") {
         let digest_hex = parse_sha256_digest(digest)?;
         let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-        if body.expected_total_bytes() != Some(0) {
-            let object_key = oci_blob_key(repository, &digest_hex, scope)?;
-            let _stored = state
-                .backend
-                .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
-                .await?;
-            return oci_created_response(
-                &oci_blob_location(repository, &digest_hex),
-                Some(&digest_hex),
-            );
-        }
+        let object_key = oci_blob_key(repository, &digest_hex, scope)?;
+        let _stored = state
+            .backend
+            .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
+            .await?;
+        return oci_created_response(
+            &oci_blob_location(repository, &digest_hex),
+            Some(&digest_hex),
+        );
     }
 
     let session_id = create_upload_session(
