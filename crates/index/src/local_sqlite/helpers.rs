@@ -138,7 +138,14 @@ pub(super) fn ensure_legacy_import_state(
     connection: &mut Connection,
     root: &Path,
 ) -> Result<(), LocalIndexStoreError> {
-    let import_completed = connection
+    // Acquire a write lock immediately to prevent TOCTOU between the
+    // existence check and the import.  Two concurrent callers that both
+    // see "not yet imported" will serialize here.
+    let transaction = connection.transaction_with_behavior(
+        rusqlite::TransactionBehavior::Immediate,
+    )?;
+
+    let import_completed = transaction
         .query_row(
             "SELECT value
              FROM shardline_local_metadata_meta
@@ -154,16 +161,16 @@ pub(super) fn ensure_legacy_import_state(
         return Err(LocalIndexStoreError::InvalidLegacyImportState);
     }
 
-    if local_metadata_has_rows(connection)? {
+    if local_metadata_has_rows(&transaction)? {
         return Err(LocalIndexStoreError::InvalidLegacyImportState);
     }
 
     if !legacy_layout_exists(root) {
-        mark_legacy_import_completed(connection)?;
+        mark_legacy_import_completed(&transaction)?;
+        transaction.commit()?;
         return Ok(());
     }
 
-    let transaction = connection.transaction()?;
     import_legacy_file_records(&transaction, root, LocalRecordKind::Latest)?;
     import_legacy_file_records(&transaction, root, LocalRecordKind::Version)?;
     import_legacy_reconstructions(&transaction, root)?;
