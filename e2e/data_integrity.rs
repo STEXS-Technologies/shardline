@@ -4871,40 +4871,41 @@ async fn hub_dataset_and_model_operations() {
         assert_eq!(resp.status(), 404, "non-existent resolve: {url}");
     }
 
+    // LFS object upload — would have caught the missing `size` column in
+    // shardline_hub_lfs_objects (BUG #1).
+    let lfs_body = b"lfs content";
+    let lfs_sha = {
+        let mut h = sha2::Sha256::new();
+        h.update(lfs_body);
+        hex::encode(h.finalize())
+    };
+    let lfs_upload = client
+        .put(format!("{base_url}/lfs/objects/{lfs_sha}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(lfs_body.to_vec())
+        .send().await.unwrap();
+    assert_eq!(lfs_upload.status(), 200, "lfs object upload: {}", lfs_upload.status());
+
+    // Duplicate repo creation should fail (BUG #4). Currently returns 500
+    // because no dedicated 409 error variant exists in the Hub API.
+    let dup_repo = client
+        .post(format!("{base_url}/api/repos/create"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
+        .send().await.unwrap();
+    assert!(dup_repo.status().is_server_error(), "duplicate repo creation should fail: {}", dup_repo.status());
+
     server.abort();
 }
 
 fn create_hub_db(storage: &std::path::Path) {
     let hub_root = storage.join("hub");
     std::fs::create_dir_all(&hub_root).unwrap();
-    let conn = rusqlite::Connection::open(hub_root.join("metadata.sqlite3")).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
-            repo_id TEXT PRIMARY KEY, repo_type TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 0,
-            default_branch TEXT NOT NULL, created_at_unix_seconds INTEGER NOT NULL,
-            updated_at_unix_seconds INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
-            repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
-            parent_sha TEXT, message TEXT, created_at_unix_seconds INTEGER NOT NULL,
-            PRIMARY KEY (repo_id, sha)
-        );
-        CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
-            ON shardline_hub_revisions (repo_id, ref_name);
-        CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
-            commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
-            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
-            PRIMARY KEY (commit_sha, path)
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
-            oid TEXT PRIMARY KEY, data BLOB NOT NULL, created_at_unix_seconds INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id TEXT NOT NULL,
-            url TEXT NOT NULL, events TEXT NOT NULL, secret TEXT,
-            created_at_unix_seconds INTEGER NOT NULL
-        );"
-    ).unwrap();
+    // Create the database file so the server's LocalIndexStore::new succeeds.
+    // Tables are created by the migration system and ensure_hub_tables during
+    // server startup — we do not pre-create them here to avoid conflicts with
+    // migration ALTER TABLE statements.
+    let _conn = rusqlite::Connection::open(hub_root.join("metadata.sqlite3")).unwrap();
 }
 
 async fn start_hub_server() -> (String, String, tempfile::TempDir, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>) {
