@@ -679,11 +679,12 @@ impl S3ObjectStore {
         // Write to a temp key first to avoid destroying the existing object
         // on partial multipart failure. Only copy to the live key after the
         // new content is fully durable.
+        let counter = TEMP_UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let temp_suffix = format!("tmp.{now_nanos}");
+        let temp_suffix = format!("tmp.{counter}.{now_nanos}");
         let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
             .expect("temp key from valid key + suffix should be valid");
         let temp_location = self.location_for_key(&temp_key)?;
@@ -947,8 +948,8 @@ impl S3ObjectStore {
         source_len: u64,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         // Fast check: if the destination already exists, compare content.
-        if let Some(dest_meta) = self.metadata(destination)? {
-            return existing_copy_outcome(self, source, destination, dest_meta.length());
+        if let Some(_dest_meta) = self.metadata(destination)? {
+            return existing_copy_outcome(self, source, destination, source_len);
         }
 
         let store = self.inner.clone();
@@ -1103,7 +1104,11 @@ impl ObjectStore for S3ObjectStore {
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
             })) => {
-                existing_object_outcome(self, key, integrity.length(), bytes.as_ref(), integrity)
+                let existing_length = self
+                    .metadata(key)?
+                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
+                    .length();
+                existing_object_outcome(self, key, existing_length, bytes.as_ref(), integrity)
             }
             Err(error) => Err(error),
         }
