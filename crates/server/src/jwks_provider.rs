@@ -1,6 +1,7 @@
 use std::{
     str::FromStr,
-    sync::{Arc, OnceLock},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::Arc,
     time::Duration,
 };
 
@@ -24,7 +25,8 @@ pub struct JwksProvider {
     jwks_url: String,
     issuer: String,
     cached_keys: Arc<RwLock<Option<CachedJwks>>>,
-    background_handle: Arc<OnceLock<tokio::task::JoinHandle<()>>>,
+    background_handle: Arc<std::sync::OnceLock<tokio::task::JoinHandle<()>>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Clone for JwksProvider {
@@ -35,7 +37,14 @@ impl Clone for JwksProvider {
             issuer: self.issuer.clone(),
             cached_keys: Arc::clone(&self.cached_keys),
             background_handle: Arc::clone(&self.background_handle),
+            shutdown: Arc::clone(&self.shutdown),
         }
+    }
+}
+
+impl Drop for JwksProvider {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 }
 
@@ -124,7 +133,8 @@ impl JwksProvider {
                 etag,
                 refresh_interval,
             }))),
-            background_handle: Arc::new(OnceLock::new()),
+            background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -142,6 +152,7 @@ impl JwksProvider {
 
     fn start_background_refresh(&self) {
         let provider = self.clone();
+        let shutdown = Arc::clone(&self.shutdown);
         let handle = tokio::spawn(async move {
             loop {
                 let interval = {
@@ -151,7 +162,16 @@ impl JwksProvider {
                         .map(|c| c.refresh_interval)
                         .unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL)
                 };
-                tokio::time::sleep(interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = futures_util::future::poll_fn(|_| {
+                        if shutdown.load(Ordering::Relaxed) {
+                            std::task::Poll::Ready(())
+                        } else {
+                            std::task::Poll::Pending
+                        }
+                    }) => return,
+                }
                 if let Err(e) = provider.refresh_keys_if_changed().await {
                     tracing::warn!("JWKS background refresh failed: {e}");
                 }
@@ -215,9 +235,21 @@ impl JwksProvider {
         payload_b64: &str,
         signature_b64: &str,
     ) -> Result<TokenClaims, AuthError> {
-        let keys = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.get_or_refresh_keys())
-        })?;
+        let keys = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.block_on(self.get_or_refresh_keys()),
+            Err(_) => {
+                // Fallback: read from cache synchronously (background refresh
+                // task keeps keys fresh).  If the cache is empty, fail.
+                let guard = self
+                    .cached_keys
+                    .try_read()
+                    .map_err(|_| AuthError::ProviderError("JWKS cache lock contended".to_owned()))?;
+                guard
+                    .as_ref()
+                    .map(|c| Arc::clone(&c.keys))
+                    .ok_or_else(|| AuthError::ProviderError("JWKS keys not available".to_owned()))
+            }
+        }?;
 
         let header_json = base64_decode_url(header_b64)
             .map_err(|e| AuthError::ProviderError(format!("invalid JWT header: {e}")))?;
@@ -258,15 +290,28 @@ impl JwksProvider {
 
         let payload = token_data.claims;
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Reject tokens issued in the future (iat) or not yet valid (nbf).
+        if let Some(iat) = payload.get("iat").and_then(|v| v.as_u64())
+            && iat > now
+        {
+            return Err(AuthError::InvalidToken);
+        }
+        if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_u64())
+            && nbf > now
+        {
+            return Err(AuthError::InvalidToken);
+        }
+
         let exp = payload
             .get("exp")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| AuthError::ProviderError("missing exp claim".to_owned()))?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         if exp < now {
             return Err(AuthError::ExpiredToken);
         }
