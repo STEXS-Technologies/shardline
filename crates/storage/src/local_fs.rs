@@ -100,7 +100,9 @@ pub(crate) fn hard_link_file_if_absent(
 
     #[cfg(not(unix))]
     {
-        let _ = root;
+        path.strip_prefix(root).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path escapes root")
+        })?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         fs::hard_link(temporary, path)
@@ -124,7 +126,9 @@ pub(crate) fn put_bytes_if_absent(
 
     #[cfg(not(unix))]
     {
-        let _ = root;
+        path.strip_prefix(root).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path escapes root")
+        })?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         match OpenOptions::new().write(true).create_new(true).open(path) {
