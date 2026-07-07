@@ -69,7 +69,7 @@ struct LocalSqliteMigration {
     down_sql: &'static str,
 }
 
-const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 7] = [
+const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 9] = [
     LocalSqliteMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -117,6 +117,18 @@ const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 7] = [
         name: "hub_api",
         up_sql: include_str!("../../migrations/20260629000000_hub_api.up.sql"),
         down_sql: include_str!("../../migrations/20260629000000_hub_api.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260630000000",
+        name: "hub_inline_content",
+        up_sql: include_str!("../../migrations/20260630000000_hub_inline_content.up.sql"),
+        down_sql: include_str!("../../migrations/20260630000000_hub_inline_content.down.sql"),
+    },
+    LocalSqliteMigration {
+        version: "20260630000001",
+        name: "hub_webhooks",
+        up_sql: include_str!("../../migrations/20260630000001_hub_webhooks.up.sql"),
+        down_sql: include_str!("../../migrations/20260630000001_hub_webhooks.down.sql"),
     },
 ];
 
