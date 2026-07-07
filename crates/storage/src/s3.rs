@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures_util::{Stream, TryStreamExt};
 use object_store::{
     CopyMode, CopyOptions, Error as ExternalObjectStoreError, GetOptions, GetResult,
-    ObjectStore as ExternalObjectStore, ObjectStoreExt, PutMode, WriteMultipart,
+    ObjectStore as ExternalObjectStore, ObjectStoreExt, PutMode, PutPayload, WriteMultipart,
     aws::{AmazonS3, AmazonS3Builder, S3ConditionalPut, S3CopyIfNotExists},
     multipart::{MultipartStore, PartId},
     path::Path as ObjectStorePath,
@@ -125,6 +125,10 @@ impl S3MultipartUploadWriter {
 
 const STREAM_UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const STREAM_COMPARE_CHUNK_BYTES: usize = 256 * 1024;
+/// Maximum object size that S3's single-part COPY supports (5 GiB).
+const MAX_SINGLE_COPY_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// Chunk size used when copying objects >5 GiB via streaming multipart.
+const LARGE_COPY_CHUNK_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 static TEMP_UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// S3-compatible object store configuration.
@@ -900,6 +904,21 @@ impl S3ObjectStore {
 
         let source_location = self.location_for_key(source)?;
         let destination_location = self.location_for_key(destination)?;
+        let source_len = source_metadata.length();
+
+        // S3 single-part COPY is limited to 5 GiB.  For larger objects, fall
+        // back to a streaming multipart copy that reads the source in chunks
+        // and re-uploads them to the destination.
+        if source_len > MAX_SINGLE_COPY_BYTES {
+            return self.block_on_result(self.streaming_large_copy(
+                &source_location,
+                &destination_location,
+                source,
+                destination,
+                source_len,
+            ));
+        }
+
         match self.block_on(self.inner.copy_opts(
             &source_location,
             &destination_location,
@@ -911,8 +930,73 @@ impl S3ObjectStore {
             }))
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
-            })) => existing_copy_outcome(self, source, destination, source_metadata.length()),
+            })) => existing_copy_outcome(self, source, destination, source_len),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Copies a large object from `source_location` to `destination_location`
+    /// by streaming the content through the server.  Used when the source exceeds
+    /// S3's single-part COPY limit (5 GiB).
+    async fn streaming_large_copy(
+        &self,
+        source_location: &ObjectStorePath,
+        destination_location: &ObjectStorePath,
+        source: &ObjectKey,
+        destination: &ObjectKey,
+        source_len: u64,
+    ) -> Result<PutOutcome, S3ObjectStoreError> {
+        // Fast check: if the destination already exists, compare content.
+        if let Some(dest_meta) = self.metadata(destination)? {
+            return existing_copy_outcome(self, source, destination, dest_meta.length());
+        }
+
+        let store = self.inner.clone();
+        let src = source_location.clone();
+        let dst = destination_location.clone();
+        let len = source_len;
+
+        let upload_id = store
+            .create_multipart(&dst)
+            .await
+            .map_err(S3ObjectStoreError::External)?;
+
+        let mut offset = 0_u64;
+        let mut part_idx = 0_usize;
+        let mut part_ids = Vec::new();
+
+        let result: Result<(), S3ObjectStoreError> = async {
+            while offset < len {
+                let chunk_end = (offset + LARGE_COPY_CHUNK_BYTES).min(len);
+                let chunk = store
+                    .get_range(&src, offset..chunk_end)
+                    .await
+                    .map_err(S3ObjectStoreError::External)?;
+                let payload = PutPayload::from_bytes(chunk);
+                let part_id = store
+                    .put_part(&dst, &upload_id, part_idx, payload)
+                    .await
+                    .map_err(S3ObjectStoreError::External)?;
+                part_ids.push(part_id);
+                part_idx += 1;
+                offset = chunk_end;
+            }
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                let _result = store
+                    .complete_multipart(&dst, &upload_id, part_ids)
+                    .await
+                    .map_err(S3ObjectStoreError::External)?;
+                Ok(PutOutcome::Inserted)
+            }
+            Err(error) => {
+                let _ = store.abort_multipart(&dst, &upload_id).await;
+                Err(error)
+            }
         }
     }
 
