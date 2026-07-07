@@ -65,7 +65,8 @@ pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::erro
             PRIMARY KEY (commit_sha, path)
         );
         CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
-            oid TEXT PRIMARY KEY, data BLOB NOT NULL, created_at_unix_seconds INTEGER NOT NULL
+            oid TEXT PRIMARY KEY, data BLOB NOT NULL, size INTEGER NOT NULL,
+            created_at_unix_seconds INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
             id TEXT PRIMARY KEY, repo_id TEXT NOT NULL,
