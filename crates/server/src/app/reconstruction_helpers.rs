@@ -71,6 +71,7 @@ pub fn full_byte_stream_response(
         [
             (CONTENT_TYPE, "application/octet-stream".to_owned()),
             (CONTENT_LENGTH, total_length.to_string()),
+            (ACCEPT_RANGES, "bytes".to_owned()),
         ],
         metered_transfer_body(byte_stream, transfer_limiter, total_length),
     )

@@ -35,6 +35,7 @@ pub(super) async fn direct_object_response(
     object_key: &shardline_storage::ObjectKey,
     content_type: &str,
     content_digest: Option<String>,
+    protocol: &str,
 ) -> Result<Response, ServerError> {
     let total_length = state.backend.object_length(object_key).await?;
     let range = parse_optional_range(headers, total_length)?;
@@ -66,7 +67,7 @@ pub(super) async fn direct_object_response(
             .headers_mut()
             .insert("Docker-Content-Digest", digest_value);
     }
-    crate::metrics::record_download("lfs", total_length, 0.0, true);
+    crate::metrics::record_download(protocol, total_length, 0.0, true);
     Ok(response)
 }
 

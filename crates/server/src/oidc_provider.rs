@@ -1,6 +1,6 @@
 use std::{
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -11,26 +11,31 @@ use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, Token
 use shardline_server_core::{AuthError, AuthProvider};
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
+const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(1800);
 
 /// OpenID Connect authentication provider.
 ///
 /// Validates tokens against an OIDC issuer by fetching JWKS keys from the
-/// issuer's discovery endpoint.
+/// issuer's discovery endpoint.  Keys are refreshed in a background task to
+/// prevent auth outages when the cache TTL expires.
 pub struct OidcProvider {
     client: Client,
     issuer: String,
     audience: Option<String>,
-    cached_keys: Mutex<Option<CachedJwks>>,
+    cached_keys: Arc<Mutex<Option<CachedJwks>>>,
+    jwks_url: String,
+    _background_handle: OnceLock<tokio::task::JoinHandle<()>>,
 }
 
 impl Clone for OidcProvider {
     fn clone(&self) -> Self {
-        let cached_keys = self.cached_keys.lock().ok().and_then(|guard| guard.clone());
         Self {
             client: self.client.clone(),
             issuer: self.issuer.clone(),
             audience: self.audience.clone(),
-            cached_keys: Mutex::new(cached_keys),
+            cached_keys: Arc::clone(&self.cached_keys),
+            jwks_url: self.jwks_url.clone(),
+            _background_handle: OnceLock::new(),
         }
     }
 }
@@ -96,7 +101,8 @@ pub enum OidcProviderError {
 }
 
 impl OidcProvider {
-    /// Creates a new OIDC provider by fetching the issuer's discovery document.
+    /// Creates a new OIDC provider by fetching the issuer's discovery document
+    /// and starting a background task to periodically refresh JWKS keys.
     ///
     /// # Errors
     ///
@@ -128,20 +134,57 @@ impl OidcProvider {
             .await
             .map_err(|e| OidcProviderError::JwksFetch(e.to_string()))?;
 
-        Ok(Self {
-            client,
+        let cached_keys = Arc::new(Mutex::new(Some(CachedJwks {
+            keys: Arc::new(jwks.keys),
+            fetched_at: Instant::now(),
+        })));
+
+        let provider = Self {
+            client: client.clone(),
             issuer: issuer.to_owned(),
             audience,
-            cached_keys: Mutex::new(Some(CachedJwks {
-                keys: Arc::new(jwks.keys),
-                fetched_at: Instant::now(),
-            })),
-        })
+            cached_keys,
+            jwks_url,
+            _background_handle: OnceLock::new(),
+        };
+
+        // Start background refresh to prevent the cache from expiring.
+        provider.start_background_refresh();
+
+        Ok(provider)
+    }
+
+    fn start_background_refresh(&self) {
+        let provider = self.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(JWKS_REFRESH_INTERVAL).await;
+                match provider.client.get(&provider.jwks_url).send().await {
+                    Ok(response) => match response.json::<JwksResponse>().await {
+                        Ok(jwks) => {
+                            if let Ok(mut guard) = provider.cached_keys.lock() {
+                                *guard = Some(CachedJwks {
+                                    keys: Arc::new(jwks.keys),
+                                    fetched_at: Instant::now(),
+                                });
+                            }
+                        }
+                        Err(e) => tracing::warn!("OIDC JWKS refresh: failed to parse response: {e}"),
+                    },
+                    Err(e) => tracing::warn!("OIDC JWKS refresh: HTTP error: {e}"),
+                }
+            }
+        });
+        let _ = provider._background_handle.set(handle);
     }
 
     fn get_cached_keys(&self) -> Option<Arc<Vec<Jwk>>> {
         let guard = self.cached_keys.lock().ok()?;
         let cached = guard.as_ref()?;
+        // The background refresh task keeps keys fresh, but we always check
+        // the TTL as a safety net.  If the TTL expires (e.g. background task
+        // failed repeatedly), we return None and auth will fail immediately
+        // rather than accepting potentially stale keys.
         if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
             return Some(Arc::clone(&cached.keys));
         }
