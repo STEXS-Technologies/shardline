@@ -61,7 +61,12 @@ impl CacheInner {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         self.eviction_order
-            .insert(EvictionKey(inserted_at, seq), key);
+            .insert(EvictionKey(inserted_at, seq), key.clone());
+        // Keep the entry's seq in sync with the eviction_order key so that
+        // remove() can find and delete the correct eviction entry.
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.seq = seq;
+        }
     }
 
     fn remove(&mut self, key: &ReconstructionCacheKey) -> Option<MemoryEntry> {
@@ -137,7 +142,18 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             if let Some(notify) = inner.loading.get(key) {
                 let notify = Arc::clone(notify);
                 drop(inner);
-                notify.notified().await;
+                // If the loader fails, the Notify is never fired and
+                // subsequent get() calls for this key would hang forever.
+                // Use a timeout so we can clean up the orphaned loading
+                // entry and let the next caller retry.
+                tokio::select! {
+                    _ = notify.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        let mut inner = self.inner.write().await;
+                        inner.loading.remove(key);
+                        return Ok(None);
+                    }
+                }
 
                 let read_inner = self.inner.read().await;
                 if let Some(entry) = read_inner.entries.get(key)

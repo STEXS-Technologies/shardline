@@ -250,8 +250,8 @@ pub enum TokenCodecError {
     #[error("token signing key must not be empty")]
     EmptySigningKey,
     /// The signing key is too short.
-    #[error("token signing key must be at least {MIN_SIGNING_KEY_BYTES} bytes")]
-    SigningKeyTooShort,
+    #[error("token signing key must be at least {MIN_SIGNING_KEY_BYTES} bytes, got {actual_bytes}")]
+    SigningKeyTooShort { actual_bytes: usize },
     /// The token payload could not be serialized or deserialized.
     #[error("token json operation failed")]
     Json(#[from] JsonError),
@@ -298,7 +298,9 @@ impl TokenSigner {
             return Err(TokenCodecError::EmptySigningKey);
         }
         if signing_key.len() < MIN_SIGNING_KEY_BYTES {
-            return Err(TokenCodecError::SigningKeyTooShort);
+            return Err(TokenCodecError::SigningKeyTooShort {
+                actual_bytes: signing_key.len(),
+            });
         }
 
         Ok(Self {

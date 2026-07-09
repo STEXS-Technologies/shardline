@@ -214,10 +214,18 @@ where
     match outcome {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
-            let _deleted_delivery = index_store
+            if let Err(delete_err) = index_store
                 .delete_webhook_delivery(&recorded_delivery)
                 .await
-                .map_err(Into::into)?;
+                .map_err(Into::into)
+            {
+                tracing::warn!(
+                    delivery_id = recorded_delivery.delivery_id(),
+                    owner = recorded_delivery.owner(),
+                    repo = recorded_delivery.repo(),
+                    "failed to remove webhook delivery record for retry: {delete_err}"
+                );
+            }
             Err(error)
         }
     }

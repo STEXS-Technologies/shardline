@@ -93,8 +93,7 @@ pub(super) fn read_quarantine_candidate_if_exists(
         return Ok(Some(candidate));
     }
 
-    let record = from_slice::<QuarantineCandidateRecord>(&bytes)?;
-    Ok(Some(record.into_domain()?))
+    Err(from_slice::<QuarantineCandidateRecord>(&bytes).unwrap_err().into())
 }
 
 pub(super) fn visit_quarantine_candidates_recursive<Visitor, VisitorError>(

@@ -128,7 +128,7 @@ struct AppliedMigration {
 
 const MIGRATION_HISTORY_TABLE: &str = "shardline_schema_migrations";
 
-const SHARDLINE_MIGRATIONS: [DatabaseMigration; 7] = [
+const SHARDLINE_MIGRATIONS: [DatabaseMigration; 9] = [
     DatabaseMigration {
         version: "20260417000000",
         name: "metadata_store",
@@ -178,6 +178,18 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 7] = [
         name: "hub_api",
         up_sql: include_str!("../../../migrations/20260629000000_hub_api.up.sql"),
         down_sql: include_str!("../../../migrations/20260629000000_hub_api.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260630000000",
+        name: "hub_inline_content",
+        up_sql: include_str!("../../../migrations/20260630000000_hub_inline_content.up.sql"),
+        down_sql: include_str!("../../../migrations/20260630000000_hub_inline_content.down.sql"),
+    },
+    DatabaseMigration {
+        version: "20260630000001",
+        name: "hub_webhooks",
+        up_sql: include_str!("../../../migrations/20260630000001_hub_webhooks.up.sql"),
+        down_sql: include_str!("../../../migrations/20260630000001_hub_webhooks.down.sql"),
     },
 ];
 

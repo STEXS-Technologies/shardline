@@ -7,19 +7,22 @@
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 
 use super::pack::{
-    GitObject, ObjectType, PackError, create_commit_object, empty_pack, generate_pack,
+    GitObject, ObjectType, PackError, apply_delta, create_commit_object, empty_pack,
+    generate_pack, parse_ofs_delta_offset,
 };
 use super::pktline::{self, FLUSH};
 use crate::error::HubApiError;
+use crate::routes::HubState;
 use shardline_index::hub::HubFileEntry;
 use shardline_protocol::TokenScope;
+use std::collections::HashMap;
 
 /// Query parameters for `GET /info/refs`.
 #[derive(Debug, Deserialize)]
@@ -35,20 +38,18 @@ struct GitRef {
 }
 
 /// Resolves the repo ID from the URL path components.
-fn resolve_repo_id(repo_type: &str, ns: &str, repo: &str) -> String {
-    format!("{repo_type}/{ns}/{repo}")
+fn resolve_repo_id(_repo_type: &str, ns: &str, repo: &str) -> String {
+    format!("{ns}/{repo}")
 }
 
-fn authorize_read(headers: &HeaderMap) -> Result<(), HubApiError> {
-    let state = crate::state::get();
+fn authorize_read(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
     if let Some(ref auth) = state.auth {
         let _ = auth.authorize(headers, TokenScope::Read)?;
     }
     Ok(())
 }
 
-fn authorize_write(headers: &HeaderMap) -> Result<(), HubApiError> {
-    let state = crate::state::get();
+fn authorize_write(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiError> {
     if let Some(ref auth) = state.auth {
         let _ = auth.authorize(headers, TokenScope::Write)?;
     }
@@ -70,6 +71,7 @@ fn authorize_write(headers: &HeaderMap) -> Result<(), HubApiError> {
 /// [`HubApiError::Forbidden`] on auth failure.
 #[allow(clippy::indexing_slicing)]
 pub async fn info_refs(
+    State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Query(query): Query<InfoRefsQuery>,
     headers: HeaderMap,
@@ -80,13 +82,13 @@ pub async fn info_refs(
     }
 
     if service == "git-receive-pack" {
-        authorize_write(&headers)?;
+        authorize_write(&state, &headers)?;
     } else {
-        authorize_read(&headers)?;
+        authorize_read(&state, &headers)?;
     }
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
-    let refs = collect_refs(&repo_id).await?;
+    let refs = collect_refs(&state, &repo_id).await?;
 
     let (capabilities, content_type) = if service == "git-receive-pack" {
         (
@@ -133,11 +135,13 @@ pub async fn info_refs(
 ///
 /// Forwards errors from [`info_refs`].
 pub async fn info_refs_upload_pack(
+    State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Query(query): Query<InfoRefsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, HubApiError> {
     info_refs(
+        State(state),
         Path((repo_type, ns, repo)),
         Query(InfoRefsQuery {
             service: Some(
@@ -157,11 +161,13 @@ pub async fn info_refs_upload_pack(
 ///
 /// Forwards errors from [`info_refs`].
 pub async fn info_refs_receive_pack(
+    State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     Query(query): Query<InfoRefsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, HubApiError> {
     info_refs(
+        State(state),
         Path((repo_type, ns, repo)),
         Query(InfoRefsQuery {
             service: Some(
@@ -184,11 +190,12 @@ pub async fn info_refs_receive_pack(
 /// Returns [`HubApiError::Unauthorized`] or [`HubApiError::Forbidden`] on
 /// auth failure. Returns [`HubApiError::NotFound`] if the repo does not exist.
 pub async fn upload_pack(
+    State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, HubApiError> {
-    authorize_read(&headers)?;
+    authorize_read(&state, &headers)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
 
@@ -196,12 +203,12 @@ pub async fn upload_pack(
     let _wants = parse_wants(&request_lines);
     let _haves = parse_haves(&request_lines);
 
-    let refs = collect_refs(&repo_id).await?;
+    let refs = collect_refs(&state, &repo_id).await?;
 
     let pack_data = if refs.is_empty() {
         empty_pack()?
     } else {
-        generate_pack_for_refs(&refs).await?
+        generate_pack_for_refs(&state, &refs).await?
     };
 
     let mut response_body = pktline::sideband_data(&pack_data);
@@ -226,11 +233,12 @@ pub async fn upload_pack(
 /// Returns [`HubApiError::Unauthorized`] or [`HubApiError::Forbidden`] on
 /// auth failure. Returns [`HubApiError::NotFound`] if the repo does not exist.
 pub async fn receive_pack(
+    State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, HubApiError> {
-    authorize_write(&headers)?;
+    authorize_write(&state, &headers)?;
 
     let repo_id = resolve_repo_id(&repo_type, &ns, &repo);
 
@@ -242,41 +250,57 @@ pub async fn receive_pack(
         .collect();
 
     if updates.is_empty() {
-        return build_report_response(&[]);
+        return build_report_response(&[], true);
     }
 
-    let objects = parse_pack_data(&pack_data).unwrap_or_default();
+    let objects = match parse_pack_data(&pack_data) {
+        Ok(objects) => objects,
+        Err(e) => {
+            tracing::warn!("failed to parse receive-pack data: {e}");
+            return build_report_response(
+                &updates
+                    .into_iter()
+                    .map(|(_, _, refname)| (refname, false, Some("unpack failed".to_owned())))
+                    .collect::<Vec<_>>(),
+                false,
+            );
+        }
+    };
+
     let mut results = Vec::new();
 
-    for (_old_sha, new_sha, refname) in &updates {
-        match store_push_objects(&repo_id, new_sha, &objects).await {
+    for (old_sha, new_sha, refname) in &updates {
+        match store_push_objects(&state, &repo_id, old_sha, new_sha, refname, &objects).await {
             Ok(()) => results.push((refname.clone(), true, None)),
             Err(e) => results.push((refname.clone(), false, Some(e))),
         }
     }
 
-    build_report_response(&results)
+    build_report_response(&results, true)
 }
 
 // ---- Helper functions ----
 
 /// Validates a Git refname for receive-pack.
 ///
-/// Rejects empty refnames, refnames with ASCII control characters, and
-/// refnames that do not start with `refs/`.
+/// Rejects empty refnames, refnames with ASCII control characters,
+/// refnames that do not start with `refs/`, and refnames containing
+/// `..` path components (path traversal).
 fn is_valid_refname(refname: &str) -> bool {
-    if refname.is_empty() {
+    if refname.is_empty() || refname.contains(' ') {
         return false;
     }
     if refname.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return false;
     }
-    refname.starts_with("refs/")
+    if !refname.starts_with("refs/") {
+        return false;
+    }
+    !refname.split('/').any(|c| c == "..")
 }
 
 /// Collects all refs from the HubStore for a given repo.
-async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
-    let state = crate::state::get();
+async fn collect_refs(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
     let revisions = state.store.list_revisions(repo_id).map_err(|e| {
         tracing::debug!("failed to list revisions for {repo_id}: {e}");
         HubApiError::RepoNotFound
@@ -312,8 +336,10 @@ async fn collect_refs(repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
     }
 
     // If no HEAD was explicitly set, use the latest revision as HEAD.
+    // Use max_by_key on created_at_unix_seconds to find the actual most recent revision,
+    // since revisions.last() may not be the newest due to ordering.
     if !seen_refs.contains("HEAD")
-        && let Some(latest) = revisions.last()
+        && let Some(latest) = revisions.iter().max_by_key(|r| r.created_at_unix_seconds)
     {
         refs.insert(
             0,
@@ -380,8 +406,7 @@ fn parse_haves(lines: &[Vec<u8>]) -> Vec<String> {
 /// 3. Generates blob objects — LFS pointer blobs for LFS files, or
 ///    content-bearing blobs for inline files.
 /// 4. Creates a commit object referencing the root tree.
-async fn generate_pack_for_refs(refs: &[GitRef]) -> Result<Vec<u8>, HubApiError> {
-    let state = crate::state::get();
+async fn generate_pack_for_refs(state: &HubState, refs: &[GitRef]) -> Result<Vec<u8>, HubApiError> {
     let mut all_objects: Vec<GitObject> = Vec::new();
     let mut seen_trees: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
     let mut seen_blobs: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
@@ -393,7 +418,8 @@ async fn generate_pack_for_refs(refs: &[GitRef]) -> Result<Vec<u8>, HubApiError>
         }
 
         // Resolve files from HubStore for this ref's commit SHA.
-        let files = state.store.get_files(&git_ref.sha1).unwrap_or_default();
+        let files = state.store.get_files(&git_ref.sha1)
+            .map_err(|e| HubApiError::CasError(e.to_string()))?;
 
         // Build tree (and all sub-trees) from file entries.
         let (root_tree, sub_trees) = build_git_tree_objects(&files);
@@ -642,8 +668,16 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
     (updates, pack_data)
 }
 
+/// Maximum depth for recursive tree walking to prevent stack overflow from
+/// maliciously crafted pushes with deeply nested tree objects.
+const MAX_TREE_DEPTH: usize = 128;
+
+/// Maximum total decompressed size for all objects in a receive-pack (512 MB).
+/// Prevents zlib-bomb attacks that decompress to many GB of memory.
+const MAX_TOTAL_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
+
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
+pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
     if data.len() < 12 {
         return Ok(Vec::new());
     }
@@ -660,7 +694,9 @@ fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
     }
 
     let mut objects = Vec::new();
+    let mut sha_index: HashMap<[u8; 20], usize> = HashMap::new();
     let mut pos = 12;
+    let mut total_decompressed: usize = 0;
 
     for _ in 0..num_objects {
         if pos >= data.len() {
@@ -691,41 +727,103 @@ fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                 match decompress_zlib(remaining) {
                     Ok((decompressed, bytes_used)) => {
                         pos += bytes_used;
+                        total_decompressed = total_decompressed
+                            .checked_add(decompressed.len())
+                            .ok_or(PackError::ExcessiveDecompressedSize)?;
+                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                            return Err(PackError::ExcessiveDecompressedSize);
+                        }
                         let ot = match obj_type {
                             1 => ObjectType::Commit,
                             2 => ObjectType::Tree,
                             3 => ObjectType::Blob,
                             _ => ObjectType::Tag,
                         };
-                        objects.push(GitObject {
+                        let obj = GitObject {
                             object_type: ot,
                             data: decompressed,
-                        });
+                        };
+                        let sha = obj.sha1();
+                        sha_index.insert(sha, objects.len());
+                        objects.push(obj);
                     }
                     Err(_) => break,
                 }
             }
             6 => {
-                // OFS_DELTA — skip
-                let mut ofs_byte = data[pos];
-                pos += 1;
-                while ofs_byte & 0x80 != 0 && pos < data.len() {
-                    ofs_byte = data[pos];
-                    pos += 1;
-                }
+                // OFS_DELTA — resolve against a base object by negative offset.
+                let offset = parse_ofs_delta_offset(data, &mut pos)?;
                 let remaining = &data[pos..];
-                if let Ok((_, bytes_used)) = decompress_zlib(remaining) {
-                    pos += bytes_used;
+                match decompress_zlib(remaining) {
+                    Ok((delta_data, bytes_used)) => {
+                        pos += bytes_used;
+                        total_decompressed = total_decompressed
+                            .checked_add(delta_data.len())
+                            .ok_or(PackError::ExcessiveDecompressedSize)?;
+                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                            return Err(PackError::ExcessiveDecompressedSize);
+                        }
+                        let base_idx = objects
+                            .len()
+                            .checked_sub(offset)
+                            .ok_or(PackError::InvalidDelta)?;
+                        let base = objects[base_idx].clone();
+                        let resolved_data = apply_delta(&base.data, &delta_data)?;
+                        total_decompressed = total_decompressed
+                            .checked_add(resolved_data.len())
+                            .ok_or(PackError::ExcessiveDecompressedSize)?;
+                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                            return Err(PackError::ExcessiveDecompressedSize);
+                        }
+                        let resolved = GitObject {
+                            object_type: base.object_type,
+                            data: resolved_data,
+                        };
+                        let sha = resolved.sha1();
+                        sha_index.insert(sha, objects.len());
+                        objects.push(resolved);
+                    }
+                    Err(_) => break,
                 }
             }
             7 => {
-                // REF_DELTA — skip
-                if pos + 20 <= data.len() {
-                    pos += 20;
+                // REF_DELTA — resolve against a base object by SHA.
+                if pos + 20 > data.len() {
+                    return Err(PackError::InvalidDelta);
                 }
+                let mut base_sha = [0u8; 20];
+                base_sha.copy_from_slice(&data[pos..pos + 20]);
+                pos += 20;
                 let remaining = &data[pos..];
-                if let Ok((_, bytes_used)) = decompress_zlib(remaining) {
-                    pos += bytes_used;
+                match decompress_zlib(remaining) {
+                    Ok((delta_data, bytes_used)) => {
+                        pos += bytes_used;
+                        total_decompressed = total_decompressed
+                            .checked_add(delta_data.len())
+                            .ok_or(PackError::ExcessiveDecompressedSize)?;
+                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                            return Err(PackError::ExcessiveDecompressedSize);
+                        }
+                        let &base_idx = sha_index
+                            .get(&base_sha)
+                            .ok_or(PackError::InvalidDelta)?;
+                        let base = objects[base_idx].clone();
+                        let resolved_data = apply_delta(&base.data, &delta_data)?;
+                        total_decompressed = total_decompressed
+                            .checked_add(resolved_data.len())
+                            .ok_or(PackError::ExcessiveDecompressedSize)?;
+                        if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
+                            return Err(PackError::ExcessiveDecompressedSize);
+                        }
+                        let resolved = GitObject {
+                            object_type: base.object_type,
+                            data: resolved_data,
+                        };
+                        let sha = resolved.sha1();
+                        sha_index.insert(sha, objects.len());
+                        objects.push(resolved);
+                    }
+                    Err(_) => break,
                 }
             }
             _ => break,
@@ -739,77 +837,364 @@ fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
 const MAX_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
 
 fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
-    use flate2::read::ZlibDecoder;
-    use std::io::Read;
+    use flate2::Decompress;
+    use flate2::FlushDecompress;
 
-    struct CountingReader<R> {
-        inner: R,
-        count: usize,
-    }
+    // Decompress zlib data, tracking the exact number of compressed bytes consumed.
+    let mut decompressor = Decompress::new(true); // true = zlib-wrapped (not raw deflate)
+    let mut output = Vec::new();
+    let mut input_pos = 0;
 
-    impl<R: Read> Read for CountingReader<R> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = self.inner.read(buf)?;
-            self.count = self.count.saturating_add(n);
-            Ok(n)
+    loop {
+        let before_in = decompressor.total_in();
+        let before_out = decompressor.total_out();
+
+        let in_chunk = &data[input_pos..];
+        let in_len = in_chunk.len().min(4096);
+
+        let flush = if input_pos + in_len >= data.len() {
+            FlushDecompress::Finish
+        } else {
+            FlushDecompress::None
+        };
+
+        // Allocate buffer for potential output.
+        let buf_len = (in_len * 4).max(256);
+        let start = output.len();
+        output.resize(start + buf_len, 0);
+        let status = decompressor.decompress(
+            &in_chunk[..in_len],
+            &mut output[start..],
+            flush,
+        )?;
+
+        let consumed = decompressor.total_in() - before_in;
+        let produced = decompressor.total_out() - before_out;
+        output.truncate(start + produced as usize);
+        input_pos += consumed as usize;
+
+        if status == flate2::Status::StreamEnd || in_len == 0 {
+            break;
         }
     }
 
-    let decoder = ZlibDecoder::new(data);
-    let mut reader = CountingReader {
-        inner: decoder.take(MAX_DECOMPRESSED_SIZE.saturating_add(1) as u64),
-        count: 0,
-    };
-    let mut output = Vec::new();
-    reader.read_to_end(&mut output)?;
     if output.len() > MAX_DECOMPRESSED_SIZE {
         return Err(format!(
             "decompressed data exceeds maximum size of {MAX_DECOMPRESSED_SIZE} bytes"
         )
         .into());
     }
-    Ok((output, reader.count))
+
+    Ok((output, input_pos))
 }
 
 async fn store_push_objects(
+    state: &HubState,
     repo_id: &str,
+    old_sha: &str,
     new_sha: &str,
-    _objects: &[GitObject],
+    ref_name: &str,
+    objects: &[GitObject],
 ) -> Result<(), String> {
-    let state = crate::state::get();
+    // Zero SHA means delete ref — not supported yet.
+    if new_sha == "0000000000000000000000000000000000000000" {
+        return Err("delete ref is not supported".to_owned());
+    }
+
+    // Build SHA → object index.
+    let mut sha_to_obj: HashMap<[u8; 20], &GitObject> = HashMap::new();
+    for obj in objects {
+        let sha = obj.sha1();
+        sha_to_obj.insert(sha, obj);
+    }
+
+    // Find the commit object for new_sha.
+    let new_sha_bytes =
+        hex::decode(new_sha).map_err(|e| format!("invalid commit SHA hex: {e}"))?;
+    let new_sha_arr: [u8; 20] = new_sha_bytes
+        .try_into()
+        .map_err(|_| "commit SHA must be 20 bytes".to_owned())?;
+
+    let commit_obj = sha_to_obj
+        .get(&new_sha_arr)
+        .ok_or_else(|| format!("commit not found in pack: {new_sha}"))?;
+
+    if commit_obj.object_type != ObjectType::Commit {
+        return Err("expected commit object for new SHA".to_owned());
+    }
+
+    // Parse commit to extract tree, parent, and message.
+    let (tree_sha_hex, _parent_sha, message) = parse_commit_object(&commit_obj.data)?;
+
+    // Walk the tree to collect file entries.
+    let tree_sha_bytes =
+        hex::decode(&tree_sha_hex).map_err(|e| format!("invalid tree SHA: {e}"))?;
+    let tree_sha_arr: [u8; 20] = tree_sha_bytes
+        .try_into()
+        .map_err(|_| "tree SHA must be 20 bytes".to_owned())?;
+
+    let files = walk_git_tree(&tree_sha_arr, &sha_to_obj, "")?;
+
+    // Store file entries for this commit.
     state
         .store
-        .create_revision(
-            repo_id,
-            None,
-            new_sha,
-            "main",
-            &format!("Push to {new_sha}"),
-        )
-        .map_err(|e| {
-            tracing::warn!("failed to create revision for {repo_id}: {e}");
-            "failed to create revision".to_owned()
-        })?;
+        .store_files(new_sha, &files)
+        .map_err(|e| format!("failed to store files: {e}"))?;
+
+    // Store LFS objects that were included in the pack.
+    // LFS pointer blobs only contain metadata; the actual file content is
+    // uploaded separately via PUT /lfs/objects/{oid}.  If the client bundled
+    // the real content as a blob (e.g. for small files), store it.
+    for file in &files {
+        if file.is_lfs {
+            // Look up the blob data from the pack objects by computing
+            // the SHA of the LFS pointer blob and fetching it.
+            let pointer_blob = build_lfs_pointer_blob(&file.sha, file.size);
+            let pointer_sha = pointer_blob.sha1();
+            if let Some(blob_obj) = sha_to_obj.get(&pointer_sha) {
+                // Store the blob data keyed by the LFS oid.
+                state
+                    .store
+                    .put_lfs_object(&file.sha, &blob_obj.data)
+                    .map_err(|e| format!("failed to store LFS object: {e}"))?;
+            }
+        }
+    }
+
+    // Determine parent SHA for revision creation.
+    let parent = if old_sha == "0000000000000000000000000000000000000000" {
+        None
+    } else {
+        // Non-fast-forward check: if the ref already exists and the client's
+        // old_sha doesn't match the current ref value, reject the push.
+        match state.store.resolve_revision(repo_id, ref_name) {
+            Ok(Some(current)) if current != old_sha => {
+                return Err(format!(
+                    "non-fast-forward (current: {current}, expected: {old_sha})"
+                ));
+            }
+            Ok(None) if old_sha != "0000000000000000000000000000000000000000" => {
+                return Err("non-fast-forward".to_owned());
+            }
+            _ => {}
+        }
+        Some(old_sha.as_ref())
+    };
+
+    // Create revision in the store.
+    state
+        .store
+        .create_revision(repo_id, parent, new_sha, ref_name, &message)
+        .map_err(|e| format!("failed to create revision: {e}"))?;
 
     Ok(())
 }
 
+/// Parses a raw Git commit object and extracts tree SHA, parent SHA, and message.
+///
+/// Format: `"tree <sha>\nparent <sha>\nauthor ...\ncommitter ...\n\n<message>"`
+#[doc(hidden)]
+pub fn parse_commit_object(data: &[u8]) -> Result<(String, Option<String>, String), String> {
+    let text =
+        std::str::from_utf8(data).map_err(|e| format!("invalid commit encoding: {e}"))?;
+
+    let mut tree_sha = None;
+    let mut parent_sha = None;
+
+    // Split at the first blank line (separates headers from message).
+    let (headers, message) = match text.split_once("\n\n") {
+        Some((h, m)) => (h, m.trim()),
+        None => (text, ""),
+    };
+
+    for line in headers.lines() {
+        if let Some(sha) = line.strip_prefix("tree ") {
+            tree_sha = Some(sha.trim().to_owned());
+        } else if let Some(sha) = line.strip_prefix("parent ") {
+            parent_sha = Some(sha.trim().to_owned());
+        }
+    }
+
+    let tree = tree_sha.ok_or("commit missing tree header")?;
+    Ok((tree, parent_sha, message.to_owned()))
+}
+
+/// Walks a Git tree object recursively, collecting file entries.
+///
+/// Each tree entry is: `"<mode> <name>\0<20-byte-sha>"`.
+/// Directories (mode `040000`) are recursed into.  Files (modes `100644`
+/// and `100755`) are looked up in the object map and added as
+/// [`HubFileEntry`] values.  LFS pointer blobs are detected by their
+/// magic prefix and stored with `is_lfs: true`.
+#[allow(clippy::arithmetic_side_effects)]
+#[doc(hidden)]
+pub fn walk_git_tree(
+    tree_sha: &[u8; 20],
+    objects: &HashMap<[u8; 20], &GitObject>,
+    prefix: &str,
+) -> Result<Vec<HubFileEntry>, String> {
+    walk_git_tree_inner(tree_sha, objects, prefix, 0)
+}
+
+fn walk_git_tree_inner(
+    tree_sha: &[u8; 20],
+    objects: &HashMap<[u8; 20], &GitObject>,
+    prefix: &str,
+    depth: usize,
+) -> Result<Vec<HubFileEntry>, String> {
+    if depth > MAX_TREE_DEPTH {
+        return Err("tree nesting exceeds maximum depth".to_owned());
+    }
+
+    let tree_obj = objects
+        .get(tree_sha)
+        .ok_or_else(|| format!("tree object not found: {}", hex::encode(tree_sha)))?;
+
+    if tree_obj.object_type != ObjectType::Tree {
+        return Err(format!(
+            "expected tree object, got {:?}",
+            tree_obj.object_type
+        ));
+    }
+
+    let mut entries = Vec::new();
+    let data = &tree_obj.data;
+    let mut pos = 0;
+
+    while pos < data.len() {
+        // Parse mode (octal string until space).
+        let space_pos = data[pos..]
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or("invalid tree entry: missing space after mode")?;
+        let mode_str = std::str::from_utf8(&data[pos..pos + space_pos])
+            .map_err(|e| format!("invalid mode encoding: {e}"))?;
+
+        // Parse name (until null byte).
+        let name_start = pos + space_pos + 1;
+        let null_pos = data[name_start..]
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or("invalid tree entry: missing null after name")?;
+        let name = std::str::from_utf8(&data[name_start..name_start + null_pos])
+            .map_err(|e| format!("invalid name encoding: {e}"))?;
+
+        // Parse SHA (20 bytes after null).
+        let sha_start = name_start + null_pos + 1;
+        if sha_start + 20 > data.len() {
+            return Err("invalid tree entry: truncated SHA".to_owned());
+        }
+        let mut entry_sha = [0u8; 20];
+        entry_sha.copy_from_slice(&data[sha_start..sha_start + 20]);
+
+        pos = sha_start + 20;
+
+        let full_path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+
+        if mode_str == "40000" {
+            // Directory — recurse into subtree.
+            let mut sub_entries = walk_git_tree_inner(&entry_sha, objects, &full_path, depth + 1)?;
+            entries.append(&mut sub_entries);
+        } else if mode_str == "100644" || mode_str == "100755" {
+            // Regular file.
+            let blob_obj = objects.get(&entry_sha).ok_or_else(|| {
+                format!("blob object not found: {}", hex::encode(entry_sha))
+            })?;
+
+            if blob_obj.object_type != ObjectType::Blob {
+                return Err(format!(
+                    "expected blob object for file, got {:?}",
+                    blob_obj.object_type
+                ));
+            }
+
+            // Check if this is an LFS pointer.
+            if blob_obj
+                .data
+                .starts_with(b"version https://git-lfs.github.com/spec/v1")
+            {
+                let text = std::str::from_utf8(&blob_obj.data)
+                    .map_err(|e| format!("invalid LFS pointer encoding: {e}"))?;
+                let oid = parse_lfs_pointer_field(text, "oid")
+                    .ok_or("LFS pointer missing oid field")?;
+                let size_str = parse_lfs_pointer_field(text, "size")
+                    .ok_or("LFS pointer missing size field")?;
+                let size: u64 = size_str
+                    .parse()
+                    .map_err(|e| format!("invalid LFS size: {e}"))?;
+
+                entries.push(HubFileEntry {
+                    path: full_path,
+                    size,
+                    sha: oid,
+                    is_lfs: true,
+                    inline_content: None,
+                });
+            } else {
+                // Inline file — compute content hash.
+                let sha = {
+                    let mut h = blake3::Hasher::new();
+                    h.update(&blob_obj.data);
+                    hex::encode(h.finalize().as_bytes())
+                };
+                entries.push(HubFileEntry {
+                    path: full_path,
+                    size: blob_obj.data.len() as u64,
+                    sha,
+                    is_lfs: false,
+                    inline_content: Some(blob_obj.data.clone()),
+                });
+            }
+        }
+        // Skip other entry types (symlinks 120000, submodules 160000).
+    }
+
+    Ok(entries)
+}
+
+/// Parses a field value from an LFS pointer.
+///
+/// LFS pointer format:
+/// ```text
+/// version https://git-lfs.github.com/spec/v1
+/// oid sha256:<oid>
+/// size <size>
+/// ```
+fn parse_lfs_pointer_field(text: &str, field: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix(&format!("{field} ")) {
+            // For "oid", strip the "sha256:" prefix.
+            if field == "oid" {
+                return value.strip_prefix("sha256:").map(|s| s.to_owned());
+            }
+            return Some(value.trim().to_owned());
+        }
+    }
+    None
+}
+
 fn build_report_response(
     results: &[(String, bool, Option<String>)],
+    unpack_ok: bool,
 ) -> Result<Response, HubApiError> {
     let mut body = String::new();
 
-    if results.is_empty() {
+    if unpack_ok {
         body.push_str(&pktline::encode_line("unpack ok\n")?);
     } else {
-        body.push_str(&pktline::encode_line("unpack ok\n")?);
-        for (refname, ok, error) in results {
-            if *ok {
-                body.push_str(&pktline::encode_line(&format!("ok {refname}\n"))?);
-            } else {
-                let msg = error.as_deref().unwrap_or("failed");
-                body.push_str(&pktline::encode_line(&format!("ng {refname} {msg}\n"))?);
-            }
+        body.push_str(&pktline::encode_line("unpack failed\n")?);
+    }
+
+    for (refname, ok, error) in results {
+        if *ok {
+            body.push_str(&pktline::encode_line(&format!("ok {refname}\n"))?);
+        } else {
+            let msg = error.as_deref().unwrap_or("failed");
+            body.push_str(&pktline::encode_line(&format!("ng {refname} {msg}\n"))?);
         }
     }
     body.push_str(FLUSH);
@@ -849,7 +1234,7 @@ mod tests {
     #[test]
     fn resolve_repo_id_format() {
         let id = resolve_repo_id("models", "org", "my-model");
-        assert_eq!(id, "models/org/my-model");
+        assert_eq!(id, "org/my-model");
     }
 
     #[test]
@@ -956,5 +1341,559 @@ mod tests {
             inline_content: None,
         }];
         assert!(build_gitattributes_blob(&files).is_none());
+    }
+
+    // --- is_valid_refname tests ---
+
+    #[test]
+    fn is_valid_refname_valid() {
+        assert!(is_valid_refname("refs/heads/main"));
+        assert!(is_valid_refname("refs/tags/v1.0"));
+        assert!(is_valid_refname("refs/heads/feature/foo"));
+        assert!(is_valid_refname("refs/heads/feature/foo/bar"));
+        assert!(is_valid_refname("refs/pull/42/head"));
+    }
+
+    #[test]
+    fn is_valid_refname_empty() {
+        assert!(!is_valid_refname(""));
+    }
+
+    #[test]
+    fn is_valid_refname_no_refs_prefix() {
+        assert!(!is_valid_refname("heads/main"));
+        assert!(!is_valid_refname("tags/v1.0"));
+        assert!(!is_valid_refname("main"));
+    }
+
+    #[test]
+    fn is_valid_refname_control_chars() {
+        assert!(!is_valid_refname("refs/heads/main\n"));
+        assert!(!is_valid_refname("refs/heads/main\t"));
+        assert!(!is_valid_refname("refs/heads/main\x00"));
+        assert!(!is_valid_refname("refs/heads/main\x7f"));
+    }
+
+    #[test]
+    fn is_valid_refname_dotdot() {
+        assert!(!is_valid_refname("refs/heads/../secret"));
+        assert!(!is_valid_refname("refs/heads/feature/.."));
+        assert!(!is_valid_refname("refs/heads/../../etc/passwd"));
+    }
+
+    // --- parse_commit_object tests ---
+
+    #[test]
+    fn parse_commit_object_valid() {
+        let data = b"tree abcdef0123456789abcdef0123456789abcdef01\n\
+                      parent 1234567890abcdef1234567890abcdef12345678\n\
+                      author Test <test@test.com> 1234567890 +0000\n\
+                      committer Test <test@test.com> 1234567890 +0000\n\
+                      \n\
+                      Initial commit\n";
+        let (tree, parent, message) = parse_commit_object(data).unwrap();
+        assert_eq!(tree, "abcdef0123456789abcdef0123456789abcdef01");
+        assert_eq!(
+            parent.as_deref(),
+            Some("1234567890abcdef1234567890abcdef12345678")
+        );
+        assert_eq!(message, "Initial commit");
+    }
+
+    #[test]
+    fn parse_commit_object_no_parent() {
+        let data = b"tree abcdef0123456789abcdef0123456789abcdef01\n\
+                      author Test <test@test.com> 1234567890 +0000\n\
+                      committer Test <test@test.com> 1234567890 +0000\n\
+                      \n\
+                      First commit\n";
+        let (tree, parent, message) = parse_commit_object(data).unwrap();
+        assert_eq!(tree, "abcdef0123456789abcdef0123456789abcdef01");
+        assert!(parent.is_none());
+        assert_eq!(message, "First commit");
+    }
+
+    #[test]
+    fn parse_commit_object_malformed() {
+        // Missing tree header
+        let data = b"parent 1234567890abcdef1234567890abcdef12345678\n\
+                      author Test <test@test.com> 1234567890 +0000\n\
+                      \n\
+                      Some message\n";
+        let result = parse_commit_object(data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing tree"));
+    }
+
+    // --- apply_delta tests ---
+
+    #[test]
+    fn apply_delta_simple() {
+        // Base: "Hello, World!"
+        let base = b"Hello, World!";
+
+        // Build a delta that copies the first 5 bytes ("Hello"), inserts " there", copies the rest.
+        let mut delta = Vec::new();
+        // Source size: 13 (varint — fits in 1 byte)
+        delta.push(13);
+        // Target size: 19 (varint — "Hello there, World!")
+        delta.push(19);
+
+        // Copy instruction 1: offset=0, size=5 ("Hello")
+        //   offset bytes: bit 0 NOT set → no offset bytes (offset=0)
+        //   size bytes:   bit 4 set → 0x10 (1 size byte)
+        //   cmd = 0x80 (copy flag) | 0x10 = 0x90
+        delta.push(0x90);
+        delta.push(0x05); // size byte = 5
+
+        // Insert instruction: 6 bytes " there"
+        delta.push(6);
+        delta.extend_from_slice(b" there");
+
+        // Copy instruction 2: offset=5, size=8 (", World!")
+        //   offset bytes: bit 0 set → 0x01 (1 offset byte)
+        //   size bytes:   bit 4 set → 0x10 (1 size byte)
+        //   cmd = 0x01 | 0x80 (copy flag) | 0x10 = 0x91
+        delta.push(0x91);
+        delta.push(0x05); // offset byte = 5
+        delta.push(0x08); // size byte = 8
+
+        let result = apply_delta(base, &delta).unwrap();
+        assert_eq!(result, b"Hello there, World!");
+    }
+
+    #[test]
+    fn apply_delta_empty() {
+        // Base: "abc", delta produces empty output (target size 0)
+        let base = b"abc";
+        let mut delta = Vec::new();
+        // Source size: 3
+        delta.push(3);
+        // Target size: 0
+        delta.push(0);
+        // No instructions — result should be empty
+
+        let result = apply_delta(base, &delta).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn apply_delta_invalid() {
+        // Source size doesn't match base length
+        let base = b"Hello, World!";
+        let mut delta = Vec::new();
+        // Source size: 99 (wrong)
+        delta.push(99);
+        // Target size: 5
+        delta.push(5);
+        // Copy command: offset=0, size=5
+        delta.push(0x90);
+        delta.push(0x00);
+        delta.push(0x05);
+
+        let result = apply_delta(base, &delta);
+        assert!(result.is_err());
+    }
+
+    // --- parse_commit_object with multiple parents ---
+
+    #[test]
+    fn parse_commit_object_multi_parent() {
+        let data = b"tree abcdef0123456789abcdef0123456789abcdef01\n\
+                      parent 1111111111111111111111111111111111111111\n\
+                      parent 2222222222222222222222222222222222222222\n\
+                      author Test <test@test.com> 1234567890 +0000\n\
+                      committer Test <test@test.com> 1234567890 +0000\n\
+                      \n\
+                      Merge commit\n";
+        let (tree, parent, message) = parse_commit_object(data).unwrap();
+        assert_eq!(tree, "abcdef0123456789abcdef0123456789abcdef01");
+        // parse_commit_object returns the LAST parent found
+        assert_eq!(
+            parent.as_deref(),
+            Some("2222222222222222222222222222222222222222")
+        );
+        assert_eq!(message, "Merge commit");
+    }
+
+    // --- walk_git_tree depth-limit tests ---
+
+    #[test]
+    fn walk_git_tree_empty_tree() {
+        // An empty tree object (no entries) should return an empty file list.
+        let empty_tree = GitObject::tree(vec![]);
+        let sha = empty_tree.sha1();
+        let mut objects: std::collections::HashMap<[u8; 20], &GitObject> =
+            std::collections::HashMap::new();
+        objects.insert(sha, &empty_tree);
+
+        let entries = walk_git_tree(&sha, &objects, "").unwrap();
+        assert!(
+            entries.is_empty(),
+            "empty tree should produce no file entries"
+        );
+    }
+
+    #[test]
+    fn walk_git_tree_max_depth() {
+        // Build a chain of 128 nested directories, each containing one subdirectory,
+        // with a file at the deepest level. Depth 128 = MAX_TREE_DEPTH and should succeed.
+        let file_blob = GitObject::blob(b"file content".to_vec());
+        let file_sha = file_blob.sha1();
+
+        // Collect all owned objects, then build the HashMap of references.
+        let mut owned: Vec<GitObject> = Vec::new();
+        owned.push(file_blob);
+
+        let mut current_sha = file_sha;
+
+        for depth in (1..=128).rev() {
+            let mut tree_data = Vec::new();
+            if depth == 128 {
+                // Innermost: file entry
+                tree_data.extend_from_slice(b"100644 f\0");
+                tree_data.extend_from_slice(&file_sha);
+            } else {
+                // Directory entry pointing to current_sha
+                tree_data.extend_from_slice(b"40000 d\0");
+                tree_data.extend_from_slice(&current_sha);
+            }
+            let tree_obj = GitObject::tree(tree_data);
+            let sha = tree_obj.sha1();
+            owned.push(tree_obj);
+            current_sha = sha;
+        }
+
+        let objects: std::collections::HashMap<[u8; 20], &GitObject> =
+            owned.iter().map(|o| (o.sha1(), o)).collect();
+
+        let entries = walk_git_tree(&current_sha, &objects, "").unwrap();
+        assert_eq!(entries.len(), 1, "should find the file at depth 128");
+        // Path is 127 "d/" prefixes + "f"
+        let expected_prefix = std::iter::repeat("d/").take(127).collect::<String>();
+        let expected_path = format!("{expected_prefix}f");
+        assert_eq!(entries[0].path, expected_path);
+    }
+
+    #[test]
+    fn walk_git_tree_exceeds_max_depth() {
+        // Build a chain of 130 nested directories — enough to reach depth 129
+        // (one more than MAX_TREE_DEPTH=128). The initial call starts at depth 0,
+        // so 130 tree levels pushes the deepest recursion to depth 129 > 128.
+        let file_blob = GitObject::blob(b"file content".to_vec());
+        let file_sha = file_blob.sha1();
+
+        let mut owned: Vec<GitObject> = Vec::new();
+        owned.push(file_blob);
+
+        let mut current_sha = file_sha;
+
+        for depth in (1..=130).rev() {
+            let mut tree_data = Vec::new();
+            if depth == 130 {
+                tree_data.extend_from_slice(b"100644 f\0");
+                tree_data.extend_from_slice(&file_sha);
+            } else {
+                tree_data.extend_from_slice(b"40000 d\0");
+                tree_data.extend_from_slice(&current_sha);
+            }
+            let tree_obj = GitObject::tree(tree_data);
+            let sha = tree_obj.sha1();
+            owned.push(tree_obj);
+            current_sha = sha;
+        }
+
+        let objects: std::collections::HashMap<[u8; 20], &GitObject> =
+            owned.iter().map(|o| (o.sha1(), o)).collect();
+
+        let result = walk_git_tree(&current_sha, &objects, "");
+        assert!(
+            result.is_err(),
+            "should fail at depth 129 (exceeds MAX_TREE_DEPTH)"
+        );
+        assert!(
+            result.unwrap_err().contains("exceeds maximum depth"),
+            "error message should mention depth"
+        );
+    }
+
+    // --- is_valid_refname edge cases ---
+
+    #[test]
+    fn is_valid_refname_with_spaces() {
+        assert!(!is_valid_refname("refs/heads/my branch"));
+        assert!(!is_valid_refname("refs/heads/feature "));
+        assert!(!is_valid_refname(" refs/heads/feature"));
+    }
+
+    #[test]
+    fn is_valid_refname_with_dotdot() {
+        assert!(!is_valid_refname("refs/heads/../secret"));
+        assert!(!is_valid_refname("refs/heads/feature/.."));
+        assert!(!is_valid_refname("refs/heads/../../etc/passwd"));
+        assert!(!is_valid_refname("refs/heads/a/../../../x"));
+    }
+
+    // --- collect_refs dedup/HEAD logic tests ---
+
+    /// Helper to create a temporary HubState backed by SQLite.
+    fn make_hub_state() -> (tempfile::TempDir, HubState) {
+        use shardline_index::LocalIndexStore;
+        use shardline_index::hub::BoxedHubStore;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let db_path = root.join("metadata.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
+                repo_id TEXT PRIMARY KEY, repo_type TEXT NOT NULL, private INTEGER NOT NULL DEFAULT 0,
+                default_branch TEXT NOT NULL, created_at_unix_seconds INTEGER NOT NULL,
+                updated_at_unix_seconds INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS shardline_hub_revisions (
+                repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
+                parent_sha TEXT, message TEXT, created_at_unix_seconds INTEGER NOT NULL,
+                PRIMARY KEY (repo_id, sha)
+            );
+            CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
+                ON shardline_hub_revisions (repo_id, ref_name);
+            CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
+                commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
+                sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
+                PRIMARY KEY (commit_sha, path)
+            );
+            CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
+                oid TEXT PRIMARY KEY, data BLOB NOT NULL, size INTEGER NOT NULL,
+                created_at_unix_seconds INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
+                id TEXT PRIMARY KEY, repo_id TEXT NOT NULL,
+                url TEXT NOT NULL, events TEXT NOT NULL DEFAULT 'push', secret TEXT,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                created_at_unix_seconds INTEGER NOT NULL,
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+            );",
+        )
+        .expect("create schema");
+        drop(conn);
+
+        let store = LocalIndexStore::open(root);
+        let boxed = BoxedHubStore::from_store(store);
+        let state = HubState {
+            store: boxed,
+            auth: None,
+            http_client: None,
+        };
+        (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn collect_refs_dedup_identical_shas() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/dedup", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+
+        // Insert two revisions with different SHAs but pointing to the same
+        // final SHA via a chain. The key dedup test: same ref_name ("main")
+        // should only appear once.
+        state
+            .store
+            .create_revision("org/dedup", Some(initial_sha), "sha_a", "main", "first")
+            .unwrap();
+        state
+            .store
+            .create_revision("org/dedup", Some("sha_a"), "sha_b", "refs/heads/dev", "second")
+            .unwrap();
+        // Also add a HEAD entry pointing to sha_a
+        state
+            .store
+            .create_revision("org/dedup", Some("sha_b"), "sha_head", "HEAD", "head ref")
+            .unwrap();
+
+        let refs = collect_refs(&state, "org/dedup").await.unwrap();
+
+        // Each unique (name, sha) pair should only appear once.
+        let mut seen = std::collections::HashSet::new();
+        for r in &refs {
+            let key = (&r.name, &r.sha1);
+            assert!(
+                seen.insert(key),
+                "duplicate ref entry: {key:?} in refs: {refs:?}"
+            );
+        }
+
+        // Verify all expected ref names are present.
+        let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"HEAD"), "should contain HEAD: {refs:?}");
+        assert!(names.contains(&"refs/heads/main"), "should contain main: {refs:?}");
+        assert!(names.contains(&"refs/heads/dev"), "should contain dev: {refs:?}");
+    }
+
+    #[tokio::test]
+    async fn collect_refs_head_fallback_when_no_head() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/head-fallback", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+
+        // Create a revision with a non-HEAD ref name only.
+        state
+            .store
+            .create_revision(
+                "org/head-fallback",
+                Some(initial_sha),
+                "abc123",
+                "main",
+                "first commit",
+            )
+            .unwrap();
+
+        let refs = collect_refs(&state, "org/head-fallback").await.unwrap();
+
+        // There should be a HEAD entry injected (no explicit HEAD ref).
+        let heads: Vec<&GitRef> = refs.iter().filter(|r| r.name == "HEAD").collect();
+        assert_eq!(
+            heads.len(),
+            1,
+            "collect_refs should inject exactly one HEAD entry when none is explicit: {refs:?}"
+        );
+        // The HEAD fallback uses `revisions.last()` which, in DESC order,
+        // is the oldest revision (the initial empty-tree SHA).
+        assert_eq!(
+            heads[0].sha1, initial_sha,
+            "HEAD fallback should point to the oldest revision (list last): {refs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_refs_explicit_head_not_duplicated() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/explicit-head", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+
+        // Create revisions: one with ref_name "HEAD" and one with "main".
+        state
+            .store
+            .create_revision(
+                "org/explicit-head",
+                Some(initial_sha),
+                "sha_head",
+                "HEAD",
+                "head commit",
+            )
+            .unwrap();
+        state
+            .store
+            .create_revision(
+                "org/explicit-head",
+                Some("sha_head"),
+                "sha_main",
+                "main",
+                "main commit",
+            )
+            .unwrap();
+
+        let refs = collect_refs(&state, "org/explicit-head").await.unwrap();
+
+        // There should be exactly one HEAD entry.
+        let head_count = refs.iter().filter(|r| r.name == "HEAD").count();
+        assert_eq!(
+            head_count, 1,
+            "HEAD should appear exactly once: {refs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_refs_bare_ref_name_gets_refs_prefix() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/bare-ref", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+
+        // Create a revision with a bare ref name (no "refs/" prefix).
+        state
+            .store
+            .create_revision(
+                "org/bare-ref",
+                Some(initial_sha),
+                "def456",
+                "feature",
+                "feature commit",
+            )
+            .unwrap();
+
+        let refs = collect_refs(&state, "org/bare-ref").await.unwrap();
+
+        // The bare "feature" name should be normalized to "refs/heads/feature".
+        assert!(
+            refs.iter().any(|r| r.name == "refs/heads/feature"),
+            "bare ref name 'feature' should be normalized to 'refs/heads/feature': {refs:?}"
+        );
+        assert!(
+            !refs.iter().any(|r| r.name == "feature"),
+            "bare ref name should not appear unmodified: {refs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_refs_full_refs_prefix_preserved() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/full-ref", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+
+        // Create a revision with a full refs/ prefix.
+        state
+            .store
+            .create_revision(
+                "org/full-ref",
+                Some(initial_sha),
+                "abc789",
+                "refs/tags/v1.0",
+                "tag v1.0",
+            )
+            .unwrap();
+
+        let refs = collect_refs(&state, "org/full-ref").await.unwrap();
+
+        // The full refs/ prefix should be preserved.
+        assert!(
+            refs.iter().any(|r| r.name == "refs/tags/v1.0"),
+            "full refs/ prefix should be preserved: {refs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_refs_nonexistent_repo_returns_empty() {
+        let (_tmp, state) = make_hub_state();
+
+        let refs = collect_refs(&state, "org/nonexistent").await.unwrap();
+        assert!(
+            refs.is_empty(),
+            "collect_refs on nonexistent repo should return empty list: {refs:?}"
+        );
     }
 }

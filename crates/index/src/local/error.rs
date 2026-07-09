@@ -50,4 +50,7 @@ pub(crate) enum LocalIndexStoreError {
     /// A stored webhook delivery was invalid.
     #[error("stored webhook delivery was invalid")]
     WebhookDelivery(#[from] WebhookDeliveryError),
+    /// A blocking computation task failed (panicked).
+    #[error("blocking task failed")]
+    BlockingTask,
 }

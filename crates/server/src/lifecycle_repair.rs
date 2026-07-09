@@ -451,13 +451,12 @@ pub(crate) const fn classify_quarantine_repair_action(
 
 pub(crate) const fn classify_retention_hold_repair_action(
     release_after_unix_seconds: Option<u64>,
-    held_at_unix_seconds: u64,
+    _held_at_unix_seconds: u64,
     object_exists: bool,
     now_unix_seconds: u64,
 ) -> RetentionHoldRepairAction {
     if let Some(release_after_unix_seconds) = release_after_unix_seconds
-        && (release_after_unix_seconds < held_at_unix_seconds
-            || release_after_unix_seconds <= now_unix_seconds)
+        && release_after_unix_seconds <= now_unix_seconds
     {
         return RetentionHoldRepairAction::DeleteExpired;
     }

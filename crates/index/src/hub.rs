@@ -48,6 +48,7 @@ pub struct HubRepo {
     pub private: bool,
     pub default_branch: String,
     pub created_at_unix_seconds: u64,
+    pub updated_at_unix_seconds: u64,
 }
 
 impl HubRepo {
@@ -247,6 +248,13 @@ pub trait HubStore: Send + Sync {
     /// Returns an error when the storage backend operation fails.
     fn list_webhooks(&self, repo_id: &str) -> Result<Vec<crate::hub::HubWebhook>, Self::Error>;
 
+    /// Deletes a repository and all associated data (revisions, file entries, webhooks).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error>;
+
     /// Deletes a webhook by ID.
     ///
     /// # Errors
@@ -357,6 +365,11 @@ trait ErasedHubStore: Send + Sync {
         &self,
         repo_id: &str,
     ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn delete_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     fn delete_webhook(
         &self,
@@ -490,6 +503,14 @@ impl<T: HubStore> ErasedHubStore for T {
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
+    fn delete_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::delete_repo(self, repo_id)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
     fn delete_webhook(
         &self,
         repo_id: &str,
@@ -503,7 +524,7 @@ impl<T: HubStore> ErasedHubStore for T {
         &self,
         repo_id: &str,
         event: &str,
-    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<crate::hub::HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
         T::webhooks_for_event(self, repo_id, event)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
@@ -708,6 +729,18 @@ impl BoxedHubStore {
         self.inner.list_webhooks(repo_id)
     }
 
+    /// Deletes a repository and all associated data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    pub fn delete_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.delete_repo(repo_id)
+    }
+
     /// Deletes a webhook by ID.
     ///
     /// # Errors
@@ -847,6 +880,13 @@ where
         repo_id: &str,
     ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
         T::list_webhooks(&self.0, repo_id).map_err(Into::into)
+    }
+
+    fn delete_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::delete_repo(&self.0, repo_id).map_err(Into::into)
     }
 
     fn delete_webhook(

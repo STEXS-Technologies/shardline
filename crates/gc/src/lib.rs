@@ -152,20 +152,9 @@ impl From<GcError> for shardline_server_core::ServerObjectStoreError {
             GcError::S3ObjectStore(e) => Self::S3(e),
             GcError::Io(e) => Self::Io(e),
             GcError::NumericConversion(e) => Self::NumericConversion(e),
-            GcError::Json(_)
-            | GcError::ObjectPrefix(_)
-            | GcError::IndexStore(_)
-            | GcError::MemoryIndexStore(_)
-            | GcError::MemoryRecordStore(_)
-            | GcError::PostgresMetadata(_)
-            | GcError::RetentionHold(_)
-            | GcError::QuarantineCandidate(_)
-            | GcError::WebhookDelivery(_)
-            | GcError::FileRecordInvariant(_)
-            | GcError::InvalidLifecycleMetadata(_)
-            | GcError::InvalidContentHash
-            | GcError::Overflow
-            | GcError::XetAdapter(_) => Self::Overflow,
+            GcError::InvalidContentHash => Self::InvalidContentHash,
+            GcError::Overflow => Self::Overflow,
+            other => Self::Io(std::io::Error::other(other)),
         }
     }
 }

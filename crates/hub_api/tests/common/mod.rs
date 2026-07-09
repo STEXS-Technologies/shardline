@@ -7,6 +7,7 @@ use tempfile::TempDir;
 
 pub(crate) static INIT: Once = Once::new();
 pub(crate) static TEMP_DIR: OnceLock<Mutex<Option<TempDir>>> = OnceLock::new();
+pub(crate) static STATE: OnceLock<HubState> = OnceLock::new();
 
 pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
                 repo_id TEXT PRIMARY KEY,
@@ -71,13 +72,17 @@ pub(crate) fn setup() {
             auth: None,
             http_client: None,
         };
-        shardline_hub_api::init(state);
+        let _ = STATE.set(state);
 
         let dir_lock = TEMP_DIR.get_or_init(|| Mutex::new(None));
         *dir_lock.lock().unwrap() = Some(tmp);
     });
 }
 
+pub(crate) fn state() -> &'static HubState {
+    STATE.get().expect("setup() must be called first")
+}
+
 pub(crate) fn app() -> axum::Router {
-    shardline_hub_api::hub_routes()
+    shardline_hub_api::hub_routes(state().clone())
 }

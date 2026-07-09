@@ -54,11 +54,14 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
             }),
         )
             .into_response(),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": format!("{error}") })),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::warn!("readiness check failed: {error}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "service unavailable" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -70,7 +73,6 @@ pub(super) async fn read_chunk(
 ) -> Result<Response, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     validate_hash_path(&hash)?;
-    let _dedupe_shard_length = state.backend.dedupe_shard_length(&hash).await?;
     if let Some(auth) = auth.as_ref() {
         let reachable = state
             .backend

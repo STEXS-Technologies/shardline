@@ -41,7 +41,7 @@ async fn provider_authorization_mints_repository_scoped_tokens_for_server_access
 }
 
 async fn exercise_provider_token_flow() -> Result<(), Box<dyn Error>> {
-    let signing_key = b"provider-signing-key";
+    let signing_key = b"provider-signing-key-32-bytes!!!";
     let storage = tempfile::tempdir()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let addr = listener.local_addr()?;

@@ -65,6 +65,31 @@ pub struct RepoResponse {
     /// Default branch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
+    /// Repository tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Download count.
+    #[serde(default)]
+    pub downloads: u64,
+    /// Like count.
+    #[serde(default)]
+    pub likes: u64,
+    /// Last modification timestamp (ISO 8601).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    /// ML pipeline tag (e.g. "text-generation", "image-classification").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_tag: Option<String>,
+    /// Model card data extracted from README metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_data: Option<serde_json::Value>,
+    /// Security status of the repository.
+    #[serde(default = "default_security_status")]
+    pub security_status: serde_json::Value,
+}
+
+fn default_security_status() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 /// Revision info response.
@@ -102,10 +127,24 @@ pub struct TreeEntryLfs {
 }
 
 /// Preupload request body.
+///
+/// Per the HuggingFace Hub spec the request may include `gitAttributes` and
+/// `gitIgnore` fields. These are accepted for spec conformity but not
+/// currently used by the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreuploadRequest {
     /// Files to upload.
     pub files: Vec<PreuploadFile>,
+    /// Optional git attributes (accepted per HF spec, currently unused).
+    #[serde(default)]
+    #[serde(rename = "gitAttributes")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_attributes: Option<serde_json::Value>,
+    /// Optional git ignore rules (accepted per HF spec, currently unused).
+    #[serde(default)]
+    #[serde(rename = "gitIgnore")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_ignore: Option<serde_json::Value>,
 }
 
 /// File in a preupload request.
@@ -192,6 +231,43 @@ pub struct WhoamiResponse {
     /// Whether the user is an admin.
     #[serde(default)]
     pub is_admin: bool,
+    /// User type (always "user").
+    #[serde(rename = "type", default = "default_user_type")]
+    pub user_type: String,
+    /// Authentication details.
+    pub auth: WhoamiAuth,
+}
+
+fn default_user_type() -> String {
+    "user".to_owned()
+}
+
+/// Authentication details in a whoami response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhoamiAuth {
+    /// Auth type (always "token").
+    #[serde(rename = "type", default = "default_auth_type")]
+    pub auth_type: String,
+    /// Identity details.
+    pub identity: WhoamiIdentity,
+}
+
+fn default_auth_type() -> String {
+    "token".to_owned()
+}
+
+/// Identity details in a whoami auth response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhoamiIdentity {
+    /// Account information.
+    pub account: WhoamiAccount,
+}
+
+/// Account information in a whoami identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhoamiAccount {
+    /// Account name.
+    pub name: String,
 }
 
 /// Token exchange response.
@@ -304,6 +380,15 @@ pub struct RepoSearchQuery {
     /// Search query (name prefix match).
     #[serde(default)]
     pub q: String,
+    /// Filter by author/owner.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Sort field ("lastModified", "likes", "downloads").
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Sort direction ("asc" or "desc").
+    #[serde(default)]
+    pub direction: Option<String>,
     /// Maximum number of results (default 50, max 200).
     #[serde(default = "default_search_limit")]
     pub limit: usize,
@@ -311,6 +396,20 @@ pub struct RepoSearchQuery {
 
 const fn default_search_limit() -> usize {
     50
+}
+
+/// Tree listing query parameters.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TreeQuery {
+    /// Maximum number of entries to return.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Pagination cursor.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Whether to list entries recursively.
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 /// Revision list response.

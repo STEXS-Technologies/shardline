@@ -77,6 +77,24 @@ fn retention_hold_repair_policy_is_prioritized_and_mutually_exclusive() {
 }
 
 #[test]
+fn retention_hold_expired_takes_priority_over_missing() {
+    // When a hold is both expired (release_after <= now) AND the object is missing,
+    // it should be classified as DeleteExpired (not DeleteMissing), because the
+    // expiry check runs first in the classification logic.
+    assert_eq!(
+        classify_retention_hold_repair_action(Some(5), 10, false, 10),
+        RetentionHoldRepairAction::DeleteExpired,
+        "expired hold should take priority even when object is missing"
+    );
+    // Edge case: expired at exactly now, object missing
+    assert_eq!(
+        classify_retention_hold_repair_action(Some(10), 10, false, 10),
+        RetentionHoldRepairAction::DeleteExpired,
+        "hold expired at exactly now should take priority over missing"
+    );
+}
+
+#[test]
 fn webhook_delivery_repair_policy_is_prioritized_and_mutually_exclusive() {
     assert_eq!(
         classify_webhook_delivery_repair_action(101, 50, 100),

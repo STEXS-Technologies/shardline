@@ -49,9 +49,11 @@ use operational::{
     upload_xorb,
 };
 use protocol_routes::{
-    bazel_get_ac, bazel_get_cas, bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object,
-    lfs_get_object, lfs_head_object, lfs_put_object, oci_api_dispatch, oci_dispatch, oci_registry_token,
-    oci_transfer_dispatch, oci_v2_root,
+    bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas,
+    bazel_put, bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object,
+    lfs_get_object, lfs_head_object, lfs_patch_object, lfs_put_object, lfs_verify_object,
+    oci_api_dispatch, oci_dispatch,
+    oci_registry_token, oci_transfer_dispatch, oci_v2_root,
 };
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
 use provider_routes::{
@@ -213,13 +215,32 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             )
             .route("/v1/stats", get(stats));
     }
+
+    // Build hub routes separately — they carry their own state type (HubState)
+    // and must be merged at the Router<()> level after both sides are
+    // converted via `.with_state()`.
+    let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
     for frontend in state.config.server_frontends() {
-        app = register_frontend_routes(app, *frontend, role, &state)?;
+        match frontend {
+            ServerFrontend::Hub => {
+                hub_state = Some(build_hub_state(&state)?);
+            }
+            _ => {
+                app = register_frontend_routes(app, *frontend, role, &state)?;
+            }
+        }
     }
 
-    Ok(app
+    let app = app
         .layer(DefaultBodyLimit::max(max_request_body_bytes.get()))
-        .with_state(state))
+        .with_state(state);
+
+    // Merge hub routes (Router<()>) into the main app (Router<()>).
+    Ok(if let Some(hs) = hub_state {
+        app.merge(shardline_hub_api::hub_routes(hs))
+    } else {
+        app
+    })
 }
 
 /// Runs the Shardline HTTP server.
@@ -255,14 +276,14 @@ fn register_frontend_routes(
     app: Router<Arc<AppState>>,
     frontend: ServerFrontend,
     role: ServerRole,
-    app_state: &AppState,
+    _app_state: &AppState,
 ) -> Result<Router<Arc<AppState>>, ServerError> {
     match frontend {
         ServerFrontend::Xet => Ok(register_xet_routes(app, role)),
         ServerFrontend::Lfs => Ok(register_lfs_routes(app, role)),
         ServerFrontend::BazelHttp => Ok(register_bazel_routes(app, role)),
         ServerFrontend::Oci => Ok(register_oci_routes(app, role)),
-        ServerFrontend::Hub => register_hub_routes(app, app_state),
+        ServerFrontend::Hub => Ok(app), // Hub routes are built separately
     }
 }
 
@@ -296,13 +317,16 @@ fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
         app = app.route("/v1/lfs/objects/batch", post(lfs_batch));
     }
     if role.serves_transfer() {
-        app = app        .route(
-            "/v1/lfs/objects/{oid}",
-            get(lfs_get_object)
-                .head(lfs_head_object)
-                .put(lfs_put_object)
-                .delete(lfs_delete_object),
-        );
+        app = app
+            .route(
+                "/v1/lfs/objects/{oid}",
+                get(lfs_get_object)
+                    .head(lfs_head_object)
+                    .put(lfs_put_object)
+                    .patch(lfs_patch_object)
+                    .delete(lfs_delete_object),
+            )
+            .route("/v1/lfs/objects/{oid}/verify", post(lfs_verify_object));
     }
     app
 }
@@ -315,11 +339,16 @@ fn register_bazel_routes(
         app = app
             .route(
                 "/v1/bazel/cache/ac/{hash}",
-                get(bazel_get_ac).put(bazel_put_ac),
+                get(bazel_get_ac).put(bazel_put_ac).head(bazel_head_ac),
             )
             .route(
                 "/v1/bazel/cache/cas/{hash}",
-                get(bazel_get_cas).put(bazel_put_cas),
+                get(bazel_get_cas).put(bazel_put_cas).head(bazel_head_cas),
+            )
+            // Flat routes for Bazel client compatibility
+            .route(
+                "/v1/bazel/{hash}",
+                get(bazel_get).put(bazel_put).head(bazel_head),
             );
     }
     app
@@ -367,10 +396,9 @@ pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: us
     configured_limit.get().min(endpoint_limit)
 }
 
-fn register_hub_routes(
-    app: Router<Arc<AppState>>,
+fn build_hub_state(
     app_state: &AppState,
-) -> Result<Router<Arc<AppState>>, ServerError> {
+) -> Result<shardline_hub_api::routes::HubState, ServerError> {
     let hub_auth = app_state
         .auth
         .as_ref()
@@ -408,18 +436,22 @@ fn register_hub_routes(
         )?;
 
     // Build an HTTP client for outbound webhook delivery.
-    let http_client = reqwest::Client::builder()
+    let http_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .ok();
+    {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::warn!("failed to build HTTP client for webhook delivery: {e}");
+            None
+        }
+    };
 
-    let hub_state = shardline_hub_api::routes::HubState {
+    Ok(shardline_hub_api::routes::HubState {
         store,
         auth: hub_auth,
         http_client,
-    };
-    shardline_hub_api::init(hub_state);
-    Ok(app.merge(shardline_hub_api::hub_routes()))
+    })
 }
 
 fn endpoint_body_limit(

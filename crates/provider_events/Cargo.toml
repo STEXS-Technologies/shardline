@@ -18,6 +18,7 @@ shardline-storage.workspace = true
 shardline-vcs.workspace = true
 shardline-xet-adapter.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
