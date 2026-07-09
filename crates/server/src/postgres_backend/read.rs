@@ -245,14 +245,6 @@ impl super::PostgresBackend {
         Ok((byte_stream, total_length))
     }
 
-    pub(crate) async fn dedupe_shard_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
-        let object_store = self.object_store();
-        let (_object_key, total_length) =
-            resolve_dedupe_shard_object(&self.index_store, &object_store, hash_hex).await?;
-
-        Ok(total_length)
-    }
-
     /// Streams a stored xorb byte range by hash.
     ///
     /// # Errors

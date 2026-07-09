@@ -393,7 +393,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || ReconstructionStore::reconstruction(&store, &file_id))
                 .await
-                .expect("reconstruction task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -408,7 +408,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || store.insert_reconstruction(&file_id, &reconstruction))
                 .await
-                .expect("insert_reconstruction task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -417,7 +417,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || ReconstructionStore::list_reconstruction_file_ids(&store))
                 .await
-                .expect("list_reconstruction_file_ids task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -430,7 +430,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || ReconstructionStore::delete_reconstruction(&store, &file_id))
                 .await
-                .expect("delete_reconstruction task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -443,7 +443,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || ReconstructionStore::contains_object(&store, &object_id))
                 .await
-                .expect("contains_object task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -456,7 +456,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || store.insert_object(&object_id))
                 .await
-                .expect("insert_object task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -469,7 +469,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || DedupeStore::dedupe_shard_mapping(&store, &chunk_hash))
                 .await
-                .expect("dedupe_shard_mapping task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -480,7 +480,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || DedupeStore::list_dedupe_shard_mappings(&store))
                 .await
-                .expect("list_dedupe_shard_mappings task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -510,7 +510,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || store.upsert_dedupe_shard_mapping(&mapping))
                 .await
-                .expect("upsert_dedupe_shard_mapping task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 
@@ -523,7 +523,7 @@ impl AsyncIndexStore for LocalIndexStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash))
                 .await
-                .expect("delete_dedupe_shard_mapping task panicked")
+                .map_err(|_| LocalIndexStoreError::BlockingTask)?
         })
     }
 

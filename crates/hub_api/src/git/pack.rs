@@ -18,6 +18,10 @@ pub enum PackError {
     TooManyObjects,
     /// Variable-length integer shift exceeds 63 bits.
     ShiftOverflow,
+    /// Delta data is malformed or references a missing base object.
+    InvalidDelta,
+    /// Total decompressed size across all objects exceeds the allowed limit.
+    ExcessiveDecompressedSize,
 }
 
 impl std::fmt::Display for PackError {
@@ -26,6 +30,10 @@ impl std::fmt::Display for PackError {
             Self::Zlib(e) => write!(f, "zlib compression failed: {e}"),
             Self::TooManyObjects => write!(f, "too many objects for pack file"),
             Self::ShiftOverflow => write!(f, "variable-length integer shift overflow"),
+            Self::InvalidDelta => write!(f, "invalid or missing delta base"),
+            Self::ExcessiveDecompressedSize => {
+                write!(f, "total decompressed size exceeds allowed limit")
+            }
         }
     }
 }
@@ -34,7 +42,7 @@ impl std::error::Error for PackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Zlib(e) => Some(e),
-            Self::TooManyObjects | Self::ShiftOverflow => None,
+            Self::TooManyObjects | Self::ShiftOverflow | Self::InvalidDelta | Self::ExcessiveDecompressedSize => None,
         }
     }
 }
@@ -247,6 +255,148 @@ pub fn empty_pack() -> Result<Vec<u8>, PackError> {
     generate_pack(&[])
 }
 
+/// Applies a Git binary delta to a base object.
+///
+/// The delta format is: source_size (varint), target_size (varint), instructions.
+/// Instructions: copy from base (0x80 flag + offset + size), insert new data (0x00 flag + data).
+///
+/// # Errors
+///
+/// Returns [`PackError::InvalidDelta`] if the delta data is malformed or the
+/// base object doesn't match the expected source size.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
+    let mut pos = 0;
+
+    // Parse source size (varint, MSB-first, 7 bits per byte)
+    let (source_size, new_pos) = parse_delta_varint(delta, pos)?;
+    pos = new_pos;
+
+    // Parse target size (varint)
+    let (target_size, new_pos) = parse_delta_varint(delta, pos)?;
+    pos = new_pos;
+
+    if source_size != base.len() {
+        return Err(PackError::InvalidDelta);
+    }
+
+    let mut result = Vec::with_capacity(target_size);
+
+    while pos < delta.len() {
+        let cmd = delta[pos];
+        pos += 1;
+
+        if cmd & 0x80 != 0 {
+            // Copy instruction: copy bytes from the base object.
+            // Bits 0-3 indicate which offset bytes are present (LSB first).
+            // Bits 4-6 indicate which size bytes are present (LSB first).
+            let mut copy_offset: usize = 0;
+            let mut copy_size: usize = 0;
+
+            let mut shift = 0;
+            for i in 0..4 {
+                if cmd & (1 << i) != 0 {
+                    if pos >= delta.len() {
+                        return Err(PackError::InvalidDelta);
+                    }
+                    copy_offset |= (delta[pos] as usize) << shift;
+                    pos += 1;
+                    shift += 8;
+                }
+            }
+
+            shift = 0;
+            for i in 4..7 {
+                if cmd & (1 << i) != 0 {
+                    if pos >= delta.len() {
+                        return Err(PackError::InvalidDelta);
+                    }
+                    copy_size |= (delta[pos] as usize) << shift;
+                    pos += 1;
+                    shift += 8;
+                }
+            }
+
+            // A size of 0 in the encoding means 0x10000 (65536).
+            if copy_size == 0 {
+                copy_size = 0x10000;
+            }
+
+            if copy_offset + copy_size > base.len() {
+                return Err(PackError::InvalidDelta);
+            }
+
+            result.extend_from_slice(&base[copy_offset..copy_offset + copy_size]);
+        } else if cmd != 0 {
+            // Insert instruction: copy cmd bytes from the delta stream.
+            let insert_size = cmd as usize;
+            if pos + insert_size > delta.len() {
+                return Err(PackError::InvalidDelta);
+            }
+            result.extend_from_slice(&delta[pos..pos + insert_size]);
+            pos += insert_size;
+        } else {
+            // cmd == 0 is not valid in the Git delta format.
+            return Err(PackError::InvalidDelta);
+        }
+    }
+
+    if result.len() != target_size {
+        return Err(PackError::InvalidDelta);
+    }
+
+    Ok(result)
+}
+
+/// Parses a variable-length integer from delta data.
+///
+/// Encoding: MSB-first, 7 bits of value per byte, MSB is continuation flag.
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_delta_varint(data: &[u8], mut pos: usize) -> Result<(usize, usize), PackError> {
+    let mut result: usize = 0;
+    let mut shift: u32 = 0;
+    loop {
+        if pos >= data.len() {
+            return Err(PackError::InvalidDelta);
+        }
+        let byte = data[pos];
+        pos += 1;
+        result |= ((byte & 0x7f) as usize) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    Ok((result, pos))
+}
+
+/// Parses the negative offset from an OFS_DELTA entry in a pack file.
+///
+/// The encoding uses MSB continuation with a special accumulation:
+/// `offset = ((offset + 1) << 7) | (byte & 0x7f)` for subsequent bytes.
+///
+/// # Errors
+///
+/// Returns [`PackError::InvalidDelta`] if the offset data is malformed.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn parse_ofs_delta_offset(data: &[u8], pos: &mut usize) -> Result<usize, PackError> {
+    if *pos >= data.len() {
+        return Err(PackError::InvalidDelta);
+    }
+    let mut byte = data[*pos];
+    *pos += 1;
+    let mut offset = (byte & 0x7f) as usize;
+    while byte & 0x80 != 0 {
+        if *pos >= data.len() {
+            return Err(PackError::InvalidDelta);
+        }
+        byte = data[*pos];
+        *pos += 1;
+        offset = ((offset + 1) << 7) | (byte & 0x7f) as usize;
+    }
+    Ok(offset)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
@@ -310,5 +460,245 @@ mod tests {
         let content = String::from_utf8_lossy(&tree.data);
         assert!(content.contains("a.txt"));
         assert!(content.contains("b.txt"));
+    }
+
+    // --- apply_delta tests ---
+
+    #[test]
+    fn apply_delta_complex_multi_step() {
+        // Base: "ABCDEFGH" (8 bytes)
+        let base = b"ABCDEFGH";
+
+        // Target: "A123EFGH" — copy A (offset=0, size=1), insert "123", copy EFGH (offset=4, size=4)
+        // Target size: 1 + 3 + 4 = 8
+        let mut delta = Vec::new();
+        // Source size: 8 (varint)
+        delta.push(8);
+        // Target size: 8 (varint)
+        delta.push(8);
+
+        // Copy instruction 1: offset=0, size=1 ("A")
+        //   offset bytes: no bits set → 0 offset bytes
+        //   size bytes: bit 4 set → 1 size byte
+        //   cmd = 0x80 (copy flag) | 0x10 = 0x90
+        delta.push(0x90);
+        delta.push(0x01); // size = 1
+
+        // Insert instruction: 3 bytes "123"
+        delta.push(3);
+        delta.extend_from_slice(b"123");
+
+        // Copy instruction 2: offset=4, size=4 ("EFGH")
+        //   offset bytes: bit 0 set → 1 offset byte
+        //   size bytes: bit 4 set → 1 size byte
+        //   cmd = 0x01 | 0x80 | 0x10 = 0x91
+        delta.push(0x91);
+        delta.push(0x04); // offset = 4
+        delta.push(0x04); // size = 4
+
+        let result = apply_delta(base, &delta).unwrap();
+        assert_eq!(result, b"A123EFGH");
+    }
+
+    #[test]
+    fn apply_delta_target_size_mismatch() {
+        // Base: "Hello"
+        let base = b"Hello";
+
+        // Build a delta that claims target size 10 but only produces 5 bytes.
+        let mut delta = Vec::new();
+        // Source size: 5
+        delta.push(5);
+        // Target size: 10 (wrong — we'll only produce 5 bytes via copy-all)
+        delta.push(10);
+
+        // Copy instruction: offset=0, size=5 (copy entire base)
+        //   cmd = 0x80 (copy flag) | 0x10 (1 size byte) = 0x90
+        delta.push(0x90);
+        delta.push(0x05); // size = 5
+
+        let result = apply_delta(base, &delta);
+        assert!(
+            result.is_err(),
+            "should fail when target size doesn't match actual output"
+        );
+        assert!(
+            matches!(result.unwrap_err(), PackError::InvalidDelta),
+            "error should be InvalidDelta"
+        );
+    }
+
+    #[test]
+    fn apply_delta_base_size_mismatch() {
+        // Source size in delta doesn't match the actual base length
+        let base = b"Hello, World!";
+
+        let mut delta = Vec::new();
+        // Source size: 99 (wrong — base is 13 bytes)
+        delta.push(99);
+        // Target size: 5
+        delta.push(5);
+        // Copy command: offset=0, size=5
+        delta.push(0x90);
+        delta.push(0x00);
+        delta.push(0x05);
+
+        let result = apply_delta(base, &delta);
+        assert!(
+            result.is_err(),
+            "should fail when base size doesn't match"
+        );
+        assert!(
+            matches!(result.unwrap_err(), PackError::InvalidDelta),
+            "error should be InvalidDelta"
+        );
+    }
+
+    #[test]
+    fn apply_delta_truncated_data() {
+        // Delta that is truncated mid-copy-instruction
+        let base = b"Hello, World!";
+
+        let mut delta = Vec::new();
+        // Source size: 13
+        delta.push(13);
+        // Target size: 5
+        delta.push(5);
+
+        // Copy instruction: offset=0, size=5
+        //   cmd = 0x80 | 0x10 = 0x90 (needs 1 size byte)
+        delta.push(0x90);
+        // Truncated — missing the size byte
+
+        let result = apply_delta(base, &delta);
+        assert!(
+            result.is_err(),
+            "should fail on truncated delta data"
+        );
+    }
+
+    #[test]
+    fn apply_delta_cmd_zero_is_invalid() {
+        // cmd == 0 is not valid in the Git delta format
+        let base = b"Hello";
+        let mut delta = Vec::new();
+        delta.push(5); // source size
+        delta.push(5); // target size
+        delta.push(0x00); // invalid cmd = 0
+
+        let result = apply_delta(base, &delta);
+        assert!(result.is_err());
+    }
+
+    // --- parse_ofs_delta_offset tests ---
+
+    #[test]
+    fn parse_ofs_delta_offset_single_byte() {
+        // Single byte, MSB clear: offset = byte & 0x7f
+        let data = [0x05];
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        assert_eq!(offset, 5);
+        assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_single_byte_max() {
+        // Single byte with max 7-bit value (MSB clear = no continuation)
+        let data = [0x7f];
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        assert_eq!(offset, 127);
+        assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_single_byte_zero() {
+        let data = [0x00];
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        assert_eq!(offset, 0);
+        assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_two_bytes() {
+        // Two bytes: first has MSB set (continuation), second does not.
+        // Byte 0: 0x82 → low 7 bits = 2, continuation
+        // Byte 1: 0x00 → low 7 bits = 0, no continuation
+        // offset = ((2 + 1) << 7) | 0 = 384
+        let data = [0x82, 0x00];
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        assert_eq!(offset, 384);
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_two_bytes_small() {
+        // Two bytes encoding 128:
+        // Byte 0: 0x81 → low 7 bits = 1, continuation
+        // Byte 1: 0x00 → low 7 bits = 0, no continuation
+        // offset = ((1 + 1) << 7) | 0 = 256
+        let data = [0x81, 0x00];
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        assert_eq!(offset, 256);
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_two_bytes_with_payload() {
+        // Two bytes with payload in second byte:
+        // Byte 0: 0x81 → low 7 bits = 1, continuation
+        // Byte 1: 0x7f → low 7 bits = 127, no continuation
+        // offset = ((1 + 1) << 7) | 127 = 256 + 127 = 383
+        let data = [0x81, 0x7f];
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        assert_eq!(offset, 383);
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_three_bytes() {
+        // Three bytes:
+        // Byte 0: 0x81 → low 7 bits = 1, continuation
+        // Byte 1: 0x81 → low 7 bits = 1, continuation
+        // Byte 2: 0x01 → low 7 bits = 1, no continuation
+        // Step 1: offset = 1
+        // Step 2: offset = ((1+1) << 7) | 1 = 256 + 1 = 257
+        // Step 3: offset = ((257+1) << 7) | 1 = 258*128 + 1 = 33024 + 1 = 33025
+        let data = [0x81, 0x81, 0x01];
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        assert_eq!(offset, 33025);
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_trailing_continuation_is_error() {
+        // A byte with MSB set as the last byte means the parser expects
+        // another byte but there isn't one.
+        let data = [0x80];
+        let mut pos = 0;
+        let result = parse_ofs_delta_offset(&data, &mut pos);
+        assert!(result.is_err(), "trailing continuation byte should be an error");
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_empty_data() {
+        let data: [u8; 0] = [];
+        let mut pos = 0;
+        let result = parse_ofs_delta_offset(&data, &mut pos);
+        assert!(result.is_err(), "empty data should be an error");
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_pos_past_end() {
+        let data = [0x05];
+        let mut pos = 1; // already past end
+        let result = parse_ofs_delta_offset(&data, &mut pos);
+        assert!(result.is_err(), "pos past end should be an error");
     }
 }

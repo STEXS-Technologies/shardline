@@ -125,7 +125,7 @@ impl From<TokenCodecError> for AuthError {
             | TokenCodecError::InvalidHex(_)
             | TokenCodecError::Claims(_) => Self::InvalidToken,
             TokenCodecError::EmptySigningKey
-            | TokenCodecError::SigningKeyTooShort
+            | TokenCodecError::SigningKeyTooShort { .. }
             | TokenCodecError::Json(_) => Self::ProviderError(error.to_string()),
         }
     }
@@ -1119,10 +1119,65 @@ mod tests {
     }
 
     #[test]
-    fn chunk_object_key_invalid_hash() {
+    fn chunk_object_key_empty_hash() {
+        let err = chunk_object_key("").unwrap_err();
+        assert!(
+            matches!(err, ServerObjectStoreError::InvalidContentHash),
+            "empty hash should return InvalidContentHash, got: {err}"
+        );
+    }
+
+    #[test]
+    fn chunk_object_key_invalid_hex() {
+        // Non-hex characters (uppercase, 'g', symbols)
+        let invalid_hashes = [
+            "G".repeat(64),                     // uppercase
+            format!("{}g{}", "a".repeat(62), "g"), // 'g' is not hex
+            format!("{}!{}", "a".repeat(62), "!"), // symbol
+            format!("{}z{}", "a".repeat(62), "z"), // 'z' is not hex
+        ];
+        for hash in &invalid_hashes {
+            let err = chunk_object_key(hash).unwrap_err();
+            assert!(
+                matches!(err, ServerObjectStoreError::InvalidContentHash),
+                "non-hex hash {hash:?} should return InvalidContentHash, got: {err}"
+            );
+        }
+
+        // Too short
         let err = chunk_object_key("short").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.to_lowercase().contains("hash"), "wrong error variant: {msg}");
+        assert!(
+            matches!(err, ServerObjectStoreError::InvalidContentHash),
+            "short hash should return InvalidContentHash, got: {err}"
+        );
+
+        // Too long
+        let err = chunk_object_key(&"a".repeat(65)).unwrap_err();
+        assert!(
+            matches!(err, ServerObjectStoreError::InvalidContentHash),
+            "long hash should return InvalidContentHash, got: {err}"
+        );
+    }
+
+    #[test]
+    fn chunk_object_key_valid_inputs() {
+        // All lowercase hex, exactly 64 chars
+        let hash = "a".repeat(64);
+        let key = chunk_object_key(&hash).unwrap();
+        assert!(key.as_str().starts_with("aa/"));
+        assert!(key.as_str().ends_with(&hash));
+        assert_eq!(key.as_str(), format!("aa/{hash}"));
+
+        // Mixed hex digits
+        let hash = "0123456789abcdef".repeat(4);
+        let key = chunk_object_key(&hash).unwrap();
+        assert!(key.as_str().starts_with("01/"));
+        assert_eq!(key.as_str(), format!("01/{hash}"));
+
+        // All 'f' (max hex)
+        let hash = "f".repeat(64);
+        let key = chunk_object_key(&hash).unwrap();
+        assert!(key.as_str().starts_with("ff/"));
     }
 
     #[test]

@@ -2821,6 +2821,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shardline-hub-api",
  "shardline-index",
  "shardline-protocol",
  "shardline-server",
@@ -2878,6 +2879,7 @@ version = "1.0.0"
 dependencies = [
  "axum",
  "base64",
+ "blake3",
  "bytes",
  "chrono",
  "flate2",
@@ -2987,6 +2989,7 @@ dependencies = [
  "shardline-vcs",
  "shardline-xet-adapter",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

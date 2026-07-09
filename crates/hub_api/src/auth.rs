@@ -96,7 +96,7 @@ impl From<AuthError> for HubApiError {
             AuthError::InvalidToken => Self::InvalidToken,
             AuthError::ExpiredToken => Self::InvalidToken,
             AuthError::InsufficientScope => Self::Forbidden,
-            AuthError::ProviderError(_) => Self::Unauthorized,
+            AuthError::ProviderError(msg) => Self::SigningKeyError(msg),
         }
     }
 }

@@ -25,7 +25,7 @@ use common::{app, setup};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_lists_data_files() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     // Create a dataset repo
     store
@@ -84,7 +84,7 @@ async fn dataset_parquet_lists_data_files() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_jsonl_data() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/jsonl-dataset", false)
@@ -127,7 +127,7 @@ async fn dataset_first_rows_returns_jsonl_data() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/csv-dataset", false)
@@ -169,7 +169,7 @@ async fn dataset_first_rows_returns_csv_data() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_viewer_returns_paginated_rows() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/paginated", false)
@@ -213,7 +213,7 @@ async fn dataset_viewer_returns_paginated_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_rejects_non_dataset_repo() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Model, "team/model", false)
@@ -240,7 +240,7 @@ async fn dataset_parquet_rejects_non_dataset_repo() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_crud_lifecycle() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Model, "team/webhook-model", false)

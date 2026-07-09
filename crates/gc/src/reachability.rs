@@ -230,3 +230,135 @@ pub(super) fn managed_object_hash_or_object_key(
         Ok(None) | Err(_) => key.as_str().to_owned(),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use shardline_storage::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
+
+    /// A mock object store that returns metadata for a set of known keys.
+    struct MockObjectStore {
+        existing_keys: HashSet<String>,
+    }
+
+    impl MockObjectStore {
+        fn new(existing: &[&str]) -> Self {
+            Self {
+                existing_keys: existing.iter().map(|s| (*s).to_owned()).collect(),
+            }
+        }
+    }
+
+    impl ObjectStore for MockObjectStore {
+        type Error = std::io::Error;
+
+        fn put_if_absent(
+            &self,
+            _key: &ObjectKey,
+            _body: ObjectBody<'_>,
+            _integrity: &ObjectIntegrity,
+        ) -> Result<PutOutcome, Self::Error> {
+            unreachable!("not used in tests")
+        }
+
+        fn read_range(
+            &self,
+            _key: &ObjectKey,
+            _range: shardline_protocol::ByteRange,
+        ) -> Result<Vec<u8>, Self::Error> {
+            unreachable!("not used in tests")
+        }
+
+        fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
+            Ok(self.existing_keys.contains(key.as_str()))
+        }
+
+        fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
+            if self.existing_keys.contains(key.as_str()) {
+                Ok(Some(ObjectMetadata::new(key.clone(), 1024, None)))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn list_prefix(
+            &self,
+            _prefix: &ObjectPrefix,
+        ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+            unreachable!("not used in tests")
+        }
+
+        fn delete_if_present(&self, _key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
+            unreachable!("not used in tests")
+        }
+    }
+
+    #[test]
+    fn mark_optional_existing_object_is_referenced() {
+        let store = MockObjectStore::new(&["chunks/abc123"]);
+        let key = ObjectKey::parse("chunks/abc123").unwrap();
+        let mut referenced = HashSet::new();
+        let mut missing = HashSet::new();
+
+        mark_optional_object_reference(&store, &key, &mut referenced, &mut missing).unwrap();
+
+        assert!(
+            referenced.contains("chunks/abc123"),
+            "existing object should be in referenced set"
+        );
+        assert!(
+            missing.is_empty(),
+            "existing object should not be in missing set"
+        );
+    }
+
+    #[test]
+    fn mark_optional_missing_object_is_marked_missing() {
+        let store = MockObjectStore::new(&[]);
+        let key = ObjectKey::parse("chunks/xyz789").unwrap();
+        let mut referenced = HashSet::new();
+        let mut missing = HashSet::new();
+
+        mark_optional_object_reference(&store, &key, &mut referenced, &mut missing).unwrap();
+
+        assert!(
+            referenced.is_empty(),
+            "missing object should not be in referenced set"
+        );
+        assert!(
+            missing.contains("chunks/xyz789"),
+            "missing object should be in missing set"
+        );
+    }
+
+    #[test]
+    fn mark_optional_already_referenced_is_noop() {
+        let store = MockObjectStore::new(&["chunks/abc"]);
+        let key = ObjectKey::parse("chunks/abc").unwrap();
+        let mut referenced = HashSet::new();
+        referenced.insert("chunks/abc".to_owned());
+        let mut missing = HashSet::new();
+
+        mark_optional_object_reference(&store, &key, &mut referenced, &mut missing).unwrap();
+
+        // Should not error, and the sets should remain unchanged.
+        assert_eq!(referenced.len(), 1);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn mark_optional_already_missing_is_noop() {
+        let store = MockObjectStore::new(&[]);
+        let key = ObjectKey::parse("chunks/def").unwrap();
+        let mut referenced = HashSet::new();
+        let mut missing = HashSet::new();
+        missing.insert("chunks/def".to_owned());
+
+        mark_optional_object_reference(&store, &key, &mut referenced, &mut missing).unwrap();
+
+        // Should not error, and the sets should remain unchanged.
+        assert!(referenced.is_empty());
+        assert_eq!(missing.len(), 1);
+    }
+}

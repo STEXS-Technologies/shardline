@@ -184,13 +184,6 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn dedupe_shard_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
-        match self {
-            Self::Local(backend) => backend.dedupe_shard_length(hash_hex).await,
-            Self::Postgres(backend) => backend.dedupe_shard_length(hash_hex).await,
-        }
-    }
-
     pub(crate) async fn xorb_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
         match self {
             Self::Local(backend) => backend.xorb_length(hash_hex).await,
@@ -645,7 +638,8 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::UnauthorizedChallenge(_)
         | ServerError::TooManyRegistryTokenRequests
         | ServerError::MissingReconstructionCacheRedisUrl
-        | ServerError::TransferLimiterClosed) => {
+        | ServerError::TransferLimiterClosed
+        | ServerError::SigningKeyError(_)) => {
             OciAdapterError::Io(std::io::Error::other(other.to_string()))
         }
     }

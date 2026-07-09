@@ -185,5 +185,29 @@ path = "fuzz_targets/shardline/rebuild_candidates.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_git_pack"
+path = "fuzz_targets/shardline/git_pack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_git_delta"
+path = "fuzz_targets/shardline/git_delta.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_git_commit_parser"
+path = "fuzz_targets/shardline/git_commit_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_git_tree_walker"
+path = "fuzz_targets/shardline/git_tree_walker.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true

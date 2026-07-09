@@ -50,8 +50,13 @@ path = "k8s_cluster_protocol_e2e.rs"
 name = "data_integrity"
 path = "data_integrity.rs"
 
+[[test]]
+name = "hub_api_e2e"
+path = "hub_api_e2e.rs"
+
 [dependencies]
 shardline-server = { path = "../crates/server" }
+shardline-hub-api = { path = "../crates/hub_api" }
 shardline-server-core = { path = "../crates/server_core" }
 shardline-protocol = { path = "../crates/protocol" }
 shardline-index = { path = "../crates/index" }

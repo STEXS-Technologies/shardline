@@ -4,9 +4,8 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind},
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(not(unix))]

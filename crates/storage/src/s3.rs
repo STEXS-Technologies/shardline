@@ -25,15 +25,6 @@ use object_store::{
 use shardline_protocol::{ByteRange, SecretString, ShardlineHash};
 use thiserror::Error;
 
-/// Returns `true` when the error is an S3 `AlreadyExists` or `Precondition` condition.
-fn is_already_exists(error: &object_store::Error) -> bool {
-    matches!(
-        error,
-        object_store::Error::AlreadyExists { .. }
-            | object_store::Error::Precondition { .. }
-    )
-}
-
 /// Generates a unique temp key derived from a canonical key using a monotonic
 /// counter and nanosecond timestamp.
 fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreError> {
@@ -46,6 +37,13 @@ fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreError> {
     let suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
     ObjectKey::parse(&format!("{}.{suffix}", key.as_str()))
         .map_err(|_| S3ObjectStoreError::InvalidListedKey)
+}
+
+/// Returns `true` if `key` looks like a temp upload artifact produced by
+/// [`temp_key_for`], i.e. contains `.tmp.` followed by at least one digit.
+fn is_temp_upload_key(key: &str) -> bool {
+    key.find(".tmp.")
+        .map_or(false, |pos| key.as_bytes().get(pos + 5).map_or(false, |b| b.is_ascii_digit()))
 }
 
 use tokio::{
@@ -430,7 +428,7 @@ impl S3ObjectStore {
                     continue;
                 }
                 // Skip temp upload artifacts (e.g., "key.xorb.tmp.0.12345").
-                if remainder.contains(".tmp.") {
+                if is_temp_upload_key(remainder) {
                     continue;
                 }
                 metadata.push(item);
@@ -1200,7 +1198,7 @@ impl ObjectStore for S3ObjectStore {
             {
                 let metadata = self.metadata_from_external(&entry).map_err(Into::into)?;
                 // Skip temp upload artifacts.
-                if metadata.key().as_str().contains(".tmp.") {
+                if is_temp_upload_key(metadata.key().as_str()) {
                     continue;
                 }
                 visitor(metadata)?;

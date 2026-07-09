@@ -161,7 +161,7 @@ impl From<AuthError> for ServerError {
             AuthError::InvalidToken => Self::InvalidToken(TokenCodecError::InvalidFormat),
             AuthError::ExpiredToken => Self::InvalidToken(TokenCodecError::Expired),
             AuthError::InsufficientScope => Self::InsufficientScope,
-            AuthError::ProviderError(_msg) => Self::InvalidToken(TokenCodecError::InvalidFormat),
+            AuthError::ProviderError(msg) => Self::SigningKeyError(msg),
         }
     }
 }

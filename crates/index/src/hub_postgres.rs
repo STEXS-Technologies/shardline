@@ -14,6 +14,11 @@ fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError
     HubRepoType::parse_str(s).ok_or(PostgresMetadataStoreError::InvalidRepoType(s.to_owned()))
 }
 
+/// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
+fn escape_like(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+}
+
 /// Runs an async future to completion on the current tokio runtime.
 ///
 /// Uses `block_in_place` to safely transition off the tokio worker thread,
@@ -41,6 +46,8 @@ impl HubStore for PostgresIndexStore {
         let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned();
 
         block_on_async(async {
+            let mut tx = pool.begin().await?;
+
             sqlx::query(
                 "INSERT INTO shardline_hub_repos (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds)
                  VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM now())::bigint, EXTRACT(EPOCH FROM now())::bigint)
@@ -50,7 +57,7 @@ impl HubStore for PostgresIndexStore {
             .bind(repo_type_str)
             .bind(private)
             .bind(&initial_sha)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await?;
 
             sqlx::query(
@@ -60,16 +67,18 @@ impl HubStore for PostgresIndexStore {
             )
             .bind(&name)
             .bind(&initial_sha)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await?;
 
             let row = sqlx::query(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos WHERE repo_id = $1",
             )
             .bind(&name)
-            .fetch_one(&pool)
+            .fetch_one(&mut *tx)
             .await?;
+
+            tx.commit().await?;
 
             Ok(HubRepo {
                 repo_id: row.try_get("repo_id")?,
@@ -78,6 +87,9 @@ impl HubStore for PostgresIndexStore {
                 default_branch: row.try_get("default_branch")?,
                 created_at_unix_seconds: i64_to_u64(
                     row.try_get::<i64, _>("created_at_unix_seconds")?,
+                )?,
+                updated_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("updated_at_unix_seconds")?,
                 )?,
             })
         })
@@ -89,7 +101,7 @@ impl HubStore for PostgresIndexStore {
 
         block_on_async(async {
             let row = sqlx::query(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos WHERE repo_id = $1",
             )
             .bind(&repo_id)
@@ -108,6 +120,9 @@ impl HubStore for PostgresIndexStore {
                 created_at_unix_seconds: i64_to_u64(
                     row.try_get::<i64, _>("created_at_unix_seconds")?,
                 )?,
+                updated_at_unix_seconds: i64_to_u64(
+                    row.try_get::<i64, _>("updated_at_unix_seconds")?,
+                )?,
             }))
         })
     }
@@ -117,7 +132,7 @@ impl HubStore for PostgresIndexStore {
 
         block_on_async(async {
             let mut rows = sqlx::query(
-                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                  FROM shardline_hub_repos ORDER BY repo_id",
             )
             .fetch(&pool);
@@ -132,6 +147,9 @@ impl HubStore for PostgresIndexStore {
                     created_at_unix_seconds: i64_to_u64(
                         row.try_get::<i64, _>("created_at_unix_seconds")?,
                     )?,
+                    updated_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("updated_at_unix_seconds")?,
+                    )?,
                 });
             }
             Ok(repos)
@@ -145,14 +163,14 @@ impl HubStore for PostgresIndexStore {
         limit: usize,
     ) -> Result<Vec<HubRepo>, Self::Error> {
         let pool = self.pool().clone();
-        let pattern = format!("{name_prefix}%");
+        let pattern = format!("{}%", escape_like(name_prefix));
         let limit = limit as i64;
 
         block_on_async(async {
             let mut rows = repo_type.map_or_else(
                 || {
                     sqlx::query(
-                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                          FROM shardline_hub_repos
                          WHERE repo_id LIKE $1
                          ORDER BY repo_id LIMIT $2",
@@ -164,7 +182,7 @@ impl HubStore for PostgresIndexStore {
                 |rt| {
                     let rt_str = rt.as_str();
                     sqlx::query(
-                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds
+                        "SELECT repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds
                          FROM shardline_hub_repos
                          WHERE repo_id LIKE $1 AND repo_type = $2
                          ORDER BY repo_id LIMIT $3",
@@ -185,6 +203,9 @@ impl HubStore for PostgresIndexStore {
                     default_branch: row.try_get("default_branch")?,
                     created_at_unix_seconds: i64_to_u64(
                         row.try_get::<i64, _>("created_at_unix_seconds")?,
+                    )?,
+                    updated_at_unix_seconds: i64_to_u64(
+                        row.try_get::<i64, _>("updated_at_unix_seconds")?,
                     )?,
                 });
             }
@@ -208,13 +229,15 @@ impl HubStore for PostgresIndexStore {
         let parent_sha = parent_sha.map(ToOwned::to_owned);
 
         block_on_async(async {
+            let mut tx = pool.begin().await?;
+
             // Optimistic concurrency check
             if let Some(ref parent) = parent_sha {
                 let current_head: Option<String> = sqlx::query_scalar::<_, String>(
                     "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = $1",
                 )
                 .bind(&repo_id)
-                .fetch_optional(&pool)
+                .fetch_optional(&mut *tx)
                 .await?;
 
                 match current_head {
@@ -235,7 +258,7 @@ impl HubStore for PostgresIndexStore {
             )
             .bind(&new_sha)
             .bind(&repo_id)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await?;
 
             sqlx::query(
@@ -247,7 +270,7 @@ impl HubStore for PostgresIndexStore {
             .bind(&new_sha)
             .bind(parent_sha.as_deref())
             .bind(&message)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await?;
 
             let row = sqlx::query(
@@ -256,8 +279,10 @@ impl HubStore for PostgresIndexStore {
             )
             .bind(&repo_id)
             .bind(&new_sha)
-            .fetch_one(&pool)
+            .fetch_one(&mut *tx)
             .await?;
+
+            tx.commit().await?;
 
             Ok(HubRevision {
                 repo_id: row.try_get("repo_id")?,
@@ -353,6 +378,7 @@ impl HubStore for PostgresIndexStore {
         let files = files.to_vec();
 
         block_on_async(async {
+            let mut tx = pool.begin().await?;
             for file in &files {
                 sqlx::query(
                     "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
@@ -366,9 +392,10 @@ impl HubStore for PostgresIndexStore {
                 .bind(&file.sha)
                 .bind(file.is_lfs)
                 .bind(&file.inline_content)
-                .execute(&pool)
+                .execute(&mut *tx)
                 .await?;
             }
+            tx.commit().await?;
             Ok(())
         })
     }
@@ -455,6 +482,45 @@ impl HubStore for PostgresIndexStore {
         })
     }
 
+    fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {
+        let pool = self.pool().clone();
+        let repo_id = repo_id.to_owned();
+
+        block_on_async(async {
+            let mut tx = pool.begin().await?;
+
+            // Delete file entries for all revisions in this repo
+            sqlx::query(
+                "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = $1)",
+            )
+            .bind(&repo_id)
+            .execute(&mut *tx)
+            .await?;
+
+            // Delete revisions
+            sqlx::query("DELETE FROM shardline_hub_revisions WHERE repo_id = $1")
+                .bind(&repo_id)
+                .execute(&mut *tx)
+                .await?;
+
+            // Delete webhooks (explicit, beyond ON DELETE CASCADE)
+            sqlx::query("DELETE FROM shardline_hub_webhooks WHERE repo_id = $1")
+                .bind(&repo_id)
+                .execute(&mut *tx)
+                .await?;
+
+            // Delete the repo itself
+            sqlx::query("DELETE FROM shardline_hub_repos WHERE repo_id = $1")
+                .bind(&repo_id)
+                .execute(&mut *tx)
+                .await?;
+
+            tx.commit().await?;
+
+            Ok(())
+        })
+    }
+
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -472,7 +538,7 @@ impl HubStore for PostgresIndexStore {
         block_on_async(async {
             let row = sqlx::query(
                 "INSERT INTO shardline_hub_webhooks (id, repo_id, url, events, secret, active, created_at_unix_seconds)
-                 VALUES (CONCAT('wh-', EXTRACT(EPOCH FROM now())::text, '-', ((SELECT COUNT(*) FROM shardline_hub_webhooks WHERE repo_id = $1))::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
+                 VALUES (CONCAT('wh-', gen_random_uuid()::text), $1, $2, $3, $4, TRUE, EXTRACT(EPOCH FROM now())::bigint)
                  RETURNING id, repo_id, url, events, secret, active, created_at_unix_seconds",
             )
             .bind(&repo_id)
@@ -555,7 +621,7 @@ impl HubStore for PostgresIndexStore {
             let mut rows = sqlx::query(
                 "SELECT id, repo_id, url, events, secret, active, created_at_unix_seconds
                  FROM shardline_hub_webhooks
-                 WHERE repo_id = $1 AND active = true AND (',' || events || ',') LIKE ('%' || $2 || '%')",
+                 WHERE repo_id = $1 AND active = true AND (',' || events || ',') LIKE ('%,' || $2 || ',%')",
             )
             .bind(&repo_id)
             .bind(&event)

@@ -29,9 +29,17 @@ pub enum HubApiError {
     #[error("forbidden")]
     Forbidden,
 
+    /// Conflict (e.g. parent commit mismatch).
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// Invalid authentication token.
     #[error("invalid token")]
     InvalidToken,
+
+    /// The token signing key is misconfigured.
+    #[error("token signing key is misconfigured: {0}")]
+    SigningKeyError(String),
 
     /// Repository not found.
     #[error("repository not found")]
@@ -61,7 +69,7 @@ pub enum HubApiError {
 impl IntoResponse for HubApiError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            Self::Io(_) | Self::Json(_) | Self::CasError(_) | Self::PktLine(_) | Self::Pack(_) => (
+            Self::Io(_) | Self::Json(_) | Self::CasError(_) | Self::PktLine(_) | Self::Pack(_) | Self::SigningKeyError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_owned(),
             ),
@@ -70,6 +78,7 @@ impl IntoResponse for HubApiError {
             }
             Self::Unauthorized | Self::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             Self::PathValidation(_) => (StatusCode::BAD_REQUEST, self.to_string()),
         };
         let body = ErrorBody { error: message };

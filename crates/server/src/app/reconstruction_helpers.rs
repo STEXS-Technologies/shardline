@@ -260,3 +260,111 @@ pub fn parse_batch_reconstruction_query(query: &str) -> Result<Vec<String>, Serv
 
     Ok(file_ids)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, Uri, header::RANGE};
+    use shardline_protocol::ByteRange;
+
+    // --- parse_batch_reconstruction_query tests ---
+
+    #[test]
+    fn reconstruct_single_chunk_file() {
+        // Single valid file ID in the query string
+        let hash = "a".repeat(64);
+        let query = format!("file_id={hash}");
+        let result = parse_batch_reconstruction_query(&query).unwrap();
+        assert_eq!(result, vec![hash]);
+    }
+
+    #[test]
+    fn reconstruct_multi_chunk_file() {
+        // Multiple valid file IDs
+        let h1 = "a".repeat(64);
+        let h2 = "b".repeat(64);
+        let h3 = "c".repeat(64);
+        let query = format!("file_id={h1}&file_id={h2}&file_id={h3}");
+        let result = parse_batch_reconstruction_query(&query).unwrap();
+        assert_eq!(result, vec![h1, h2, h3]);
+    }
+
+    #[test]
+    fn reconstruct_empty_file() {
+        // Empty query returns empty list
+        let result = parse_batch_reconstruction_query("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn reconstruct_with_compression() {
+        // Non-file_id parameters are ignored
+        let hash = "a".repeat(64);
+        let query = format!("file_id={hash}&other_param=ignored&another=value");
+        let result = parse_batch_reconstruction_query(&query).unwrap();
+        assert_eq!(result, vec![hash]);
+    }
+
+    #[test]
+    fn reconstruct_deduplicates_file_ids() {
+        let hash = "a".repeat(64);
+        let query = format!("file_id={hash}&file_id={hash}");
+        let result = parse_batch_reconstruction_query(&query).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    // --- parse_batch_reconstruction_file_ids tests ---
+
+    #[test]
+    fn file_ids_from_empty_uri() {
+        let uri: Uri = "https://example.com/batch".parse().unwrap();
+        let result = parse_batch_reconstruction_file_ids(&uri).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn file_ids_from_valid_uri() {
+        let hash = "a".repeat(64);
+        let uri: Uri = format!("https://example.com/batch?file_id={hash}")
+            .parse()
+            .unwrap();
+        let result = parse_batch_reconstruction_file_ids(&uri).unwrap();
+        assert_eq!(result, vec![hash]);
+    }
+
+    #[test]
+    fn file_ids_from_uri_with_invalid_hash() {
+        let uri: Uri = "https://example.com/batch?file_id=not-a-hash"
+            .parse()
+            .unwrap();
+        let result = parse_batch_reconstruction_file_ids(&uri);
+        assert!(result.is_err());
+    }
+
+    // --- parse_required_xorb_transfer_range tests ---
+
+    #[test]
+    fn xorb_range_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RANGE, "bytes=0-1023".parse().unwrap());
+        let range = parse_required_xorb_transfer_range(&headers, 4096).unwrap();
+        assert_eq!(range.start(), 0);
+        assert_eq!(range.end_inclusive(), 1023);
+    }
+
+    #[test]
+    fn xorb_range_missing_header() {
+        let headers = HeaderMap::new();
+        let result = parse_required_xorb_transfer_range(&headers, 4096);
+        assert!(matches!(result, Err(ServerError::InvalidRangeHeader)));
+    }
+
+    #[test]
+    fn xorb_range_invalid_syntax() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RANGE, "not-a-range".parse().unwrap());
+        let result = parse_required_xorb_transfer_range(&headers, 4096);
+        assert!(matches!(result, Err(ServerError::InvalidRangeHeader)));
+    }
+}
