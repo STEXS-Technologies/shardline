@@ -19,6 +19,7 @@ const MAX_OCI_TOKEN_QUERY_SERVICE_BYTES: usize = 128;
 const MAX_OCI_TOKEN_QUERY_SCOPE_BYTES: usize = 1024;
 const MAX_OCI_TOKEN_QUERY_ACCOUNT_BYTES: usize = 512;
 const MAX_OCI_TOKEN_QUERY_SCOPES: usize = 16;
+const MIN_OCI_TOKEN_EXPIRES_IN_SECONDS: u64 = 60;
 
 pub(crate) async fn oci_registry_token(
     State(state): State<Arc<AppState>>,
@@ -109,6 +110,7 @@ pub(crate) async fn oci_registry_token(
         expires_in: issued_claims
             .expires_at_unix_seconds()
             .saturating_sub(now)
+            .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
             .min(i32::MAX as u64),
     }))
 }
@@ -347,7 +349,7 @@ mod tests {
     use shardline_protocol::TokenScope;
 
     use super::{
-        OCI_REGISTRY_SERVICE, oci_bearer_challenge,
+        OCI_REGISTRY_SERVICE, MIN_OCI_TOKEN_EXPIRES_IN_SECONDS, oci_bearer_challenge,
         parse_oci_registry_actions, parse_oci_registry_token_query,
         parse_oci_registry_token_scope, parse_oci_registry_token_scopes,
         scope_allows_oci_exchange,
@@ -613,5 +615,40 @@ mod tests {
         let challenge =
             oci_bearer_challenge("https://example.com/", Some("repo"), TokenScope::Read);
         assert!(challenge.contains("realm=\"https://example.com/v2/token\""));
+    }
+
+    // ── expires_in clamping ─────────────────────────────────────────────────
+
+    #[test]
+    fn expires_in_clamps_to_minimum() {
+        let now = 1000_u64;
+        // Bootstrap token is near-expiry (only 5 seconds remain). The clamp
+        // must raise this to at least MIN_OCI_TOKEN_EXPIRES_IN_SECONDS so the
+        // client has time to use the issued token.
+        assert_eq!(
+            (now + 5)
+                .saturating_sub(now)
+                .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
+                .min(i32::MAX as u64),
+            MIN_OCI_TOKEN_EXPIRES_IN_SECONDS,
+        );
+
+        // Bootstrap token is already expired (sub gives 0, max raises to 60).
+        assert_eq!(
+            now.saturating_sub(10)
+                .saturating_sub(now)
+                .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
+                .min(i32::MAX as u64),
+            MIN_OCI_TOKEN_EXPIRES_IN_SECONDS,
+        );
+
+        // Ample remaining lifetime is unclamped.
+        assert_eq!(
+            (now + 3600)
+                .saturating_sub(now)
+                .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
+                .min(i32::MAX as u64),
+            3600,
+        );
     }
 }

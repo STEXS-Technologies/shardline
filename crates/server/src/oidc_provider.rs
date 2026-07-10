@@ -1,6 +1,9 @@
 use std::{
     str::FromStr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -24,7 +27,8 @@ pub struct OidcProvider {
     audience: Option<String>,
     cached_keys: Arc<Mutex<Option<CachedJwks>>>,
     jwks_url: String,
-    _background_handle: OnceLock<tokio::task::JoinHandle<()>>,
+    _background_handle: Arc<std::sync::OnceLock<tokio::task::JoinHandle<()>>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Clone for OidcProvider {
@@ -35,7 +39,8 @@ impl Clone for OidcProvider {
             audience: self.audience.clone(),
             cached_keys: Arc::clone(&self.cached_keys),
             jwks_url: self.jwks_url.clone(),
-            _background_handle: OnceLock::new(),
+            _background_handle: Arc::clone(&self._background_handle),
+            shutdown: Arc::clone(&self.shutdown),
         }
     }
 }
@@ -136,7 +141,8 @@ impl OidcProvider {
             audience,
             cached_keys,
             jwks_url,
-            _background_handle: OnceLock::new(),
+            _background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
 
         // Start background refresh to prevent the cache from expiring.
@@ -147,9 +153,13 @@ impl OidcProvider {
 
     fn start_background_refresh(&self) {
         let provider = self.clone();
+        let shutdown = Arc::clone(&self.shutdown);
         let handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(JWKS_REFRESH_INTERVAL).await;
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
                 match provider.client.get(&provider.jwks_url).send().await {
                     Ok(response) => match response.json::<JwksResponse>().await {
                         Ok(jwks) => {
@@ -166,7 +176,7 @@ impl OidcProvider {
                 }
             }
         });
-        let _ = provider._background_handle.set(handle);
+        let _ = self._background_handle.set(handle);
     }
 
     fn get_cached_keys(&self) -> Option<Arc<Vec<Jwk>>> {
@@ -281,6 +291,15 @@ impl OidcProvider {
 
         TokenClaims::new(&self.issuer, &sub, scope, repository, exp)
             .map_err(|e| AuthError::ProviderError(e.to_string()))
+    }
+}
+
+impl Drop for OidcProvider {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self._background_handle.get() {
+            handle.abort();
+        }
     }
 }
 

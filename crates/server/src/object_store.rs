@@ -68,6 +68,11 @@ pub(crate) fn read_full_object(
     object_key: &ObjectKey,
     length: u64,
 ) -> Result<Vec<u8>, ServerError> {
+    const MAX_FULL_OBJECT_READ_BYTES: u64 = 1_073_741_824;
+
+    if length > MAX_FULL_OBJECT_READ_BYTES {
+        return Err(ServerError::RequestBodyTooLarge);
+    }
     if length == 0 {
         return Ok(Vec::new());
     }

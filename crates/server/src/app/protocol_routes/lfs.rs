@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::io::{Seek, SeekFrom, Write};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::{
     Json,
@@ -12,8 +13,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use shardline_protocol::TokenScope;
+
+use futures_util::StreamExt;
 use shardline_storage::DeleteOutcome;
 
 use crate::{
@@ -24,6 +27,10 @@ use crate::upload_ingest::read_body_to_bytes;
 
 use super::{AppState, MAX_LFS_BATCH_OBJECTS, authorize, direct_object_response, scope_from_auth};
 
+/// Maximum LFS object size allowed for server-side verification (1 GiB).
+/// Objects above this threshold are rejected with a 413 to prevent OOM.
+const MAX_LFS_VERIFY_BYTES: u64 = 1_073_741_824; // 1 GiB
+
 /// Returns a 422 UNPROCESSABLE_ENTITY response for LFS validation errors.
 fn lfs_validation_response(message: &str) -> Response {
     (
@@ -32,6 +39,17 @@ fn lfs_validation_response(message: &str) -> Response {
         Json(json!({ "message": message })),
     )
         .into_response()
+}
+
+/// Per-OID mutex map to serialize PATCH operations targeting the same temp file.
+static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
+    let mut map = LFS_PATCH_LOCKS.lock().unwrap();
+    map.entry(oid.to_owned())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 #[tracing::instrument(skip(state, headers, request))]
@@ -339,30 +357,52 @@ pub(crate) async fn lfs_patch_object(
     // Write the chunk to a temp file at the correct offset.
     // Use a deterministic path based on OID so multiple chunks accumulate in the same file.
     // The temp directory is per-server-instance, avoiding cross-session conflicts.
-    let tmp_dir = state.config.root_dir().join("tmp").join("lfs-patch");
-    std::fs::create_dir_all(&tmp_dir).ok();
-    let tmp_path = tmp_dir.join(&oid);
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&tmp_path)?;
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&chunk_bytes)?;
-    }
+    //
+    // All blocking I/O is offloaded to the tokio blocking thread-pool to avoid
+    // starving the async runtime.  A per-OID Mutex serializes concurrent PATCH
+    // requests for the same object, preventing data corruption in the shared
+    // temp file.
+    let is_final = offset + chunk_size == total;
+    let root_dir = state.config.root_dir().to_path_buf();
+    let backend = state.backend.clone();
+    let oid_for_closure = oid.clone();
+    let object_key_for_closure = object_key.clone();
 
     let elapsed = start.elapsed().as_secs_f64();
     crate::metrics::record_upload("lfs", content_length, elapsed, true);
 
-    // If this is the final chunk, promote the temp file to the permanent store.
-    if offset + chunk_size == total {
-        let assembled: Vec<u8> = std::fs::read(&tmp_path)?;
-        let _ = std::fs::remove_file(&tmp_path);
-        let _stored = state
-            .backend
-            .put_sha256_addressed_object_bytes_if_absent(&object_key, &oid, assembled)?;
-    }
+    tokio::task::spawn_blocking(move || {
+        let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);
+        let _lock = lock_arc.lock().unwrap();
+
+        let tmp_dir = root_dir.join("tmp").join("lfs-patch");
+        std::fs::create_dir_all(&tmp_dir).ok();
+        let tmp_path = tmp_dir.join(&oid_for_closure);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&tmp_path)?;
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(&chunk_bytes)?;
+        }
+
+        if is_final {
+            let assembled: Vec<u8> = std::fs::read(&tmp_path)?;
+            let _ = std::fs::remove_file(&tmp_path);
+            let _stored = backend.put_sha256_addressed_object_bytes_if_absent(
+                &object_key_for_closure,
+                &oid_for_closure,
+                assembled,
+            )?;
+        }
+
+        Ok::<_, ServerError>(())
+    })
+    .await
+    .map_err(ServerError::BlockingTask)?
+    ?;
 
     Ok(StatusCode::OK.into_response())
 }
@@ -384,16 +424,37 @@ pub(crate) async fn lfs_verify_object(
         Err(_) => return Ok(lfs_validation_response("invalid oid")),
     };
 
-    // Read the stored content and verify SHA-256.
-    let content = match state.backend.read_object(&object_key).await {
-        Ok(c) => c,
+    // Check object existence and size before reading.
+    let total_length = match state.backend.object_length(&object_key).await {
+        Ok(len) => len,
         Err(ServerError::NotFound) => {
             return Ok(StatusCode::NOT_FOUND.into_response());
         }
         Err(e) => return Err(e),
     };
 
-    let computed_hash = hex::encode(sha2::Sha256::digest(&content));
+    if total_length > MAX_LFS_VERIFY_BYTES {
+        return Ok((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
+            Json(json!({ "message": "object too large for server-side verification" })),
+        )
+            .into_response());
+    }
+
+    // Stream the object through a SHA-256 hasher in fixed-size chunks
+    // to avoid loading the entire object into memory (OOM prevention).
+    let mut hasher = Sha256::new();
+    let mut byte_stream = state
+        .backend
+        .read_object_stream(&object_key, total_length, None)
+        .await?;
+    while let Some(chunk_result) = byte_stream.next().await {
+        let chunk = chunk_result?;
+        hasher.update(&chunk);
+    }
+    let computed_hash = hex::encode(hasher.finalize());
+
     if computed_hash != oid {
         return Ok((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -418,6 +479,9 @@ fn parse_content_range(value: &str) -> Result<(u64, u64, u64), ()> {
     let mut parts = range_part.split('-');
     let start: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_| ())?;
     let end: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_| ())?;
+    if end < start {
+        return Err(());
+    }
     Ok((start, end, total))
 }
 
@@ -446,7 +510,7 @@ mod tests {
     };
 
     use super::{
-        parse_content_range,
+        parse_content_range, acquire_lfs_patch_lock,
         lfs_batch, lfs_get_object, lfs_head_object, lfs_put_object,
         lfs_delete_object, lfs_patch_object, lfs_verify_object,
     };
@@ -583,6 +647,17 @@ mod tests {
     #[test]
     fn parse_content_range_rejects_negative_numbers() {
         assert_eq!(parse_content_range("bytes -1-99/200"), Err(()));
+    }
+
+    #[test]
+    fn parse_content_range_rejects_end_before_start() {
+        assert_eq!(parse_content_range("bytes 100-50/200"), Err(()));
+    }
+
+    #[test]
+    fn parse_content_range_accepts_end_equals_start() {
+        // Single-byte chunk at offset 5.
+        assert_eq!(parse_content_range("bytes 5-5/200"), Ok((5, 5, 200)));
     }
 
     // =========================================================================
@@ -1376,6 +1451,109 @@ mod tests {
     }
 
     // =========================================================================
+    // lfs_patch_object concurrency / lock tests
+    // =========================================================================
+
+    #[test]
+    fn acquire_lfs_patch_lock_returns_same_lock_for_same_oid() {
+        let lock1 = acquire_lfs_patch_lock("abc123");
+        let lock2 = acquire_lfs_patch_lock("abc123");
+        assert!(Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    #[test]
+    fn acquire_lfs_patch_lock_returns_different_lock_for_different_oid() {
+        let lock1 = acquire_lfs_patch_lock("abc123");
+        let lock2 = acquire_lfs_patch_lock("def456");
+        assert!(!Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_object_concurrent_chunks_assembles_correctly() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state.clone());
+
+        let chunk1 = b"hello-world-part-AAAA"; // 20 bytes
+        let chunk2 = b"BBBB-part-two-last!!";   // 20 bytes
+        let full_content = [chunk1.as_slice(), chunk2.as_slice()].concat();
+        let oid = test_oid(&full_content);
+        let total = full_content.len() as u64;
+
+        let app1 = app.clone();
+        let oid1 = oid.clone();
+        let h1 = tokio::spawn(async move {
+            app1
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/v1/lfs/objects/{oid1}"))
+                        .header(
+                            "content-range",
+                            format!("bytes 0-{}/{}", chunk1.len() as u64 - 1, total),
+                        )
+                        .header("content-length", chunk1.len())
+                        .body(Body::from(chunk1.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        let app2 = app.clone();
+        let oid2 = oid.clone();
+        let h2 = tokio::spawn(async move {
+            app2
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/v1/lfs/objects/{oid2}"))
+                        .header(
+                            "content-range",
+                            format!(
+                                "bytes {}-{}/{}",
+                                chunk1.len(),
+                                total - 1,
+                                total
+                            ),
+                        )
+                        .header("content-length", chunk2.len())
+                        .body(Body::from(chunk2.to_vec()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        let (r1, r2) = tokio::join!(h1, h2);
+        let r1 = r1.unwrap();
+        let r2 = r2.unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        assert_eq!(r2.status(), StatusCode::OK);
+
+        // Verify the assembled object is correct.
+        let head = app
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        let content_length = head
+            .headers()
+            .get("content-length")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(content_length, total);
+    }
+
+    // =========================================================================
     // lfs_verify_object tests
     // =========================================================================
 
@@ -1504,5 +1682,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_object_too_large_returns_413() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state.clone());
+        let content = b"small-object-for-size-inflation";
+        let oid = test_oid(content);
+
+        // Store a small object under the correct OID key.
+        let object_key = lfs_object_key(&oid, None).expect("object key");
+        state
+            .backend
+            .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .expect("insert object");
+
+        // Inflate the file size on disk beyond MAX_LFS_VERIFY_BYTES.
+        // The local backend stores objects at root_dir()/chunks/<key>.
+        let object_path = state
+            .config
+            .root_dir()
+            .join("chunks")
+            .join(object_key.as_str());
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&object_path)
+            .expect("open object file for size inflation");
+        file.set_len(super::MAX_LFS_VERIFY_BYTES + 1)
+            .expect("inflate file size");
+        drop(file);
+
+        // Verify should be rejected with 413 Payload Too Large.
+        let verify = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/lfs/objects/{oid}/verify"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verify.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(verify.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            parsed["message"],
+            "object too large for server-side verification"
+        );
     }
 }

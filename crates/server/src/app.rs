@@ -270,7 +270,13 @@ pub async fn serve_with_listener(
 ) -> Result<(), ServerError> {
     let app = router(config).await?;
     tracing::info!("router initialized, starting HTTP serve");
-    serve_http(listener, app).await?;
+    let shutdown_signal = async {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("shutdown signal received, draining connections");
+    };
+    serve_http(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
     Ok(())
 }
 
