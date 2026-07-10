@@ -1,6 +1,5 @@
 #![deny(unsafe_code)]
 #![allow(
-    clippy::indexing_slicing,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::let_underscore_must_use
@@ -8,6 +7,7 @@
 #![cfg_attr(
     test,
     allow(
+        clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::arithmetic_side_effects,

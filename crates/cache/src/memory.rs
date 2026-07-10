@@ -59,7 +59,7 @@ impl CacheInner {
                 .remove(&EvictionKey(old.inserted_at, old.seq));
         }
         let seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(1);
+        self.next_seq = self.next_seq.saturating_add(1);
         self.eviction_order
             .insert(EvictionKey(inserted_at, seq), key.clone());
         // Keep the entry's seq in sync with the eviction_order key so that

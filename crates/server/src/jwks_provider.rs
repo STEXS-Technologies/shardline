@@ -45,6 +45,9 @@ impl Clone for JwksProvider {
 impl Drop for JwksProvider {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.background_handle.get() {
+            handle.abort();
+        }
     }
 }
 

@@ -50,7 +50,7 @@ sqlx = { workspace = true, features = [
 ] }
 subtle.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
 tracing.workspace = true
 url.workspace = true
 shardline-xet-core.workspace = true

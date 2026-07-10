@@ -310,6 +310,9 @@ impl FileUploadIngestor {
         self.reusable_pending_buffers.push(buffer);
     }
 
+    /// `windows(2)` always yields slices of exactly two elements, so indexing
+    /// at 0 and 1 is infallible.
+    #[allow(clippy::indexing_slicing)]
     fn record_completed_chunks(&mut self) -> Result<(), ServerError> {
         let expected_chunks = usize::try_from(self.next_sequence)?;
         if self.completed_chunks.len() != expected_chunks {
