@@ -746,4 +746,237 @@ mod tests {
             "mark-and-sweep"
         );
     }
+
+    #[test]
+    fn quarantine_root_for_storage_path() {
+        let result = quarantine_root(Path::new("/storage"));
+        assert_eq!(result, PathBuf::from("/storage/gc/quarantine"));
+    }
+
+    #[test]
+    fn quarantine_root_for_dot_path() {
+        let result = quarantine_root(Path::new("."));
+        assert_eq!(result, PathBuf::from("./gc/quarantine"));
+    }
+
+    #[test]
+    fn quarantine_record_path_starts_with_prefix_and_ends_with_json() {
+        let hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let result = quarantine_record_path(Path::new("/storage"), hash);
+        assert!(result.starts_with("/storage/ab/"));
+        assert!(result.to_string_lossy().ends_with(".json"));
+    }
+
+    // GcError display message tests
+
+    #[test]
+    fn gc_error_io_display_nonempty() {
+        let err = GcError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test"));
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        assert_eq!(display, "local storage operation failed");
+    }
+
+    #[test]
+    fn gc_error_json_display_nonempty() {
+        let json_err =
+            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = GcError::Json(json_err);
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        assert_eq!(display, "json operation failed");
+    }
+
+    #[test]
+    fn gc_error_numeric_conversion_display_nonempty() {
+        let source: std::num::TryFromIntError = u8::try_from(256u32).unwrap_err();
+        let err = GcError::NumericConversion(source);
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        assert_eq!(display, "numeric conversion exceeded supported bounds");
+    }
+
+    #[test]
+    fn gc_error_invalid_content_hash_display_nonempty() {
+        let err = GcError::InvalidContentHash;
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        assert_eq!(display, "content hash must be 64 hexadecimal characters");
+    }
+
+    #[test]
+    fn gc_error_overflow_display_nonempty() {
+        let err = GcError::Overflow;
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        assert_eq!(display, "arithmetic overflow");
+    }
+
+    // Error conversion tests
+
+    #[test]
+    fn gc_error_from_parse_stored_file_record_metadata_too_large() {
+        let parse_err =
+            shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+                observed_bytes: 1024,
+                maximum_bytes: 512,
+            };
+        let gc_err: GcError = parse_err.into();
+        assert!(matches!(gc_err, GcError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_from_parse_stored_file_record_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let parse_err = shardline_server_core::ParseStoredFileRecordError::Json(json_err);
+        let gc_err: GcError = parse_err.into();
+        assert!(matches!(gc_err, GcError::Json(_)));
+    }
+
+    #[test]
+    fn gc_error_from_rebuild_overflow() {
+        let overflow_err = shardline_server_core::RebuildOverflowError;
+        let gc_err: GcError = overflow_err.into();
+        assert!(matches!(gc_err, GcError::Overflow));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_object_store() {
+        let inner_err = ServerObjectStoreError::NotFound;
+        let gc_err = GcError::ObjectStore(inner_err);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::NotFound));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let gc_err = GcError::Io(io_err);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_numeric_conversion() {
+        let source: std::num::TryFromIntError = u8::try_from(256u32).unwrap_err();
+        let gc_err = GcError::NumericConversion(source);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(
+            server_err,
+            ServerObjectStoreError::NumericConversion(_)
+        ));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_invalid_content_hash() {
+        let gc_err = GcError::InvalidContentHash;
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(
+            server_err,
+            ServerObjectStoreError::InvalidContentHash
+        ));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_overflow() {
+        let gc_err = GcError::Overflow;
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Overflow));
+    }
+
+    // --- GC safety guarantee tests ---
+
+    #[test]
+    fn minimum_gc_retention_seconds_is_enforced() {
+        assert_eq!(MINIMUM_GC_RETENTION_SECONDS, 3600);
+    }
+
+    #[test]
+    fn quarantine_record_path_uppercase_hex_hash_produces_valid_path() {
+        // Uppercase hex still produces a valid path; the first two chars become
+        // the prefix directory.
+        let hash = "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890";
+        let result = quarantine_record_path(Path::new("/storage"), hash);
+        assert!(
+            result.to_string_lossy().ends_with(".json"),
+            "record path must end with .json"
+        );
+        assert!(
+            result.starts_with("/storage/AB/"),
+            "record path must be under the two-char prefix directory"
+        );
+    }
+
+    #[test]
+    fn quarantine_record_path_produces_prefix_directory_from_first_two_chars() {
+        let hash = "ff00112233445566ff00112233445566ff00112233445566ff00112233445566";
+        let result = quarantine_record_path(Path::new("/root"), hash);
+        let expected = PathBuf::from("/root/ff/ff00112233445566ff00112233445566ff00112233445566ff00112233445566.json");
+        assert_eq!(result, expected);
+    }
+
+    // GcError display messages for all key variants
+
+    #[test]
+    fn gc_error_object_store_display() {
+        let inner = ServerObjectStoreError::NotFound;
+        let err = GcError::ObjectStore(inner);
+        assert_eq!(err.to_string(), "object storage adapter operation failed");
+    }
+
+    #[test]
+    fn gc_error_xet_adapter_display() {
+        let inner = shardline_xet_adapter::XetAdapterError::NotFound;
+        let err = GcError::XetAdapter(inner);
+        assert_eq!(err.to_string(), "xet adapter operation failed");
+    }
+
+    // Error conversion: From<io::Error> for GcError
+
+    #[test]
+    fn gc_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let gc_err: GcError = io_err.into();
+        assert!(matches!(gc_err, GcError::Io(_)));
+    }
+
+    // Error conversion: From<serde_json::Error> for GcError
+
+    #[test]
+    fn gc_error_from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let gc_err: GcError = json_err.into();
+        assert!(matches!(gc_err, GcError::Json(_)));
+    }
+
+    // GcError → ServerObjectStoreError for all mapped variants
+
+    #[test]
+    fn gc_error_into_server_object_store_error_local_object_store() {
+        let inner = LocalObjectStoreError::Io(std::io::Error::other("local"));
+        let gc_err = GcError::LocalObjectStore(inner);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Local(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_s3_object_store() {
+        let inner = S3ObjectStoreError::Io(std::io::Error::other("s3"));
+        let gc_err = GcError::S3ObjectStore(inner);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::S3(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_unmapped_variant_becomes_io() {
+        // Json is not directly mapped to a named ServerObjectStoreError variant;
+        // it should be wrapped in Io(Error::other(...)).
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let gc_err = GcError::Json(json_err);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(
+            matches!(server_err, ServerObjectStoreError::Io(_)),
+            "unmapped GcError variant should be wrapped in Io"
+        );
+    }
 }

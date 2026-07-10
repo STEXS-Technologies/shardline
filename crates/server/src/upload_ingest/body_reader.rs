@@ -109,3 +109,173 @@ pub(crate) async fn read_body_to_bytes(
 
     Ok(body)
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Bytes;
+
+    use super::{ChunkBuffer, RequestBodyReader, read_body_to_bytes};
+
+    // ------------------------------------------------------------------
+    // ChunkBuffer
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn pooled_chunk_buffer_as_slice_returns_bytes() {
+        let buf = ChunkBuffer::Pooled(Bytes::from_static(b"hello"));
+        assert_eq!(buf.as_slice(), b"hello");
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
+    fn shared_chunk_buffer_as_slice_returns_bytes() {
+        let buf = ChunkBuffer::Shared(Bytes::from_static(b"world"));
+        assert_eq!(buf.as_slice(), b"world");
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
+    fn pooled_chunk_buffer_empty() {
+        let buf = ChunkBuffer::Pooled(Bytes::new());
+        assert_eq!(buf.as_slice(), b"");
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn shared_chunk_buffer_empty() {
+        let buf = ChunkBuffer::Shared(Bytes::new());
+        assert_eq!(buf.as_slice(), b"");
+        assert_eq!(buf.len(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // RequestBodyReader::from_bytes
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn from_bytes_returns_content_on_first_call() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"hello"));
+        let chunk = reader.next_bytes().await.unwrap();
+        assert!(chunk.is_some());
+        assert_eq!(chunk.unwrap().as_ref(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn from_bytes_returns_none_on_second_call() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"hello"));
+        let _first = reader.next_bytes().await.unwrap();
+        let second = reader.next_bytes().await.unwrap();
+        assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn from_bytes_empty_body_returns_empty_chunk_then_none() {
+        // `from_bytes` wraps data in `stream::once`, so even an empty Bytes
+        // yields one `Some(Bytes::new())` before the stream ends.
+        let mut reader = RequestBodyReader::from_bytes(Bytes::new());
+        let result = reader.next_bytes().await.unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().is_empty());
+        assert!(reader.next_bytes().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn from_bytes_large_content() {
+        let data = vec![0xAB_u8; 65536];
+        let bytes = Bytes::from(data.clone());
+        let mut reader = RequestBodyReader::from_bytes(bytes);
+
+        let chunk = reader.next_bytes().await.unwrap();
+        assert!(chunk.is_some());
+        assert_eq!(chunk.unwrap().as_ref(), data.as_slice());
+
+        // Stream exhausted.
+        assert!(reader.next_bytes().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn from_bytes_multiple_chunks_are_none_after_exhaustion() {
+        // from_bytes produces a single-chunk stream
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"only one chunk"));
+        assert!(reader.next_bytes().await.unwrap().is_some());
+        assert!(reader.next_bytes().await.unwrap().is_none());
+        assert!(reader.next_bytes().await.unwrap().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // read_body_to_bytes
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_body_to_bytes_returns_full_content() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from_static(b"hello world"));
+        let body = read_body_to_bytes(&mut reader).await.unwrap();
+        assert_eq!(body, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn read_body_to_bytes_empty_body() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::new());
+        let body = read_body_to_bytes(&mut reader).await.unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_body_to_bytes_large_content() {
+        let data = vec![0xCD_u8; 100_000];
+        let mut reader = RequestBodyReader::from_bytes(Bytes::from(data.clone()));
+        let body = read_body_to_bytes(&mut reader).await.unwrap();
+        assert_eq!(body, data.as_slice());
+    }
+
+    // ------------------------------------------------------------------
+    // RequestBodyReader::from_body size-limit path
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn from_body_rejects_body_exceeding_size_hint() {
+        use std::num::NonZeroUsize;
+
+        use axum::body::Body;
+
+        let body = Body::from(vec![0u8; 100]);
+        let max_bytes = NonZeroUsize::new(50).unwrap();
+        let result = RequestBodyReader::from_body(body, max_bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_body_accepts_body_within_size_hint() {
+        use std::num::NonZeroUsize;
+
+        use axum::body::Body;
+
+        let body = Body::from(vec![0u8; 50]);
+        let max_bytes = NonZeroUsize::new(100).unwrap();
+        let result = RequestBodyReader::from_body(body, max_bytes);
+        assert!(result.is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // Edge cases
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_body_to_bytes_idempotent_with_empty_reader() {
+        let mut reader = RequestBodyReader::from_bytes(Bytes::new());
+        let body1 = read_body_to_bytes(&mut reader).await.unwrap();
+        let body2 = read_body_to_bytes(&mut reader).await.unwrap();
+        assert!(body1.is_empty());
+        assert!(body2.is_empty());
+    }
+
+    #[test]
+    fn chunk_buffer_len_matches_as_slice() {
+        let data = b"chunk data for testing";
+        let pooled = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let shared = ChunkBuffer::Shared(Bytes::from_static(data));
+        assert_eq!(pooled.len(), pooled.as_slice().len());
+        assert_eq!(shared.len(), shared.as_slice().len());
+        assert_eq!(pooled.len(), shared.len());
+    }
+}

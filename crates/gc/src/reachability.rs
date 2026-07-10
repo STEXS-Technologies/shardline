@@ -361,4 +361,60 @@ mod tests {
         assert!(referenced.is_empty());
         assert_eq!(missing.len(), 1);
     }
+
+    #[test]
+    fn managed_object_hash_or_object_key_with_chunk_key_returns_hash() {
+        let hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let key_str = format!("ab/{hash}");
+        let key = ObjectKey::parse(key_str.as_str()).unwrap();
+        let result = managed_object_hash_or_object_key(&key, &[]);
+        assert_eq!(result, hash);
+    }
+
+    #[test]
+    fn managed_object_hash_or_object_key_with_unknown_key_returns_key_as_is() {
+        let key = ObjectKey::parse("unknown/somevalue").unwrap();
+        let result = managed_object_hash_or_object_key(&key, &[]);
+        assert_eq!(result, "unknown/somevalue");
+    }
+
+    // --- GC safety guarantee tests ---
+
+    const TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn managed_object_hash_or_object_key_chunk_format_returns_hash() {
+        // Chunk keys use the format <2-char-prefix>/<64-char-hash> where the
+        // prefix is the first two characters of the hash.
+        let prefix = &TEST_HASH[..2];
+        let key = ObjectKey::parse(&format!("{prefix}/{TEST_HASH}")).unwrap();
+        let result = managed_object_hash_or_object_key(&key, &[ServerFrontend::Xet]);
+        assert_eq!(result, TEST_HASH);
+    }
+
+    #[test]
+    fn managed_object_hash_or_object_key_xorb_format_returns_hash() {
+        // Xorb keys follow the format xorbs/default/<prefix>/<hash>.xorb
+        let prefix = &TEST_HASH[..2];
+        let key = ObjectKey::parse(&format!("xorbs/default/{prefix}/{TEST_HASH}.xorb")).unwrap();
+        let result = managed_object_hash_or_object_key(&key, &[ServerFrontend::Xet]);
+        assert_eq!(result, TEST_HASH);
+    }
+
+    #[test]
+    fn managed_object_hash_or_object_key_shard_format_returns_hash() {
+        // Shard keys follow the format shards/<prefix>/<hash>.shard
+        let prefix = &TEST_HASH[..2];
+        let key = ObjectKey::parse(&format!("shards/{prefix}/{TEST_HASH}.shard")).unwrap();
+        let result = managed_object_hash_or_object_key(&key, &[ServerFrontend::Xet]);
+        assert_eq!(result, TEST_HASH);
+    }
+
+    #[test]
+    fn managed_object_hash_or_object_key_oci_format_returns_key_as_is() {
+        // OCI keys are not a managed format; the key should be returned as-is.
+        let key = ObjectKey::parse(&format!("oci/{TEST_HASH}")).unwrap();
+        let result = managed_object_hash_or_object_key(&key, &[ServerFrontend::Xet]);
+        assert_eq!(result, format!("oci/{TEST_HASH}"));
+    }
 }

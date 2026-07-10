@@ -1,13 +1,12 @@
 use std::{
     ffi::OsStr,
     io::{Error as IoError, ErrorKind},
-    ops::Deref,
     path::{Path, PathBuf},
 };
 
 use rusqlite::{
-    Connection, Error as SqliteError, MappedRows, OptionalExtension, Params,
-    Result as SqliteResult, Row, Transaction, params,
+    Connection, Error as SqliteError, MappedRows, OptionalExtension, Row,
+    params,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Error as JsonError;
@@ -26,9 +25,12 @@ use crate::{
 mod async_index_store;
 mod helpers;
 mod index_store;
+mod migration;
 mod record_store;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use migration::LOCAL_SQLITE_MIGRATIONS;
 
 pub(crate) const LOCAL_METADATA_DATABASE_FILE_NAME: &str = "metadata.sqlite3";
 const LOCAL_SCHEMA_MIGRATIONS_TABLE: &str = "shardline_local_schema_migrations";
@@ -36,101 +38,6 @@ const LEGACY_IMPORT_COMPLETED_KEY: &str = "legacy_filesystem_import_completed";
 const MAX_CONTROL_PLANE_METADATA_BYTES: u64 = 1_048_576;
 const MAX_RECONSTRUCTION_METADATA_BYTES: u64 = 1_073_741_824;
 const MAX_LOCAL_RECORD_METADATA_BYTES: u64 = 1_073_741_824;
-
-pub(super) trait SqliteExecutor {
-    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
-    where
-        P: Params;
-}
-
-impl SqliteExecutor for Connection {
-    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
-    where
-        P: Params,
-    {
-        Connection::execute(self, sql, params)
-    }
-}
-
-impl SqliteExecutor for Transaction<'_> {
-    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
-    where
-        P: Params,
-    {
-        Deref::deref(self).execute(sql, params)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LocalSqliteMigration {
-    version: &'static str,
-    name: &'static str,
-    up_sql: &'static str,
-    down_sql: &'static str,
-}
-
-const LOCAL_SQLITE_MIGRATIONS: [LocalSqliteMigration; 9] = [
-    LocalSqliteMigration {
-        version: "20260417000000",
-        name: "metadata_store",
-        up_sql: include_str!("../../migrations/20260417000000_metadata_store.up.sql"),
-        down_sql: include_str!("../../migrations/20260417000000_metadata_store.down.sql"),
-    },
-    LocalSqliteMigration {
-        version: "20260417010000",
-        name: "retention_holds",
-        up_sql: include_str!("../../migrations/20260417010000_retention_holds.up.sql"),
-        down_sql: include_str!("../../migrations/20260417010000_retention_holds.down.sql"),
-    },
-    LocalSqliteMigration {
-        version: "20260418000000",
-        name: "dedupe_shards",
-        up_sql: include_str!("../../migrations/20260418000000_dedupe_shards.up.sql"),
-        down_sql: include_str!("../../migrations/20260418000000_dedupe_shards.down.sql"),
-    },
-    LocalSqliteMigration {
-        version: "20260418010000",
-        name: "webhook_deliveries",
-        up_sql: include_str!("../../migrations/20260418010000_webhook_deliveries.up.sql"),
-        down_sql: include_str!("../../migrations/20260418010000_webhook_deliveries.down.sql"),
-    },
-    LocalSqliteMigration {
-        version: "20260418020000",
-        name: "provider_repository_states",
-        up_sql: include_str!("../../migrations/20260418020000_provider_repository_states.up.sql"),
-        down_sql: include_str!(
-            "../../migrations/20260418020000_provider_repository_states.down.sql"
-        ),
-    },
-    LocalSqliteMigration {
-        version: "20260418110000",
-        name: "provider_repository_reconciliation",
-        up_sql: include_str!(
-            "../../migrations/20260418110000_provider_repository_reconciliation.up.sql"
-        ),
-        down_sql: include_str!(
-            "../../migrations/20260418110000_provider_repository_reconciliation.down.sql"
-        ),
-    },
-    LocalSqliteMigration {
-        version: "20260629000000",
-        name: "hub_api",
-        up_sql: include_str!("../../migrations/20260629000000_hub_api.up.sql"),
-        down_sql: include_str!("../../migrations/20260629000000_hub_api.down.sql"),
-    },
-    LocalSqliteMigration {
-        version: "20260630000000",
-        name: "hub_inline_content",
-        up_sql: include_str!("../../migrations/20260630000000_hub_inline_content.up.sql"),
-        down_sql: include_str!("../../migrations/20260630000000_hub_inline_content.down.sql"),
-    },
-    LocalSqliteMigration {
-        version: "20260630000001",
-        name: "hub_webhooks",
-        up_sql: include_str!("../../migrations/20260630000001_hub_webhooks.up.sql"),
-        down_sql: include_str!("../../migrations/20260630000001_hub_webhooks.down.sql"),
-    },
-];
 
 /// Local SQLite implementation of [`IndexStore`].
 #[derive(Debug, Clone)]

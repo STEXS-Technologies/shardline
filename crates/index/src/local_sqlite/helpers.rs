@@ -5,12 +5,14 @@ use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
     io::{Error as IoError, ErrorKind, Read},
+    ops::Deref,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
 
 use rusqlite::{
-    Connection, Error as SqliteError, OpenFlags, OptionalExtension, Row, Transaction,
+    Connection, Error as SqliteError, OpenFlags, OptionalExtension, Params, Result as SqliteResult,
+    Row, Transaction,
     config::DbConfig,
     params,
     types::{Type, ValueRef},
@@ -26,7 +28,7 @@ use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS, LegacyQuarantineCandidateRecord,
     LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
-    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, SqliteExecutor,
+    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES,
     StoredObjectPresenceRecord, i64_to_u64, invalid_metadata_path_error,
     invalid_record_metadata_path_error, u64_to_i64,
 };
@@ -36,6 +38,30 @@ use crate::{
     provider::parse_repository_provider, record_key::record_key as shared_record_key,
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
+
+pub(crate) trait SqliteExecutor {
+    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
+    where
+        P: Params;
+}
+
+impl SqliteExecutor for Connection {
+    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
+    where
+        P: Params,
+    {
+        Connection::execute(self, sql, params)
+    }
+}
+
+impl SqliteExecutor for Transaction<'_> {
+    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
+    where
+        P: Params,
+    {
+        Deref::deref(self).execute(sql, params)
+    }
+}
 
 pub(super) fn initialize_local_metadata_root(root: &Path) -> Result<(), LocalIndexStoreError> {
     ensure_directory_path_components_are_not_symlinked(root)?;
@@ -1205,4 +1231,116 @@ fn legacy_quarantine_object_key(hash: &str) -> Result<ObjectKey, LocalIndexStore
 
 fn from_sql_error(error: impl StdError + Send + Sync + 'static) -> SqliteError {
     SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn initialize_local_metadata_root_creates_directory() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("nested").join("metadata");
+        assert!(!root.exists());
+        initialize_local_metadata_root(&root).expect("should create directory");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn initialize_local_metadata_root_creates_nested_directories() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("metadata");
+        assert!(!root.exists());
+        initialize_local_metadata_root(&root).expect("should create nested directories");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn initialize_local_metadata_root_is_idempotent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("metadata");
+        initialize_local_metadata_root(&root).expect("first call should succeed");
+        initialize_local_metadata_root(&root).expect("second call should succeed");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn ensure_local_schema_migrations_table_creates_table() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let connection = Connection::open(&db_path).unwrap();
+
+        ensure_local_schema_migrations_table(&connection)
+            .expect("should create migrations table");
+
+        let exists: bool = connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='{LOCAL_SCHEMA_MIGRATIONS_TABLE}')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "migrations table should exist");
+    }
+
+    #[test]
+    fn ensure_local_schema_migrations_table_is_idempotent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let connection = Connection::open(&db_path).unwrap();
+
+        ensure_local_schema_migrations_table(&connection).unwrap();
+        ensure_local_schema_migrations_table(&connection).unwrap();
+
+        let exists: bool = connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='{LOCAL_SCHEMA_MIGRATIONS_TABLE}')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "migrations table should still exist after idempotent calls");
+    }
+
+    #[test]
+    fn apply_pending_local_migrations_is_idempotent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let mut connection = Connection::open(&db_path).unwrap();
+        prepare_connection(&mut connection).unwrap();
+        ensure_local_schema_migrations_table(&connection).unwrap();
+
+        apply_pending_local_migrations(&mut connection).expect("first migration should succeed");
+        apply_pending_local_migrations(&mut connection).expect("second migration should succeed (idempotent)");
+
+        let count: i64 = connection
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE}"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            count > 0,
+            "should have applied at least one migration"
+        );
+    }
 }

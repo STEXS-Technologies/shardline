@@ -49,3 +49,82 @@ impl AuthProvider for PassthroughProvider {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AuthProvider;
+    use shardline_protocol::RepositoryProvider;
+
+    // ── PassthroughProvider::verify_token ────────────────────────────────
+
+    #[test]
+    fn verify_empty_token_errors() {
+        let provider = PassthroughProvider;
+        let result = provider.verify_token("");
+        assert!(matches!(result, Err(AuthError::InvalidToken)));
+    }
+
+    #[test]
+    fn verify_whitespace_only_token_errors() {
+        let provider = PassthroughProvider;
+        let result = provider.verify_token("   \t\n  ");
+        assert!(matches!(result, Err(AuthError::InvalidToken)));
+    }
+
+    #[test]
+    fn verify_any_nonempty_token_succeeds() {
+        let provider = PassthroughProvider;
+        let result = provider.verify_token("any-token-string");
+        assert!(result.is_ok());
+
+        let claims = result.unwrap();
+        assert_eq!(claims.subject(), "anonymous");
+        assert_eq!(claims.scope(), TokenScope::Write);
+        assert_eq!(claims.issuer(), "passthrough");
+    }
+
+    #[test]
+    fn verify_token_has_write_scope() {
+        let provider = PassthroughProvider;
+        let claims = provider.verify_token("dev-token-123").unwrap();
+        assert!(claims.scope().allows_write());
+        assert!(claims.scope().allows_read());
+    }
+
+    #[test]
+    fn verify_token_repository_scope() {
+        let provider = PassthroughProvider;
+        let claims = provider.verify_token("test").unwrap();
+        let repo = claims.repository();
+        assert_eq!(repo.provider(), RepositoryProvider::Generic);
+        assert_eq!(repo.owner(), "anonymous");
+        assert_eq!(repo.name(), "anonymous");
+        assert_eq!(repo.revision(), Some("main"));
+    }
+
+    // ── PassthroughProvider::mint_token ──────────────────────────────────
+
+    #[test]
+    fn mint_token_always_errors() {
+        let provider = PassthroughProvider;
+        let claims = shardline_protocol::TokenClaims::new(
+            "issuer",
+            "subject",
+            TokenScope::Write,
+            shardline_protocol::RepositoryScope::new(
+                RepositoryProvider::Generic,
+                "owner",
+                "repo",
+                Some("main"),
+            )
+            .unwrap(),
+            u64::MAX,
+        )
+        .unwrap();
+
+        let result = provider.mint_token(&claims);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AuthError::ProviderError(_)));
+    }
+}

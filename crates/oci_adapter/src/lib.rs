@@ -35,6 +35,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, compress256, digest::generic_array::GenericArray};
 use shardline_protocol::RepositoryScope;
 use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectPrefix, PutOutcome};
+#[cfg(unix)]
+use shardline_storage::anchored_fs::{
+    AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target, remove_if_present,
+    write_anchored_temporary_file,
+};
+#[cfg(not(unix))]
+use std::io::Write;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, MutexGuard};
@@ -451,7 +458,7 @@ pub async fn create_upload_session<B: OciBackend>(
     validate_oci_repository_scope(repository, repository_scope)?;
     let now_unix_seconds = unix_now_seconds_checked()?;
     purge_expired_upload_sessions::<B>(root, backend, ttl_seconds, now_unix_seconds).await?;
-    let active_sessions = count_active_upload_sessions(root).await?;
+    let active_sessions = count_active_upload_sessions(root, ttl_seconds).await?;
     if active_sessions >= max_active_sessions.get() {
         return Err(OciAdapterError::TooManyUploadSessions);
     }
@@ -838,18 +845,34 @@ const fn upload_session_expired(
         <= now_unix_seconds
 }
 
-async fn count_active_upload_sessions(root: &Path) -> Result<usize, OciAdapterError> {
+async fn count_active_upload_sessions(
+    root: &Path,
+    ttl_seconds: NonZeroU64,
+) -> Result<usize, OciAdapterError> {
     let upload_dir = upload_dir(root);
     let mut entries = match fs::read_dir(upload_dir).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(OciAdapterError::Io(error)),
     };
+    let now_unix_seconds = unix_now_seconds_checked()?;
     let mut active_sessions = 0_usize;
     while let Some(entry) = entries.next_entry().await? {
-        if entry.path().extension() == Some(OsStr::new("json")) {
-            active_sessions = active_sessions.saturating_add(1);
+        let path = entry.path();
+        if path.extension() != Some(OsStr::new("json")) {
+            continue;
         }
+        // Validate that the file contains a valid, unexpired session.
+        let Ok(bytes) = fs::read(&path).await else {
+            continue;
+        };
+        let Ok(session): Result<OciUploadSession, _> = serde_json::from_slice(&bytes) else {
+            continue;
+        };
+        if upload_session_expired(&session, ttl_seconds, now_unix_seconds) {
+            continue;
+        }
+        active_sessions = active_sessions.saturating_add(1);
     }
     Ok(active_sessions)
 }
@@ -1060,7 +1083,34 @@ fn unix_now_seconds_checked() -> Result<u64, OciAdapterError> {
     shardline_server_core::unix_now_seconds_checked().map_err(|_e| OciAdapterError::Overflow)
 }
 
+#[cfg(unix)]
 fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fn invalid_path_error() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "path must have a parent directory")
+    }
+    let anchored = open_anchored_target(root, path, AnchoredPathOptions::new(None, None), invalid_path_error)?;
+    let final_path = anchored.final_path();
+    let temporary = write_anchored_temporary_file(&anchored, bytes, None)?;
+    match std::fs::rename(&temporary, &final_path) {
+        Ok(()) => {}
+        Err(error) => {
+            remove_if_present(&temporary)?;
+            return Err(error);
+        }
+    }
+    if let Err(error) = ensure_parent_path_matches_anchor(&anchored, "upload directory path changed during anchored write") {
+        remove_if_present(&final_path)?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // Defense-in-depth: ensure the path stays within the root directory.
+    path.strip_prefix(root).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
+    })?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1068,12 +1118,109 @@ fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Res
         )
     })?;
     std::fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("tmp");
-    let file = File::create(&temporary)?;
-    let mut writer = std::io::BufWriter::new(file);
-    std::io::Write::write_all(&mut writer, bytes)?;
-    drop(writer);
+    let temporary = write_temporary_file(path, bytes)?;
     std::fs::rename(&temporary, path)?;
-    let _ignored = root;
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_temporary_file(path: &Path, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("tmp-{pid}-{seq}-{now_nanos}"));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    Ok(temporary)
+}
+
+#[cfg(test)]
+mod write_file_atomically_tests {
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    use super::write_file_atomically;
+
+    fn temp_root() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        (dir, root)
+    }
+
+    #[test]
+    fn creates_file_with_expected_content() {
+        let (_dir, root) = temp_root();
+        let path = root.join("metadata.json");
+        let payload = b"{\"key\":\"value\"}";
+        write_file_atomically(&root, &path, payload).unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, payload);
+    }
+
+    #[test]
+    fn overwrites_existing_file() {
+        let (_dir, root) = temp_root();
+        let path = root.join("data.json");
+        write_file_atomically(&root, &path, b"first").unwrap();
+        write_file_atomically(&root, &path, b"second").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"second");
+    }
+
+    #[test]
+    fn handles_empty_bytes() {
+        let (_dir, root) = temp_root();
+        let path = root.join("empty.json");
+        write_file_atomically(&root, &path, b"").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"");
+    }
+
+    #[test]
+    fn writes_into_nested_subdirectory() {
+        let (_dir, root) = temp_root();
+        let path = root.join("sub/dir/file.json");
+        write_file_atomically(&root, &path, b"nested").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"nested");
+    }
+
+    #[test]
+    fn rejects_path_escaping_root() {
+        let (_dir, root) = temp_root();
+        // A path that resolves outside of root via `..`
+        let path = root.join("../outside.json");
+        let result = write_file_atomically(&root, &path, b"escape");
+        assert!(result.is_err(), "must reject path escaping root");
+    }
+
+    #[test]
+    fn rejects_path_absolute_outside_root() {
+        let (_dir, root) = temp_root();
+        let path = Path::new("/tmp/not-under-root.json").to_path_buf();
+        let result = write_file_atomically(&root, &path, b"escape");
+        assert!(result.is_err(), "must reject absolute path outside root");
+    }
+
+    #[test]
+    fn respects_root_distinct_dirs() {
+        let dir1 = TempDir::new().unwrap();
+        let dir2 = TempDir::new().unwrap();
+        let path1 = dir1.path().join("file.json");
+        let path2 = dir2.path().join("file.json");
+        write_file_atomically(dir1.path(), &path1, b"alpha").unwrap();
+        write_file_atomically(dir2.path(), &path2, b"beta").unwrap();
+        assert_eq!(std::fs::read(&path1).unwrap(), b"alpha");
+        assert_eq!(std::fs::read(&path2).unwrap(), b"beta");
+    }
 }

@@ -738,3 +738,387 @@ async fn local_backend_ready_fails_when_metadata_database_path_is_directory() {
 
     assert!(ready.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Focused unit tests for core backend operations
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_backend_new_creates_root_and_chunks_directories() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    // The root directory must exist.
+    let root_exists = fs::metadata(temp.path()).await.is_ok();
+    assert!(root_exists, "root directory must exist after backend creation");
+
+    // The chunks directory (object store root) must exist.
+    let chunks_dir = temp.path().join("chunks");
+    let chunks_exists = fs::metadata(&chunks_dir).await.is_ok();
+    assert!(
+        chunks_exists,
+        "chunks directory must exist after backend creation"
+    );
+
+    // The backend should be healthy.
+    let ready = backend.ready().await;
+    assert!(ready.is_ok(), "backend must be ready after creation");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_file_returns_non_empty_content_hash() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let response = backend
+        .upload_file("hello.txt", Bytes::from_static(b"hello world"), None)
+        .await
+        .expect("upload");
+
+    assert!(!response.content_hash.is_empty(), "content_hash must not be empty");
+    assert_eq!(response.total_bytes, 11, "total_bytes must match input length");
+    assert_eq!(response.file_id, "hello.txt");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_same_file_twice_produces_identical_content_hash() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let data = b"identical payload for idempotency check";
+
+    let first = backend
+        .upload_file("doc.bin", Bytes::from_static(data), None)
+        .await
+        .expect("first upload");
+    let second = backend
+        .upload_file("doc.bin", Bytes::from_static(data), None)
+        .await
+        .expect("second upload");
+
+    assert_eq!(
+        first.content_hash, second.content_hash,
+        "same file content must yield the same content hash"
+    );
+    assert_eq!(
+        first.total_bytes, second.total_bytes,
+        "total_bytes must be stable across uploads"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_file_returns_correct_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let payload = b"round-trip download test";
+    let response = backend
+        .upload_file("rt.bin", Bytes::from_static(payload), None)
+        .await
+        .expect("upload");
+
+    let downloaded = backend
+        .download_file("rt.bin", None, None)
+        .await
+        .expect("download");
+
+    assert_eq!(downloaded, payload.as_slice());
+
+    // Also verify pinning to a specific content hash.
+    let pinned = backend
+        .download_file("rt.bin", Some(&response.content_hash), None)
+        .await
+        .expect("pinned download");
+    assert_eq!(pinned, payload.as_slice());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_record_returns_correct_metadata_after_upload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let payload = b"metadata round-trip payload";
+    let upload_response = backend
+        .upload_file("meta.bin", Bytes::from_static(payload), None)
+        .await
+        .expect("upload");
+
+    let record = backend
+        .file_record("meta.bin", None, None)
+        .await
+        .expect("file_record");
+
+    assert_eq!(record.file_id, "meta.bin");
+    assert_eq!(
+        record.content_hash, upload_response.content_hash,
+        "record content_hash must match upload response"
+    );
+    assert_eq!(
+        record.total_bytes,
+        u64::try_from(payload.len()).unwrap(),
+        "record total_bytes must match input length"
+    );
+    assert!(
+        !record.chunks.is_empty(),
+        "record must reference at least one chunk"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_record_nonexistent_file_returns_not_found() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let result = backend
+        .file_record("does-not-exist.bin", None, None)
+        .await;
+
+    assert!(
+        matches!(result, Err(ServerError::NotFound)),
+        "expected NotFound for non-existent file, got: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_record_with_content_hash_nonexistent_returns_not_found() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    // Upload a real file first, then request with a bogus content hash.
+    backend
+        .upload_file("exists.bin", Bytes::from_static(b"data"), None)
+        .await
+        .expect("upload");
+
+    let result = backend
+        .file_record(
+            "exists.bin",
+            Some(&"a".repeat(64)),
+            None,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(ServerError::NotFound)),
+        "expected NotFound for non-existent content hash, got: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_upload_stored_and_length_matches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let (body, hash) = single_chunk_xorb(b"xorb test payload");
+    let expected_length = u64::try_from(body.len()).expect("body length");
+
+    let response = backend
+        .upload_xorb(&hash, body.clone())
+        .await
+        .expect("upload xorb");
+    assert!(response.was_inserted, "first upload must insert");
+
+    let stored_length = backend
+        .xorb_length(&hash)
+        .await
+        .expect("xorb length");
+    assert_eq!(stored_length, expected_length);
+
+    // Second upload must be idempotent.
+    let second = backend
+        .upload_xorb(&hash, body)
+        .await
+        .expect("second upload");
+    assert!(!second.was_inserted, "second upload must not re-insert");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_read_returns_correct_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let (body, hash) = single_chunk_xorb(b"readback verification");
+
+    backend
+        .upload_xorb(&hash, body.clone())
+        .await
+        .expect("upload xorb");
+
+    // Read back via the xorb object key and object store.
+    let object_key = crate::xet_adapter::xorb_object_key(&hash).expect("xorb object key");
+    let read_back = backend
+        .read_object(&object_key)
+        .await
+        .expect("read xorb object");
+    assert_eq!(
+        read_back,
+        body.as_ref(),
+        "read xorb bytes must match uploaded body"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_file_with_repository_scope_round_trip() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let scope = RepositoryScope::new(
+        RepositoryProvider::GitHub,
+        "org",
+        "repo",
+        Some("main"),
+    )
+    .expect("scope");
+
+    let payload = b"scoped file payload";
+    let response = backend
+        .upload_file("scoped.bin", Bytes::from_static(payload), Some(&scope))
+        .await
+        .expect("upload");
+
+    // Record retrieval must use the same scope.
+    let record = backend
+        .file_record("scoped.bin", None, Some(&scope))
+        .await
+        .expect("file_record with scope");
+    assert_eq!(record.content_hash, response.content_hash);
+    assert_eq!(record.total_bytes, u64::try_from(payload.len()).unwrap());
+
+    // Download must use the same scope.
+    let downloaded = backend
+        .download_file("scoped.bin", None, Some(&scope))
+        .await
+        .expect("download with scope");
+    assert_eq!(downloaded, payload.as_slice());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_file_nonexistent_returns_not_found() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    let result = backend
+        .download_file("ghost.bin", None, None)
+        .await;
+
+    assert!(
+        matches!(result, Err(ServerError::NotFound)),
+        "expected NotFound for non-existent file, got: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_chunk_metadata_matches_chunk_size() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .expect("backend");
+
+    // 12 bytes with chunk_size=4 → 3 chunks.
+    let payload = b"aaaabbbbcccc";
+    backend
+        .upload_file("three.bin", Bytes::from_static(payload), None)
+        .await
+        .expect("upload");
+
+    let record = backend
+        .file_record("three.bin", None, None)
+        .await
+        .expect("file_record");
+
+    assert_eq!(record.chunks.len(), 3, "must produce 3 chunks");
+    assert_eq!(record.total_bytes, 12);
+    assert_eq!(record.chunk_size, chunk_size.get() as u64);
+
+    // Each chunk's offset must be contiguous.
+    for (i, chunk) in record.chunks.iter().enumerate() {
+        assert_eq!(
+            chunk.offset,
+            (i as u64) * 4,
+            "chunk {i} must start at correct offset"
+        );
+    }
+}

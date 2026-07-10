@@ -71,7 +71,7 @@ pub use config::{
 };
 pub use db::{DbRuntimeError, run_db_migration};
 pub use fsck::{FsckRuntimeError, run_fsck};
-pub use gc::{GcRuntimeError, run_gc, run_gc_diagnostics};
+pub use gc::{GcRuntimeError, MINIMUM_GC_RETENTION_SECONDS, run_gc, run_gc_diagnostics};
 pub use gc_schedule::{
     GcScheduleError, GcScheduleInstallOptions, GcScheduleInstallReport, GcScheduleUninstallReport,
     install_gc_schedule, uninstall_gc_schedule,

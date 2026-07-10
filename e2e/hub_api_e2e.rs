@@ -189,29 +189,6 @@ async fn create_model_repo(base_url: &str, token: &str) {
     );
 }
 
-/// Creates a dataset repo.
-#[allow(dead_code)]
-async fn create_dataset_repo(base_url: &str, token: &str) {
-    let client = Client::new();
-    let resp = client
-        .post(format!("{base_url}/api/repos/create"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({
-            "name": "test-owner/test-dataset",
-            "type": "dataset",
-            "private": false,
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "dataset repo creation failed: {} {}",
-        resp.status(),
-        resp.text().await.unwrap()
-    );
-}
-
 /// Commits an inline file to the given repo and returns the new commit SHA.
 async fn commit_inline_file(
     base_url: &str,

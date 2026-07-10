@@ -389,4 +389,188 @@ mod tests {
         assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(directory_metadata.permissions().mode() & 0o777, 0o700);
     }
+
+    // ── put_bytes_if_absent ───────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn put_bytes_if_absent_inserts_and_idempotent() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let path = root.join("aa").join("chunk.bin");
+
+        let first = put_bytes_if_absent(&root, &path, b"hello");
+        assert!(matches!(first, Ok(PutBytesIfAbsentOutcome::Inserted)));
+
+        let second = put_bytes_if_absent(&root, &path, b"hello");
+        assert!(matches!(second, Ok(PutBytesIfAbsentOutcome::AlreadyExists)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn put_bytes_if_absent_rejects_different_bytes() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let path = root.join("aa").join("chunk.bin");
+
+        put_bytes_if_absent(&root, &path, b"hello").unwrap();
+
+        let result = put_bytes_if_absent(&root, &path, b"world");
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn put_bytes_if_absent_creates_parent_directories() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let path = root.join("deep").join("nested").join("dir").join("chunk.bin");
+
+        let result = put_bytes_if_absent(&root, &path, b"data");
+        assert!(matches!(result, Ok(PutBytesIfAbsentOutcome::Inserted)));
+        assert!(path.exists());
+    }
+
+    // ── write_bytes_atomically ────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_atomically_creates_file() {
+        use super::write_bytes_atomically;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let path = root.join("aa").join("output.bin");
+
+        write_bytes_atomically(&root, &path, b"atomic payload").unwrap();
+
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"atomic payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_atomically_overwrites_existing() {
+        use super::write_bytes_atomically;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let path = root.join("aa").join("output.bin");
+
+        write_bytes_atomically(&root, &path, b"first").unwrap();
+        write_bytes_atomically(&root, &path, b"second").unwrap();
+
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_atomically_empty_bytes() {
+        use super::write_bytes_atomically;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let path = root.join("aa").join("empty.bin");
+
+        write_bytes_atomically(&root, &path, b"").unwrap();
+
+        let contents = std::fs::read(&path).unwrap();
+        assert!(contents.is_empty());
+    }
+
+    // ── hard_link_file_if_absent ──────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_file_if_absent_links_and_errors_on_duplicate() {
+        use super::hard_link_file_if_absent;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let temporary = sandbox.path().join("source.tmp");
+        std::fs::write(&temporary, b"linked").unwrap();
+        let dest = root.join("aa").join("linked.bin");
+
+        // First hard link succeeds
+        hard_link_file_if_absent(&root, &dest, &temporary).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"linked");
+
+        // Second hard link returns AlreadyExists (callers handle this)
+        let err = hard_link_file_if_absent(&root, &dest, &temporary).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    // ── ensure_file_matches_bytes ─────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_file_matches_bytes_ok_for_identical() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("match.bin");
+        std::fs::write(&path, b"test data").unwrap();
+        let file = File::open(&path).unwrap();
+
+        assert!(ensure_file_matches_bytes(file, b"test data").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_file_matches_bytes_err_for_mismatch() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("mismatch.bin");
+        std::fs::write(&path, b"actual").unwrap();
+        let file = File::open(&path).unwrap();
+
+        assert!(ensure_file_matches_bytes(file, b"expected").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_file_matches_bytes_err_for_length_mismatch() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("short.bin");
+        std::fs::write(&path, b"ab").unwrap();
+        let file = File::open(&path).unwrap();
+
+        assert!(ensure_file_matches_bytes(file, b"abcdef").is_err());
+    }
+
+    // ── test hook mechanism ───────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn set_before_local_write_hook_is_called_on_write() {
+        use super::{set_before_local_write_hook, write_bytes_atomically};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let called = Arc::new(AtomicBool::new(false));
+        let flag = called.clone();
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let path = root.join("aa").join("hooked.bin");
+
+        // Register a hook that fires for this specific path
+        set_before_local_write_hook(path.clone(), move || {
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        write_bytes_atomically(&root, &path, b"hooked").unwrap();
+
+        assert!(
+            called.load(Ordering::SeqCst),
+            "before-local-write hook was not called"
+        );
+    }
 }

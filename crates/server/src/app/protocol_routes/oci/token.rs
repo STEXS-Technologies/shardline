@@ -341,3 +341,277 @@ impl Drop for PromActiveRequestGuard {
             .end_oci_registry_token_request();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_protocol::TokenScope;
+
+    use super::{
+        OCI_REGISTRY_SERVICE, oci_bearer_challenge,
+        parse_oci_registry_actions, parse_oci_registry_token_query,
+        parse_oci_registry_token_scope, parse_oci_registry_token_scopes,
+        scope_allows_oci_exchange,
+    };
+
+    // ── parse_oci_registry_token_scope ──────────────────────────────────────
+
+    #[test]
+    fn parse_scope_none_returns_none() {
+        assert_eq!(
+            parse_oci_registry_token_scope(None).unwrap(),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn parse_scope_empty_string_returns_none() {
+        assert_eq!(
+            parse_oci_registry_token_scope(Some("")).unwrap(),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn parse_scope_pull() {
+        assert_eq!(
+            parse_oci_registry_token_scope(Some("repository:team/assets:pull")).unwrap(),
+            (Some(TokenScope::Read), Some("team/assets".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_scope_push() {
+        assert_eq!(
+            parse_oci_registry_token_scope(Some("repository:team/assets:push")).unwrap(),
+            (Some(TokenScope::Write), Some("team/assets".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_scope_pull_and_push() {
+        assert_eq!(
+            parse_oci_registry_token_scope(Some("repository:team/assets:pull,push")).unwrap(),
+            (Some(TokenScope::Write), Some("team/assets".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_scope_non_repository_resource_type_errors() {
+        assert!(matches!(
+            parse_oci_registry_token_scope(Some("notrepository:team/assets:pull")),
+            Err(crate::ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn parse_scope_missing_actions_errors() {
+        assert!(matches!(
+            parse_oci_registry_token_scope(Some("repository:team/assets")),
+            Err(crate::ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── parse_oci_registry_actions ──────────────────────────────────────────
+
+    #[test]
+    fn parse_actions_pull() {
+        assert_eq!(
+            parse_oci_registry_actions("pull").unwrap(),
+            TokenScope::Read
+        );
+    }
+
+    #[test]
+    fn parse_actions_push() {
+        assert_eq!(
+            parse_oci_registry_actions("push").unwrap(),
+            TokenScope::Write
+        );
+    }
+
+    #[test]
+    fn parse_actions_pull_push() {
+        assert_eq!(
+            parse_oci_registry_actions("pull,push").unwrap(),
+            TokenScope::Write
+        );
+    }
+
+    #[test]
+    fn parse_actions_push_pull() {
+        assert_eq!(
+            parse_oci_registry_actions("push,pull").unwrap(),
+            TokenScope::Write
+        );
+    }
+
+    #[test]
+    fn parse_actions_empty_errors() {
+        assert!(matches!(
+            parse_oci_registry_actions(""),
+            Err(crate::ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn parse_actions_invalid_errors() {
+        assert!(matches!(
+            parse_oci_registry_actions("invalid"),
+            Err(crate::ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── parse_oci_registry_token_scopes ─────────────────────────────────────
+
+    #[test]
+    fn parse_scopes_empty_vec() {
+        assert_eq!(
+            parse_oci_registry_token_scopes(&[]).unwrap(),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn parse_scopes_one_pull() {
+        let scopes = vec!["repository:repo:pull".to_owned()];
+        assert_eq!(
+            parse_oci_registry_token_scopes(&scopes).unwrap(),
+            (Some(TokenScope::Read), Some("repo".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_scopes_one_push() {
+        let scopes = vec!["repository:repo:push".to_owned()];
+        assert_eq!(
+            parse_oci_registry_token_scopes(&scopes).unwrap(),
+            (Some(TokenScope::Write), Some("repo".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_scopes_two_same_repo_pull_and_push() {
+        let scopes = vec![
+            "repository:repo:pull".to_owned(),
+            "repository:repo:push".to_owned(),
+        ];
+        let (scope, repo) = parse_oci_registry_token_scopes(&scopes).unwrap();
+        assert_eq!(scope, Some(TokenScope::Write));
+        assert_eq!(repo, Some("repo".to_owned()));
+    }
+
+    #[test]
+    fn parse_scopes_two_different_repos_errors() {
+        let scopes = vec![
+            "repository:repo/a:pull".to_owned(),
+            "repository:repo/b:pull".to_owned(),
+        ];
+        assert!(matches!(
+            parse_oci_registry_token_scopes(&scopes),
+            Err(crate::ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── parse_oci_registry_token_query ──────────────────────────────────────
+
+    fn uri(path: &str) -> axum::http::Uri {
+        path.parse().unwrap()
+    }
+
+    #[test]
+    fn parse_query_no_params() {
+        let query = parse_oci_registry_token_query(&uri("/v2/token")).unwrap();
+        assert!(query.service.is_none());
+        assert!(query.scopes.is_empty());
+        assert!(query._account.is_none());
+    }
+
+    #[test]
+    fn parse_query_with_service() {
+        let query =
+            parse_oci_registry_token_query(&uri("/v2/token?service=shardline")).unwrap();
+        assert_eq!(query.service.as_deref(), Some("shardline"));
+    }
+
+    #[test]
+    fn parse_query_with_scope() {
+        let query = parse_oci_registry_token_query(&uri(
+            "/v2/token?scope=repository:repo:pull",
+        ))
+        .unwrap();
+        assert_eq!(query.scopes.len(), 1);
+        assert_eq!(query.scopes[0], "repository:repo:pull");
+    }
+
+    #[test]
+    fn parse_query_with_multiple_scopes() {
+        let query = parse_oci_registry_token_query(&uri(
+            "/v2/token?scope=a&scope=b",
+        ))
+        .unwrap();
+        assert_eq!(query.scopes.len(), 2);
+    }
+
+    // ── scope_allows_oci_exchange ───────────────────────────────────────────
+
+    #[test]
+    fn exchange_read_scope_allows_read() {
+        assert!(scope_allows_oci_exchange(TokenScope::Read, Some(TokenScope::Read)));
+    }
+
+    #[test]
+    fn exchange_read_scope_denies_write() {
+        assert!(!scope_allows_oci_exchange(TokenScope::Read, Some(TokenScope::Write)));
+    }
+
+    #[test]
+    fn exchange_write_scope_allows_read() {
+        assert!(scope_allows_oci_exchange(TokenScope::Write, Some(TokenScope::Read)));
+    }
+
+    #[test]
+    fn exchange_write_scope_allows_write() {
+        assert!(scope_allows_oci_exchange(TokenScope::Write, Some(TokenScope::Write)));
+    }
+
+    #[test]
+    fn exchange_none_uses_actual_scope() {
+        // When requested_scope is None, the function falls back to actual_scope.
+        // Read actual → requested is Read → Read.allows_read() = true
+        assert!(scope_allows_oci_exchange(TokenScope::Read, None));
+        // Write actual → requested is Write → Write.allows_write() = true
+        assert!(scope_allows_oci_exchange(TokenScope::Write, None));
+    }
+
+    // ── oci_bearer_challenge ────────────────────────────────────────────────
+
+    #[test]
+    fn challenge_with_repository_read() {
+        let challenge = oci_bearer_challenge("https://example.com", Some("repo"), TokenScope::Read);
+        assert!(challenge.contains(&format!("realm=\"https://example.com/v2/token\"")));
+        assert!(challenge.contains(&format!("service=\"{OCI_REGISTRY_SERVICE}\"")));
+        assert!(challenge.contains("scope=\"repository:repo:pull\""));
+    }
+
+    #[test]
+    fn challenge_with_repository_write() {
+        let challenge =
+            oci_bearer_challenge("https://example.com", Some("repo"), TokenScope::Write);
+        assert!(challenge.contains("scope=\"repository:repo:pull,push\""));
+    }
+
+    #[test]
+    fn challenge_without_repository() {
+        let challenge = oci_bearer_challenge("https://example.com", None, TokenScope::Read);
+        assert!(challenge.contains(&format!("realm=\"https://example.com/v2/token\"")));
+        assert!(challenge.contains(&format!("service=\"{OCI_REGISTRY_SERVICE}\"")));
+        assert!(!challenge.contains("scope="));
+    }
+
+    #[test]
+    fn challenge_strips_trailing_slash() {
+        let challenge =
+            oci_bearer_challenge("https://example.com/", Some("repo"), TokenScope::Read);
+        assert!(challenge.contains("realm=\"https://example.com/v2/token\""));
+    }
+}

@@ -7,12 +7,15 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::{
-    OciAdapterError, OciUploadSession, SerializableSha256State, append_upload_bytes,
+    OciAdapterError, OciReference, OciUploadSession, SerializableSha256State, append_upload_bytes,
     create_upload_session, delete_upload_session, new_upload_session_id,
+    oci_blob_key, oci_manifest_key, oci_manifest_media_type_key, oci_manifest_prefix,
+    oci_tag_key, oci_tag_prefix, parse_reference,
     purge_expired_upload_sessions, read_upload_session, upload_body_integrity, upload_length,
     upload_session_expired,
 };
 use crate::traits::OciBackend;
+use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use shardline_storage::{DeleteOutcome, ObjectKey, PutOutcome};
 
 /// No-op backend used in tests that never creates S3 multipart uploads.
@@ -472,4 +475,275 @@ fn serializable_sha256_state_matches_reference_digest() {
         state.finalize_hex().as_deref(),
         Ok(actual) if actual == expected
     ));
+}
+
+// ── Key construction tests ──────────────────────────────────────────────────
+
+const VALID_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const VALID_DIGEST_FULL: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn test_scope() -> RepositoryScope {
+    RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap()
+}
+
+#[test]
+fn oci_blob_key_global_namespace() {
+    let key = oci_blob_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("protocols/oci/global/repos/"),
+        "expected global namespace, got: {s}"
+    );
+    assert!(s.contains("/blobs/"), "expected blobs path, got: {s}");
+    assert!(
+        s.contains(VALID_DIGEST_FULL),
+        "expected digest in key, got: {s}"
+    );
+}
+
+#[test]
+fn oci_blob_key_with_scope() {
+    let scope = test_scope();
+    let key = oci_blob_key("team/assets", VALID_DIGEST_FULL, Some(&scope)).unwrap();
+    let s = key.as_str();
+    assert!(
+        !s.contains("/global/"),
+        "should not contain global namespace with scope, got: {s}"
+    );
+    assert!(s.contains("/blobs/"), "expected blobs path, got: {s}");
+}
+
+#[test]
+fn oci_blob_key_empty_repo_errors() {
+    assert!(matches!(
+        oci_blob_key("", VALID_DIGEST_FULL, None),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn oci_manifest_key_global_namespace() {
+    let key = oci_manifest_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("protocols/oci/global/repos/"),
+        "expected global namespace, got: {s}"
+    );
+    assert!(
+        s.contains("/manifests/"),
+        "expected manifests path, got: {s}"
+    );
+}
+
+#[test]
+fn oci_manifest_key_with_scope() {
+    let scope = test_scope();
+    let key = oci_manifest_key("team/assets", VALID_DIGEST_FULL, Some(&scope)).unwrap();
+    let s = key.as_str();
+    assert!(
+        !s.contains("/global/"),
+        "should not contain global namespace with scope, got: {s}"
+    );
+    assert!(s.contains("/manifests/"), "expected manifests path, got: {s}");
+}
+
+#[test]
+fn oci_manifest_media_type_key_contains_expected_path() {
+    let key = oci_manifest_media_type_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("/manifest-media-types/"),
+        "expected manifest-media-types path, got: {s}"
+    );
+}
+
+#[test]
+fn oci_tag_key_global_namespace() {
+    let key = oci_tag_key("team/assets", "latest", None).unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("protocols/oci/global/repos/"),
+        "expected global namespace, got: {s}"
+    );
+    assert!(s.contains("/tags/latest"), "expected tags/latest, got: {s}");
+}
+
+#[test]
+fn oci_tag_key_with_scope() {
+    let scope = test_scope();
+    let key = oci_tag_key("team/assets", "v1.0", Some(&scope)).unwrap();
+    let s = key.as_str();
+    assert!(
+        !s.contains("/global/"),
+        "should not contain global namespace with scope, got: {s}"
+    );
+    assert!(s.contains("/tags/v1.0"), "expected tags/v1.0, got: {s}");
+}
+
+#[test]
+fn oci_tag_key_empty_tag_errors() {
+    assert!(matches!(
+        oci_tag_key("team/assets", "", None),
+        Err(OciAdapterError::InvalidManifestReference)
+    ));
+}
+
+#[test]
+fn oci_manifest_prefix_returns_manifest_path() {
+    let prefix = oci_manifest_prefix("team/assets", None).unwrap();
+    let s = prefix.as_str();
+    assert!(
+        s.contains("/manifests/"),
+        "expected manifests path in prefix, got: {s}"
+    );
+}
+
+#[test]
+fn oci_manifest_prefix_with_scope() {
+    let scope = test_scope();
+    let prefix = oci_manifest_prefix("team/assets", Some(&scope)).unwrap();
+    let s = prefix.as_str();
+    assert!(
+        !s.contains("/global/"),
+        "should not contain global namespace with scope, got: {s}"
+    );
+    assert!(s.contains("/manifests/"), "expected manifests path, got: {s}");
+}
+
+#[test]
+fn oci_tag_prefix_returns_tag_path() {
+    let prefix = oci_tag_prefix("team/assets", None).unwrap();
+    let s = prefix.as_str();
+    assert!(
+        s.contains("/tags/"),
+        "expected tags path in prefix, got: {s}"
+    );
+}
+
+#[test]
+fn oci_tag_prefix_with_scope() {
+    let scope = test_scope();
+    let prefix = oci_tag_prefix("team/assets", Some(&scope)).unwrap();
+    let s = prefix.as_str();
+    assert!(
+        !s.contains("/global/"),
+        "should not contain global namespace with scope, got: {s}"
+    );
+    assert!(s.contains("/tags/"), "expected tags path, got: {s}");
+}
+
+// ── parse_reference tests ───────────────────────────────────────────────────
+
+#[test]
+fn parse_reference_digest() {
+    let r = parse_reference(VALID_DIGEST_FULL).unwrap();
+    // parse_sha256_digest strips the "sha256:" prefix
+    assert!(matches!(r, OciReference::Digest(ref d) if d == VALID_DIGEST));
+}
+
+#[test]
+fn parse_reference_tag() {
+    let r = parse_reference("latest").unwrap();
+    assert!(matches!(r, OciReference::Tag(ref t) if t == "latest"));
+}
+
+#[test]
+fn parse_reference_empty_tag_errors() {
+    assert!(matches!(
+        parse_reference(""),
+        Err(OciAdapterError::InvalidManifestReference)
+    ));
+}
+
+// ── SerializableSha256State additional tests ────────────────────────────────
+
+#[test]
+fn serializable_sha256_empty_state_matches_reference() {
+    let state = SerializableSha256State::default();
+    let hex = state.finalize_hex().unwrap();
+    let reference = hex::encode(Sha256::new().finalize());
+    assert_eq!(hex, reference);
+}
+
+#[test]
+fn serializable_sha256_single_update_matches_reference() {
+    let mut state = SerializableSha256State::default();
+    state.update(b"hello").unwrap();
+    let hex = state.finalize_hex().unwrap();
+
+    let mut reference = Sha256::new();
+    reference.update(b"hello");
+    let expected = hex::encode(reference.finalize());
+    assert_eq!(hex, expected);
+}
+
+#[test]
+fn serializable_sha256_multiple_updates_match_concatenated() {
+    let mut state = SerializableSha256State::default();
+    state.update(b"hel").unwrap();
+    state.update(b"lo").unwrap();
+    state.update(b" world").unwrap();
+    let hex = state.finalize_hex().unwrap();
+
+    let mut reference = Sha256::new();
+    reference.update(b"hello world");
+    let expected = hex::encode(reference.finalize());
+    assert_eq!(hex, expected);
+}
+
+#[test]
+fn serializable_sha256_serialization_round_trip() {
+    let mut state = SerializableSha256State::default();
+    state.update(b"partial").unwrap();
+    let mid_hex = state.finalize_hex().unwrap();
+
+    let serialized = serde_json::to_vec(&state).unwrap();
+    let deserialized: SerializableSha256State = serde_json::from_slice(&serialized).unwrap();
+    let rt_hex = deserialized.finalize_hex().unwrap();
+    assert_eq!(mid_hex, rt_hex);
+}
+
+#[test]
+fn serializable_sha256_serialization_round_trip_after_multiple_updates() {
+    let mut state = SerializableSha256State::default();
+    state.update(&[0u8; 128]).unwrap(); // triggers block compression
+    state.update(b"tail").unwrap();
+    let expected_hex = state.finalize_hex().unwrap();
+
+    let serialized = serde_json::to_vec(&state).unwrap();
+    let deserialized: SerializableSha256State = serde_json::from_slice(&serialized).unwrap();
+    assert_eq!(expected_hex, deserialized.finalize_hex().unwrap());
+}
+
+// ── Key content-addressed uniqueness ────────────────────────────────────────
+
+#[test]
+fn oci_blob_key_different_digests_produce_different_keys() {
+    let key1 = oci_blob_key(
+        "team/assets",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+    )
+    .unwrap();
+    let key2 = oci_blob_key(
+        "team/assets",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        None,
+    )
+    .unwrap();
+    assert_ne!(key1.as_str(), key2.as_str());
+}
+
+#[test]
+fn oci_manifest_key_different_repos_produce_different_keys() {
+    let key1 = oci_manifest_key("team/assets", VALID_DIGEST_FULL, None).unwrap();
+    let key2 = oci_manifest_key("team/other", VALID_DIGEST_FULL, None).unwrap();
+    assert_ne!(key1.as_str(), key2.as_str());
+}
+
+#[test]
+fn oci_tag_key_different_tags_produce_different_keys() {
+    let key1 = oci_tag_key("team/assets", "latest", None).unwrap();
+    let key2 = oci_tag_key("team/assets", "v1.0", None).unwrap();
+    assert_ne!(key1.as_str(), key2.as_str());
 }

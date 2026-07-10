@@ -16,7 +16,6 @@ use crate::{
 pub(crate) struct OciTestContext {
     /// The temporary directory holding all test data. Kept alive for the
     /// duration of the test so that the backend has a valid root.
-    #[allow(dead_code)]
     pub temp: tempfile::TempDir,
     pub state: Arc<AppState>,
 }

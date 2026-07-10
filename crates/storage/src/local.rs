@@ -1324,4 +1324,190 @@ mod tests {
             "object delete escaped into a symlink target outside the object root"
         );
     }
+
+    #[test]
+    fn storage_integrity_download_side_hash_verification() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        let body = b"hello world";
+        let key = ObjectKey::parse("xorbs/default/11/hash.xorb").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 11);
+
+        let inserted = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+        assert!(matches!(inserted, Ok(PutOutcome::Inserted)));
+
+        // Full range read
+        let range = ByteRange::new(0, 10).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read, b"hello world");
+
+        // Partial range read
+        let range = ByteRange::new(6, 10).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read, b"world");
+    }
+
+    #[test]
+    fn storage_integrity_put_if_absent_rejects_conflicting_bytes_and_wrong_hash() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        let key = ObjectKey::parse("xorbs/default/22/hash.xorb").unwrap();
+
+        // Store original data
+        let body = b"original data";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 13);
+        let inserted = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+        assert!(matches!(inserted, Ok(PutOutcome::Inserted)));
+
+        // Try to store SAME key with SAME bytes but WRONG hash — should fail
+        let wrong_hash_integrity = ObjectIntegrity::new(super::chunk_hash(b"other"), 13);
+        let result =
+            store.put_if_absent(&key, ObjectBody::from_slice(body), &wrong_hash_integrity);
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::IntegrityHashMismatch)
+        ));
+
+        // Try to store SAME key with CORRECT hash but WRONG length — should fail
+        let wrong_length_integrity = ObjectIntegrity::new(super::chunk_hash(body), 100);
+        let result =
+            store.put_if_absent(&key, ObjectBody::from_slice(body), &wrong_length_integrity);
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::IntegrityLengthMismatch)
+        ));
+
+        // Verify original data is intact
+        let range = ByteRange::new(0, 12).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read, b"original data");
+    }
+
+    #[test]
+    fn storage_integrity_put_overwrite_rejects_wrong_hash_and_length() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        let key = ObjectKey::parse("xorbs/default/33/hash.xorb").unwrap();
+
+        // Store with correct integrity
+        let body = b"correct data!!";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 14);
+        let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &integrity);
+        assert!(result.is_ok());
+
+        // Try put_overwrite with wrong hash
+        let wrong_hash = ObjectIntegrity::new(super::chunk_hash(b"different"), 14);
+        let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &wrong_hash);
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::IntegrityHashMismatch)
+        ));
+
+        // Try put_overwrite with wrong length
+        let wrong_length = ObjectIntegrity::new(super::chunk_hash(body), 999);
+        let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &wrong_length);
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::IntegrityLengthMismatch)
+        ));
+
+        // Verify original data still intact
+        let range = ByteRange::new(0, 13).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read, b"correct data!!");
+    }
+
+    #[test]
+    fn storage_integrity_cross_key_independence() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        let key_a = ObjectKey::parse("xorbs/default/aa/key_a.xorb").unwrap();
+        let key_b = ObjectKey::parse("xorbs/default/bb/key_b.xorb").unwrap();
+
+        let body_a = b"alpha data";
+        let body_b = b"bravo data";
+        let integrity_a = ObjectIntegrity::new(super::chunk_hash(body_a), 10);
+        let integrity_b = ObjectIntegrity::new(super::chunk_hash(body_b), 10);
+
+        store
+            .put_if_absent(&key_a, ObjectBody::from_slice(body_a), &integrity_a)
+            .unwrap();
+        store
+            .put_if_absent(&key_b, ObjectBody::from_slice(body_b), &integrity_b)
+            .unwrap();
+
+        // Verify each returns its own bytes
+        let range = ByteRange::new(0, 9).unwrap();
+        assert_eq!(
+            store.read_range(&key_a, range).unwrap(),
+            b"alpha data"
+        );
+
+        let range = ByteRange::new(0, 9).unwrap();
+        assert_eq!(
+            store.read_range(&key_b, range).unwrap(),
+            b"bravo data"
+        );
+
+        // Delete one
+        assert!(matches!(
+            store.delete_if_present(&key_a),
+            Ok(DeleteOutcome::Deleted)
+        ));
+
+        // Verify the other still exists
+        assert!(store.contains(&key_b).unwrap());
+        let range = ByteRange::new(0, 9).unwrap();
+        assert_eq!(
+            store.read_range(&key_b, range).unwrap(),
+            b"bravo data"
+        );
+    }
+
+    #[test]
+    fn storage_integrity_large_object_round_trip() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        // Create a 1MB object with a repeating pattern
+        let pattern: Vec<u8> = (0..=255).collect();
+        let body: Vec<u8> = pattern
+            .iter()
+            .copied()
+            .cycle()
+            .take(1024 * 1024)
+            .collect();
+        assert_eq!(body.len(), 1024 * 1024);
+
+        let key = ObjectKey::parse("xorbs/default/cc/large.xorb").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(&body), body.len() as u64);
+
+        let inserted = store.put_if_absent(&key, ObjectBody::from_slice(&body), &integrity);
+        assert!(matches!(inserted, Ok(PutOutcome::Inserted)));
+
+        // Full range read
+        let range = ByteRange::new(0, body.len() as u64 - 1).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read, body);
+
+        // Partial range: early
+        let range = ByteRange::new(1000, 1999).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read, &body[1000..2000]);
+
+        // Partial range: middle
+        let range = ByteRange::new(500_000, 500_999).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read, &body[500_000..501_000]);
+
+        // Partial range: last byte
+        let range = ByteRange::new(1_048_575, 1_048_575).unwrap();
+        let read = store.read_range(&key, range).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0], body[1_048_575]);
+    }
 }

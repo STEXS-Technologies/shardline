@@ -15,7 +15,7 @@ use crate::{config::load_server_config, local_output::write_output_bytes};
 /// Prevents data loss from the TOCTOU race between the GC mark phase and
 /// concurrent uploads that have written chunks on disk but not yet committed
 /// their file records.
-const MINIMUM_GC_RETENTION_SECONDS: u64 = 3600; // 1 hour
+pub const MINIMUM_GC_RETENTION_SECONDS: u64 = 3600; // 1 hour
 
 /// Garbage-collection runtime failure.
 #[derive(Debug, Error)]

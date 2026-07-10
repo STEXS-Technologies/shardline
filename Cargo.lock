@@ -3348,6 +3348,7 @@ dependencies = [
  "shardline-storage",
  "shardline-xet-adapter",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -3420,6 +3421,8 @@ dependencies = [
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",
+ "shardline-test-support",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]

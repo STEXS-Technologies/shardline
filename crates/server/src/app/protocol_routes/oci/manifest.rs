@@ -375,3 +375,346 @@ fn ensure_manifest_representation_is_acceptable(
 
     Err(ServerError::NotAcceptable)
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
+    use serde_json::json;
+
+    use super::*;
+
+    // ── normalize_media_type ──
+
+    #[test]
+    fn normalize_media_type_passthrough_plain() {
+        assert_eq!(
+            normalize_media_type("application/json"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn normalize_media_type_strips_parameters() {
+        assert_eq!(
+            normalize_media_type("application/json; charset=utf-8"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn normalize_media_type_strips_multiple_parameters() {
+        assert_eq!(
+            normalize_media_type("application/json;param=val;other=val"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn normalize_media_type_trims_whitespace() {
+        assert_eq!(
+            normalize_media_type("  application/json  ; charset=utf-8"),
+            "application/json"
+        );
+    }
+
+    // ── validate_oci_schema_version ──
+
+    #[test]
+    fn schema_version_valid() {
+        let doc = json!({"schemaVersion": 2});
+        assert!(validate_oci_schema_version(&doc).is_ok());
+    }
+
+    #[test]
+    fn schema_version_wrong_number() {
+        let doc = json!({"schemaVersion": 1});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn schema_version_missing() {
+        let doc = json!({});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn schema_version_not_a_number() {
+        let doc = json!({"schemaVersion": "2"});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── validate_oci_descriptor ──
+
+    #[test]
+    fn descriptor_valid() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 1234
+        });
+        let result = validate_oci_descriptor(&desc);
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        );
+    }
+
+    #[test]
+    fn descriptor_valid_without_mediatype() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 100
+        });
+        assert!(validate_oci_descriptor(&desc).is_ok());
+    }
+
+    #[test]
+    fn descriptor_valid_with_string_mediatype() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 100,
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"
+        });
+        assert!(validate_oci_descriptor(&desc).is_ok());
+    }
+
+    #[test]
+    fn descriptor_missing_digest() {
+        let desc = json!({"size": 100});
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_missing_size() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_invalid_digest_format() {
+        let desc = json!({
+            "digest": "not-a-digest",
+            "size": 100
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidDigest)
+        ));
+    }
+
+    #[test]
+    fn descriptor_non_object() {
+        let desc = json!("just a string");
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_non_string_mediatype() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 100,
+            "mediaType": 123
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_array_digest() {
+        let desc = json!({
+            "digest": ["sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"],
+            "size": 100
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── ensure_manifest_representation_is_acceptable ──
+
+    #[test]
+    fn accept_header_absent_allows_any() {
+        let headers = HeaderMap::new();
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_wildcard_accepts_any() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_exact_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_type_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/*"));
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_subtype_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_mismatch_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.docker.distribution.manifest.v2+json"),
+        );
+        assert!(matches!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            ),
+            Err(ServerError::NotAcceptable)
+        ));
+    }
+
+    #[test]
+    fn accept_comma_separated_first_match_wins() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static(
+                "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json",
+            ),
+        );
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_with_parameters_strips_before_comparison() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json; q=0.9"),
+        );
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_with_parameters_type_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/*; q=0.5"),
+        );
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_empty_candidate_entry_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static(", application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accept_entry_without_slash_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("bogus, application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn media_type_with_parameters_is_normalized() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+        );
+        // The media_type has a parameter; normalize_media_type should strip it before comparison
+        assert!(ensure_manifest_representation_is_acceptable(
+            &headers,
+            "application/vnd.oci.image.manifest.v1+json; charset=utf-8"
+        )
+        .is_ok());
+    }
+}

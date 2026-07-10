@@ -22,7 +22,8 @@ use std::{
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::HeaderMap,
+    http::{HeaderMap, header},
+    middleware::{self, Next},
     routing::{get, head, post},
     serve as serve_http,
 };
@@ -197,7 +198,8 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/metrics", get(metrics))
-        .layer(MetricsLayer);
+        .layer(MetricsLayer)
+        .layer(middleware::from_fn(security_headers_middleware));
     if role.serves_api() {
         app = app
             .route(
@@ -512,6 +514,37 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
     }
+}
+
+async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let response = next.run(request).await;
+    let (mut parts, body) = response.into_parts();
+    let headers = &mut parts.headers;
+    if !headers.contains_key(header::X_CONTENT_TYPE_OPTIONS) {
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            "nosniff".parse().unwrap(),
+        );
+    }
+    if !headers.contains_key(header::X_FRAME_OPTIONS) {
+        headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());
+    }
+    if !headers.contains_key(header::STRICT_TRANSPORT_SECURITY) {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            "max-age=31536000".parse().unwrap(),
+        );
+    }
+    if !headers.contains_key(header::REFERRER_POLICY) {
+        headers.insert(
+            header::REFERRER_POLICY,
+            "strict-origin-when-cross-origin".parse().unwrap(),
+        );
+    }
+    axum::response::Response::from_parts(parts, body)
 }
 
 #[cfg(test)]

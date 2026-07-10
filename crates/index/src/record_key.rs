@@ -65,3 +65,98 @@ fn push_length_prefixed(target: &mut String, value: &str) {
     target.push(':');
     target.push_str(value);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // push_length_prefixed (private – exercised through public helpers)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_length_prefixed_basic() {
+        let mut buf = String::new();
+        push_length_prefixed(&mut buf, "hello");
+        assert_eq!(buf, "5:hello");
+    }
+
+    #[test]
+    fn push_length_prefixed_empty() {
+        let mut buf = String::new();
+        push_length_prefixed(&mut buf, "");
+        assert_eq!(buf, "0:");
+    }
+
+    // -----------------------------------------------------------------------
+    // record_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn record_key_without_hash() {
+        let key = record_key("latest", "global", "file.bin", None);
+        assert_eq!(key, "6:latest6:global8:file.bin");
+    }
+
+    #[test]
+    fn record_key_with_hash() {
+        let key = record_key("version", "scope", "file.bin", Some("hash"));
+        assert_eq!(key, "7:version5:scope8:file.bin4:hash");
+    }
+
+    #[test]
+    fn record_key_without_hash_omits_hash_part() {
+        let key_with = record_key("latest", "global", "file.bin", Some("abc"));
+        let key_without = record_key("latest", "global", "file.bin", None);
+        assert!(key_with.len() > key_without.len());
+        assert!(key_with.starts_with(&key_without));
+    }
+
+    // -----------------------------------------------------------------------
+    // repository_scope_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repository_scope_key_none_is_global() {
+        let key = repository_scope_key(None);
+        assert_eq!(key, "6:global");
+    }
+
+    #[test]
+    fn repository_scope_key_with_scope() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "name", None).unwrap();
+        let key = repository_scope_key(Some(&scope));
+        // "github" = 6 chars, "owner" = 5 chars, "name" = 4 chars
+        assert_eq!(key, "6:github5:owner4:name");
+    }
+
+    #[test]
+    fn repository_scope_key_with_revision() {
+        let scope = RepositoryScope::new(
+            RepositoryProvider::GitLab,
+            "alice",
+            "myrepo",
+            Some("abc123"),
+        )
+        .unwrap();
+        let key = repository_scope_key(Some(&scope));
+        assert_eq!(key, "6:gitlab5:alice6:myrepo6:abc123");
+    }
+
+    // -----------------------------------------------------------------------
+    // repository_record_scope_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repository_record_scope_key_omits_revision() {
+        let scope = RepositoryRecordScope::new(
+            RepositoryProvider::GitHub,
+            "owner",
+            "name",
+        );
+        let key = repository_record_scope_key(&scope);
+        // Should contain provider, owner, name but NOT the revision
+        assert_eq!(key, "6:github5:owner4:name");
+    }
+}

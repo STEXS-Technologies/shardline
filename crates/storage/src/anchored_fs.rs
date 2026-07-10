@@ -468,3 +468,517 @@ fn fd_base_path(directory: &File) -> PathBuf {
         PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use tempfile::tempdir;
+
+    fn invalid_path_error() -> io::Error {
+        io::Error::new(ErrorKind::InvalidInput, "invalid path")
+    }
+
+    // ── AnchoredPathOptions ──────────────────────────────────────────────
+
+    #[test]
+    fn anchored_path_options_with_modes() {
+        let opts = AnchoredPathOptions::new(Some(0o755), Some(0o644));
+        assert_eq!(opts.directory_mode, Some(0o755));
+        assert_eq!(opts.file_mode, Some(0o644));
+    }
+
+    #[test]
+    fn anchored_path_options_none() {
+        let opts = AnchoredPathOptions::new(None, None);
+        assert!(opts.directory_mode.is_none());
+        assert!(opts.file_mode.is_none());
+    }
+
+    // ── AnchoredTarget ───────────────────────────────────────────────────
+
+    #[test]
+    fn anchored_target_accessors() {
+        let dir = tempdir().unwrap();
+        let parent_path = dir.path().join("sub");
+        fs::create_dir(&parent_path).unwrap();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(&parent_path)
+            .unwrap();
+        let file_name: OsString = "file.txt".into();
+
+        let target = AnchoredTarget::new(file, parent_path.clone(), file_name.clone());
+
+        assert_eq!(target.file_name(), file_name.as_os_str());
+        assert_eq!(target.parent_path, parent_path);
+    }
+
+    #[test]
+    fn anchored_target_final_path() {
+        let dir = tempdir().unwrap();
+        let parent_path = dir.path().to_path_buf();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(&parent_path)
+            .unwrap();
+        let file_name: OsString = "output.bin".into();
+
+        let target = AnchoredTarget::new(file, parent_path.clone(), file_name.clone());
+        let final_path = target.final_path();
+        // final_path should end with the file_name
+        assert_eq!(final_path.file_name().unwrap(), file_name.as_os_str());
+    }
+
+    #[test]
+    fn anchored_target_logical_path() {
+        let dir = tempdir().unwrap();
+        let parent_path = dir.path().to_path_buf();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(&parent_path)
+            .unwrap();
+        let file_name: OsString = "data.txt".into();
+
+        let target = AnchoredTarget::new(file, parent_path.clone(), file_name.clone());
+        assert_eq!(target.logical_path(), parent_path.join("data.txt"));
+    }
+
+    // ── open_anchored_target ─────────────────────────────────────────────
+
+    #[test]
+    fn open_anchored_target_nested_path() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("sub/dir/file.txt");
+
+        let result = open_anchored_target(root.path(), &path, AnchoredPathOptions::new(None, None), invalid_path_error);
+        assert!(result.is_ok());
+        let target = result.unwrap();
+        assert_eq!(target.file_name(), OsStr::new("file.txt"));
+        assert_eq!(target.parent_path, root.path().join("sub/dir"));
+    }
+
+    #[test]
+    fn open_anchored_target_path_outside_root() {
+        let root = tempdir().unwrap();
+        // Construct a path that resolves outside root via canonicalization
+        let path = PathBuf::from("/tmp/definitely-not-inside-root.txt");
+
+        let result = open_anchored_target(root.path(), &path, AnchoredPathOptions::new(None, None), invalid_path_error);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_anchored_target_traversal_rejected() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("../escape.txt");
+
+        let result = open_anchored_target(root.path(), &path, AnchoredPathOptions::new(None, None), invalid_path_error);
+        assert!(result.is_err());
+    }
+
+    // ── open_directory_chain ──────────────────────────────────────────────
+
+    #[test]
+    fn open_directory_chain_existing() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("existing");
+        fs::create_dir(&sub).unwrap();
+
+        let result = open_directory_chain(&sub, false, None, invalid_path_error);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_directory_chain_create_missing() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("new");
+
+        let result = open_directory_chain(&sub, true, None, invalid_path_error);
+        assert!(result.is_ok());
+        assert!(sub.exists());
+    }
+
+    #[test]
+    fn open_directory_chain_no_create_missing() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("missing");
+
+        let result = open_directory_chain(&sub, false, None, invalid_path_error);
+        assert!(result.is_err());
+    }
+
+    // ── open_or_create_child_directory ────────────────────────────────────
+
+    #[test]
+    fn open_or_create_child_existing() {
+        let dir = tempdir().unwrap();
+        let child_name: &OsStr = "child".as_ref();
+        fs::create_dir(dir.path().join("child")).unwrap();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+
+        let result = open_or_create_child_directory(&parent, child_name, false, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_or_create_child_create_missing() {
+        let dir = tempdir().unwrap();
+        let child_name: &OsStr = "newchild".as_ref();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+
+        let result = open_or_create_child_directory(&parent, child_name, true, None);
+        assert!(result.is_ok());
+        assert!(dir.path().join("newchild").exists());
+    }
+
+    #[test]
+    fn open_or_create_child_no_create_missing() {
+        let dir = tempdir().unwrap();
+        let child_name: &OsStr = "nochild".as_ref();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+
+        let result = open_or_create_child_directory(&parent, child_name, false, None);
+        assert!(result.is_err());
+    }
+
+    // ── write_anchored_temporary_file ─────────────────────────────────────
+
+    #[test]
+    fn write_anchored_temporary_file_basic() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+        let target = AnchoredTarget::new(
+            parent,
+            dir.path().to_path_buf(),
+            "target.txt".into(),
+        );
+        let payload = b"hello world";
+
+        let result = write_anchored_temporary_file(&target, payload, None);
+        assert!(result.is_ok());
+        let tmp_path = result.unwrap();
+
+        // Temp file name should contain the target name and ".tmp-"
+        let tmp_name = tmp_path.file_name().unwrap().to_string_lossy();
+        assert!(tmp_name.starts_with("target.txt.tmp-"), "unexpected temp name: {tmp_name}");
+
+        // File content should match
+        let contents = fs::read(&tmp_path).unwrap();
+        assert_eq!(contents, payload);
+    }
+
+    // ── temporary_file_name ──────────────────────────────────────────────
+
+    #[test]
+    fn temporary_file_name_has_tmp_suffix() {
+        let name = temporary_file_name(OsStr::new("file.txt"));
+        let name_str = name.to_string_lossy();
+        assert!(name_str.starts_with("file.txt.tmp-"));
+    }
+
+    #[test]
+    fn temporary_file_name_unique() {
+        let a = temporary_file_name(OsStr::new("file.txt"));
+        let b = temporary_file_name(OsStr::new("file.txt"));
+        assert_ne!(a, b);
+    }
+
+    // ── ensure_parent_path_matches_anchor ─────────────────────────────────
+
+    #[test]
+    fn ensure_parent_path_matches_anchor_ok() {
+        let dir = tempdir().unwrap();
+        let parent_path = dir.path().to_path_buf();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(&parent_path)
+            .unwrap();
+        let target = AnchoredTarget::new(file, parent_path, "f.txt".into());
+
+        assert!(ensure_parent_path_matches_anchor(&target, "changed").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_parent_path_matches_anchor_symlink_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(&real_dir)
+            .unwrap();
+        let target = AnchoredTarget::new(file, real_dir.clone(), "f.txt".into());
+
+        // Replace the real directory with a symlink
+        fs::remove_dir(&real_dir).unwrap();
+        symlink("/tmp", &real_dir).unwrap();
+
+        let result = ensure_parent_path_matches_anchor(&target, "symlink detected");
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_parent_path_matches_anchor_renamed() {
+        let dir = tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(&real_dir)
+            .unwrap();
+        let target = AnchoredTarget::new(file, real_dir.clone(), "f.txt".into());
+
+        // Rename the directory
+        let new_name = dir.path().join("renamed");
+        fs::rename(&real_dir, &new_name).unwrap();
+
+        let result = ensure_parent_path_matches_anchor(&target, "renamed detected");
+        assert!(result.is_err());
+    }
+
+    // ── open_directory ────────────────────────────────────────────────────
+
+    #[test]
+    fn open_directory_existing() {
+        let dir = tempdir().unwrap();
+        let result = open_directory(dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_directory_not_a_directory() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("file.txt");
+        fs::write(&file_path, "hello").unwrap();
+
+        let result = open_directory(&file_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_directory_nonexistent() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("nope");
+
+        let result = open_directory(&missing);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_directory_symlink_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("link");
+        symlink(&real_dir, &link_path).unwrap();
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            // On Linux, O_NOFOLLOW should reject the symlink
+            let result = open_directory(&link_path);
+            assert!(result.is_err());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, O_NOFOLLOW is not set; the symlink resolves
+            let result = open_directory(&link_path);
+            assert!(result.is_ok());
+        }
+    }
+
+    // ── open_new_file ─────────────────────────────────────────────────────
+
+    #[test]
+    fn open_new_file_creates() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+
+        let result = open_new_file(&path, None);
+        assert!(result.is_ok());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn open_new_file_already_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        fs::write(&path, "data").unwrap();
+
+        let result = open_new_file(&path, None);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::AlreadyExists);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_new_file_via_symlink_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let real_file = dir.path().join("real.txt");
+        fs::write(&real_file, "data").unwrap();
+        let link_path = dir.path().join("link.txt");
+        symlink(&real_file, &link_path).unwrap();
+
+        let result = open_new_file(&link_path, None);
+        assert!(result.is_err());
+    }
+
+    // ── create_directory ──────────────────────────────────────────────────
+
+    #[test]
+    fn create_directory_ok() {
+        let dir = tempdir().unwrap();
+        let new_dir = dir.path().join("created");
+
+        assert!(create_directory(&new_dir, None).is_ok());
+        assert!(new_dir.is_dir());
+    }
+
+    #[test]
+    fn create_directory_already_exists() {
+        let dir = tempdir().unwrap();
+        let new_dir = dir.path().join("exists");
+        fs::create_dir(&new_dir).unwrap();
+
+        let result = create_directory(&new_dir, None);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::AlreadyExists);
+    }
+
+    // ── create_directory_all ──────────────────────────────────────────────
+
+    #[test]
+    fn create_directory_all_nested() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("a/b/c");
+
+        assert!(create_directory_all(&nested, None).is_ok());
+        assert!(nested.is_dir());
+    }
+
+    #[test]
+    fn create_directory_all_idempotent() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("x/y");
+
+        assert!(create_directory_all(&nested, None).is_ok());
+        assert!(create_directory_all(&nested, None).is_ok());
+    }
+
+    // ── fd_child_path ────────────────────────────────────────────────────
+
+    #[test]
+    fn fd_child_path_beneath_parent() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+
+        let child = fd_child_path(&parent, OsStr::new("file.txt"));
+        // The fd_child_path uses /proc/self/fd/N, which on Linux resolves to the real path.
+        // Just check that the filename component matches.
+        assert_eq!(child.file_name().unwrap(), OsStr::new("file.txt"));
+    }
+
+    // ── rename_at ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rename_at_ok() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+        fs::write(dir.path().join("old.txt"), "data").unwrap();
+
+        assert!(rename_at(&parent, OsStr::new("old.txt"), OsStr::new("new.txt")).is_ok());
+        assert!(dir.path().join("new.txt").exists());
+        assert!(!dir.path().join("old.txt").exists());
+    }
+
+    #[test]
+    fn rename_at_null_byte_in_name() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+
+        let bad_name = OsStr::from_bytes(b"old\x00txt");
+        let result = rename_at(&parent, bad_name, OsStr::new("new.txt"));
+        assert!(result.is_err());
+    }
+
+    // ── remove_at ────────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_at_existing() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+        fs::write(dir.path().join("file.txt"), "data").unwrap();
+
+        assert!(remove_at(&parent, OsStr::new("file.txt")).is_ok());
+        assert!(!dir.path().join("file.txt").exists());
+    }
+
+    #[test]
+    fn remove_at_nonexistent() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .open(dir.path())
+            .unwrap();
+
+        let result = remove_at(&parent, OsStr::new("nope.txt"));
+        assert!(result.is_err());
+    }
+
+    // ── remove_if_present ────────────────────────────────────────────────
+
+    #[test]
+    fn remove_if_present_existing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        fs::write(&path, "data").unwrap();
+
+        assert!(remove_if_present(&path).is_ok());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_if_present_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nope.txt");
+
+        // Should be idempotent
+        assert!(remove_if_present(&path).is_ok());
+    }
+}

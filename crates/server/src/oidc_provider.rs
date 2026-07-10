@@ -65,25 +65,16 @@ struct JwksResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 struct Jwk {
     kid: String,
     #[serde(rename = "kty")]
     key_type: String,
-    #[serde(rename = "alg")]
-    algorithm: String,
-    #[serde(rename = "use")]
-    public_key_use: Option<String>,
     n: Option<String>,
     e: Option<String>,
     #[serde(rename = "x")]
     x_coord: Option<String>,
     #[serde(rename = "y")]
     y_coord: Option<String>,
-    #[serde(rename = "crv")]
-    curve: Option<String>,
-    #[serde(rename = "x5c")]
-    x509_chain: Option<Vec<String>>,
 }
 
 /// OIDC provider initialization failure.
@@ -350,4 +341,122 @@ fn build_decoding_key(jwk: &Jwk, algorithm: Algorithm) -> Result<DecodingKey, St
 fn base64_decode_url(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.decode(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── OidcProviderError display ────────────────────────────────────────
+
+    #[test]
+    fn oidc_provider_error_http_client_display_non_empty() {
+        let e = OidcProviderError::HttpClient("connection refused".into());
+        let msg = format!("{e}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("HTTP client"));
+    }
+
+    #[test]
+    fn oidc_provider_error_discovery_fetch_display_non_empty() {
+        let e = OidcProviderError::DiscoveryFetch("timeout".into());
+        let msg = format!("{e}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("discovery"));
+    }
+
+    #[test]
+    fn oidc_provider_error_jwks_fetch_display_non_empty() {
+        let e = OidcProviderError::JwksFetch("404 not found".into());
+        let msg = format!("{e}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("JWKS"));
+    }
+
+    // ── Jwk deserialization ──────────────────────────────────────────────
+
+    #[test]
+    fn jwk_deserialize_rsa() {
+        let json = json!({
+            "kid": "rsa-key-1",
+            "kty": "RSA",
+            "alg": "RS256",
+            "use": "sig",
+            "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4Qy5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+            "e": "AQAB"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize RSA JWK");
+        assert_eq!(jwk.kid, "rsa-key-1");
+        assert_eq!(jwk.key_type, "RSA");
+        assert!(jwk.n.is_some(), "RSA key should have n field");
+        assert!(jwk.e.is_some(), "RSA key should have e field");
+    }
+
+    #[test]
+    fn jwk_deserialize_ec() {
+        let json = json!({
+            "kid": "ec-key-1",
+            "kty": "EC",
+            "alg": "ES256",
+            "use": "sig",
+            "crv": "P-256",
+            "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+            "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize EC JWK");
+        assert_eq!(jwk.kid, "ec-key-1");
+        assert_eq!(jwk.key_type, "EC");
+        assert_eq!(jwk.x_coord.as_deref(), Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4"));
+        assert_eq!(jwk.y_coord.as_deref(), Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"));
+    }
+
+    // ── JwksResponse deserialization ─────────────────────────────────────
+
+    #[test]
+    fn jwks_response_deserialize_with_keys() {
+        let json = json!({
+            "keys": [
+                {
+                    "kid": "k1",
+                    "kty": "RSA",
+                    "alg": "RS256",
+                    "n": "m",
+                    "e": "e"
+                },
+                {
+                    "kid": "k2",
+                    "kty": "EC",
+                    "alg": "ES256",
+                    "crv": "P-256",
+                    "x": "x",
+                    "y": "y"
+                }
+            ]
+        });
+        let resp: JwksResponse = serde_json::from_value(json).expect("should deserialize JWKS response");
+        assert_eq!(resp.keys.len(), 2);
+        assert_eq!(resp.keys[0].kid, "k1");
+        assert_eq!(resp.keys[1].kid, "k2");
+    }
+
+    #[test]
+    fn jwks_response_deserialize_empty() {
+        let json = json!({ "keys": [] });
+        let resp: JwksResponse = serde_json::from_value(json).expect("should deserialize empty JWKS");
+        assert!(resp.keys.is_empty());
+    }
+
+    // ── OidcDiscovery deserialization ────────────────────────────────────
+
+    #[test]
+    fn oidc_discovery_deserialize_valid() {
+        let json = json!({
+            "jwks_uri": "https://example.com/.well-known/jwks",
+            "issuer": "https://example.com",
+            "authorization_endpoint": "https://example.com/auth"
+        });
+        let disco: OidcDiscovery = serde_json::from_value(json).expect("should deserialize discovery doc");
+        assert_eq!(disco.jwks_uri, "https://example.com/.well-known/jwks");
+    }
 }
