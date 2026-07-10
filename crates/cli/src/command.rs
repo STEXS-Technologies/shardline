@@ -151,6 +151,8 @@ pub enum CliCommand {
         user: String,
         /// Service group.
         group: String,
+        /// Print the generated unit files to stdout instead of writing them.
+        dry_run: bool,
     },
     /// Remove scheduled garbage-collection systemd units.
     GcScheduleUninstall {
@@ -278,6 +280,7 @@ pub enum BenchMode {
 #[derive(Debug, Parser)]
 #[command(
     name = "shardline",
+    version,
     about = "Content-addressed storage server and operations CLI.",
     long_about = "Shardline serves CAS protocol frontends, provider integration, storage maintenance, and operational workflows from one CLI.\n\nThe current frontend set in this repository is Xet, Git LFS, Bazel HTTP remote cache, and OCI Distribution.\n\nUse `shardline help <command>` to inspect a command in detail.",
     after_help = CLI_AFTER_LONG_HELP,
@@ -683,6 +686,9 @@ struct GcScheduleInstallArgs {
     /// Service group.
     #[arg(long, default_value = "shardline")]
     group: String,
+    /// Print the generated unit files to stdout instead of writing them.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1082,6 +1088,7 @@ impl TryFrom<CliDefinition> for CliCommand {
                         working_directory: install_args.working_directory,
                         user: install_args.user,
                         group: install_args.group,
+                        dry_run: install_args.dry_run,
                     }),
                     GcScheduleSubcommand::Uninstall(uninstall_args) => {
                         Ok(Self::GcScheduleUninstall {
@@ -1572,6 +1579,7 @@ mod tests {
                 working_directory: PathBuf::from("/srv/assets"),
                 user: "svc".to_owned(),
                 group: "svc".to_owned(),
+                dry_run: false,
             })
         );
     }

@@ -100,3 +100,156 @@ impl From<AuthError> for HubApiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+    use shardline_protocol::TokenClaims;
+
+    // -----------------------------------------------------------------------
+    // parse_bearer_token (private – exercised through authorize)
+    // -----------------------------------------------------------------------
+
+    fn make_auth_header(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    fn make_mock_provider() -> impl AuthProvider {
+        struct MockProvider;
+        impl AuthProvider for MockProvider {
+            fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+                // Build a valid claim so we can reach the scope-check logic.
+                let repo =
+                    shardline_protocol::RepositoryScope::new(
+                        shardline_protocol::RepositoryProvider::GitHub,
+                        "owner",
+                        "repo",
+                        Some("main"),
+                    )
+                    .unwrap();
+                Ok(TokenClaims::new(
+                    "issuer",
+                    "subject",
+                    TokenScope::Read,
+                    repo,
+                    u64::MAX,
+                )
+                .unwrap())
+            }
+            fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+                Err(AuthError::ProviderError(
+                    "mock provider does not mint tokens".to_owned(),
+                ))
+            }
+        }
+        MockProvider
+    }
+
+    #[test]
+    fn parse_bearer_token_valid() {
+        let headers = make_auth_header("Bearer validtoken123");
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_bearer_token_empty_after_prefix() {
+        let headers = make_auth_header("Bearer ");
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::InvalidToken)));
+    }
+
+    #[test]
+    fn parse_bearer_token_contains_whitespace() {
+        let headers = make_auth_header("Bearer a b");
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::InvalidToken)));
+    }
+
+    #[test]
+    fn parse_bearer_token_not_bearer() {
+        let headers = make_auth_header("Basic dXNlcjpwYXNz");
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::InvalidToken)));
+    }
+
+    #[test]
+    fn parse_bearer_token_too_long() {
+        let long_token = "a".repeat(8193);
+        let header_value = format!("Bearer {long_token}");
+        let headers = make_auth_header(&header_value);
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::InvalidToken)));
+    }
+
+    #[test]
+    fn parse_bearer_token_no_authorization_header() {
+        let headers = HeaderMap::new();
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::Unauthorized)));
+    }
+
+    // -----------------------------------------------------------------------
+    // scope_allows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scope_allows_read_for_read() {
+        assert!(scope_allows(TokenScope::Read, TokenScope::Read));
+    }
+
+    #[test]
+    fn scope_allows_write_for_read() {
+        assert!(scope_allows(TokenScope::Write, TokenScope::Read));
+    }
+
+    #[test]
+    fn scope_allows_read_for_write_fails() {
+        assert!(!scope_allows(TokenScope::Read, TokenScope::Write));
+    }
+
+    #[test]
+    fn scope_allows_write_for_write() {
+        assert!(scope_allows(TokenScope::Write, TokenScope::Write));
+    }
+
+    // -----------------------------------------------------------------------
+    // From<AuthError> for HubApiError
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auth_error_invalid_token_maps_to_invalid_token() {
+        let err: HubApiError = AuthError::InvalidToken.into();
+        assert!(matches!(err, HubApiError::InvalidToken));
+    }
+
+    #[test]
+    fn auth_error_expired_token_maps_to_invalid_token() {
+        let err: HubApiError = AuthError::ExpiredToken.into();
+        assert!(matches!(err, HubApiError::InvalidToken));
+    }
+
+    #[test]
+    fn auth_error_insufficient_scope_maps_to_forbidden() {
+        let err: HubApiError = AuthError::InsufficientScope.into();
+        assert!(matches!(err, HubApiError::Forbidden));
+    }
+
+    #[test]
+    fn auth_error_provider_error_maps_to_signing_key_error() {
+        let err: HubApiError = AuthError::ProviderError("boom".into()).into();
+        assert!(
+            matches!(&err, HubApiError::SigningKeyError(msg) if msg == "boom"),
+            "expected SigningKeyError(\"boom\"), got {err:?}"
+        );
+    }
+}

@@ -60,25 +60,16 @@ struct JwksResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 struct Jwk {
     kid: String,
     #[serde(rename = "kty")]
     key_type: String,
-    #[serde(rename = "alg")]
-    algorithm: String,
-    #[serde(rename = "use")]
-    public_key_use: Option<String>,
     n: Option<String>,
     e: Option<String>,
     #[serde(rename = "x")]
     x_coord: Option<String>,
     #[serde(rename = "y")]
     y_coord: Option<String>,
-    #[serde(rename = "crv")]
-    curve: Option<String>,
-    #[serde(rename = "x5c")]
-    x509_chain: Option<Vec<String>>,
 }
 
 /// JWKS provider initialization failure.
@@ -240,14 +231,28 @@ impl JwksProvider {
             Err(_) => {
                 // Fallback: read from cache synchronously (background refresh
                 // task keeps keys fresh).  If the cache is empty, fail.
-                let guard = self
-                    .cached_keys
-                    .try_read()
-                    .map_err(|_| AuthError::ProviderError("JWKS cache lock contended".to_owned()))?;
-                guard
-                    .as_ref()
-                    .map(|c| Arc::clone(&c.keys))
-                    .ok_or_else(|| AuthError::ProviderError("JWKS keys not available".to_owned()))
+                // Retry try_read a few times to tolerate transient write-lock
+                // contention during key rotation.
+                const MAX_RETRIES: usize = 5;
+                const RETRY_DELAY_MS: u64 = 10;
+                let mut attempt = 0;
+                loop {
+                    if let Ok(guard) = self.cached_keys.try_read() {
+                        break guard
+                            .as_ref()
+                            .map(|c| Arc::clone(&c.keys))
+                            .ok_or_else(|| {
+                                AuthError::ProviderError("JWKS keys not available".to_owned())
+                            });
+                    }
+                    attempt += 1;
+                    if attempt >= MAX_RETRIES {
+                        break Err(AuthError::ProviderError(
+                            "JWKS cache lock contended".to_owned(),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                }
             }
         }?;
 
@@ -399,6 +404,27 @@ fn base64_decode_url(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
     URL_SAFE_NO_PAD.decode(input)
 }
 
+/// Validate that an algorithm string represents an asymmetric public-key algorithm
+/// suitable for JWKS-based token verification.
+#[cfg(test)]
+fn validate_algorithm(alg_str: &str) -> Result<(), String> {
+    match alg_str {
+        "RS256" | "RS384" | "RS512" | "ES256" | "ES384" | "ES512" => Ok(()),
+        "HS256" | "HS384" | "HS512" | "EdDSA" | "none" => {
+            Err(format!("unsupported or insecure algorithm: {alg_str}"))
+        }
+        _ => Err(format!("unsupported algorithm: {alg_str}")),
+    }
+}
+
+/// Return a default [`Validation`] for the given algorithm.
+///
+/// The returned validation requires the `exp` claim and enables expiry checking.
+#[cfg(test)]
+fn default_validation(algorithm: Algorithm) -> Validation {
+    Validation::new(algorithm)
+}
+
 /// Parse `Cache-Control: max-age=N` header and return a clamped refresh interval.
 fn parse_cache_max_age(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let cache_control = headers.get("cache-control")?.to_str().ok()?;
@@ -411,4 +437,125 @@ fn parse_cache_max_age(headers: &reqwest::header::HeaderMap) -> Option<Duration>
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── JwksProviderError display ────────────────────────────────────────
+
+    #[test]
+    fn jwks_provider_error_http_client_display_non_empty() {
+        let e = JwksProviderError::HttpClient("connection refused".into());
+        let msg = format!("{e}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("HTTP client"));
+    }
+
+    #[test]
+    fn jwks_provider_error_jwks_fetch_display_non_empty() {
+        let e = JwksProviderError::JwksFetch("404 not found".into());
+        let msg = format!("{e}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("JWKS"));
+    }
+
+    // ── Jwk deserialization ──────────────────────────────────────────────
+
+    #[test]
+    fn jwk_deserialize_rsa() {
+        let json = json!({
+            "kid": "rsa-key-1",
+            "kty": "RSA",
+            "alg": "RS256",
+            "use": "sig",
+            "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4Qy5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+            "e": "AQAB"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize RSA JWK");
+        assert_eq!(jwk.kid, "rsa-key-1");
+        assert_eq!(jwk.key_type, "RSA");
+        assert!(jwk.n.is_some());
+        assert!(jwk.e.is_some());
+    }
+
+    #[test]
+    fn jwk_deserialize_ec() {
+        let json = json!({
+            "kid": "ec-key-1",
+            "kty": "EC",
+            "alg": "ES256",
+            "use": "sig",
+            "crv": "P-256",
+            "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+            "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize EC JWK");
+        assert_eq!(jwk.kid, "ec-key-1");
+        assert_eq!(jwk.key_type, "EC");
+        assert_eq!(jwk.x_coord.as_deref(), Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4"));
+        assert_eq!(jwk.y_coord.as_deref(), Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"));
+    }
+
+    // ── validate_algorithm ───────────────────────────────────────────────
+
+    #[test]
+    fn validate_algorithm_rsa_family_ok() {
+        assert!(validate_algorithm("RS256").is_ok());
+        assert!(validate_algorithm("RS384").is_ok());
+        assert!(validate_algorithm("RS512").is_ok());
+    }
+
+    #[test]
+    fn validate_algorithm_ec_family_ok() {
+        assert!(validate_algorithm("ES256").is_ok());
+        assert!(validate_algorithm("ES384").is_ok());
+        assert!(validate_algorithm("ES512").is_ok());
+    }
+
+    #[test]
+    fn validate_algorithm_hmac_family_err() {
+        assert!(validate_algorithm("HS256").is_err());
+        assert!(validate_algorithm("HS384").is_err());
+        assert!(validate_algorithm("HS512").is_err());
+    }
+
+    #[test]
+    fn validate_algorithm_eddsa_err() {
+        assert!(validate_algorithm("EdDSA").is_err());
+    }
+
+    #[test]
+    fn validate_algorithm_none_err() {
+        assert!(validate_algorithm("none").is_err());
+    }
+
+    // ── default_validation ───────────────────────────────────────────────
+
+    #[test]
+    fn default_validation_has_correct_algorithm() {
+        let v = default_validation(Algorithm::RS256);
+        assert_eq!(v.algorithms, vec![Algorithm::RS256]);
+
+        let v = default_validation(Algorithm::ES384);
+        assert_eq!(v.algorithms, vec![Algorithm::ES384]);
+    }
+
+    #[test]
+    fn default_validation_requires_exp() {
+        let v = default_validation(Algorithm::RS256);
+        assert!(v.required_spec_claims.contains("exp"));
+        assert!(v.validate_exp);
+    }
+
+    // ── Constants ────────────────────────────────────────────────────────
+
+    #[test]
+    fn constants_jwks_refresh_interval() {
+        assert_eq!(DEFAULT_JWKS_REFRESH_INTERVAL, Duration::from_secs(300));
+        assert_eq!(MIN_JWKS_REFRESH_INTERVAL, Duration::from_secs(60));
+        assert_eq!(MAX_JWKS_REFRESH_INTERVAL, Duration::from_secs(3600));
+    }
 }

@@ -574,3 +574,99 @@ pub struct LfsObjectError {
     /// Error message.
     pub message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // RepoType::from_str
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_str_models() {
+        assert_eq!(RepoType::from_str("models"), Some(RepoType::Model));
+    }
+
+    #[test]
+    fn from_str_model() {
+        assert_eq!(RepoType::from_str("model"), Some(RepoType::Model));
+    }
+
+    #[test]
+    fn from_str_datasets() {
+        assert_eq!(RepoType::from_str("datasets"), Some(RepoType::Dataset));
+    }
+
+    #[test]
+    fn from_str_dataset() {
+        assert_eq!(RepoType::from_str("dataset"), Some(RepoType::Dataset));
+    }
+
+    #[test]
+    fn from_str_spaces() {
+        assert_eq!(RepoType::from_str("spaces"), Some(RepoType::Space));
+    }
+
+    #[test]
+    fn from_str_space() {
+        assert_eq!(RepoType::from_str("space"), Some(RepoType::Space));
+    }
+
+    #[test]
+    fn from_str_unknown() {
+        assert_eq!(RepoType::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn from_str_empty() {
+        assert_eq!(RepoType::from_str(""), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // RepoType::as_path_str
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn as_path_str_model() {
+        assert_eq!(RepoType::Model.as_path_str(), "models");
+    }
+
+    #[test]
+    fn as_path_str_dataset() {
+        assert_eq!(RepoType::Dataset.as_path_str(), "datasets");
+    }
+
+    #[test]
+    fn as_path_str_space() {
+        assert_eq!(RepoType::Space.as_path_str(), "spaces");
+    }
+
+    // -----------------------------------------------------------------------
+    // RepoType serialization round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_type_roundtrip_model() {
+        let value = serde_json::to_string(&RepoType::Model).unwrap();
+        assert_eq!(value, "\"model\"");
+        let deserialized: RepoType = serde_json::from_str(&value).unwrap();
+        assert_eq!(deserialized, RepoType::Model);
+    }
+
+    #[test]
+    fn repo_type_roundtrip_dataset() {
+        let value = serde_json::to_string(&RepoType::Dataset).unwrap();
+        assert_eq!(value, "\"dataset\"");
+        let deserialized: RepoType = serde_json::from_str(&value).unwrap();
+        assert_eq!(deserialized, RepoType::Dataset);
+    }
+
+    #[test]
+    fn repo_type_roundtrip_space() {
+        let value = serde_json::to_string(&RepoType::Space).unwrap();
+        assert_eq!(value, "\"space\"");
+        let deserialized: RepoType = serde_json::from_str(&value).unwrap();
+        assert_eq!(deserialized, RepoType::Space);
+    }
+}

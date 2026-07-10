@@ -238,3 +238,142 @@ impl RecordMutation for LocalRecordStore {
         Box::pin(async move { Ok(()) })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_protocol::{ChunkRange, ShardlineHash};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::{FileChunkRecord, FileRecord, RecordMutation, RecordTraversal};
+
+    fn make_store() -> LocalRecordStore {
+        let storage = shardline_test_support::TempStorage::new();
+        LocalRecordStore::new(storage.path_buf()).expect("failed to create local record store")
+    }
+
+    fn sample_record() -> FileRecord {
+        FileRecord {
+            file_id: "test.bin".to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "b".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_version_records_on_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let call_count = AtomicUsize::new(0);
+        RecordTraversal::visit_version_records(&store, |_| {
+            call_count.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_latest_records_on_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let call_count = AtomicUsize::new(0);
+        RecordTraversal::visit_latest_records(&store, |_| {
+            call_count.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_version_records_after_write_calls_visitor_with_correct_data() {
+        let store = make_store();
+        let record = sample_record();
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .expect("write should succeed");
+
+        let mut visited = Vec::new();
+        RecordTraversal::visit_version_records(&store, |stored| {
+            visited.push(stored.bytes);
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(visited.len(), 1);
+        let loaded: FileRecord = serde_json::from_slice(&visited[0]).expect("should deserialize");
+        assert_eq!(loaded.file_id, record.file_id);
+        assert_eq!(loaded.content_hash, record.content_hash);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_latest_records_after_write_calls_visitor_with_correct_data() {
+        let store = make_store();
+        let record = sample_record();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .expect("write should succeed");
+
+        let mut visited = Vec::new();
+        RecordTraversal::visit_latest_records(&store, |stored| {
+            visited.push(stored.bytes);
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(visited.len(), 1);
+        let loaded: FileRecord = serde_json::from_slice(&visited[0]).expect("should deserialize");
+        assert_eq!(loaded.file_id, record.file_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_and_read_version_record_roundtrip() {
+        let store = make_store();
+        let record = sample_record();
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .expect("write should succeed");
+
+        let locator = RecordTraversal::version_record_locator(&store, &record);
+        let exists = RecordTraversal::record_locator_exists(&store, &locator)
+            .await
+            .expect("exists should succeed");
+        assert!(exists);
+
+        let bytes = RecordTraversal::read_record_bytes(&store, &locator)
+            .await
+            .expect("read should succeed");
+        let loaded: FileRecord = serde_json::from_slice(&bytes).expect("should deserialize");
+        assert_eq!(loaded, record);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_version_record_locators_empty_initially() {
+        let store = make_store();
+        let locators = RecordTraversal::list_version_record_locators(&store)
+            .await
+            .expect("list should succeed");
+        assert!(locators.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_latest_record_locators_empty_initially() {
+        let store = make_store();
+        let locators = RecordTraversal::list_latest_record_locators(&store)
+            .await
+            .expect("list should succeed");
+        assert!(locators.is_empty());
+    }
+}

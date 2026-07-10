@@ -749,4 +749,279 @@ mod tests {
         .unwrap();
         assert_eq!(report.issue_count(), 1);
     }
+
+    // ---- desired_reconstruction_file_ids tests ----
+
+    fn make_candidate_with_file_id(file_id: &str) -> VersionCandidate<&'static str> {
+        VersionCandidate {
+            record: shardline_index::FileRecord {
+                file_id: file_id.to_owned(),
+                content_hash: "a".repeat(64),
+                total_bytes: 0,
+                chunk_size: 0,
+                repository_scope: None,
+                chunks: Vec::new(),
+            },
+            locator: "loc",
+            modified_since_epoch: std::time::Duration::from_secs(0),
+        }
+    }
+
+    #[test]
+    fn desired_reconstruction_file_ids_empty_candidates_returns_empty_set() {
+        let candidates: Vec<VersionCandidate<&str>> = Vec::new();
+        let result = desired_reconstruction_file_ids(&candidates);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn desired_reconstruction_file_ids_includes_valid_xet_hash() {
+        let valid_hash = "a".repeat(64);
+        let candidates = vec![make_candidate_with_file_id(&valid_hash)];
+        let result = desired_reconstruction_file_ids(&candidates);
+        assert!(result.contains(&valid_hash));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn desired_reconstruction_file_ids_filters_non_hash_file_ids() {
+        let valid_hash = "a".repeat(64);
+        let candidates = vec![
+            make_candidate_with_file_id(&valid_hash),
+            make_candidate_with_file_id("not-a-hash"),
+            make_candidate_with_file_id("path/to/file.txt"),
+        ];
+        let result = desired_reconstruction_file_ids(&candidates);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&valid_hash));
+    }
+
+    #[test]
+    fn desired_reconstruction_file_ids_deduplicates() {
+        let valid_hash = "b".repeat(64);
+        let candidates = vec![
+            make_candidate_with_file_id(&valid_hash),
+            make_candidate_with_file_id(&valid_hash),
+            make_candidate_with_file_id(&valid_hash),
+        ];
+        let result = desired_reconstruction_file_ids(&candidates);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn desired_reconstruction_file_ids_multiple_unique_hashes() {
+        let hash1 = "a".repeat(64);
+        let hash2 = "b".repeat(64);
+        let hash3 = "c".repeat(64);
+        let candidates = vec![
+            make_candidate_with_file_id(&hash1),
+            make_candidate_with_file_id("invalid"),
+            make_candidate_with_file_id(&hash2),
+            make_candidate_with_file_id(&hash3),
+        ];
+        let result = desired_reconstruction_file_ids(&candidates);
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&hash1));
+        assert!(result.contains(&hash2));
+        assert!(result.contains(&hash3));
+    }
+
+    // ---- RebuildError From conversions ----
+
+    #[test]
+    fn rebuild_error_from_parse_stored_file_record_too_large() {
+        let source = shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+            observed_bytes: 999,
+            maximum_bytes: 100,
+        };
+        let error: RebuildError = source.into();
+        match error {
+            RebuildError::StoredFileMetadataTooLarge {
+                observed_bytes,
+                maximum_bytes,
+            } => {
+                assert_eq!(observed_bytes, 999);
+                assert_eq!(maximum_bytes, 100);
+            }
+            other => panic!("expected StoredFileMetadataTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebuild_error_from_parse_stored_file_record_json() {
+        let source = shardline_server_core::ParseStoredFileRecordError::Json(
+            serde_json::from_str::<serde_json::Value>("invalid json!").unwrap_err(),
+        );
+        let error: RebuildError = source.into();
+        assert!(matches!(error, RebuildError::Json(_)));
+    }
+
+    #[test]
+    fn rebuild_error_from_validate_identifier_error() {
+        let source = shardline_server_core::ValidateIdentifierError;
+        let error: RebuildError = source.into();
+        assert!(matches!(error, RebuildError::InvalidFileId));
+    }
+
+    #[test]
+    fn rebuild_error_from_validate_content_hash_error() {
+        let source = shardline_server_core::ValidateContentHashError;
+        let error: RebuildError = source.into();
+        assert!(matches!(error, RebuildError::InvalidContentHash));
+    }
+
+    #[test]
+    fn rebuild_error_from_rebuild_overflow_error() {
+        let source = shardline_server_core::RebuildOverflowError;
+        let error: RebuildError = source.into();
+        assert!(matches!(error, RebuildError::Overflow));
+    }
+
+    // ---- RebuildError display messages ----
+
+    #[test]
+    fn rebuild_error_display_messages_are_non_empty() {
+        let errors: Vec<RebuildError> = vec![
+            RebuildError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "test",
+            )),
+            RebuildError::Json(serde_json::from_str::<serde_json::Value>("bad json}}").unwrap_err()),
+            RebuildError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+            RebuildError::InvalidContentHash,
+            RebuildError::InvalidFileId,
+            RebuildError::Overflow,
+            RebuildError::ObjectPrefix(
+                shardline_storage::ObjectPrefixError::UnsafePath,
+            ),
+            RebuildError::LocalObjectStore(
+                shardline_storage::LocalObjectStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "test",
+                )),
+            ),
+            RebuildError::StoredFileMetadataTooLarge {
+                observed_bytes: 1,
+                maximum_bytes: 0,
+            },
+        ];
+
+        for error in &errors {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "display message was empty for: {error:?}");
+        }
+    }
+
+    #[test]
+    fn rebuild_error_stored_file_metadata_too_large_display_includes_sizes() {
+        let error = RebuildError::StoredFileMetadataTooLarge {
+            observed_bytes: 2048,
+            maximum_bytes: 1024,
+        };
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+        assert!(
+            msg.contains("stored file metadata"),
+            "expected metadata mention in display, got: {msg}"
+        );
+    }
+
+    // ---- prune_stale_reconstructions early-return on dirty state ----
+
+    #[tokio::test]
+    async fn prune_stale_reconstructions_returns_early_when_report_is_dirty() {
+        use shardline_index::MemoryIndexStore;
+
+        let index_store = MemoryIndexStore::new();
+        let desired = HashSet::from(["a".repeat(64)]);
+
+        let mut report = empty_report();
+        push_issue(
+            &mut report,
+            IndexRebuildIssueKind::InvalidVersionRecordJson,
+            "corrupt/record".to_owned(),
+            IndexRebuildIssueDetail::RecordJsonInvalid,
+        )
+        .unwrap();
+        assert!(!report.is_clean());
+
+        prune_stale_reconstructions(&index_store, &desired, &mut report)
+            .await
+            .unwrap();
+
+        // Report should still have the original issue and no reconstruction stats.
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(report.scanned_reconstructions, 0);
+        assert_eq!(report.removed_stale_reconstructions, 0);
+    }
+
+    // ---- desired_reconstruction_file_ids preserves dirty report state ----
+
+    #[test]
+    fn desired_reconstruction_file_ids_does_not_modify_report_state() {
+        let mut report = empty_report();
+        push_issue(
+            &mut report,
+            IndexRebuildIssueKind::InvalidVersionFileId,
+            "loc".to_owned(),
+            IndexRebuildIssueDetail::InvalidFileId {
+                file_id: "bad".to_owned(),
+            },
+        )
+        .unwrap();
+        assert!(!report.is_clean());
+
+        let candidates = vec![make_candidate_with_file_id(&"a".repeat(64))];
+        let _result = desired_reconstruction_file_ids(&candidates);
+
+        // Report is still dirty — the function does not touch the report.
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+    }
+
+    // ---- push_issue with many issues ----
+
+    #[test]
+    fn push_issue_many_issues_tracks_all() {
+        let mut report = empty_report();
+        for i in 0..100 {
+            push_issue(
+                &mut report,
+                IndexRebuildIssueKind::InvalidVersionContentHash,
+                format!("loc/{i}"),
+                IndexRebuildIssueDetail::InvalidContentHash {
+                    content_hash: format!("hash-{i}"),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(report.issue_count(), 100);
+        assert!(!report.is_clean());
+    }
+
+    // ---- RebuildError From impls for basic error types ----
+
+    #[test]
+    fn rebuild_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing file");
+        let error: RebuildError = io_err.into();
+        assert!(matches!(error, RebuildError::Io(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not json!!!").unwrap_err();
+        let error: RebuildError = json_err.into();
+        assert!(matches!(error, RebuildError::Json(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_try_from_int_error() {
+        let int_err = u64::try_from(-1i32).unwrap_err();
+        let error: RebuildError = int_err.into();
+        assert!(matches!(error, RebuildError::NumericConversion(_)));
+        assert!(!error.to_string().is_empty());
+    }
 }

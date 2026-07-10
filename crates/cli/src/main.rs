@@ -9,7 +9,8 @@ use std::{
 
 use serde_json::to_string_pretty;
 use shardline::{
-    BenchConfig, BenchMode, CliCommand, GcScheduleInstallOptions, effective_root,
+    BenchConfig, BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
+    effective_root,
     install_gc_schedule, load_runtime_server_config, mint_admin_token_from_sources,
     print_hold_list_summary, print_hold_summary, render_completion, render_manpage,
     run_backup_manifest, run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc,
@@ -276,7 +277,9 @@ async fn main() -> ExitCode {
             retention_seconds,
             retention_report,
             orphan_inventory,
-        }) => match run_gc(
+        }) => {
+            let retention_seconds = retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS);
+            match run_gc(
             root.as_deref(),
             mark,
             sweep,
@@ -309,7 +312,8 @@ async fn main() -> ExitCode {
                 eprintln!("{error}");
                 ExitCode::from(2)
             }
-        },
+        }
+        }
         Ok(CliCommand::GcScheduleInstall {
             output_dir,
             unit_prefix,
@@ -320,6 +324,7 @@ async fn main() -> ExitCode {
             working_directory,
             user,
             group,
+            dry_run,
         }) => match install_gc_schedule(&GcScheduleInstallOptions {
             output_dir,
             unit_prefix,
@@ -330,6 +335,7 @@ async fn main() -> ExitCode {
             working_directory,
             user,
             group,
+            dry_run,
         }) {
             Ok(report) => {
                 report.print_summary();

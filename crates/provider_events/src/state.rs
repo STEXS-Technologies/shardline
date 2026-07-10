@@ -169,3 +169,242 @@ where
         .map_err(Into::into)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_index::{LifecycleStore, MemoryIndexStore, ProviderRepositoryState};
+    use shardline_protocol::RepositoryProvider;
+    use shardline_vcs::{
+        ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind,
+        RevisionRef, WebhookDeliveryId,
+    };
+
+    use super::*;
+
+    fn make_event(
+        owner: &str,
+        name: &str,
+        kind: RepositoryWebhookEventKind,
+        delivery_id: &str,
+    ) -> RepositoryWebhookEvent {
+        RepositoryWebhookEvent::new(
+            RepositoryRef::new(ProviderKind::GitHub, owner, name).unwrap(),
+            WebhookDeliveryId::new(delivery_id).unwrap(),
+            kind,
+        )
+    }
+
+    #[tokio::test]
+    async fn apply_access_changed_returns_correct_outcome() {
+        let index = MemoryIndexStore::new();
+        let event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::AccessChanged,
+            "delivery-access-1",
+        );
+
+        let outcome = apply_access_changed(&index, &event, 1000).await.unwrap();
+
+        assert_eq!(outcome.provider, ProviderKind::GitHub);
+        assert_eq!(outcome.owner, "team");
+        assert_eq!(outcome.repo, "repo");
+        assert_eq!(outcome.delivery_id, "delivery-access-1");
+        assert_eq!(outcome.event_kind, ProviderWebhookOutcomeKind::AccessChanged);
+        assert_eq!(outcome.affected_file_versions, 0);
+        assert_eq!(outcome.affected_chunks, 0);
+        assert_eq!(outcome.applied_holds, 0);
+        assert_eq!(outcome.retention_seconds, None);
+    }
+
+    #[tokio::test]
+    async fn apply_access_changed_updates_provider_repository_state() {
+        let index = MemoryIndexStore::new();
+        let event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::AccessChanged,
+            "delivery-access-2",
+        );
+
+        let _outcome = apply_access_changed(&index, &event, 2000).await.unwrap();
+
+        let state = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "repo",
+        )
+        .unwrap();
+        assert!(state.is_some());
+        let state = state.unwrap();
+        assert_eq!(state.last_access_changed_at_unix_seconds(), Some(2000));
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), None);
+        assert_eq!(state.last_pushed_revision(), None);
+    }
+
+    #[tokio::test]
+    async fn apply_revision_pushed_returns_correct_outcome() {
+        let index = MemoryIndexStore::new();
+        let event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::RevisionPushed {
+                revision: RevisionRef::new("refs/heads/main").unwrap(),
+            },
+            "delivery-rev-1",
+        );
+
+        let outcome = apply_revision_pushed(&index, &event, "refs/heads/main", 3000)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.provider, ProviderKind::GitHub);
+        assert_eq!(outcome.owner, "team");
+        assert_eq!(outcome.repo, "repo");
+        assert_eq!(outcome.delivery_id, "delivery-rev-1");
+        assert_eq!(
+            outcome.event_kind,
+            ProviderWebhookOutcomeKind::RevisionPushed {
+                revision: "refs/heads/main".to_owned(),
+            }
+        );
+        assert_eq!(outcome.affected_file_versions, 0);
+        assert_eq!(outcome.affected_chunks, 0);
+        assert_eq!(outcome.applied_holds, 0);
+        assert_eq!(outcome.retention_seconds, None);
+    }
+
+    #[tokio::test]
+    async fn apply_revision_pushed_updates_provider_repository_state() {
+        let index = MemoryIndexStore::new();
+        let event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::RevisionPushed {
+                revision: RevisionRef::new("refs/heads/main").unwrap(),
+            },
+            "delivery-rev-2",
+        );
+
+        let _outcome = apply_revision_pushed(&index, &event, "refs/heads/main", 4000)
+            .await
+            .unwrap();
+
+        let state = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "repo",
+        )
+        .unwrap();
+        assert!(state.is_some());
+        let state = state.unwrap();
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(4000));
+        assert_eq!(state.last_pushed_revision(), Some("refs/heads/main"));
+        assert_eq!(state.last_access_changed_at_unix_seconds(), None);
+    }
+
+    #[tokio::test]
+    async fn migrate_provider_repository_state_moves_state() {
+        let index = MemoryIndexStore::new();
+        let old_repo = RepositoryRef::new(ProviderKind::GitHub, "team", "old-repo").unwrap();
+        let new_repo = RepositoryRef::new(ProviderKind::GitHub, "team", "new-repo").unwrap();
+
+        // Seed old repo state.
+        let old_state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "old-repo".to_owned(),
+            Some(100),
+            Some(200),
+            Some("refs/heads/main".to_owned()),
+        );
+        LifecycleStore::upsert_provider_repository_state(&index, &old_state).unwrap();
+
+        // Migrate.
+        migrate_provider_repository_state(&index, &old_repo, &new_repo)
+            .await
+            .unwrap();
+
+        // Old state is gone.
+        let old = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "old-repo",
+        )
+        .unwrap();
+        assert!(old.is_none());
+
+        // New state exists with migrated fields.
+        let new = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "new-repo",
+        )
+        .unwrap();
+        assert!(new.is_some());
+        let new = new.unwrap();
+        assert_eq!(new.last_access_changed_at_unix_seconds(), Some(100));
+        assert_eq!(new.last_revision_pushed_at_unix_seconds(), Some(200));
+        assert_eq!(new.last_pushed_revision(), Some("refs/heads/main"));
+    }
+
+    #[tokio::test]
+    async fn migrate_provider_repository_state_noop_when_old_state_missing() {
+        let index = MemoryIndexStore::new();
+        let old_repo = RepositoryRef::new(ProviderKind::GitHub, "team", "missing").unwrap();
+        let new_repo = RepositoryRef::new(ProviderKind::GitHub, "team", "target").unwrap();
+
+        let result = migrate_provider_repository_state(&index, &old_repo, &new_repo).await;
+        assert!(result.is_ok());
+
+        // New state should not exist either.
+        let new = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "target",
+        )
+        .unwrap();
+        assert!(new.is_none());
+    }
+
+    #[tokio::test]
+    async fn access_changed_then_revision_push_merges_state() {
+        let index = MemoryIndexStore::new();
+        let access_event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::AccessChanged,
+            "delivery-access-3",
+        );
+        let rev_event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::RevisionPushed {
+                revision: RevisionRef::new("refs/heads/dev").unwrap(),
+            },
+            "delivery-rev-3",
+        );
+
+        let _a = apply_access_changed(&index, &access_event, 500).await.unwrap();
+        let _r = apply_revision_pushed(&index, &rev_event, "refs/heads/dev", 600)
+            .await
+            .unwrap();
+
+        let state = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "repo",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(state.last_access_changed_at_unix_seconds(), Some(500));
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(600));
+        assert_eq!(state.last_pushed_revision(), Some("refs/heads/dev"));
+    }
+}

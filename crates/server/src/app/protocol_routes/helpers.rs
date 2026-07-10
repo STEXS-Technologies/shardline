@@ -124,3 +124,173 @@ pub(crate) fn parse_query_values(uri: &axum::http::Uri, key: &str) -> Result<Vec
         .filter_map(|(candidate_key, value)| (candidate_key == key).then(|| value.into_owned()))
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, Uri};
+
+    use super::*;
+
+    #[test]
+    fn parse_optional_range_returns_none_when_header_absent() {
+        let headers = HeaderMap::new();
+        let result = parse_optional_range(&headers, 1024);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_optional_range_parses_valid_range_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::RANGE,
+            HeaderValue::from_static("bytes=0-9"),
+        );
+        let result = parse_optional_range(&headers, 100);
+        let range = result.unwrap().unwrap();
+        assert_eq!(range.start(), 0);
+        assert_eq!(range.end_inclusive(), 9);
+    }
+
+    #[test]
+    fn parse_optional_range_rejects_invalid_range_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::RANGE,
+            HeaderValue::from_static("bytes=abc-def"),
+        );
+        let result = parse_optional_range(&headers, 100);
+        assert!(matches!(result, Err(ServerError::InvalidRangeHeader)));
+    }
+
+    #[test]
+    fn parse_upload_content_range_plain_range() {
+        let range = parse_upload_content_range("0-9").unwrap();
+        assert_eq!(range.start(), 0);
+        assert_eq!(range.end_inclusive(), 9);
+    }
+
+    #[test]
+    fn parse_upload_content_range_with_bytes_prefix_and_total() {
+        let range = parse_upload_content_range("bytes 10-19/20").unwrap();
+        assert_eq!(range.start(), 10);
+        assert_eq!(range.end_inclusive(), 19);
+    }
+
+    #[test]
+    fn parse_upload_content_range_with_unknown_total() {
+        let range = parse_upload_content_range("bytes 20-29/*").unwrap();
+        assert_eq!(range.start(), 20);
+        assert_eq!(range.end_inclusive(), 29);
+    }
+
+    #[test]
+    fn parse_upload_content_range_rejects_invalid_input() {
+        assert!(matches!(
+            parse_upload_content_range("invalid"),
+            Err(ServerError::InvalidRangeHeader)
+        ));
+    }
+
+    #[test]
+    fn parse_upload_content_range_rejects_empty_string() {
+        assert!(matches!(
+            parse_upload_content_range(""),
+            Err(ServerError::InvalidRangeHeader)
+        ));
+    }
+
+    #[test]
+    fn parse_upload_content_range_rejects_negative_start() {
+        assert!(matches!(
+            parse_upload_content_range("bytes -1-9"),
+            Err(ServerError::InvalidRangeHeader)
+        ));
+    }
+
+    #[test]
+    fn parse_upload_content_range_rejects_non_numeric() {
+        assert!(matches!(
+            parse_upload_content_range("bytes abc-def"),
+            Err(ServerError::InvalidRangeHeader)
+        ));
+    }
+
+    #[test]
+    fn parse_query_map_returns_empty_for_no_query() {
+        let uri: Uri = "/v2/repo/blobs/uploads".parse().unwrap();
+        let result = parse_query_map(&uri).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_query_map_parses_single_key_value() {
+        let uri: Uri = "/v2/repo/blobs/uploads?mount=abc123".parse().unwrap();
+        let result = parse_query_map(&uri).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("mount").unwrap(), "abc123");
+    }
+
+    #[test]
+    fn parse_query_map_parses_multiple_key_values() {
+        let uri: Uri = "/v2/repo/blobs/uploads?a=1&b=2".parse().unwrap();
+        let result = parse_query_map(&uri).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("a").unwrap(), "1");
+        assert_eq!(result.get("b").unwrap(), "2");
+    }
+
+    #[test]
+    fn parse_query_map_rejects_oversized_query() {
+        let long_value = "a".repeat(super::super::super::MAX_PROTOCOL_QUERY_BYTES + 1);
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/repo/blobs/uploads?key={long_value}"))
+            .build()
+            .unwrap();
+        assert!(matches!(
+            parse_query_map(&uri),
+            Err(ServerError::RequestQueryTooLarge)
+        ));
+    }
+
+    #[test]
+    fn parse_query_values_returns_empty_for_no_query() {
+        let uri: Uri = "/v2/repo/blobs/uploads".parse().unwrap();
+        let result = parse_query_values(&uri, "scope").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_query_values_extracts_matching_key() {
+        let uri: Uri = "/v2/repo/blobs/uploads?scope=repo:pull".parse().unwrap();
+        let result = parse_query_values(&uri, "scope").unwrap();
+        assert_eq!(result, vec!["repo:pull"]);
+    }
+
+    #[test]
+    fn parse_query_values_extracts_multiple_matching_keys() {
+        let uri: Uri = "/v2/repo/blobs/uploads?scope=a&scope=b".parse().unwrap();
+        let result = parse_query_values(&uri, "scope").unwrap();
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_query_values_returns_empty_when_key_missing() {
+        let uri: Uri = "/v2/repo/blobs/uploads?other=val".parse().unwrap();
+        let result = parse_query_values(&uri, "scope").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_query_values_rejects_oversized_query() {
+        let long_value = "a".repeat(super::super::super::MAX_PROTOCOL_QUERY_BYTES + 1);
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/repo/blobs/uploads?scope={long_value}"))
+            .build()
+            .unwrap();
+        assert!(matches!(
+            parse_query_values(&uri, "scope"),
+            Err(ServerError::RequestQueryTooLarge)
+        ));
+    }
+}

@@ -15,19 +15,6 @@ use criterion::{BenchmarkId, Criterion, black_box};
 use shardline_index::{FileChunkRecord, FileRecord};
 use shardline_server_core::{chunk_hash, parse_stored_file_record_bytes, validate_content_hash};
 
-#[expect(dead_code)]
-fn make_hash_string(suffix: u8) -> String {
-    let mut s = String::with_capacity(64);
-    for i in 0..64u8 {
-        if i == 63 {
-            s.push_str(&format!("{suffix:02x}"));
-        } else {
-            s.push('a');
-        }
-    }
-    s
-}
-
 fn make_record(chunk_count: usize) -> FileRecord {
     let mut chunks = Vec::with_capacity(chunk_count);
     let mut offset = 0_u64;

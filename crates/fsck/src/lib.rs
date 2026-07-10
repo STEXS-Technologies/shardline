@@ -712,6 +712,389 @@ mod tests {
         });
         assert_eq!(report.issue_count(), 2);
     }
+
+    // ── push_issue ──────────────────────────────────────────────────────
+
+    #[test]
+    fn push_issue_appends_to_report() {
+        let mut report = clean_report();
+        let detail = FsckIssueDetail::HashMismatch {
+            expected_hash: "a".repeat(64),
+            observed_hash: "b".repeat(64),
+        };
+        push_issue(
+            &mut report,
+            FsckIssueKind::MissingChunk,
+            "loc1".to_owned(),
+            detail.clone(),
+        )
+        .unwrap();
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(report.issues[0].kind, FsckIssueKind::MissingChunk);
+        assert_eq!(report.issues[0].location, "loc1");
+        assert_eq!(report.issues[0].detail, detail);
+    }
+
+    #[test]
+    fn push_issue_increments_count_for_multiple_issues() {
+        let mut report = clean_report();
+        for i in 0..5 {
+            push_issue(
+                &mut report,
+                FsckIssueKind::EmptyChunk,
+                format!("loc{i}"),
+                FsckIssueDetail::ReconstructionContainedNoTerms,
+            )
+            .unwrap();
+        }
+        assert_eq!(report.issue_count(), 5);
+    }
+
+    // ── push_reconstruction_plan_issue ──────────────────────────────────
+
+    #[test]
+    fn reconstruction_plan_issue_chunk_hash_maps_to_invalid_content_hash() {
+        let mut report = clean_report();
+        let err = FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(report.issues[0].kind, FsckIssueKind::InvalidContentHash);
+        assert_eq!(
+            report.issues[0].detail,
+            FsckIssueDetail::InvalidReconstructionPlan(
+                FsckReconstructionPlanDetail::ChunkHashInvalid
+            )
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_issue_empty_chunk() {
+        let mut report = clean_report();
+        let err = FileRecordInvariantError::EmptyChunk;
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
+        assert_eq!(report.issues[0].kind, FsckIssueKind::EmptyChunk);
+        assert_eq!(
+            report.issues[0].detail,
+            FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::EmptyChunk)
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_issue_non_contiguous_chunk_offsets() {
+        let mut report = clean_report();
+        let err = FileRecordInvariantError::NonContiguousChunkOffsets;
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
+        assert_eq!(report.issues[0].kind, FsckIssueKind::NonContiguousChunks);
+        assert_eq!(
+            report.issues[0].detail,
+            FsckIssueDetail::InvalidReconstructionPlan(
+                FsckReconstructionPlanDetail::NonContiguousChunkOffsets
+            )
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_issue_invalid_chunk_range() {
+        let mut report = clean_report();
+        let err = FileRecordInvariantError::InvalidChunkRange;
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
+        assert_eq!(report.issues[0].kind, FsckIssueKind::InvalidChunkRange);
+        assert_eq!(
+            report.issues[0].detail,
+            FsckIssueDetail::InvalidReconstructionPlan(
+                FsckReconstructionPlanDetail::InvalidChunkRange
+            )
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_issue_invalid_packed_range() {
+        let mut report = clean_report();
+        let err = FileRecordInvariantError::InvalidPackedRange;
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
+        assert_eq!(report.issues[0].kind, FsckIssueKind::InvalidPackedRange);
+        assert_eq!(
+            report.issues[0].detail,
+            FsckIssueDetail::InvalidReconstructionPlan(
+                FsckReconstructionPlanDetail::InvalidPackedRange
+            )
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_issue_length_overflow() {
+        let mut report = clean_report();
+        let err = FileRecordInvariantError::LengthOverflow;
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
+        assert_eq!(report.issues[0].kind, FsckIssueKind::TotalBytesMismatch);
+        assert_eq!(
+            report.issues[0].detail,
+            FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::LengthOverflow)
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_issue_total_bytes_mismatch() {
+        let mut report = clean_report();
+        let err = FileRecordInvariantError::TotalBytesMismatch;
+        push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
+        assert_eq!(report.issues[0].kind, FsckIssueKind::TotalBytesMismatch);
+        assert_eq!(
+            report.issues[0].detail,
+            FsckIssueDetail::InvalidReconstructionPlan(
+                FsckReconstructionPlanDetail::TotalBytesMismatch
+            )
+        );
+    }
+
+    // ── reconstruction_plan_error_detail ─────────────────────────────────
+
+    #[test]
+    fn reconstruction_plan_error_detail_chunk_hash() {
+        let err = FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidCharacter);
+        assert_eq!(
+            reconstruction_plan_error_detail(&err),
+            FsckReconstructionPlanDetail::ChunkHashInvalid
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_error_detail_empty_chunk() {
+        let err = FileRecordInvariantError::EmptyChunk;
+        assert_eq!(
+            reconstruction_plan_error_detail(&err),
+            FsckReconstructionPlanDetail::EmptyChunk
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_error_detail_non_contiguous() {
+        let err = FileRecordInvariantError::NonContiguousChunkOffsets;
+        assert_eq!(
+            reconstruction_plan_error_detail(&err),
+            FsckReconstructionPlanDetail::NonContiguousChunkOffsets
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_error_detail_invalid_chunk_range() {
+        let err = FileRecordInvariantError::InvalidChunkRange;
+        assert_eq!(
+            reconstruction_plan_error_detail(&err),
+            FsckReconstructionPlanDetail::InvalidChunkRange
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_error_detail_invalid_packed_range() {
+        let err = FileRecordInvariantError::InvalidPackedRange;
+        assert_eq!(
+            reconstruction_plan_error_detail(&err),
+            FsckReconstructionPlanDetail::InvalidPackedRange
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_error_detail_length_overflow() {
+        let err = FileRecordInvariantError::LengthOverflow;
+        assert_eq!(
+            reconstruction_plan_error_detail(&err),
+            FsckReconstructionPlanDetail::LengthOverflow
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_error_detail_total_bytes_mismatch() {
+        let err = FileRecordInvariantError::TotalBytesMismatch;
+        assert_eq!(
+            reconstruction_plan_error_detail(&err),
+            FsckReconstructionPlanDetail::TotalBytesMismatch
+        );
+    }
+
+    // ── FsckIssueKind::as_str ───────────────────────────────────────────
+
+    #[test]
+    fn fsck_issue_kind_as_str_all_variants() {
+        let cases: &[(FsckIssueKind, &str)] = &[
+            (FsckIssueKind::OversizedRecordMetadata, "oversized_record_metadata"),
+            (FsckIssueKind::InvalidRecordJson, "invalid_record_json"),
+            (FsckIssueKind::InvalidFileId, "invalid_file_id"),
+            (FsckIssueKind::InvalidContentHash, "invalid_content_hash"),
+            (FsckIssueKind::RecordPathMismatch, "record_path_mismatch"),
+            (FsckIssueKind::NonContiguousChunks, "non_contiguous_chunks"),
+            (FsckIssueKind::EmptyChunk, "empty_chunk"),
+            (FsckIssueKind::TotalBytesMismatch, "total_bytes_mismatch"),
+            (FsckIssueKind::InvalidChunkRange, "invalid_chunk_range"),
+            (FsckIssueKind::InvalidPackedRange, "invalid_packed_range"),
+            (FsckIssueKind::RecordHashMismatch, "record_hash_mismatch"),
+            (FsckIssueKind::MissingChunk, "missing_chunk"),
+            (FsckIssueKind::ChunkHashMismatch, "chunk_hash_mismatch"),
+            (FsckIssueKind::ChunkLengthMismatch, "chunk_length_mismatch"),
+            (FsckIssueKind::MissingVersionRecord, "missing_version_record"),
+            (FsckIssueKind::MismatchedVersionRecord, "mismatched_version_record"),
+            (FsckIssueKind::MissingDedupeShardObject, "missing_dedupe_shard_object"),
+            (FsckIssueKind::InvalidRetainedShard, "invalid_retained_shard"),
+            (FsckIssueKind::InvalidDedupeShardMapping, "invalid_dedupe_shard_mapping"),
+            (FsckIssueKind::EmptyReconstruction, "empty_reconstruction"),
+            (FsckIssueKind::MissingReconstructionXorb, "missing_reconstruction_xorb"),
+            (FsckIssueKind::InvalidQuarantineCandidate, "invalid_quarantine_candidate"),
+            (FsckIssueKind::MissingQuarantinedObject, "missing_quarantined_object"),
+            (FsckIssueKind::QuarantineLengthMismatch, "quarantine_length_mismatch"),
+            (FsckIssueKind::ReachableQuarantinedObject, "reachable_quarantined_object"),
+            (FsckIssueKind::InvalidRetentionHold, "invalid_retention_hold"),
+            (FsckIssueKind::MissingHeldObject, "missing_held_object"),
+            (FsckIssueKind::HeldQuarantinedObject, "held_quarantined_object"),
+            (FsckIssueKind::InvalidWebhookDeliveryTimestamp, "invalid_webhook_delivery_timestamp"),
+            (FsckIssueKind::InvalidProviderRepositoryState, "invalid_provider_repository_state"),
+            (
+                FsckIssueKind::InvalidProviderRepositoryStateTimestamp,
+                "invalid_provider_repository_state_timestamp",
+            ),
+        ];
+        for &(kind, expected) in cases {
+            assert_eq!(kind.as_str(), expected, "variant {kind:?}");
+        }
+    }
+
+    // ── ProviderRepositoryStateTimestampField::as_str ────────────────────
+
+    #[test]
+    fn provider_repository_state_timestamp_field_as_str_all_variants() {
+        let cases: &[(ProviderRepositoryStateTimestampField, &str)] = &[
+            (
+                ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
+                "last_access_changed_at_unix_seconds",
+            ),
+            (
+                ProviderRepositoryStateTimestampField::LastRevisionPushedAtUnixSeconds,
+                "last_revision_pushed_at_unix_seconds",
+            ),
+            (
+                ProviderRepositoryStateTimestampField::LastCacheInvalidatedAtUnixSeconds,
+                "last_cache_invalidated_at_unix_seconds",
+            ),
+            (
+                ProviderRepositoryStateTimestampField::LastAuthorizationRecheckedAtUnixSeconds,
+                "last_authorization_rechecked_at_unix_seconds",
+            ),
+            (
+                ProviderRepositoryStateTimestampField::LastDriftCheckedAtUnixSeconds,
+                "last_drift_checked_at_unix_seconds",
+            ),
+        ];
+        for &(field, expected) in cases {
+            assert_eq!(field.as_str(), expected, "variant {field:?}");
+        }
+    }
+
+    // ── ProviderRepositoryStateTimestampField Display ────────────────────
+
+    #[test]
+    fn provider_repository_state_timestamp_field_display_matches_as_str() {
+        let all_fields = [
+            ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
+            ProviderRepositoryStateTimestampField::LastRevisionPushedAtUnixSeconds,
+            ProviderRepositoryStateTimestampField::LastCacheInvalidatedAtUnixSeconds,
+            ProviderRepositoryStateTimestampField::LastAuthorizationRecheckedAtUnixSeconds,
+            ProviderRepositoryStateTimestampField::LastDriftCheckedAtUnixSeconds,
+        ];
+        for field in all_fields {
+            assert_eq!(field.to_string(), field.as_str(), "Display mismatch for {field:?}");
+        }
+    }
+
+    // ── RecordKind::ops ─────────────────────────────────────────────────
+
+    #[test]
+    fn record_kind_latest_ops_returns_ops_record_kind_latest() {
+        assert_eq!(RecordKind::Latest.ops(), OpsRecordKind::Latest);
+    }
+
+    #[test]
+    fn record_kind_version_ops_returns_ops_record_kind_version() {
+        assert_eq!(RecordKind::Version.ops(), OpsRecordKind::Version);
+    }
+
+    // ── object_key_storage_path ──────────────────────────────────────────
+
+    #[test]
+    fn object_key_storage_path_joins_root_and_key() {
+        let root = PathBuf::from("/data/chunks");
+        let key = ObjectKey::parse("shards/aa/bb/hash.xorb").unwrap();
+        let result = object_key_storage_path(&root, &key);
+        assert_eq!(result, PathBuf::from("/data/chunks/shards/aa/bb/hash.xorb"));
+    }
+
+    #[test]
+    fn object_key_storage_path_handles_single_segment_key() {
+        let root = PathBuf::from("/storage");
+        let key = ObjectKey::parse("file.bin").unwrap();
+        let result = object_key_storage_path(&root, &key);
+        assert_eq!(result, PathBuf::from("/storage/file.bin"));
+    }
+
+    // ── Error conversions ────────────────────────────────────────────────
+
+    #[test]
+    fn fsck_error_from_stored_file_metadata_too_large() {
+        let err = shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+            observed_bytes: 999,
+            maximum_bytes: 100,
+        };
+        let fsck_err: FsckError = err.into();
+        assert!(matches!(
+            fsck_err,
+            FsckError::StoredFileMetadataTooLarge {
+                observed_bytes: 999,
+                maximum_bytes: 100,
+            }
+        ));
+    }
+
+    #[test]
+    fn fsck_error_from_stored_file_record_json_error() {
+        let serde_err =
+            serde_json::from_str::<serde_json::Value>("not valid json {{{").unwrap_err();
+        let err = shardline_server_core::ParseStoredFileRecordError::Json(serde_err);
+        let fsck_err: FsckError = err.into();
+        assert!(matches!(fsck_err, FsckError::Json(_)));
+    }
+
+    #[test]
+    fn fsck_error_from_validate_identifier_error() {
+        let err = shardline_server_core::ValidateIdentifierError;
+        let fsck_err: FsckError = err.into();
+        assert!(matches!(fsck_err, FsckError::Overflow));
+    }
+
+    #[test]
+    fn fsck_error_from_validate_content_hash_error() {
+        let err = shardline_server_core::ValidateContentHashError;
+        let fsck_err: FsckError = err.into();
+        assert!(matches!(fsck_err, FsckError::Overflow));
+    }
+
+    #[test]
+    fn fsck_error_from_rebuild_overflow_error() {
+        let err = shardline_server_core::RebuildOverflowError;
+        let fsck_err: FsckError = err.into();
+        assert!(matches!(fsck_err, FsckError::Overflow));
+    }
+
+    #[test]
+    fn fsck_error_from_xorb_parse_error() {
+        let err = shardline_xet_adapter::XorbParseError::HashMismatch;
+        let fsck_err: FsckError = err.into();
+        assert!(matches!(fsck_err, FsckError::Overflow));
+    }
+
+    #[test]
+    fn fsck_error_from_hash_parse_error() {
+        let err = shardline_protocol::HashParseError::InvalidLength;
+        let fsck_err: FsckError = err.into();
+        assert!(matches!(fsck_err, FsckError::Overflow));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

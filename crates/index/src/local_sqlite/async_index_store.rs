@@ -466,3 +466,172 @@ impl AsyncIndexStore for LocalIndexStore {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_protocol::ChunkRange;
+
+    use super::*;
+    use crate::{AsyncIndexStore, ReconstructionTerm};
+
+    fn make_store() -> super::super::LocalIndexStore {
+        let storage = shardline_test_support::TempStorage::new();
+        super::super::LocalIndexStore::new(storage.path_buf())
+            .expect("failed to create local index store")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_quarantine_candidates_on_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut call_count = 0u32;
+        AsyncIndexStore::visit_quarantine_candidates(&store, |_| {
+            call_count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(call_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_retention_holds_on_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut call_count = 0u32;
+        AsyncIndexStore::visit_retention_holds(&store, |_| {
+            call_count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(call_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_webhook_deliveries_on_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut call_count = 0u32;
+        AsyncIndexStore::visit_webhook_deliveries(&store, |_| {
+            call_count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(call_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_provider_repository_states_on_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut call_count = 0u32;
+        AsyncIndexStore::visit_provider_repository_states(&store, |_| {
+            call_count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(call_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_dedupe_shard_mappings_on_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut call_count = 0u32;
+        AsyncIndexStore::visit_dedupe_shard_mappings(&store, |_| {
+            call_count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .await
+        .expect("visit should succeed");
+        assert_eq!(call_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_insert_and_get_reconstruction_roundtrip() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([1; 32]));
+        let object_id = StoredObjectId::new(ShardlineHash::from_bytes([2; 32]));
+        let range = ChunkRange::new(0, 1).unwrap();
+        let reconstruction =
+            FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 100)]);
+
+        AsyncIndexStore::insert_reconstruction(&store, &file_id, &reconstruction)
+            .await
+            .expect("insert should succeed");
+        let loaded = AsyncIndexStore::reconstruction(&store, &file_id)
+            .await
+            .expect("lookup should succeed");
+        assert_eq!(loaded, Some(reconstruction));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_delete_reconstruction_returns_true_then_false() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([3; 32]));
+        let reconstruction = FileReconstruction::new(vec![]);
+
+        AsyncIndexStore::insert_reconstruction(&store, &file_id, &reconstruction)
+            .await
+            .expect("insert should succeed");
+        let deleted = AsyncIndexStore::delete_reconstruction(&store, &file_id)
+            .await
+            .expect("delete should succeed");
+        assert!(deleted);
+        let deleted_again = AsyncIndexStore::delete_reconstruction(&store, &file_id)
+            .await
+            .expect("second delete should succeed");
+        assert!(!deleted_again);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_insert_object_and_contains_object() {
+        let store = make_store();
+        let object_id = StoredObjectId::new(ShardlineHash::from_bytes([5; 32]));
+
+        assert!(!AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
+        AsyncIndexStore::insert_object(&store, &object_id)
+            .await
+            .expect("insert should succeed");
+        assert!(AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_dedupe_shard_mapping_roundtrip() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([7; 32]);
+        let object_key = shardline_storage::ObjectKey::parse("shards/aa/test.shard").unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, object_key);
+
+        AsyncIndexStore::upsert_dedupe_shard_mapping(&store, &mapping)
+            .await
+            .expect("upsert should succeed");
+        let loaded = AsyncIndexStore::dedupe_shard_mapping(&store, &chunk_hash)
+            .await
+            .expect("lookup should succeed");
+        assert_eq!(loaded, Some(mapping));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_list_reconstruction_file_ids_empty_initially() {
+        let store = make_store();
+        let ids = AsyncIndexStore::list_reconstruction_file_ids(&store)
+            .await
+            .expect("list should succeed");
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_list_reconstruction_file_ids_after_insert() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([10; 32]));
+        let reconstruction = FileReconstruction::new(vec![]);
+
+        AsyncIndexStore::insert_reconstruction(&store, &file_id, &reconstruction)
+            .await
+            .expect("insert should succeed");
+        let ids = AsyncIndexStore::list_reconstruction_file_ids(&store)
+            .await
+            .expect("list should succeed");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], file_id);
+    }
+}

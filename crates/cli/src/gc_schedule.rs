@@ -78,6 +78,8 @@ pub struct GcScheduleInstallOptions {
     pub user: String,
     /// Service group.
     pub group: String,
+    /// When true, print generated unit files to stdout instead of writing to disk.
+    pub dry_run: bool,
 }
 
 impl Default for GcScheduleInstallOptions {
@@ -92,6 +94,7 @@ impl Default for GcScheduleInstallOptions {
             working_directory: PathBuf::from(DEFAULT_WORKING_DIRECTORY),
             user: DEFAULT_SERVICE_USER.to_owned(),
             group: DEFAULT_SERVICE_GROUP.to_owned(),
+            dry_run: false,
         }
     }
 }
@@ -267,12 +270,6 @@ pub fn install_gc_schedule(
     {
         let resolved = resolve_install_options(options)?;
 
-        ensure_output_directory(&resolved.output_dir)?;
-        if !resolved.output_dir.is_dir() {
-            return Err(GcScheduleError::InvalidOutputDirectory(resolved.output_dir));
-        }
-        ensure_output_directory(&resolved.working_directory)?;
-
         let service_path = resolved
             .output_dir
             .join(format!("{}.service", resolved.unit_prefix));
@@ -282,8 +279,29 @@ pub fn install_gc_schedule(
 
         let service_unit = render_service_unit(&resolved);
         let timer_unit = render_timer_unit(&resolved);
-        write_output_bytes(&service_path, service_unit.as_bytes(), true)?;
-        write_output_bytes(&timer_path, timer_unit.as_bytes(), true)?;
+
+        if resolved.dry_run {
+            println!(
+                "Would write {} ({} bytes):\n{}\n",
+                service_path.display(),
+                service_unit.len(),
+                service_unit
+            );
+            println!(
+                "Would write {} ({} bytes):\n{}\n",
+                timer_path.display(),
+                timer_unit.len(),
+                timer_unit
+            );
+        } else {
+            ensure_output_directory(&resolved.output_dir)?;
+            if !resolved.output_dir.is_dir() {
+                return Err(GcScheduleError::InvalidOutputDirectory(resolved.output_dir));
+            }
+            ensure_output_directory(&resolved.working_directory)?;
+            write_output_bytes(&service_path, service_unit.as_bytes(), true)?;
+            write_output_bytes(&timer_path, timer_unit.as_bytes(), true)?;
+        }
 
         Ok(GcScheduleInstallReport {
             service_path,
@@ -387,6 +405,7 @@ fn resolve_install_options(
         working_directory,
         user: options.user.clone(),
         group: options.group.clone(),
+        dry_run: options.dry_run,
     })
 }
 

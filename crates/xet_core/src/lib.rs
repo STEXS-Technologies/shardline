@@ -1,4 +1,9 @@
-#![allow(clippy::all)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate
+)]
 #![deny(unsafe_code)]
 #![cfg_attr(
     test,
