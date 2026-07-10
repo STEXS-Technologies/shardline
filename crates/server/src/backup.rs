@@ -334,3 +334,189 @@ where
     writer.write_all(b":")?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // write_field_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_field_name_first_field() {
+        let mut buf = Vec::new();
+        let mut first = true;
+        write_field_name(&mut buf, "key", &mut first).unwrap();
+        assert!(!first);
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""key":"#);
+    }
+
+    #[test]
+    fn write_field_name_second_field_adds_comma() {
+        let mut buf = Vec::new();
+        let mut first = true;
+
+        write_field_name(&mut buf, "first", &mut first).unwrap();
+        write_field_name(&mut buf, "second", &mut first).unwrap();
+
+        assert!(!first);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#""first":,"second":"#
+        );
+    }
+
+    #[test]
+    fn write_field_name_three_fields() {
+        let mut buf = Vec::new();
+        let mut first = true;
+
+        write_field_name(&mut buf, "a", &mut first).unwrap();
+        write_field_name(&mut buf, "b", &mut first).unwrap();
+        write_field_name(&mut buf, "c", &mut first).unwrap();
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#""a":,"b":,"c":"#
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // write_named_value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_named_value_string() {
+        let mut buf = Vec::new();
+        let mut first = true;
+        write_named_value(&mut buf, "name", &"Alice".to_string(), &mut first).unwrap();
+
+        assert!(!first);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#""name":"Alice""#
+        );
+    }
+
+    #[test]
+    fn write_named_value_integer() {
+        let mut buf = Vec::new();
+        let mut first = true;
+        write_named_value(&mut buf, "count", &42u64, &mut first).unwrap();
+
+        assert!(!first);
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""count":42"#);
+    }
+
+    #[test]
+    fn write_named_value_multiple_produces_comma_separation() {
+        let mut buf = Vec::new();
+        let mut first = true;
+
+        write_named_value(&mut buf, "x", &1u64, &mut first).unwrap();
+        write_named_value(&mut buf, "y", &2u64, &mut first).unwrap();
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#""x":1,"y":2"#
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BackupManifestReport
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn backup_manifest_report_new_defaults() {
+        let report = BackupManifestReport::new("postgres", "fs");
+        assert_eq!(report.manifest_version, 1);
+        assert_eq!(report.metadata_backend, "postgres");
+        assert_eq!(report.object_backend, "fs");
+        assert_eq!(report.object_count, 0);
+        assert_eq!(report.object_bytes, 0);
+        assert_eq!(report.latest_records, 0);
+        assert_eq!(report.version_records, 0);
+        assert_eq!(report.reconstruction_rows, 0);
+        assert_eq!(report.dedupe_shard_mappings, 0);
+        assert_eq!(report.quarantine_candidates, 0);
+        assert_eq!(report.retention_holds, 0);
+        assert_eq!(report.webhook_deliveries, 0);
+        assert_eq!(report.provider_repository_states, 0);
+    }
+
+    #[test]
+    fn backup_manifest_report_new_local_backend() {
+        let report = BackupManifestReport::new("local", "s3");
+        assert_eq!(report.metadata_backend, "local");
+        assert_eq!(report.object_backend, "s3");
+    }
+
+    // -----------------------------------------------------------------------
+    // BackupManifestObjectEntry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn backup_manifest_object_entry_fields() {
+        let entry = BackupManifestObjectEntry {
+            key: "objects/abc".to_string(),
+            length: 1024,
+            checksum: Some("deadbeef".to_string()),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"key\":\"objects/abc\""));
+        assert!(json.contains("\"length\":1024"));
+        assert!(json.contains("\"checksum\":\"deadbeef\""));
+    }
+
+    #[test]
+    fn backup_manifest_object_entry_no_checksum() {
+        let entry = BackupManifestObjectEntry {
+            key: "objects/xyz".to_string(),
+            length: 0,
+            checksum: None,
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"checksum\":null"));
+    }
+
+    // -----------------------------------------------------------------------
+    // BackupManifestReport serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn backup_manifest_report_serializable() {
+        let report = BackupManifestReport {
+            manifest_version: 1,
+            metadata_backend: "test".to_string(),
+            object_backend: "test".to_string(),
+            object_count: 5,
+            object_bytes: 100,
+            latest_records: 1,
+            version_records: 2,
+            reconstruction_rows: 3,
+            dedupe_shard_mappings: 4,
+            quarantine_candidates: 5,
+            retention_holds: 6,
+            webhook_deliveries: 7,
+            provider_repository_states: 8,
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"manifest_version\":1"));
+        assert!(json.contains("\"metadata_backend\":\"test\""));
+        assert!(json.contains("\"object_backend\":\"test\""));
+        assert!(json.contains("\"object_count\":5"));
+        assert!(json.contains("\"object_bytes\":100"));
+        assert!(json.contains("\"latest_records\":1"));
+        assert!(json.contains("\"version_records\":2"));
+        assert!(json.contains("\"reconstruction_rows\":3"));
+        assert!(json.contains("\"dedupe_shard_mappings\":4"));
+        assert!(json.contains("\"quarantine_candidates\":5"));
+        assert!(json.contains("\"retention_holds\":6"));
+        assert!(json.contains("\"webhook_deliveries\":7"));
+        assert!(json.contains("\"provider_repository_states\":8"));
+    }
+}
