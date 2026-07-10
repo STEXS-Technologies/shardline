@@ -905,3 +905,280 @@ where
         T::webhooks_for_event(&self.0, repo_id, event).map_err(Into::into)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // HubRepo::compute_commit_sha
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn compute_commit_sha_same_inputs_same_output() {
+        let sha1 = HubRepo::compute_commit_sha("abc", "commit msg", "def").unwrap();
+        let sha2 = HubRepo::compute_commit_sha("abc", "commit msg", "def").unwrap();
+        assert_eq!(sha1, sha2);
+    }
+
+    #[test]
+    fn compute_commit_sha_different_parent_produces_different_sha() {
+        let sha1 = HubRepo::compute_commit_sha("abc", "commit msg", "def").unwrap();
+        let sha2 = HubRepo::compute_commit_sha("xyz", "commit msg", "def").unwrap();
+        assert_ne!(sha1, sha2);
+    }
+
+    #[test]
+    fn compute_commit_sha_different_message_produces_different_sha() {
+        let sha1 = HubRepo::compute_commit_sha("abc", "msg1", "def").unwrap();
+        let sha2 = HubRepo::compute_commit_sha("abc", "msg2", "def").unwrap();
+        assert_ne!(sha1, sha2);
+    }
+
+    #[test]
+    fn compute_commit_sha_different_files_produces_different_sha() {
+        let sha1 = HubRepo::compute_commit_sha("abc", "msg", "aaa").unwrap();
+        let sha2 = HubRepo::compute_commit_sha("abc", "msg", "bbb").unwrap();
+        assert_ne!(sha1, sha2);
+    }
+
+    // ---------------------------------------------------------------------------
+    // HubRepoType::as_str
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn hub_repo_type_as_str() {
+        assert_eq!(HubRepoType::Model.as_str(), "model");
+        assert_eq!(HubRepoType::Dataset.as_str(), "dataset");
+        assert_eq!(HubRepoType::Space.as_str(), "space");
+    }
+
+    // ---------------------------------------------------------------------------
+    // HubRepoType::parse_str
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn parse_str_valid_singular() {
+        assert_eq!(HubRepoType::parse_str("model"), Some(HubRepoType::Model));
+        assert_eq!(
+            HubRepoType::parse_str("dataset"),
+            Some(HubRepoType::Dataset)
+        );
+        assert_eq!(HubRepoType::parse_str("space"), Some(HubRepoType::Space));
+    }
+
+    #[test]
+    fn parse_str_valid_plural() {
+        assert_eq!(HubRepoType::parse_str("models"), Some(HubRepoType::Model));
+        assert_eq!(
+            HubRepoType::parse_str("datasets"),
+            Some(HubRepoType::Dataset)
+        );
+        assert_eq!(HubRepoType::parse_str("spaces"), Some(HubRepoType::Space));
+    }
+
+    #[test]
+    fn parse_str_invalid() {
+        assert_eq!(HubRepoType::parse_str("invalid"), None);
+        assert_eq!(HubRepoType::parse_str(""), None);
+        assert_eq!(HubRepoType::parse_str("unknown"), None);
+    }
+
+    // ---------------------------------------------------------------------------
+    // HubRepo fields
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn hub_repo_fields() {
+        let repo = HubRepo {
+            repo_id: "owner/name".to_string(),
+            repo_type: HubRepoType::Model,
+            private: false,
+            default_branch: "main".to_string(),
+            created_at_unix_seconds: 1000,
+            updated_at_unix_seconds: 2000,
+        };
+        assert_eq!(repo.repo_id, "owner/name");
+        assert_eq!(repo.repo_type, HubRepoType::Model);
+        assert!(!repo.private);
+        assert_eq!(repo.default_branch, "main");
+        assert_eq!(repo.created_at_unix_seconds, 1000);
+        assert_eq!(repo.updated_at_unix_seconds, 2000);
+    }
+
+    #[test]
+    fn hub_repo_private_flag() {
+        let public = HubRepo {
+            repo_id: "a/b".to_string(),
+            repo_type: HubRepoType::Dataset,
+            private: false,
+            default_branch: String::new(),
+            created_at_unix_seconds: 0,
+            updated_at_unix_seconds: 0,
+        };
+        assert!(!public.private);
+
+        let private = HubRepo {
+            repo_id: "a/b".to_string(),
+            repo_type: HubRepoType::Dataset,
+            private: true,
+            default_branch: String::new(),
+            created_at_unix_seconds: 0,
+            updated_at_unix_seconds: 0,
+        };
+        assert!(private.private);
+    }
+
+    // ---------------------------------------------------------------------------
+    // HubRepoType::from_api_repo_type
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn from_api_repo_type() {
+        assert_eq!(
+            HubRepoType::from_api_repo_type("model"),
+            Some(HubRepoType::Model)
+        );
+        assert_eq!(
+            HubRepoType::from_api_repo_type("dataset"),
+            Some(HubRepoType::Dataset)
+        );
+        assert_eq!(HubRepoType::from_api_repo_type("invalid"), None);
+    }
+
+    // ---------------------------------------------------------------------------
+    // BoxedHubStore construction
+    // ---------------------------------------------------------------------------
+
+    struct MockHubStore;
+
+    impl HubStore for MockHubStore {
+        type Error = Box<dyn std::error::Error + Send + Sync>;
+
+        fn create_repo(
+            &self,
+            _repo_type: HubRepoType,
+            _name: &str,
+            _private: bool,
+        ) -> Result<HubRepo, Self::Error> {
+            unimplemented!()
+        }
+
+        fn get_repo(&self, _repo_id: &str) -> Result<Option<HubRepo>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn list_repos(&self) -> Result<Vec<HubRepo>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn search_repos(
+            &self,
+            _repo_type: Option<HubRepoType>,
+            _name_prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<HubRepo>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn create_revision(
+            &self,
+            _repo_id: &str,
+            _parent_sha: Option<&str>,
+            _new_sha: &str,
+            _ref_name: &str,
+            _message: &str,
+        ) -> Result<HubRevision, Self::Error> {
+            unimplemented!()
+        }
+
+        fn list_revisions(&self, _repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn resolve_revision(
+            &self,
+            _repo_id: &str,
+            _revision: &str,
+        ) -> Result<Option<String>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn store_files(
+            &self,
+            _commit_sha: &str,
+            _files: &[HubFileEntry],
+        ) -> Result<(), Self::Error> {
+            unimplemented!()
+        }
+
+        fn get_files(&self, _commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn put_lfs_object(&self, _oid: &str, _data: &[u8]) -> Result<(), Self::Error> {
+            unimplemented!()
+        }
+
+        fn get_lfs_object(&self, _oid: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn has_lfs_object(&self, _oid: &str) -> Result<bool, Self::Error> {
+            unimplemented!()
+        }
+
+        fn create_webhook(
+            &self,
+            _repo_id: &str,
+            _url: &str,
+            _events: &[String],
+            _secret: Option<&str>,
+        ) -> Result<HubWebhook, Self::Error> {
+            unimplemented!()
+        }
+
+        fn list_webhooks(&self, _repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error> {
+            unimplemented!()
+        }
+
+        fn delete_repo(&self, _repo_id: &str) -> Result<(), Self::Error> {
+            unimplemented!()
+        }
+
+        fn delete_webhook(
+            &self,
+            _repo_id: &str,
+            _webhook_id: &str,
+        ) -> Result<(), Self::Error> {
+            unimplemented!()
+        }
+
+        fn webhooks_for_event(
+            &self,
+            _repo_id: &str,
+            _event: &str,
+        ) -> Result<Vec<HubWebhook>, Self::Error> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn boxed_hub_store_new_constructs() {
+        let store = BoxedHubStore::new(MockHubStore);
+        let _ = store;
+    }
+
+    #[test]
+    fn boxed_hub_store_from_store_constructs() {
+        let store = BoxedHubStore::from_store(MockHubStore);
+        let _ = store;
+    }
+
+    #[test]
+    fn boxed_hub_store_clone_works() {
+        let store = BoxedHubStore::new(MockHubStore);
+        let cloned = store.clone();
+        let _ = (store, cloned);
+    }
+}

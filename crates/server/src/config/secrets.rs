@@ -264,3 +264,205 @@ fn parse_env_bool(name: &str) -> Result<Option<bool>, ()> {
 
     parse_bool(&value).map(Some).ok_or(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ensure_secret_size_within_limit, open_secret_file, read_secret_file_bytes,
+    };
+    use shardline_protocol::parse_bool;
+    use std::io::Write;
+    use std::path::Path;
+
+    use super::super::ServerConfigError;
+
+    // -----------------------------------------------------------------------
+    // parse_bool (the underlying parser used by parse_env_bool)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_bool_true_literal() {
+        assert_eq!(parse_bool("true"), Some(true));
+    }
+
+    #[test]
+    fn parse_bool_false_literal() {
+        assert_eq!(parse_bool("false"), Some(false));
+    }
+
+    #[test]
+    fn parse_bool_one_is_true() {
+        assert_eq!(parse_bool("1"), Some(true));
+    }
+
+    #[test]
+    fn parse_bool_zero_is_false() {
+        assert_eq!(parse_bool("0"), Some(false));
+    }
+
+    #[test]
+    fn parse_bool_yes_is_true() {
+        assert_eq!(parse_bool("yes"), Some(true));
+    }
+
+    #[test]
+    fn parse_bool_no_is_false() {
+        assert_eq!(parse_bool("no"), Some(false));
+    }
+
+    #[test]
+    fn parse_bool_on_is_true() {
+        assert_eq!(parse_bool("on"), Some(true));
+    }
+
+    #[test]
+    fn parse_bool_off_is_false() {
+        assert_eq!(parse_bool("off"), Some(false));
+    }
+
+    #[test]
+    fn parse_bool_invalid_returns_none() {
+        assert_eq!(parse_bool("invalid"), None);
+    }
+
+    #[test]
+    fn parse_bool_empty_string_returns_none() {
+        assert_eq!(parse_bool(""), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_secret_size_within_limit
+    // -----------------------------------------------------------------------
+
+    fn size_error(observed: u64, maximum: u64) -> ServerConfigError {
+        ServerConfigError::ProviderApiKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        }
+    }
+
+    #[test]
+    fn size_under_limit_is_ok() {
+        assert!(ensure_secret_size_within_limit(100, 1024, size_error).is_ok());
+    }
+
+    #[test]
+    fn size_at_limit_is_ok() {
+        assert!(ensure_secret_size_within_limit(1024, 1024, size_error).is_ok());
+    }
+
+    #[test]
+    fn size_at_zero_limit_is_ok() {
+        assert!(ensure_secret_size_within_limit(0, 0, size_error).is_ok());
+    }
+
+    #[test]
+    fn size_over_limit_is_err() {
+        let result = ensure_secret_size_within_limit(1025, 1024, size_error);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
+    }
+
+    #[test]
+    fn size_one_byte_over_limit_is_err() {
+        assert!(ensure_secret_size_within_limit(1, 0, size_error).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // read_secret_file_bytes
+    // -----------------------------------------------------------------------
+
+    fn read_error(e: std::io::Error) -> ServerConfigError {
+        ServerConfigError::ProviderApiKey(e)
+    }
+
+    fn length_mismatch_error(expected: u64, observed: u64) -> ServerConfigError {
+        ServerConfigError::ProviderApiKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        }
+    }
+
+    #[test]
+    fn read_secret_file_roundtrip() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"hello world").unwrap();
+        tmp.flush().unwrap();
+
+        let result = read_secret_file_bytes(
+            tmp.path(),
+            4096,
+            read_error,
+            size_error,
+            length_mismatch_error,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn read_secret_file_empty_is_ok() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+
+        let result = read_secret_file_bytes(
+            tmp.path(),
+            4096,
+            read_error,
+            size_error,
+            length_mismatch_error,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"");
+    }
+
+    #[test]
+    fn read_secret_file_exceeds_limit_is_err() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let data = vec![0u8; 100];
+        tmp.write_all(&data).unwrap();
+        tmp.flush().unwrap();
+
+        let result = read_secret_file_bytes(
+            tmp.path(),
+            50,
+            read_error,
+            size_error,
+            length_mismatch_error,
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
+    }
+
+    // -----------------------------------------------------------------------
+    // open_secret_file
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn open_secret_file_valid_path() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let result = open_secret_file(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_secret_file_nonexistent_path() {
+        let result = open_secret_file(Path::new("/nonexistent/path/secret_file_test"));
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_symlink_resolved_is_ok() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let symlink_path = tmp.path().with_extension("link");
+        symlink(tmp.path(), &symlink_path).unwrap();
+
+        // Symlinks are resolved to their target and opened successfully.
+        let result = open_secret_file(&symlink_path);
+        assert!(result.is_ok());
+    }
+}
