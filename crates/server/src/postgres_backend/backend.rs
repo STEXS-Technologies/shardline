@@ -120,3 +120,97 @@ impl PostgresBackend {
         self.object_store.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroUsize;
+    use tempfile::tempdir;
+    use crate::object_store::ServerObjectStore;
+
+    const TEST_POSTGRES_URL: &str = "postgres://localhost:5432/test";
+
+    async fn make_backend() -> PostgresBackend {
+        let root = tempdir().unwrap();
+        let object_store = ServerObjectStore::local(root.path().join("chunks")).unwrap();
+        PostgresBackend::new_with_object_store_and_upload_parallelism(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap(),
+            NonZeroUsize::new(64).unwrap(),
+            TEST_POSTGRES_URL,
+            object_store,
+        )
+        .await
+        .expect("constructor should succeed with lazy pool")
+    }
+
+    #[tokio::test]
+    async fn constructor_succeeds() {
+        let root = tempdir().unwrap();
+        let object_store = ServerObjectStore::local(root.path().join("chunks")).unwrap();
+        let backend = PostgresBackend::new_with_object_store_and_upload_parallelism(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap(),
+            NonZeroUsize::new(64).unwrap(),
+            TEST_POSTGRES_URL,
+            object_store,
+        )
+        .await;
+        assert!(
+            backend.is_ok(),
+            "constructor should succeed with lazy pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn constructor_fails_empty_url() {
+        let root = tempdir().unwrap();
+        let object_store = ServerObjectStore::local(root.path().join("chunks")).unwrap();
+        let backend = PostgresBackend::new_with_object_store_and_upload_parallelism(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap(),
+            NonZeroUsize::new(64).unwrap(),
+            "",
+            object_store,
+        )
+        .await;
+        assert!(
+            backend.is_err(),
+            "constructor should fail with empty postgres URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_base_url() {
+        let backend = make_backend().await;
+        assert_eq!(backend.public_base_url(), "http://127.0.0.1:8080");
+    }
+
+    #[tokio::test]
+    async fn object_backend_name() {
+        let backend = make_backend().await;
+        assert_eq!(backend.object_backend_name(), "local");
+    }
+
+    #[tokio::test]
+    async fn object_store() {
+        let root = tempdir().unwrap();
+        let object_store = ServerObjectStore::local(root.path().join("chunks")).unwrap();
+        let backend = PostgresBackend::new_with_object_store_and_upload_parallelism(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap(),
+            NonZeroUsize::new(64).unwrap(),
+            TEST_POSTGRES_URL,
+            object_store.clone(),
+        )
+        .await
+        .unwrap();
+        let retrieved = backend.object_store();
+        // ServerObjectStore implements Clone but not PartialEq, so compare backend names
+        assert_eq!(retrieved.backend_name(), object_store.backend_name());
+    }
+}
