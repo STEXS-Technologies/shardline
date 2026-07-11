@@ -14,6 +14,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use hmac::Mac;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -4327,4 +4328,59 @@ async fn git_lfs_authenticate_with_provider_token() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert!(json["header"]["X-Xet-Access-Token"].as_str().is_some());
+}
+
+// ============================================================================
+// Provider Webhook E2E Tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_github_push_webhook_accepted() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Lfs]).await;
+
+    let body = br#"{"action":"deleted","repository":{"full_name":"team/assets"}}"#;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+    mac.update(body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/webhooks")
+                .header("x-github-event", "repository")
+                .header("x-github-delivery", "delivery-1")
+                .header("x-hub-signature-256", &signature)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // A valid webhook should be accepted (202) or processed (204 for ping events)
+    assert!(response.status() == StatusCode::ACCEPTED || response.status() == StatusCode::NO_CONTENT,
+        "expected 202 or 204, got {}", response.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_github_webhook_invalid_signature() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Lfs]).await;
+
+    let body = br#"{"action":"deleted","repository":{"full_name":"team/assets"}}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/webhooks")
+                .header("x-github-event", "repository")
+                .header("x-github-delivery", "delivery-1")
+                .header("x-hub-signature-256", "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
