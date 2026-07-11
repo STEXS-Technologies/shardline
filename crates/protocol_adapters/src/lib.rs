@@ -183,4 +183,82 @@ mod tests {
         assert!(!key.as_str().contains("global"));
         assert!(key.as_str().contains("protocols/lfs/"));
     }
+
+    // --- ProtocolError::Display ---
+
+    #[test]
+    fn protocol_error_display() {
+        let err = ProtocolError::InvalidContentHash;
+        assert_eq!(
+            err.to_string(),
+            "content hash must be 64 hexadecimal characters"
+        );
+    }
+
+    // --- ProtocolError::From<ObjectKeyError> ---
+
+    #[test]
+    fn protocol_error_from_object_key_error() {
+        let oke = shardline_storage::ObjectKeyError::Empty;
+        let pe: ProtocolError = oke.into();
+        assert_eq!(
+            pe.to_string(),
+            "content hash must be 64 hexadecimal characters"
+        );
+    }
+
+    // --- object_key() ---
+
+    #[test]
+    fn object_key_valid() {
+        let key = object_key("valid/path").unwrap();
+        assert_eq!(key.as_str(), "valid/path");
+    }
+
+    #[test]
+    fn object_key_invalid_empty() {
+        assert!(object_key("").is_err());
+    }
+
+    #[test]
+    fn object_key_invalid_unsafe_path() {
+        assert!(object_key("../unsafe").is_err());
+    }
+
+    // --- validate_content_hash() ---
+
+    #[test]
+    fn validate_content_hash_valid() {
+        let hash = "a".repeat(64);
+        assert!(validate_content_hash(&hash).is_ok());
+    }
+
+    #[test]
+    fn validate_content_hash_too_short() {
+        assert!(validate_content_hash("short").is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_uppercase() {
+        let hash = "A".repeat(64);
+        assert!(validate_content_hash(&hash).is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_empty() {
+        assert!(validate_content_hash("").is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_non_hex_chars() {
+        let hash = format!("{}g{}", "a".repeat(32), "a".repeat(31));
+        assert!(validate_content_hash(&hash).is_err());
+    }
+
+    // --- LFS_CONTENT_TYPE ---
+
+    #[test]
+    fn lfs_content_type_is_correct() {
+        assert_eq!(LFS_CONTENT_TYPE, "application/vnd.git-lfs+json");
+    }
 }

@@ -197,4 +197,121 @@ mod tests {
         assert!(json["objects"][0].get("actions").is_none());
         assert!(json["objects"][0].get("error").is_none());
     }
+
+    // --- LfsObjectError serialization ---
+
+    #[test]
+    fn lfs_object_error_serialize() {
+        let err = LfsObjectError {
+            code: 404,
+            message: "Not found".into(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], 404);
+        assert_eq!(json["message"], "Not found");
+    }
+
+    // --- LfsBatchResponse with actions ---
+
+    #[test]
+    fn lfs_batch_response_with_actions() {
+        let response = LfsBatchResponse {
+            transfer: "basic".to_owned(),
+            objects: vec![LfsObjectResponse {
+                oid: "deadbeef".to_owned(),
+                size: 42,
+                authenticated: None,
+                actions: Some(serde_json::json!({"download": {"href": "https://example.com/obj"}})),
+                error: None,
+            }],
+            hash_algo: "sha256",
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        let obj = &json["objects"][0];
+        assert_eq!(obj["actions"]["download"]["href"], "https://example.com/obj");
+    }
+
+    // --- LfsBatchResponse with error on object ---
+
+    #[test]
+    fn lfs_batch_response_with_object_error() {
+        let response = LfsBatchResponse {
+            transfer: "basic".to_owned(),
+            objects: vec![LfsObjectResponse {
+                oid: "deadbeef".to_owned(),
+                size: 42,
+                authenticated: None,
+                actions: None,
+                error: Some(LfsObjectError {
+                    code: 422,
+                    message: "validation error".into(),
+                }),
+            }],
+            hash_algo: "sha256",
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        let obj = &json["objects"][0];
+        assert_eq!(obj["error"]["code"], 422);
+        assert_eq!(obj["error"]["message"], "validation error");
+    }
+
+    // --- LfsBatchResponse with mixed objects ---
+
+    #[test]
+    fn lfs_batch_response_mixed_objects() {
+        let response = LfsBatchResponse {
+            transfer: "basic".to_owned(),
+            objects: vec![
+                LfsObjectResponse {
+                    oid: "aaa".to_owned(),
+                    size: 1,
+                    authenticated: Some(true),
+                    actions: Some(serde_json::json!({"download": {"href": "https://ok"}})),
+                    error: None,
+                },
+                LfsObjectResponse {
+                    oid: "bbb".to_owned(),
+                    size: 2,
+                    authenticated: None,
+                    actions: None,
+                    error: Some(LfsObjectError {
+                        code: 404,
+                        message: "gone".into(),
+                    }),
+                },
+                LfsObjectResponse {
+                    oid: "ccc".to_owned(),
+                    size: 3,
+                    authenticated: None,
+                    actions: None,
+                    error: None,
+                },
+            ],
+            hash_algo: "sha256",
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        let objects = &json["objects"];
+        assert_eq!(objects.as_array().unwrap().len(), 3);
+
+        // First object: has actions
+        assert!(objects[0].get("actions").is_some());
+
+        // Second object: has error
+        assert_eq!(objects[1]["error"]["code"], 404);
+
+        // Third object: no actions, no error (both omitted)
+        assert!(objects[2].get("actions").is_none());
+        assert!(objects[2].get("error").is_none());
+        assert!(objects[2].get("authenticated").is_none());
+    }
+
+    // --- LfsObjectRequest deserialization ---
+
+    #[test]
+    fn lfs_object_request_deserialize() {
+        let json = r#"{"oid": "abc123", "size": 999}"#;
+        let req: LfsObjectRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.oid, "abc123");
+        assert_eq!(req.size, 999);
+    }
 }
