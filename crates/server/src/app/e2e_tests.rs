@@ -3307,6 +3307,31 @@ async fn oci_blob_patch_offset_mismatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_patch_content_range_end_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let create = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+            .header(header::CONTENT_LENGTH, "0")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED);
+    let location = create.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+
+    // PATCH with Content-Range saying 0-9 (10 bytes) but only sending 3
+    let patch = app
+        .oneshot(Request::builder().method("PATCH")
+            .uri(&location)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Range", "0-9")
+            .body(Body::from(b"abc".to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(patch.status(), StatusCode::RANGE_NOT_SATISFIABLE,
+        "end mismatch should return 416, got {}", patch.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_blob_put_session_hash_mismatch() {
     let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
 
