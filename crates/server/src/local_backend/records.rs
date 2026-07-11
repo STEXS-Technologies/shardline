@@ -101,3 +101,99 @@ fn inspect_repository_record_for_xorb(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_index::{FileChunkRecord, FileRecord};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use serde_json::to_vec;
+
+    use super::inspect_repository_record_for_xorb;
+
+    fn make_scope() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap()
+    }
+
+    fn make_other_scope() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "other-owner", "repo", None).unwrap()
+    }
+
+    fn make_record(scope: &RepositoryScope, chunk_hash: &str) -> FileRecord {
+        FileRecord {
+            file_id: "test.txt".to_string(),
+            content_hash: "deadbeef".to_string(),
+            total_bytes: 100,
+            chunk_size: 64,
+            repository_scope: Some(scope.clone()),
+            chunks: vec![FileChunkRecord {
+                hash: chunk_hash.to_string(),
+                offset: 0,
+                length: 100,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn matching_hash_and_scope() {
+        let scope = make_scope();
+        let record = make_record(&scope, "abc123");
+        let bytes = to_vec(&record).unwrap();
+
+        let mut found = false;
+        inspect_repository_record_for_xorb(&mut found, &bytes, "abc123", &scope).unwrap();
+        assert!(found);
+    }
+
+    #[test]
+    fn matching_hash_wrong_scope() {
+        let scope = make_scope();
+        let record = make_record(&scope, "abc123");
+        let bytes = to_vec(&record).unwrap();
+
+        let mut found = false;
+        let other = make_other_scope();
+        inspect_repository_record_for_xorb(&mut found, &bytes, "abc123", &other).unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn different_hash() {
+        let scope = make_scope();
+        let record = make_record(&scope, "abc123");
+        let bytes = to_vec(&record).unwrap();
+
+        let mut found = false;
+        inspect_repository_record_for_xorb(&mut found, &bytes, "xyz789", &scope).unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn already_found() {
+        let scope = make_scope();
+        let mut found = true;
+
+        // When found is already true, the function returns early without parsing,
+        // so even garbage bytes are fine.
+        inspect_repository_record_for_xorb(&mut found, b"not valid json", "anything", &scope)
+            .unwrap();
+        assert!(found);
+    }
+
+    #[test]
+    fn invalid_bytes() {
+        let scope = make_scope();
+        let mut found = false;
+
+        let result = inspect_repository_record_for_xorb(
+            &mut found,
+            b"not valid json",
+            "anything",
+            &scope,
+        );
+        assert!(result.is_err());
+    }
+}
