@@ -424,6 +424,50 @@ async fn batch_reconstruction_empty() {
     assert!(json["files"].is_object());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_read_token_without_auth_returns_error() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // Without auth configured, token endpoints should return 401 or 500
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/github/team/repo/xet-read-token/main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_server_error() || response.status().is_client_error(),
+        "expected error status without auth, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_write_token_without_auth_returns_error() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let response = app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/github/team/repo/xet-write-token/main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_server_error() || response.status().is_client_error(),
+        "expected error status without auth, got {}",
+        response.status()
+    );
+}
+
 // ============================================================================
 // LFS Protocol Tests
 // ============================================================================
@@ -716,6 +760,107 @@ async fn lfs_invalid_oid_returns_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_patch_object() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let chunk1 = b"lfs-patch-initial-";
+    let chunk2 = b"content";
+    let full_content = [chunk1.to_vec(), chunk2.to_vec()].concat();
+    let oid = test_oid(&full_content);
+    let total = full_content.len() as u64;
+
+    // PATCH chunk 1 (offset 0)
+    let range1 = format!("bytes 0-{}/{}", chunk1.len() as u64 - 1, total);
+    let patch1 = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, chunk1.len().to_string())
+                .header("Content-Range", &range1)
+                .body(Body::from(chunk1.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch1.status(), StatusCode::OK, "PATCH chunk1 failed: {}", String::from_utf8_lossy(&body_bytes(patch1).await));
+
+    // PATCH chunk 2 (final chunk)
+    let range2 = format!("bytes {}-{}/{}", chunk1.len(), total - 1, total);
+    let patch2 = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, chunk2.len().to_string())
+                .header("Content-Range", &range2)
+                .body(Body::from(chunk2.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch2.status(), StatusCode::OK, "PATCH chunk2 failed: {}", String::from_utf8_lossy(&body_bytes(patch2).await));
+
+    // GET the final object and verify it contains both parts
+    let get = app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = body_bytes(get).await;
+    assert_eq!(body, full_content, "PATCH result should contain both chunks");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_patch_invalid_range() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let content = b"lfs-patch-invalid-range";
+    let oid = test_oid(content);
+
+    // Upload
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // PATCH with invalid Content-Range (start > end — triggers the underflow bug we found)
+    let patch = app.oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header("Content-Range", "bytes 100-0/*")  // intentionally invalid
+                .body(Body::from(b"data".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    // Should return a client error, not panic
+    assert!(
+        patch.status().is_client_error(),
+        "invalid Content-Range should return 4xx, got {}",
+        patch.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_verify_valid() {
     let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
 
@@ -955,6 +1100,67 @@ async fn bazel_ac_get_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_ac_head_present() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let content = b"bazel-ac-head-content";
+    let hash = test_hash(content);
+
+    // PUT to AC
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/ac/{hash}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::NO_CONTENT);
+
+    // HEAD
+    let head_resp = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v1/bazel/cache/ac/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(head_resp.status(), StatusCode::OK);
+    let content_length = head_resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .expect("content-length")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert_eq!(content_length, content.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_ac_head_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let nonexistent_hash = "0".repeat(64);
+    let response = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v1/bazel/cache/ac/{nonexistent_hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bazel_flat_put_and_get() {
     let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
 
@@ -990,6 +1196,67 @@ async fn bazel_flat_put_and_get() {
     assert_eq!(get.status(), StatusCode::OK);
     let body = body_bytes(get).await;
     assert_eq!(body, content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_flat_head_present() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let content = b"bazel-flat-head-content";
+    let hash = test_hash(content);
+
+    // PUT
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/{hash}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::NO_CONTENT);
+
+    // HEAD
+    let head_resp = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v1/bazel/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(head_resp.status(), StatusCode::OK);
+    let content_length = head_resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .expect("content-length")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert_eq!(content_length, content.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_flat_head_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let nonexistent_hash = "0".repeat(64);
+    let response = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v1/bazel/{nonexistent_hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1200,6 +1467,80 @@ async fn oci_blob_get_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_head_present() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let data = b"oci-blob-head-test";
+    let digest = oci_upload_blob(&app, OCI_TEST_REPO, data).await;
+
+    let response = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::CONTENT_LENGTH).is_some());
+    assert!(response.headers().get(header::CONTENT_TYPE).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_head_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let nonexistent_digest = "1".repeat(64);
+    let response = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{nonexistent_digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_delete() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let data = b"oci-blob-delete-test";
+    let digest = oci_upload_blob(&app, OCI_TEST_REPO, data).await;
+
+    // Delete
+    let delete = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete.status().is_success() || delete.status() == StatusCode::ACCEPTED,
+        "delete status: {}", delete.status());
+
+    // Confirm deleted
+    let get = app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_manifest_put_and_get() {
     let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
 
@@ -1273,6 +1614,80 @@ async fn oci_manifest_get_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_head_present() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    oci_setup_manifest(&app, OCI_TEST_REPO, "head-test").await;
+
+    let response = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/head-test"))
+                .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::CONTENT_LENGTH).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_head_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let response = app.oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/nonexistent-manifest"))
+                .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_delete() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    oci_setup_manifest(&app, OCI_TEST_REPO, "delete-me").await;
+
+    // Delete the manifest
+    let delete = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/delete-me"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // DELETE may return 202 Accepted or 204 No Content
+    assert!(delete.status().is_success() || delete.status() == StatusCode::ACCEPTED,
+        "delete status: {}", delete.status());
+
+    // Confirm deleted
+    let get = app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/delete-me"))
+                .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
