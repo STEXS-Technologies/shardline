@@ -528,6 +528,55 @@ async fn shard_upload_invalid_data() {
         "invalid shard should return 4xx, got {}", response.status());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconstruction_for_existing_data() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // Upload xorb + shard
+    let content = b"reconstruction-existing-data-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    let (shard_bytes, file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let shard_resp = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(shard_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shard_resp.status(), StatusCode::OK);
+
+    // Verify reconstruction returns the file data
+    let recon = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/reconstructions/{file_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recon.status(), StatusCode::OK);
+    let recon_json = body_json(recon).await;
+    assert!(recon_json.get("terms").is_some(), "reconstruction should have terms");
+    assert!(recon_json.get("fetch_info").is_some(), "reconstruction should have fetch_info");
+}
+
 // ============================================================================
 // LFS Protocol Tests
 // ============================================================================
@@ -921,6 +970,25 @@ async fn lfs_patch_invalid_range() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_patch_missing_content_range() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let oid = test_oid(b"missing-range-test");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(b"data".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_batch_unsupported_operation() {
     let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
 
@@ -1261,6 +1329,42 @@ async fn lfs_verify_valid() {
         .unwrap();
 
     assert_eq!(verify.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_verify_hash_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    // Upload object with one hash
+    let content = b"verify-hash-mismatch-content";
+    let actual_oid = test_oid(content);
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{actual_oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Verify with a DIFFERENT (non-existent) OID — should return 404
+    let wrong_oid = "b".repeat(64);
+    let verify = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/lfs/objects/{wrong_oid}/verify"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1977,6 +2081,75 @@ async fn oci_blob_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_delete_referenced_by_manifest() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = oci_upload_blob(&app, OCI_TEST_REPO, config_data).await;
+    let layer_digest = oci_upload_blob(&app, OCI_TEST_REPO, layer_data).await;
+
+    // Create a manifest referencing both blobs
+    let manifest_json = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": config_data.len() as u64,
+            "digest": format!("sha256:{config_digest}")
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": layer_data.len() as u64,
+            "digest": format!("sha256:{layer_digest}")
+        }]
+    })
+    .to_string();
+
+    let manifest_bytes = manifest_json.as_bytes();
+    let put_manifest = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/referencing"))
+                .header(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::from(manifest_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_manifest.status(), StatusCode::CREATED);
+
+    // Try to delete the config blob — should be blocked by manifest reference
+    let delete_config = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{config_digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_config.status(), StatusCode::BAD_REQUEST,
+        "should reject deleting blob referenced by manifest");
+
+    // Try to delete the layer blob — should also be blocked
+    let delete_layer = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{layer_digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_layer.status(), StatusCode::BAD_REQUEST,
+        "should reject deleting layer blob referenced by manifest");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_manifest_put_and_get() {
     let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
 
@@ -2468,6 +2641,94 @@ async fn oci_manifest_put_invalid_json() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_put_with_multiple_tags() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = oci_upload_blob(&app, OCI_TEST_REPO, config_data).await;
+    let layer_digest = oci_upload_blob(&app, OCI_TEST_REPO, layer_data).await;
+    let manifest_json = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": config_data.len() as u64,
+            "digest": format!("sha256:{config_digest}")
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": layer_data.len() as u64,
+            "digest": format!("sha256:{layer_digest}")
+        }]
+    })
+    .to_string();
+
+    // PUT with multiple ?tag= query params
+    let manifest_bytes = manifest_json.as_bytes();
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/latest?tag=stable&tag=release"))
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/vnd.oci.image.manifest.v1+json",
+                )
+                .body(Body::from(manifest_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    // Should have OCI-Tag header with combined tags
+    let oci_tag = response.headers().get("OCI-Tag")
+        .expect("OCI-Tag header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(oci_tag.contains("latest"), "should contain 'latest': {oci_tag}");
+    assert!(oci_tag.contains("stable"), "should contain 'stable': {oci_tag}");
+    assert!(oci_tag.contains("release"), "should contain 'release': {oci_tag}");
+
+    // Verify all three tags resolve to the same manifest
+    for tag in &["latest", "stable", "release"] {
+        let get = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v2/{OCI_TEST_REPO}/manifests/{tag}"))
+                    .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK, "tag {tag} should resolve");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_put_digest_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // PUT to a digest that doesn't match the body
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                .header(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::from(br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":0,"digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"layers":[]}"#.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+        "digest mismatch should return 400, got {}", response.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_tags_list_empty_repo() {
     let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
     let response = app
@@ -2485,6 +2746,68 @@ async fn oci_tags_list_empty_repo() {
     assert_eq!(json["name"], OCI_TEST_REPO);
     let tags = json["tags"].as_array().expect("tags array");
     assert!(tags.is_empty(), "expected empty tags list, got {tags:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_tags_list_pagination() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Create 3 manifests with different tags
+    oci_setup_manifest(&app, OCI_TEST_REPO, "v1.0").await;
+    oci_setup_manifest(&app, OCI_TEST_REPO, "v2.0").await;
+    oci_setup_manifest(&app, OCI_TEST_REPO, "v3.0").await;
+
+    // Request first page with n=1
+    let page1 = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/tags/list?n=1"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page1.status(), StatusCode::OK);
+
+    // Save headers and Link header before body_json consumes page1
+    let link = page1.headers().get(axum::http::header::LINK)
+        .expect("Link header should be present for pagination")
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let page1_json = body_json(page1).await;
+    assert_eq!(page1_json["name"], OCI_TEST_REPO);
+    let page1_tags = page1_json["tags"].as_array().unwrap();
+    assert_eq!(page1_tags.len(), 1, "expected 1 tag per page, got {page1_tags:?}");
+
+    // Verify Link header is present
+    assert!(link.contains("rel=\"next\""), "Link header should contain rel=next: {link}");
+
+    // Extract the last tag from the Link header
+    assert!(link.contains("last="), "Link header should contain last=: {link}");
+
+    // Request page with n=0 — should return empty list, no Link header
+    let page0 = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/tags/list?n=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page0.status(), StatusCode::OK);
+
+    // Check headers before body_json consumes page0
+    let page0_has_link = page0.headers().get(axum::http::header::LINK).is_some();
+
+    let page0_json = body_json(page0).await;
+    assert_eq!(page0_json["tags"].as_array().unwrap().len(), 0);
+    assert!(!page0_has_link,
+        "n=0 should not include Link header");
 }
 
 // ============================================================================
