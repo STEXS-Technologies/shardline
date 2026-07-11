@@ -4467,3 +4467,55 @@ async fn lfs_get_object_returns_integrity_digest_header() {
     // Server should include the integrity digest header
     assert_eq!(digest_header, Some(format!("sha256:{oid}")));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_verify_detects_corrupted_storage() {
+    let (app, tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let content = b"lfs-verify-corruption-test";
+    let oid = test_oid(content);
+
+    // Upload object
+    let put = app.clone()
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("/v1/lfs/objects/{oid}"))
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, content.len().to_string())
+            .body(Body::from(content.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Verify it works before corruption
+    let verify_ok = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v1/lfs/objects/{oid}/verify"))
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(verify_ok.status(), StatusCode::OK);
+
+    // Find and corrupt the stored file on disk
+    let stored_path = tmp.path().join("chunks").join("protocols").join("lfs").join("global").join("objects").join(&oid);
+    assert!(stored_path.exists(), "stored LFS object should exist at {:?}", stored_path);
+
+    // Truncate to change content — verify will read truncated bytes and compute wrong hash
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&stored_path)
+        .unwrap();
+    file.set_len(3).unwrap(); // only keep first 3 bytes
+    drop(file);
+
+    // Verify should fail because hash of truncated data != oid
+    let verify_corrupted = app
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v1/lfs/objects/{oid}/verify"))
+            .body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    // The verify handler streams the truncated file, computes SHA-256,
+    // and compares with the oid. Since the content changed, hash won't match.
+    assert_eq!(verify_corrupted.status(), StatusCode::UNPROCESSABLE_ENTITY,
+        "verify should detect corruption with 422, got {}",
+        verify_corrupted.status());
+}
