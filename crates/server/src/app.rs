@@ -522,7 +522,7 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
     }
 }
 
-async fn security_headers_middleware(
+pub(super) async fn security_headers_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
@@ -555,3 +555,6 @@ async fn security_headers_middleware(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod e2e_tests;
