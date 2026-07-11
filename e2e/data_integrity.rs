@@ -9681,3 +9681,87 @@ async fn lfs_verify_hash_mismatch_returns_422() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_backend_oci_session_upload() {
+    let docker = shardline_test_support::DockerLocalStack::builder()
+        .with_minio()
+        .start().unwrap();
+    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+    let s3 = docker.s3_raw_config(None).unwrap();
+
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
+        .with_endpoint(s3.endpoint)
+        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_key_prefix(s3.key_prefix.as_deref())
+        .with_allow_http(s3.allow_http);
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Oci].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
+        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    let repo = "test-owner/test-repo";
+
+    // Step 1: Create upload session (POST without digest)
+    let create = client.post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .send().await.unwrap();
+    assert_eq!(create.status(), 202, "create session");
+    let location = create.headers().get("location").unwrap().to_str().unwrap().to_owned();
+    assert!(location.contains("/blobs/uploads/"), "session location: {location}");
+
+    // Step 2: PATCH first chunk
+    let chunk1 = b"hello-s3-";
+    let patch1 = client.patch(format!("{base_url}{location}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", format!("0-{}", chunk1.len() - 1))
+        .body(chunk1.to_vec()).send().await.unwrap();
+    assert_eq!(patch1.status(), 202, "first PATCH");
+    let range_header1 = patch1.headers().get("range").unwrap().to_str().unwrap().to_owned();
+    assert_eq!(range_header1, format!("0-{}", chunk1.len() as u64 - 1));
+
+    // Step 3: PATCH second chunk
+    let chunk2 = b"world-s3!";
+    let location2 = patch1.headers().get("location")
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or_else(|| location.clone());
+    let patch2 = client.patch(format!("{base_url}{location2}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", format!("{}-{}", chunk1.len(), chunk1.len() + chunk2.len() - 1))
+        .body(chunk2.to_vec()).send().await.unwrap();
+    assert_eq!(patch2.status(), 202, "second PATCH");
+
+    // Step 4: PUT to complete with digest
+    let full_data = [chunk1.to_vec(), chunk2.to_vec()].concat();
+    let digest_hex = hex::encode(sha2::Sha256::digest(&full_data));
+    let location3 = patch2.headers().get("location")
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or_else(|| location2.clone());
+    let complete = client.put(format!("{base_url}{location3}?digest=sha256:{digest_hex}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .send().await.unwrap();
+    assert_eq!(complete.status(), 201, "PUT complete on S3");
+
+    // Step 5: Verify blob content
+    let get = client.get(format!("{base_url}/v2/{repo}/blobs/sha256:{digest_hex}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 200, "S3 OCI blob GET after session upload");
+    assert_eq!(get.bytes().await.unwrap().as_ref(), full_data);
+
+    server.abort();
+}
