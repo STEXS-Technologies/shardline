@@ -84,7 +84,8 @@ async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
     let mut app = Router::new()
         .route("/healthz", get(super::operational::health))
         .route("/readyz", get(super::operational::ready))
-        .layer(middleware::from_fn(super::security_headers_middleware));
+        .layer(middleware::from_fn(super::security_headers_middleware))
+        .route("/metrics", get(super::operational::metrics));
 
     // Stats route (registered when role serves API, outside per-frontend loop).
     if state.role.serves_api() {
@@ -286,6 +287,21 @@ async fn stats_endpoint_returns_200() {
     // Fresh backend has zero chunks and zero files.
     assert_eq!(json["chunks"], 0);
     assert_eq!(json["files"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_endpoint_returns_prometheus_text() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let response = app
+        .oneshot(Request::builder().method("GET")
+            .uri("/metrics")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(response).await).unwrap();
+    assert!(body.contains("shardline_up 1"), "metrics should contain shardline_up gauge");
+    assert!(body.contains("# HELP"), "metrics should contain HELP lines");
+    assert!(body.contains("# TYPE"), "metrics should contain TYPE lines");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -575,6 +591,78 @@ async fn reconstruction_for_existing_data() {
     let recon_json = body_json(recon).await;
     assert!(recon_json.get("terms").is_some(), "reconstruction should have terms");
     assert!(recon_json.get("fetch_info").is_some(), "reconstruction should have fetch_info");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconstruction_v2_route() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let content = b"recon-v2-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+            .body(Body::from(xorb_bytes.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    let (shard_bytes, file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let shard_resp = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri("/v1/shards").body(Body::from(shard_bytes.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(shard_resp.status(), StatusCode::OK);
+
+    // Use v2 reconstruction route
+    let recon = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v2/reconstructions/{file_id}"))
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(recon.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconstruction_not_found_v2() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let response = app
+        .oneshot(Request::builder().method("GET")
+            .uri("/v2/reconstructions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconstruction_with_content_hash() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let content = b"recon-content-hash-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+            .body(Body::from(xorb_bytes.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    let (shard_bytes, file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let shard_resp = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri("/v1/shards").body(Body::from(shard_bytes.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(shard_resp.status(), StatusCode::OK);
+
+    // GET reconstruction with content_hash query param using a valid-format
+    // hash that doesn't match any stored version — handler accepts the param
+    // but the backend returns NOT_FOUND since the hash doesn't identify a
+    // known file version.
+    let recon = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v1/reconstructions/{file_id}?content_hash={xorb_hash}"))
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(recon.status(), StatusCode::NOT_FOUND);
 }
 
 // ============================================================================
@@ -986,6 +1074,50 @@ async fn lfs_patch_missing_content_range() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_patch_content_length_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let oid = test_oid(b"content-length-mismatch");
+    let response = app
+        .oneshot(Request::builder().method("PATCH")
+            .uri(format!("/v1/lfs/objects/{oid}"))
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Range", "bytes 0-9/100")
+            .header(header::CONTENT_LENGTH, "3") // says 10 bytes in range, sends 3
+            .body(Body::from(b"abc".to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_patch_single_chunk_final() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let content = b"lfs-single-chunk-final";
+    let oid = test_oid(content);
+
+    // Single PATCH that covers the entire range (is_final=true)
+    let patch = app.clone()
+        .oneshot(Request::builder().method("PATCH")
+            .uri(format!("/v1/lfs/objects/{oid}"))
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Range", format!("bytes 0-{}/{}", content.len() - 1, content.len()))
+            .header(header::CONTENT_LENGTH, content.len().to_string())
+            .body(Body::from(content.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(patch.status(), StatusCode::OK);
+
+    // Verify content is accessible via GET
+    let get = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v1/lfs/objects/{oid}"))
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, content);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1726,6 +1858,73 @@ async fn bazel_flat_head_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_flat_route_serves_ac_before_cas() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let cas_content = b"bazel-flat-cas-content";
+    let hash = test_hash(cas_content);
+
+    let ac_content = b"bazel-flat-ac-first";
+
+    // PUT different content to AC (AC does NOT validate hash, so any content works)
+    let put_ac = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/ac/{hash}"))
+                .body(Body::from(ac_content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_ac.status(), StatusCode::NO_CONTENT);
+
+    // Also PUT to CAS with matching hash (CAS DOES validate hash)
+    let put_cas = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .body(Body::from(cas_content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_cas.status(), StatusCode::NO_CONTENT);
+
+    // Flat GET should return AC content (AC checked first)
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/bazel/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = body_bytes(get).await;
+    assert_eq!(body, ac_content, "flat route should serve AC content (checked first)");
+
+    // Flat HEAD should also return AC content-length
+    let head = app
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v1/bazel/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    let cl: u64 = head.headers().get(header::CONTENT_LENGTH).unwrap().to_str().unwrap().parse().unwrap();
+    assert_eq!(cl, ac_content.len() as u64, "flat HEAD should return AC content-length");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2726,6 +2925,115 @@ async fn oci_manifest_put_digest_mismatch() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST,
         "digest mismatch should return 400, got {}", response.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_unknown_path_returns_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+    let response = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v2/{OCI_TEST_REPO}/nonexistent/endpoint"))
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_patch_wrong_content_range() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Create session
+    let create = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+            .header(header::CONTENT_LENGTH, "0")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED);
+    let location = create.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+
+    // PATCH with wrong Content-Range (start > end)
+    let patch = app
+        .oneshot(Request::builder().method("PATCH")
+            .uri(&location)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Range", "100-0")
+            .body(Body::from(b"data".to_vec())).unwrap())
+        .await.unwrap();
+    assert!(patch.status().is_client_error(),
+        "wrong Content-Range should return 4xx, got {}", patch.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_list_put() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // First create a regular manifest so we have something to reference
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = oci_upload_blob(&app, OCI_TEST_REPO, config_data).await;
+    let layer_digest = oci_upload_blob(&app, OCI_TEST_REPO, layer_data).await;
+    let manifest_len = {
+        let mj = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "size": config_data.len(), "digest": format!("sha256:{config_digest}")},
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": layer_data.len(), "digest": format!("sha256:{layer_digest}")}]
+        }).to_string();
+        let len = mj.len();
+        let put_m = app.clone()
+            .oneshot(Request::builder().method("PUT")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/child"))
+                .header(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::from(mj.into_bytes())).unwrap())
+            .await.unwrap();
+        assert_eq!(put_m.status(), StatusCode::CREATED);
+        len
+    };
+
+    // Now create a manifest list (index) referencing that manifest
+    // Use the child manifest's digest
+    let child_get = app.clone()
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v2/{OCI_TEST_REPO}/manifests/child"))
+            .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(child_get.status(), StatusCode::OK);
+    let child_digest = child_get.headers().get("Docker-Content-Digest")
+        .unwrap().to_str().unwrap()
+        .strip_prefix("sha256:").unwrap().to_owned();
+
+    let index_json = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": manifest_len,
+            "digest": format!("sha256:{child_digest}"),
+            "platform": {"architecture": "amd64", "os": "linux"}
+        }]
+    }).to_string();
+
+    let put_idx = app.clone()
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("/v2/{OCI_TEST_REPO}/manifests/index-v1"))
+            .header(header::CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")
+            .body(Body::from(index_json.into_bytes())).unwrap())
+        .await.unwrap();
+    assert_eq!(put_idx.status(), StatusCode::CREATED);
+
+    // Verify index is retrievable
+    let get_idx = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v2/{OCI_TEST_REPO}/manifests/index-v1"))
+            .header(header::ACCEPT, "application/vnd.oci.image.index.v1+json")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(get_idx.status(), StatusCode::OK);
+    let idx_json = body_json(get_idx).await;
+    assert_eq!(idx_json["mediaType"], "application/vnd.oci.image.index.v1+json");
+    assert_eq!(idx_json["manifests"][0]["platform"]["architecture"], "amd64");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
