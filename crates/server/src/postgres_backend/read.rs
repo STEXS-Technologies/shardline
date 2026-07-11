@@ -421,3 +421,106 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::IndexError;
+    use serde_json::to_vec;
+    use shardline_index::{FileChunkRecord, FileRecord};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+
+    fn test_scope() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"))
+            .unwrap()
+    }
+
+    fn make_hash(ch: char) -> String {
+        std::iter::repeat(ch).take(64).collect()
+    }
+
+    fn file_record_json_bytes(scope: &RepositoryScope, chunk_hash: &str) -> Vec<u8> {
+        let record = FileRecord {
+            file_id: "test/file.bin".into(),
+            content_hash: make_hash('f'),
+            total_bytes: 1024,
+            chunk_size: 256,
+            repository_scope: Some(scope.clone()),
+            chunks: vec![FileChunkRecord {
+                hash: chunk_hash.to_owned(),
+                offset: 0,
+                length: 256,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 256,
+            }],
+        };
+        to_vec(&record).unwrap()
+    }
+
+    #[test]
+    fn stored_record_references_hash_matching() {
+        let scope = test_scope();
+        let hash = make_hash('b');
+        let bytes = file_record_json_bytes(&scope, &hash);
+
+        assert!(stored_record_references_hash(&bytes, &hash, &scope).unwrap());
+    }
+
+    #[test]
+    fn stored_record_references_hash_different() {
+        let scope = test_scope();
+        let stored_hash = make_hash('b');
+        let queried_hash = make_hash('q');
+        let bytes = file_record_json_bytes(&scope, &stored_hash);
+
+        assert!(!stored_record_references_hash(&bytes, &queried_hash, &scope).unwrap());
+    }
+
+    #[test]
+    fn stored_record_references_hash_different_scope() {
+        let record_scope = test_scope();
+        let other_scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "other", "other-repo", None).unwrap();
+        let hash = make_hash('b');
+        let bytes = file_record_json_bytes(&record_scope, &hash);
+
+        assert!(!stored_record_references_hash(&bytes, &hash, &other_scope).unwrap());
+    }
+
+    #[test]
+    fn stored_record_references_hash_invalid_json() {
+        let scope = test_scope();
+        let bytes = b"!!! not valid json !!!";
+
+        assert!(stored_record_references_hash(bytes, &make_hash('a'), &scope).is_err());
+    }
+
+    #[test]
+    fn map_record_store_error_not_found() {
+        let error = PostgresMetadataStoreError::RecordNotFound;
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::NotFound));
+    }
+
+    #[test]
+    fn map_record_store_error_other() {
+        let error = PostgresMetadataStoreError::IntegerOutOfRange;
+        let result = map_record_store_error(error);
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn connect_postgres_metadata_pool_empty_url() {
+        assert!(connect_postgres_metadata_pool("", 5).is_err());
+    }
+
+    #[test]
+    fn connect_postgres_metadata_pool_invalid_url() {
+        assert!(connect_postgres_metadata_pool("!!not-a-valid-url!!", 5).is_err());
+    }
+}
