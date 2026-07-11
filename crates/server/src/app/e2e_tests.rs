@@ -27,6 +27,8 @@ use crate::{
     server_role::ServerRole,
     test_fixtures,
 };
+use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenScope, TokenClaims};
+use shardline_server_core::{AuthProvider, auth::LocalEd25519Provider};
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -201,6 +203,200 @@ async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
 
     let app: Router = app.with_state(Arc::clone(&state));
     (app, tmp)
+}
+
+/// Signing key shared by both test-app builders and token helpers so that
+/// tokens minted in tests are valid against the server auth layer.
+const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+/// Builds a test app with **authentication enabled**.
+async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
+    let object_store =
+        ServerObjectStore::local(tmp.path().join("chunks")).expect("local object store");
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).expect("upload parallelism"),
+        object_store,
+        frontends,
+    )
+    .await
+    .expect("local backend");
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().expect("bind addr"),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(frontends.to_vec())
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key");
+
+    config
+        .validate_runtime_requirements()
+        .expect("runtime requirements");
+
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
+
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Local(backend),
+        auth: Some(auth),
+        provider_tokens: None,
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+
+    let mut app = Router::new()
+        .route("/healthz", get(super::operational::health))
+        .route("/readyz", get(super::operational::ready))
+        .layer(middleware::from_fn(super::security_headers_middleware))
+        .route("/metrics", get(super::operational::metrics));
+
+    if state.role.serves_api() {
+        app = app.route("/v1/stats", get(super::operational::stats));
+    }
+
+    for frontend in frontends {
+        match frontend {
+            ServerFrontend::Xet => {
+                if state.role.serves_api() {
+                    app = app
+                        .route(
+                            "/reconstructions",
+                            get(super::reconstruction_routes::batch_reconstruction),
+                        )
+                        .route(
+                            "/v1/reconstructions",
+                            get(super::reconstruction_routes::batch_reconstruction),
+                        )
+                        .route(
+                            "/v1/reconstructions/{file_id}",
+                            get(super::reconstruction_routes::reconstruction),
+                        )
+                        .route(
+                            "/v2/reconstructions/{file_id}",
+                            get(super::reconstruction_routes::reconstruction_v2),
+                        )
+                        .route("/shards", post(super::operational::upload_shard))
+                        .route("/v1/shards", post(super::operational::upload_shard));
+                }
+                if state.role.serves_transfer() {
+                    app = app
+                        .route(
+                            "/v1/chunks/default/{hash}",
+                            get(super::operational::read_chunk),
+                        )
+                        .route(
+                            "/v1/chunks/default-merkledb/{hash}",
+                            get(super::operational::read_chunk),
+                        )
+                        .route(
+                            "/v1/xorbs/default/{hash}",
+                            head(super::operational::head_xorb)
+                                .post(super::operational::upload_xorb),
+                        )
+                        .route(
+                            "/transfer/xorb/{prefix}/{hash}",
+                            get(super::operational::read_xorb_transfer),
+                        );
+                }
+            }
+            ServerFrontend::Lfs => {
+                if state.role.serves_api() {
+                    app = app.route(
+                        "/v1/lfs/objects/batch",
+                        post(super::protocol_routes::lfs_batch),
+                    );
+                }
+                if state.role.serves_transfer() {
+                    app = app
+                        .route(
+                            "/v1/lfs/objects/{oid}",
+                            get(super::protocol_routes::lfs_get_object)
+                                .head(super::protocol_routes::lfs_head_object)
+                                .put(super::protocol_routes::lfs_put_object)
+                                .patch(super::protocol_routes::lfs_patch_object)
+                                .delete(super::protocol_routes::lfs_delete_object),
+                        )
+                        .route(
+                            "/v1/lfs/objects/{oid}/verify",
+                            post(super::protocol_routes::lfs_verify_object),
+                        );
+                }
+            }
+            ServerFrontend::BazelHttp => {
+                if state.role.serves_transfer() {
+                    app = app
+                        .route(
+                            "/v1/bazel/cache/ac/{hash}",
+                            get(super::protocol_routes::bazel_get_ac)
+                                .put(super::protocol_routes::bazel_put_ac)
+                                .head(super::protocol_routes::bazel_head_ac),
+                        )
+                        .route(
+                            "/v1/bazel/cache/cas/{hash}",
+                            get(super::protocol_routes::bazel_get_cas)
+                                .put(super::protocol_routes::bazel_put_cas)
+                                .head(super::protocol_routes::bazel_head_cas),
+                        )
+                        .route(
+                            "/v1/bazel/{hash}",
+                            get(super::protocol_routes::bazel_get)
+                                .put(super::protocol_routes::bazel_put)
+                                .head(super::protocol_routes::bazel_head),
+                        );
+                }
+            }
+            ServerFrontend::Oci => {
+                app = app
+                    .route(
+                        "/v2/token",
+                        get(super::protocol_routes::oci_registry_token),
+                    )
+                    .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                    .route(
+                        "/v2/{*path}",
+                        axum::routing::any(super::protocol_routes::oci_dispatch),
+                    );
+            }
+            ServerFrontend::Hub => {}
+        }
+    }
+
+    let app: Router = app.with_state(Arc::clone(&state));
+    (app, tmp)
+}
+
+// ---------------------------------------------------------------------------
+// Token helpers
+// ---------------------------------------------------------------------------
+
+/// Mints a signed test token with the given scope using the shared test
+/// signing key.
+fn test_token(scope: TokenScope) -> String {
+    let provider = LocalEd25519Provider::new(TEST_SIGNING_KEY).unwrap();
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
+    provider.mint_token(&claims).unwrap()
+}
+
+/// Mints a signed test token with the given scope and custom repository
+/// owner/name.
+fn test_token_with_scope_and_repo(scope: TokenScope, owner: &str, name: &str) -> String {
+    let provider = LocalEd25519Provider::new(TEST_SIGNING_KEY).unwrap();
+    let repo = RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
+    provider.mint_token(&claims).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +859,16 @@ async fn reconstruction_with_content_hash() {
             .body(Body::empty()).unwrap())
         .await.unwrap();
     assert_eq!(recon.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconstruction_requires_auth() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Xet]).await;
+    let response = app
+        .oneshot(Request::builder().method("GET").uri("/v1/reconstructions/nonexistent")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ============================================================================
@@ -1500,6 +1706,44 @@ async fn lfs_verify_hash_mismatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_requires_auth() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    let response = app
+        .oneshot(Request::builder().method("POST").uri("/v1/lfs/objects/batch")
+            .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+            .body(Body::from(r#"{"operation":"download","objects":[]}"#)).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_with_valid_token() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    let token = test_token(TokenScope::Read);
+    let response = app
+        .oneshot(Request::builder().method("POST").uri("/v1/lfs/objects/batch")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+            .body(Body::from(r#"{"operation":"download","objects":[]}"#)).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_with_insufficient_scope() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    // Upload requires Write scope, a Read-only token should fail
+    let token = test_token(TokenScope::Read);
+    let response = app
+        .oneshot(Request::builder().method("POST").uri("/v1/lfs/objects/batch")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+            .body(Body::from(r#"{"operation":"upload","objects":[]}"#)).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_verify_not_found() {
     let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
 
@@ -1925,6 +2169,33 @@ async fn bazel_flat_route_serves_ac_before_cas() {
     assert_eq!(head.status(), StatusCode::OK);
     let cl: u64 = head.headers().get(header::CONTENT_LENGTH).unwrap().to_str().unwrap().parse().unwrap();
     assert_eq!(cl, ac_content.len() as u64, "flat HEAD should return AC content-length");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_put_requires_auth() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::BazelHttp]).await;
+    let hash = "a".repeat(64);
+    let response = app
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("/v1/bazel/cache/cas/{hash}"))
+            .body(Body::from(b"data".to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_put_with_valid_token() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::BazelHttp]).await;
+    let content = b"bazel-auth-test";
+    let hash = test_hash(content);
+    let token = test_token(TokenScope::Write);
+    let response = app
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("/v1/bazel/cache/cas/{hash}"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(content.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3037,6 +3308,16 @@ async fn oci_manifest_list_put() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_v2_root_requires_auth() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Oci]).await;
+    let response = app
+        .oneshot(Request::builder().method("GET").uri("/v2/")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_tags_list_empty_repo() {
     let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
     let response = app
@@ -3451,4 +3732,34 @@ async fn all_protocols_coexist() {
         .unwrap();
     assert_eq!(lfs_oci_cross.status(), StatusCode::NOT_FOUND,
         "namespace isolation: LFS should not see OCI content");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_then_bazel_download_with_auth() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs, ServerFrontend::BazelHttp]).await;
+    let write_token = test_token(TokenScope::Write);
+    let read_token = test_token(TokenScope::Read);
+
+    // Upload an object via LFS with auth
+    let content = b"auth-cross-proto-content";
+    let oid = test_oid(content);
+    let put = app.clone()
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("/v1/lfs/objects/{oid}"))
+            .header(header::AUTHORIZATION, format!("Bearer {write_token}"))
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, content.len().to_string())
+            .body(Body::from(content.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Now download the same content via Bazel (should NOT work -- different namespace)
+    let hash = test_hash(b"unrelated");
+    let get = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v1/bazel/cache/cas/{hash}"))
+            .header(header::AUTHORIZATION, format!("Bearer {read_token}"))
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
 }
