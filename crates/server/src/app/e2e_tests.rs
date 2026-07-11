@@ -4384,3 +4384,86 @@ async fn provider_github_webhook_invalid_signature() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_webhook_triggers_lifecycle_reconciliation() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Xet, ServerFrontend::Lfs]).await;
+
+    // Send a GitHub repository deletion webhook (simplest event that triggers reconciliation)
+    let body = br#"{"action":"deleted","repository":{"full_name":"team/assets"}}"#;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+    mac.update(body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/webhooks")
+                .header("x-github-event", "repository")
+                .header("x-github-delivery", "recon-test-delivery-1")
+                .header("x-hub-signature-256", &signature)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The webhook should be accepted and reconciliation run
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let json = body_json(response).await;
+    assert_eq!(json["provider"], "GitHub");
+    assert_eq!(json["owner"], "team");
+    assert_eq!(json["repo"], "assets");
+    assert_eq!(json["event_kind"], "repository_deleted");
+    // Reconciliation should produce these fields (even if zero)
+    assert!(json.get("affected_file_versions").is_some(), "reconciliation should report affected_file_versions");
+    assert!(json.get("affected_chunks").is_some(), "reconciliation should report affected_chunks");
+    assert!(json.get("applied_holds").is_some(), "reconciliation should report applied_holds");
+    assert!(json.get("retention_seconds").is_some(), "reconciliation should report retention_seconds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_get_object_returns_integrity_digest_header() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let content = b"lfs-integrity-header-test-content-777";
+    let oid = test_oid(content);
+
+    // Upload
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // GET the object and verify the Docker-Content-Digest header is present
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(get.status(), StatusCode::OK);
+    // Save digest header before consuming the body
+    let digest_header = get.headers().get("Docker-Content-Digest")
+        .map(|v| v.to_str().unwrap().to_owned());
+    let body = body_bytes(get).await;
+    assert_eq!(body, content);
+    // Server should include the integrity digest header
+    assert_eq!(digest_header, Some(format!("sha256:{oid}")));
+}
