@@ -70,6 +70,17 @@ install_crate_args = ["--locked"]
 command = "cargo"
 args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "${@}"]
 
+[tasks.test-postgres]
+description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
+workspace = false
+command = "bash"
+args = [
+    "-c",
+    "cargo test -p shardline-index -- hub_postgres && \
+     cargo test -p shardline-server -- postgres_backend::tests database_migration lifecycle_repair::tests && \
+     cargo test -p shardline-cli --test db_migrate_e2e",
+]
+
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"
 workspace = false

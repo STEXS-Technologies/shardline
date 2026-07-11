@@ -25,3 +25,41 @@ jobs:
 
       - name: Run contributor CI matrix
         run: cargo make ci
+
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: shardline
+          POSTGRES_PASSWORD: shardline-dev-password
+          POSTGRES_DB: shardline
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready -U shardline
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust CI toolchain and tools
+        uses: ./.github/actions/rust-ci-setup
+
+      - name: Run Postgres-gated unit tests
+        env:
+          DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
+        run: |
+          cargo test -p shardline-index -- hub_postgres 2>&1
+          cargo test -p shardline-server -- postgres_backend::tests 2>&1
+          cargo test -p shardline-server -- database_migration 2>&1
+          cargo test -p shardline-server -- lifecycle_repair::tests 2>&1
+
+      - name: Run Postgres-gated E2E tests
+        env:
+          DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
+        run: cargo test -p shardline-cli --test db_migrate_e2e 2>&1
