@@ -862,6 +862,40 @@ async fn reconstruction_with_content_hash() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconstruction_with_range_header() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let content = b"recon-range-test-content-1234567890";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+            .body(Body::from(xorb_bytes.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    let (shard_bytes, file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let shard_resp = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri("/v1/shards").body(Body::from(shard_bytes.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(shard_resp.status(), StatusCode::OK);
+
+    // GET reconstruction with Range header
+    let recon = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v1/reconstructions/{file_id}"))
+            .header(header::RANGE, "bytes=0-3")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(recon.status(), StatusCode::OK);
+    let body = body_bytes(recon).await;
+    // The response could be either JSON (reconstruction metadata) or binary (chunk data),
+    // depending on the handler. Just verify it returns 200.
+    assert!(body.len() > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconstruction_requires_auth() {
     let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Xet]).await;
     let response = app
@@ -3236,6 +3270,83 @@ async fn oci_blob_patch_wrong_content_range() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_patch_offset_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Create session
+    let create = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+            .header(header::CONTENT_LENGTH, "0")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED);
+    let location = create.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+
+    // PATCH first chunk at offset 0
+    let patch1 = app.clone()
+        .oneshot(Request::builder().method("PATCH")
+            .uri(&location)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Range", "0-4")
+            .body(Body::from(b"hello".to_vec())).unwrap())
+        .await.unwrap();
+    assert!(patch1.status().is_success());
+
+    // PATCH second chunk at WRONG offset (should be 5, send 10 instead)
+    let patch2 = app
+        .oneshot(Request::builder().method("PATCH")
+            .uri(&location)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Range", "10-14")
+            .body(Body::from(b"world".to_vec())).unwrap())
+        .await.unwrap();
+    // Offset mismatch should return a client error
+    assert!(patch2.status().is_client_error(),
+        "offset mismatch should return 4xx, got {}", patch2.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_put_session_hash_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Create session and upload data
+    let data = b"oci-hash-mismatch-test-data";
+    let create = app.clone()
+        .oneshot(Request::builder().method("POST")
+            .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+            .header(header::CONTENT_LENGTH, "0")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED);
+    let location = create.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+
+    let patch = app.clone()
+        .oneshot(Request::builder().method("PATCH")
+            .uri(&location)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Range", format!("0-{}", data.len() - 1))
+            .body(Body::from(data.to_vec())).unwrap())
+        .await.unwrap();
+    assert_eq!(patch.status(), StatusCode::ACCEPTED);
+    let location2 = patch.headers().get(header::LOCATION)
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or(location);
+
+    // Complete with WRONG digest (not matching the data)
+    let wrong_digest = "0".repeat(64);
+    let complete = app
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("{location2}?digest=sha256:{wrong_digest}"))
+            .header(header::CONTENT_LENGTH, "0")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    // Hash mismatch should return 400
+    assert_eq!(complete.status(), StatusCode::BAD_REQUEST,
+        "hash mismatch should return 400, got {}", complete.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_manifest_list_put() {
     let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
 
@@ -3305,6 +3416,75 @@ async fn oci_manifest_list_put() {
     let idx_json = body_json(get_idx).await;
     assert_eq!(idx_json["mediaType"], "application/vnd.oci.image.index.v1+json");
     assert_eq!(idx_json["manifests"][0]["platform"]["architecture"], "amd64");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_tag_overwrite_cleans_up_old_reference() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // First manifest version under tag "movable"
+    let config_data = b"{\"v\":1}";
+    let layer_data1 = b"\x1f\x8b\x08\x00";
+    let config_digest1 = oci_upload_blob(&app, OCI_TEST_REPO, config_data).await;
+    let layer_digest1 = oci_upload_blob(&app, OCI_TEST_REPO, layer_data1).await;
+    let manifest1 = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "size": config_data.len() as u64, "digest": format!("sha256:{config_digest1}")},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": layer_data1.len() as u64, "digest": format!("sha256:{layer_digest1}")}]
+    }).to_string();
+
+    let put1 = app.clone()
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("/v2/{OCI_TEST_REPO}/manifests/movable"))
+            .header(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::from(manifest1.clone().into_bytes())).unwrap())
+        .await.unwrap();
+    assert_eq!(put1.status(), StatusCode::CREATED);
+    let digest1 = put1.headers().get("Docker-Content-Digest").unwrap().to_str().unwrap().to_owned();
+
+    // Verify tag resolves to digest1
+    let get1 = app.clone()
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v2/{OCI_TEST_REPO}/manifests/movable"))
+            .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(get1.status(), StatusCode::OK);
+    let d1 = get1.headers().get("Docker-Content-Digest").unwrap().to_str().unwrap().to_owned();
+    assert_eq!(d1, digest1);
+
+    // Second manifest version with different content, same tag "movable"
+    let layer_data2 = b"\x1f\x8b\x08\x01";
+    let layer_digest2 = oci_upload_blob(&app, OCI_TEST_REPO, layer_data2).await;
+    // Reuse same config blob
+    let manifest2 = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "size": config_data.len() as u64, "digest": format!("sha256:{config_digest1}")},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": layer_data2.len() as u64, "digest": format!("sha256:{layer_digest2}")}]
+    }).to_string();
+
+    let put2 = app.clone()
+        .oneshot(Request::builder().method("PUT")
+            .uri(format!("/v2/{OCI_TEST_REPO}/manifests/movable"))
+            .header(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::from(manifest2.into_bytes())).unwrap())
+        .await.unwrap();
+    assert_eq!(put2.status(), StatusCode::CREATED);
+    let digest2 = put2.headers().get("Docker-Content-Digest").unwrap().to_str().unwrap().to_owned();
+    assert_ne!(digest1, digest2, "different content should produce different digest");
+
+    // Verify tag now resolves to digest2
+    let get2 = app
+        .oneshot(Request::builder().method("GET")
+            .uri(format!("/v2/{OCI_TEST_REPO}/manifests/movable"))
+            .header(header::ACCEPT, "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::empty()).unwrap())
+        .await.unwrap();
+    assert_eq!(get2.status(), StatusCode::OK);
+    let d2 = get2.headers().get("Docker-Content-Digest").unwrap().to_str().unwrap().to_owned();
+    assert_eq!(d2, digest2, "tag should now point to second manifest version");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
