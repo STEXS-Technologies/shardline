@@ -9765,3 +9765,71 @@ async fn s3_backend_oci_session_upload() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_backend_oci_session_abort() {
+    let docker = shardline_test_support::DockerLocalStack::builder()
+        .with_minio()
+        .start().unwrap();
+    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+    let s3 = docker.s3_raw_config(None).unwrap();
+
+    let storage = tempfile::tempdir().unwrap();
+    let config_path = write_provider_config(storage.path()).unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
+        .with_endpoint(s3.endpoint)
+        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_key_prefix(s3.key_prefix.as_deref())
+        .with_allow_http(s3.allow_http);
+    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
+        .with_server_frontends([ServerFrontend::Oci].iter().copied()).unwrap()
+        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
+        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let client = Client::new();
+    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
+    wait_for_health(&base_url, &client).await;
+
+    let repo = "test-owner/test-repo";
+
+    // Create upload session
+    let create = client.post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .send().await.unwrap();
+    assert_eq!(create.status(), 202);
+    let location = create.headers().get("location").unwrap().to_str().unwrap().to_owned();
+    assert!(location.contains("/blobs/uploads/"));
+
+    // PATCH a chunk
+    let chunk = b"abortable-chunk-data";
+    let patch = client.patch(&format!("{base_url}{location}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", format!("0-{}", chunk.len() - 1))
+        .body(chunk.to_vec()).send().await.unwrap();
+    assert_eq!(patch.status(), 202);
+
+    // Get the updated location after PATCH
+    let location2 = patch.headers().get("location")
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or_else(|| location.clone());
+
+    // Cancel (DELETE) the upload session
+    let cancel = client.delete(&format!("{base_url}{location2}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(cancel.status(), 204, "cancel session should return 204");
+
+    // Verify session is gone
+    let get = client.get(&format!("{base_url}{location2}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(get.status(), 404, "cancelled session should return 404");
+
+    server.abort();
+}

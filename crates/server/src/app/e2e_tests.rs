@@ -4519,3 +4519,31 @@ async fn lfs_verify_detects_corrupted_storage() {
         "verify should detect corruption with 422, got {}",
         verify_corrupted.status());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_multiple_webhooks_in_sequence() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Xet, ServerFrontend::Lfs]).await;
+
+    use hmac::Mac;
+
+    // Send 3 webhooks in sequence, each with unique delivery ID
+    for i in 0..3 {
+        let body = br#"{"action":"deleted","repository":{"full_name":"team/assets"}}"#;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+        let response = app.clone()
+            .oneshot(Request::builder().method("POST")
+                .uri("/v1/providers/github/webhooks")
+                .header("x-github-event", "repository")
+                .header("x-github-delivery", format!("multi-delivery-{i}"))
+                .header("x-hub-signature-256", &signature)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_vec())).unwrap())
+            .await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED,
+            "webhook {i} should be accepted");
+    }
+}
