@@ -495,6 +495,39 @@ async fn xorb_upload_hash_mismatch() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunk_merkledb_route_returns_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/chunks/default-merkledb/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shard_upload_invalid_data() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(b"invalid-shard-data".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error(),
+        "invalid shard should return 4xx, got {}", response.status());
+}
+
 // ============================================================================
 // LFS Protocol Tests
 // ============================================================================
@@ -1094,6 +1127,105 @@ async fn lfs_batch_upload_existing_object() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_download_existing_object() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let content = b"lfs-batch-download-existing";
+    let oid = test_oid(content);
+
+    // Upload first
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Batch download should include download actions for the object
+    let request = json!({
+        "operation": "download",
+        "objects": [{"oid": oid, "size": content.len() as u64}]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    let obj = &json["objects"][0];
+    assert_eq!(obj["oid"], oid);
+    assert!(obj["actions"].is_object(), "existing object should have download actions");
+    assert!(obj["actions"]["download"]["href"].as_str().unwrap().contains(&oid));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_mixed_present_absent() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let present_content = b"present-obj";
+    let present_oid = test_oid(present_content);
+
+    // Upload one object
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{present_oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, present_content.len().to_string())
+                .body(Body::from(present_content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let absent_oid = test_oid(b"absent-obj");
+
+    let request = json!({
+        "operation": "download",
+        "objects": [
+            {"oid": present_oid, "size": present_content.len() as u64},
+            {"oid": absent_oid, "size": 0}
+        ]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    let objects = json["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 2);
+    // Present object has actions
+    assert!(objects[0]["actions"].is_object(), "present object should have actions");
+    // Absent object has error
+    assert!(objects[1]["error"].is_object(), "absent object should have error");
+    assert_eq!(objects[1]["error"]["code"], 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_verify_valid() {
     let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
 
@@ -1527,6 +1659,40 @@ async fn bazel_cas_get_with_range() {
     assert_eq!(get.status(), StatusCode::PARTIAL_CONTENT);
     let body = body_bytes(get).await;
     assert_eq!(body, &content[0..4]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_ac_invalid_hash_returns_error() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/bazel/cache/ac/short")
+                .body(Body::from(b"data".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error(),
+        "expected client error, got {}", response.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_flat_invalid_hash_returns_error() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/bazel/short")
+                .body(Body::from(b"data".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error(),
+        "expected client error, got {}", response.status());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2201,6 +2367,124 @@ async fn oci_blob_get_with_range() {
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     let body = body_bytes(response).await;
     assert_eq!(body, &data[0..4]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_upload_session_get_status() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Create session
+    let create = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+                .header(header::CONTENT_LENGTH, "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED);
+    let location = create.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+
+    // GET session status
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&location)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_upload_session_delete_cancel() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Create session
+    let create = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+                .header(header::CONTENT_LENGTH, "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED);
+    let location = create.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+
+    // DELETE (cancel) session
+    let delete = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&location)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete.status().is_success() || delete.status() == StatusCode::ACCEPTED,
+        "cancel session status: {}", delete.status());
+
+    // Verify session is gone (GET should return 404)
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&location)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_put_invalid_json() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/latest"))
+                .header(header::CONTENT_TYPE, "application/vnd.oci.image.manifest.v1+json")
+                .body(Body::from(b"not-valid-json".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error(),
+        "invalid manifest should return 4xx, got {}", response.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_tags_list_empty_repo() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/tags/list"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["name"], OCI_TEST_REPO);
+    let tags = json["tags"].as_array().expect("tags array");
+    assert!(tags.is_empty(), "expected empty tags list, got {tags:?}");
 }
 
 // ============================================================================
