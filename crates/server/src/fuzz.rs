@@ -110,6 +110,62 @@ pub struct FuzzRetainedShardSummary {
     pub dedupe_chunk_hashes: Vec<String>,
 }
 
+/// Classification result for quarantine repair, exposed for fuzzing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuzzQuarantineAction {
+    Keep,
+    DeleteMissing,
+    DeleteReachable,
+    DeleteHeld,
+}
+
+impl From<QuarantineRepairAction> for FuzzQuarantineAction {
+    fn from(action: QuarantineRepairAction) -> Self {
+        match action {
+            QuarantineRepairAction::Keep => Self::Keep,
+            QuarantineRepairAction::DeleteMissing => Self::DeleteMissing,
+            QuarantineRepairAction::DeleteReachable => Self::DeleteReachable,
+            QuarantineRepairAction::DeleteHeld => Self::DeleteHeld,
+        }
+    }
+}
+
+/// Classification result for retention hold repair, exposed for fuzzing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuzzRetentionAction {
+    Keep,
+    DeleteExpired,
+    DeleteMissing,
+}
+
+impl From<RetentionHoldRepairAction> for FuzzRetentionAction {
+    fn from(action: RetentionHoldRepairAction) -> Self {
+        match action {
+            RetentionHoldRepairAction::Keep => Self::Keep,
+            RetentionHoldRepairAction::DeleteExpired => Self::DeleteExpired,
+            RetentionHoldRepairAction::DeleteMissing => Self::DeleteMissing,
+        }
+    }
+}
+
+/// Classification result for webhook delivery repair, exposed for fuzzing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuzzWebhookAction {
+    Keep,
+    DeleteStale,
+    DeleteFuture,
+}
+
+impl From<WebhookDeliveryRepairAction> for FuzzWebhookAction {
+    fn from(action: WebhookDeliveryRepairAction) -> Self {
+        match action {
+            WebhookDeliveryRepairAction::Keep => Self::Keep,
+            WebhookDeliveryRepairAction::DeleteStale => Self::DeleteStale,
+            WebhookDeliveryRepairAction::DeleteFuture => Self::DeleteFuture,
+        }
+    }
+}
+
 /// Summary of lifecycle-repair classifications used by fuzz targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FuzzLifecycleRepairSummary {
@@ -579,6 +635,45 @@ pub fn fuzz_lifecycle_repair_summary(
     }
 
     Ok(summary)
+}
+
+/// Fuzz-target wrapper for quarantine classification.
+pub fn fuzz_classify_quarantine(
+    object_exists: bool,
+    is_reachable: bool,
+    is_held: bool,
+) -> FuzzQuarantineAction {
+    classify_quarantine_repair_action(object_exists, is_reachable, is_held).into()
+}
+
+/// Fuzz-target wrapper for retention hold classification.
+pub fn fuzz_classify_retention(
+    release_after_unix_seconds: Option<u64>,
+    held_at_unix_seconds: u64,
+    object_exists: bool,
+    now_unix_seconds: u64,
+) -> FuzzRetentionAction {
+    classify_retention_hold_repair_action(
+        release_after_unix_seconds,
+        held_at_unix_seconds,
+        object_exists,
+        now_unix_seconds,
+    )
+    .into()
+}
+
+/// Fuzz-target wrapper for webhook delivery classification.
+pub fn fuzz_classify_webhook(
+    processed_at_unix_seconds: u64,
+    stale_cutoff_unix_seconds: u64,
+    max_processed_at_unix_seconds: u64,
+) -> FuzzWebhookAction {
+    classify_webhook_delivery_repair_action(
+        processed_at_unix_seconds,
+        stale_cutoff_unix_seconds,
+        max_processed_at_unix_seconds,
+    )
+    .into()
 }
 
 /// Parses a serialized shard with bounded metadata limits and reports the retained

@@ -90,6 +90,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "shardline_lifecycle_repair_classification"
+path = "fuzz_targets/shardline/lifecycle_repair_classification.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "shardline_vcs_refs"
 path = "fuzz_targets/shardline/vcs_refs.rs"
 test = false
