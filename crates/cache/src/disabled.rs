@@ -39,3 +39,55 @@ impl AsyncReconstructionCache for DisabledReconstructionCache {
         Box::pin(async { Ok(false) })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
+
+    use super::*;
+
+    #[test]
+    fn new_constructs_without_panic() {
+        let cache = DisabledReconstructionCache::new();
+        drop(cache);
+    }
+
+    #[test]
+    fn default_constructs_without_panic() {
+        let cache = DisabledReconstructionCache::default();
+        drop(cache);
+    }
+
+    #[tokio::test]
+    async fn ready_returns_ok() {
+        let cache = DisabledReconstructionCache::new();
+        let result = cache.ready().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_returns_none() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::latest("test", None);
+        let result = cache.get(&key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn put_returns_ok() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::latest("test", None);
+        let result = cache.put(&key, b"payload").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_returns_false() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::latest("test", None);
+        let result = cache.delete(&key).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+}
