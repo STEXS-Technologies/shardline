@@ -3,7 +3,7 @@
 //! Each test group builds a minimal [`Router`] with only the routes needed for that
 //! protocol and sends real HTTP requests via [`tower::ServiceExt::oneshot`].
 
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::{NonZeroU64, NonZeroUsize}, sync::Arc};
 
 use axum::{
     Router,
@@ -23,9 +23,11 @@ use crate::{
     backend::ServerBackend,
     local_backend::LocalBackend,
     object_store::ServerObjectStore,
+    provider::ProviderTokenService,
     reconstruction_cache::ReconstructionCacheService,
     server_role::ServerRole,
     test_fixtures,
+    xet_adapter::{XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE},
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenScope, TokenClaims};
 use shardline_server_core::{AuthProvider, auth::LocalEd25519Provider};
@@ -375,6 +377,220 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
 
     let app: Router = app.with_state(Arc::clone(&state));
     (app, tmp)
+}
+
+// ---------------------------------------------------------------------------
+// Provider config helpers
+// ---------------------------------------------------------------------------
+
+/// Creates a temporary provider config file for testing.
+fn create_provider_config_file() -> (TempDir, std::path::PathBuf) {
+    let dir = TempDir::new().expect("tempdir for provider config");
+    let config_path = dir.path().join("providers.json");
+    let config_content = br#"{
+        "providers": [{
+            "kind": "github",
+            "integration_subject": "github-app",
+            "webhook_secret": "secret",
+            "repositories": [{
+                "owner": "team",
+                "name": "assets",
+                "visibility": "private",
+                "default_revision": "main",
+                "clone_url": "https://github.example/team/assets.git",
+                "read_subjects": ["github-user-1"],
+                "write_subjects": ["github-user-1"]
+            }]
+        }]
+    }"#;
+    std::fs::write(&config_path, config_content).expect("write provider config");
+    (dir, config_path)
+}
+
+/// Builds a test app with authentication and provider tokens enabled.
+async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router, TempDir, TempDir) {
+    let (_config_dir, config_path) = create_provider_config_file();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
+    let object_store =
+        ServerObjectStore::local(tmp.path().join("chunks")).expect("local object store");
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).expect("upload parallelism"),
+        object_store,
+        frontends,
+    )
+    .await
+    .expect("local backend");
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().expect("bind addr"),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends(frontends.to_vec())
+    .expect("server frontends")
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .expect("token signing key");
+
+    config
+        .validate_runtime_requirements()
+        .expect("runtime requirements");
+
+    let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
+
+    let provider_tokens = ProviderTokenService::from_file(
+        &config_path,
+        b"bootstrap".to_vec(),
+        "test-issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+    )
+    .expect("provider token service");
+
+    let state = Arc::new(AppState {
+        config,
+        role: ServerRole::All,
+        backend: ServerBackend::Local(backend),
+        auth: Some(auth),
+        provider_tokens: Some(provider_tokens),
+        reconstruction_cache: ReconstructionCacheService::disabled(),
+        transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        protocol_metrics: ProtocolMetrics::default(),
+    });
+
+    let mut app = Router::new()
+        .route("/healthz", get(super::operational::health))
+        .route("/readyz", get(super::operational::ready))
+        .layer(middleware::from_fn(super::security_headers_middleware))
+        .route("/metrics", get(super::operational::metrics));
+
+    // Provider routes (registered when role serves API, outside per-frontend loop).
+    if state.role.serves_api() {
+        app = app
+            .route("/v1/providers/{provider}/tokens", post(super::provider_routes::issue_provider_token))
+            .route("/v1/providers/{provider}/git-lfs-authenticate", post(super::provider_routes::git_lfs_authenticate))
+            .route("/v1/providers/{provider}/webhooks", post(super::provider_routes::handle_provider_webhook))
+            .route("/v1/stats", get(super::operational::stats));
+    }
+
+    for frontend in frontends {
+        match frontend {
+            ServerFrontend::Xet => {
+                if state.role.serves_api() {
+                    app = app
+                        .route(
+                            "/reconstructions",
+                            get(super::reconstruction_routes::batch_reconstruction),
+                        )
+                        .route(
+                            "/v1/reconstructions",
+                            get(super::reconstruction_routes::batch_reconstruction),
+                        )
+                        .route(
+                            "/v1/reconstructions/{file_id}",
+                            get(super::reconstruction_routes::reconstruction),
+                        )
+                        .route(
+                            "/v2/reconstructions/{file_id}",
+                            get(super::reconstruction_routes::reconstruction_v2),
+                        )
+                        .route("/shards", post(super::operational::upload_shard))
+                        .route("/v1/shards", post(super::operational::upload_shard))
+                        .route(XET_READ_TOKEN_ROUTE, get(super::provider_routes::issue_xet_read_token))
+                        .route(XET_WRITE_TOKEN_ROUTE, get(super::provider_routes::issue_xet_write_token));
+                }
+                if state.role.serves_transfer() {
+                    app = app
+                        .route(
+                            "/v1/chunks/default/{hash}",
+                            get(super::operational::read_chunk),
+                        )
+                        .route(
+                            "/v1/chunks/default-merkledb/{hash}",
+                            get(super::operational::read_chunk),
+                        )
+                        .route(
+                            "/v1/xorbs/default/{hash}",
+                            head(super::operational::head_xorb)
+                                .post(super::operational::upload_xorb),
+                        )
+                        .route(
+                            "/transfer/xorb/{prefix}/{hash}",
+                            get(super::operational::read_xorb_transfer),
+                        );
+                }
+            }
+            ServerFrontend::Lfs => {
+                if state.role.serves_api() {
+                    app = app.route(
+                        "/v1/lfs/objects/batch",
+                        post(super::protocol_routes::lfs_batch),
+                    );
+                }
+                if state.role.serves_transfer() {
+                    app = app
+                        .route(
+                            "/v1/lfs/objects/{oid}",
+                            get(super::protocol_routes::lfs_get_object)
+                                .head(super::protocol_routes::lfs_head_object)
+                                .put(super::protocol_routes::lfs_put_object)
+                                .patch(super::protocol_routes::lfs_patch_object)
+                                .delete(super::protocol_routes::lfs_delete_object),
+                        )
+                        .route(
+                            "/v1/lfs/objects/{oid}/verify",
+                            post(super::protocol_routes::lfs_verify_object),
+                        );
+                }
+            }
+            ServerFrontend::BazelHttp => {
+                if state.role.serves_transfer() {
+                    app = app
+                        .route(
+                            "/v1/bazel/cache/ac/{hash}",
+                            get(super::protocol_routes::bazel_get_ac)
+                                .put(super::protocol_routes::bazel_put_ac)
+                                .head(super::protocol_routes::bazel_head_ac),
+                        )
+                        .route(
+                            "/v1/bazel/cache/cas/{hash}",
+                            get(super::protocol_routes::bazel_get_cas)
+                                .put(super::protocol_routes::bazel_put_cas)
+                                .head(super::protocol_routes::bazel_head_cas),
+                        )
+                        .route(
+                            "/v1/bazel/{hash}",
+                            get(super::protocol_routes::bazel_get)
+                                .put(super::protocol_routes::bazel_put)
+                                .head(super::protocol_routes::bazel_head),
+                        );
+                }
+            }
+            ServerFrontend::Oci => {
+                app = app
+                    .route(
+                        "/v2/token",
+                        get(super::protocol_routes::oci_registry_token),
+                    )
+                    .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                    .route(
+                        "/v2/{*path}",
+                        axum::routing::any(super::protocol_routes::oci_dispatch),
+                    );
+            }
+            ServerFrontend::Hub => {}
+        }
+    }
+
+    let app: Router = app.with_state(Arc::clone(&state));
+    (app, tmp, _config_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -3967,4 +4183,148 @@ async fn lfs_upload_then_bazel_download_with_auth() {
             .body(Body::empty()).unwrap())
         .await.unwrap();
     assert_eq!(get.status(), StatusCode::NOT_FOUND);
+}
+
+// ============================================================================
+// Provider Token E2E Tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_token_issuance_with_valid_bootstrap_key() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Lfs, ServerFrontend::Xet]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-shardline-provider-key", "bootstrap")
+                .body(Body::from(r#"{"subject":"github-user-1","owner":"team","repo":"assets","revision":"refs/heads/main","scope":"Read"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(json.get("token").and_then(|t| t.as_str()).is_some(), "should return a token");
+    assert_eq!(json["issuer"], "test-issuer");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_token_rejected_wrong_bootstrap_key() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Lfs]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-shardline-provider-key", "wrong-key")
+                .body(Body::from(r#"{"subject":"github-user-1","owner":"team","repo":"assets","revision":"refs/heads/main","scope":"Read"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_token_rejected_unknown_provider() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Lfs]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/gitlab/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-shardline-provider-key", "bootstrap")
+                .body(Body::from(r#"{"subject":"user","owner":"team","repo":"assets","revision":"main","scope":"Read"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_token_rejected_unauthorized_subject() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Lfs]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-shardline-provider-key", "bootstrap")
+                .body(Body::from(r#"{"subject":"unknown-user","owner":"team","repo":"assets","revision":"main","scope":"Read"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_read_token_with_provider_tokens() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/github/team/assets/xet-read-token/main?subject=github-user-1")
+                .header("x-shardline-provider-key", "bootstrap")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(json.get("accessToken").and_then(|t| t.as_str()).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xet_write_token_with_provider_tokens() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/github/team/assets/xet-write-token/main?subject=github-user-1")
+                .header("x-shardline-provider-key", "bootstrap")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(json.get("accessToken").and_then(|t| t.as_str()).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_lfs_authenticate_with_provider_token() {
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Lfs]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/providers/github/git-lfs-authenticate")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-shardline-provider-key", "bootstrap")
+                .body(Body::from(r#"{"subject":"github-user-1","owner":"team","repo":"assets","revision":"refs/heads/main","scope":"Read"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(json["header"]["X-Xet-Access-Token"].as_str().is_some());
 }
