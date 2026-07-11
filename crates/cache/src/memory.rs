@@ -221,6 +221,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
 mod tests {
     use std::{
         num::{NonZeroU64, NonZeroUsize},
+        sync::Arc,
         time::Duration,
     };
 
@@ -277,5 +278,123 @@ mod tests {
 
         assert!(value.is_ok());
         assert_eq!(value.ok(), Some(None));
+    }
+
+    // ── Concurrency stress tests ──────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn memory_cache_concurrent_get_put_delete() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(1000).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let keys: std::sync::Arc<[ReconstructionCacheKey; 4]> = std::sync::Arc::new([
+            ReconstructionCacheKey::latest("concurrent-1", None),
+            ReconstructionCacheKey::latest("concurrent-2", None),
+            ReconstructionCacheKey::latest("concurrent-3", None),
+            ReconstructionCacheKey::latest("concurrent-4", None),
+        ]);
+
+        let mut handles = Vec::new();
+
+        // 10 concurrent tasks: mix of get, put, delete
+        for task_id in 0..10 {
+            let cache = std::sync::Arc::clone(&cache);
+            let keys = std::sync::Arc::clone(&keys);
+            handles.push(tokio::spawn(async move {
+                for round in 0..50 {
+                    let key = &keys[(task_id + round) % 4];
+                    match (task_id + round) % 5 {
+                        0 | 1 => {
+                            // put
+                            let payload = format!("payload-{task_id}-{round}");
+                            let _ = cache.put(key, payload.as_bytes()).await;
+                        }
+                        2 | 3 => {
+                            // get
+                            let _ = cache.get(key).await;
+                        }
+                        _ => {
+                            // delete
+                            let _ = cache.delete(key).await;
+                        }
+                    }
+                    // Yield between operations to increase interleaving
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await;
+            assert!(result.is_ok(), "task panicked: {:?}", result.err());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn memory_cache_concurrent_same_key() {
+        // Stress the loading/Notify coalescing pattern when multiple tasks
+        // race on the same key simultaneously.
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("hot-key", None);
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let cache = std::sync::Arc::clone(&cache);
+            let key = key.clone();
+            handles.push(tokio::spawn(async move {
+                // First put to ensure there's data
+                let _ = cache.put(&key, b"shared-data").await;
+                // Multiple concurrent gets — some will hit loading coalescing
+                for _ in 0..20 {
+                    let result = cache.get(&key).await;
+                    assert!(result.is_ok(), "concurrent get should not error");
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await;
+            assert!(result.is_ok(), "task panicked: {:?}", result.err());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn memory_cache_concurrent_eviction_stress() {
+        // Stress the eviction path by filling the cache beyond capacity
+        // with concurrent puts.
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(10).unwrap_or(NonZeroUsize::MIN),
+        ));
+
+        let mut handles = Vec::new();
+        for task_id in 0..20 {
+            let cache = std::sync::Arc::clone(&cache);
+            handles.push(tokio::spawn(async move {
+                for i in 0..20 {
+                    let key = ReconstructionCacheKey::latest(
+                        &format!("evict-key-{task_id}-{i}"),
+                        None,
+                    );
+                    let payload = format!("evict-payload-{task_id}-{i}");
+                    let _ = cache.put(&key, payload.as_bytes()).await;
+                    // Also read back randomly
+                    if i % 3 == 0 {
+                        let _ = cache.get(&key).await;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await;
+            assert!(result.is_ok(), "task panicked: {:?}", result.err());
+        }
     }
 }
