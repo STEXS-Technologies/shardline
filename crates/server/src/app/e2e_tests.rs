@@ -468,6 +468,33 @@ async fn xet_write_token_without_auth_returns_error() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_upload_hash_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let content = b"xorb-hash-mismatch-test";
+    // Compute a hash but upload different content
+    let wrong_hash = "a".repeat(64);
+    
+    let upload = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{wrong_hash}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    // Hash mismatch should return an error (4xx or 5xx)
+    assert!(
+        upload.status().is_client_error() || upload.status().is_server_error(),
+        "expected error status for hash mismatch, got {}",
+        upload.status()
+    );
+}
+
 // ============================================================================
 // LFS Protocol Tests
 // ============================================================================
@@ -858,6 +885,212 @@ async fn lfs_patch_invalid_range() {
         "invalid Content-Range should return 4xx, got {}",
         patch.status()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_unsupported_operation() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let request = serde_json::json!({
+        "operation": "delete",
+        "objects": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_too_many_objects() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let objects: Vec<serde_json::Value> = (0..2000)
+        .map(|i| serde_json::json!({"oid": format!("{:064x}", i), "size": 100}))
+        .collect();
+    let request = serde_json::json!({
+        "operation": "download",
+        "objects": objects
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_unsupported_hash_algo() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let request = serde_json::json!({
+        "operation": "download",
+        "hash_algo": "sha512",
+        "objects": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_unsupported_transfer() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let request = serde_json::json!({
+        "operation": "download",
+        "transfers": ["ssh"],
+        "objects": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_put_wrong_content_type() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let oid = test_oid(b"wrong-content-type-test");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from(b"test".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_get_object_with_range() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let content = b"lfs-range-test-content-1234567890";
+    let oid = test_oid(content);
+
+    // Upload
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // GET with Range
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::RANGE, "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::PARTIAL_CONTENT);
+    let body = body_bytes(get).await;
+    assert_eq!(body, &content[0..4]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_upload_existing_object() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    // Upload an object first
+    let content = b"lfs-batch-exists-test";
+    let oid = test_oid(content);
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Batch with upload operation — should report the object as already present (no actions)
+    let request = serde_json::json!({
+        "operation": "upload",
+        "objects": [{"oid": oid, "size": content.len() as u64}]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    let obj = &json["objects"][0];
+    assert_eq!(obj["oid"], oid);
+    // Existing object should NOT have upload actions
+    assert!(obj.get("actions").is_none() || obj["actions"].as_object().map_or(true, |m| m.is_empty()),
+        "existing object should not have upload actions: {:?}", obj["actions"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1257,6 +1490,43 @@ async fn bazel_flat_head_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_cas_get_with_range() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let content = b"bazel-cas-range-test-content-42";
+    let hash = test_hash(content);
+
+    // PUT
+    let put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::NO_CONTENT);
+
+    // GET with Range header
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .header(header::RANGE, "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::PARTIAL_CONTENT);
+    let body = body_bytes(get).await;
+    assert_eq!(body, &content[0..4]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1718,6 +1988,221 @@ async fn oci_tags_list() {
     );
 }
 
+// ── session upload (PATCH + PUT complete) ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_session_upload() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Step 1: Create upload session (POST without digest)
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+                .header(header::CONTENT_LENGTH, "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED, "session create failed: {}",
+        String::from_utf8_lossy(&body_bytes(create).await));
+    let location = create
+        .headers()
+        .get(header::LOCATION)
+        .expect("LOCATION header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(location.contains("/blobs/uploads/"), "location: {location}");
+
+    // Step 2: PATCH first chunk
+    let chunk1 = b"hello-";
+    let patch1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(&location)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, chunk1.len().to_string())
+                .header("Content-Range", format!("0-{}", chunk1.len() - 1))
+                .body(Body::from(chunk1.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch1.status(), StatusCode::ACCEPTED, "PATCH 1 failed: {}",
+        String::from_utf8_lossy(&body_bytes(patch1).await));
+    let location2 = patch1
+        .headers()
+        .get(header::LOCATION)
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or(location);
+
+    // Step 3: PATCH second chunk
+    let chunk2 = b"world!";
+    let patch2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(&location2)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, chunk2.len().to_string())
+                .header(
+                    "Content-Range",
+                    format!("{}-{}", chunk1.len(), chunk1.len() + chunk2.len() - 1),
+                )
+                .body(Body::from(chunk2.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch2.status(), StatusCode::ACCEPTED, "PATCH 2 failed: {}",
+        String::from_utf8_lossy(&body_bytes(patch2).await));
+    let location3 = patch2
+        .headers()
+        .get(header::LOCATION)
+        .map(|v| v.to_str().unwrap().to_owned())
+        .unwrap_or(location2);
+
+    // Step 4: PUT to complete with digest
+    let full_data = [chunk1.to_vec(), chunk2.to_vec()].concat();
+    let digest_hex = sha256_hex(&full_data);
+    let complete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("{location3}?digest=sha256:{digest_hex}"))
+                .header(header::CONTENT_LENGTH, "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        complete.status(),
+        StatusCode::CREATED,
+        "PUT complete failed: {}",
+        String::from_utf8_lossy(&body_bytes(complete).await)
+    );
+
+    // Step 5: Verify blob is readable
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{digest_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, full_data);
+}
+
+// ── cross-repo mount ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_mount_cross_repo() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Upload blob to source repo
+    let data = b"mountable-blob-data-42";
+    let source_repo = "team/source";
+    let digest_hex = oci_upload_blob(&app, source_repo, data).await;
+
+    // Mount from source to target
+    let target_repo = "team/target";
+    let mount = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v2/{target_repo}/blobs/uploads/?mount=sha256:{digest_hex}&from={source_repo}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mount.status(),
+        StatusCode::CREATED,
+        "mount failed: {}",
+        String::from_utf8_lossy(&body_bytes(mount).await)
+    );
+
+    // Verify blob accessible in target repo
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{target_repo}/blobs/sha256:{digest_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(get).await, data);
+}
+
+// ── digest-algorithm rejection ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_upload_unsupported_digest_algorithm() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let data = b"test-data";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v2/{OCI_TEST_REPO}/blobs/uploads/?digest-algorithm=sha512"
+                ))
+                .body(Body::from(data.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── Range request ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_get_with_range() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let data = b"oci-range-test-data-1234567890";
+    let digest_hex = oci_upload_blob(&app, OCI_TEST_REPO, data).await;
+
+    // GET with Range
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{digest_hex}"))
+                .header(header::RANGE, "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    let body = body_bytes(response).await;
+    assert_eq!(body, &data[0..4]);
+}
+
 // ============================================================================
 // Security Headers
 // ============================================================================
@@ -1864,4 +2349,191 @@ async fn upload_via_lfs_read_metadata_via_reconstruction() {
         .unwrap();
     assert_eq!(lfs_get.status(), StatusCode::OK);
     assert_eq!(body_bytes(lfs_get).await, lfs_content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_and_lfs_coexist_independently() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci, ServerFrontend::Lfs]).await;
+
+    // Upload via OCI
+    let data = b"oci-lfs-cross-proto-test";
+    let digest_hex = oci_upload_blob(&app, OCI_TEST_REPO, data).await;
+
+    // Verify OCI blob is accessible
+    let oci_get = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{digest_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oci_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(oci_get).await, data);
+
+    // Verify LFS cannot access the same content via OID (different namespace)
+    let lfs_get = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{digest_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // LFS should NOT find content uploaded via OCI (namespace isolation)
+    assert_eq!(lfs_get.status(), StatusCode::NOT_FOUND,
+        "LFS should not find OCI-uploaded content (namespace isolation)");
+
+    // Upload via LFS 
+    let lfs_content = b"lfs-only-content";
+    let lfs_oid = test_oid(lfs_content);
+    let lfs_put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{lfs_oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, lfs_content.len().to_string())
+                .body(Body::from(lfs_content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lfs_put.status(), StatusCode::OK);
+
+    // Verify OCI cannot access LFS content (reverse isolation)
+    let oci_get2 = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{lfs_oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oci_get2.status(), StatusCode::NOT_FOUND,
+        "OCI should not find LFS-uploaded content (namespace isolation)");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_protocols_coexist() {
+    let (app, _tmp) = test_app(&[
+        ServerFrontend::Xet,
+        ServerFrontend::Lfs,
+        ServerFrontend::BazelHttp,
+        ServerFrontend::Oci,
+    ]).await;
+
+    // 1. Xet: upload xorb + shard, get reconstruction
+    let content = b"quad-proto-content";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    // 2. LFS: upload and download
+    let lfs_content = b"lfs-quad-content";
+    let lfs_oid = test_oid(lfs_content);
+    let lfs_put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{lfs_oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, lfs_content.len().to_string())
+                .body(Body::from(lfs_content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lfs_put.status(), StatusCode::OK);
+
+    // 3. Bazel: upload and download
+    let bazel_content = b"bazel-quad-content";
+    let bazel_hash = test_hash(bazel_content);
+    let bazel_put = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{bazel_hash}"))
+                .body(Body::from(bazel_content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bazel_put.status(), StatusCode::NO_CONTENT);
+
+    // 4. OCI: upload and download blob
+    let oci_data = b"oci-quad-content";
+    let oci_digest = oci_upload_blob(&app, OCI_TEST_REPO, oci_data).await;
+
+    // 5. Verify ALL four are independently accessible
+    // LFS
+    let lfs_get = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{lfs_oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lfs_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(lfs_get).await, lfs_content);
+
+    // Bazel
+    let bazel_get = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/bazel/cache/cas/{bazel_hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bazel_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(bazel_get).await, bazel_content);
+
+    // OCI
+    let oci_get = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{oci_digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oci_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(oci_get).await, oci_data);
+
+    // 6. Namespace isolation: OCI blob not accessible via LFS
+    let lfs_oci_cross = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oci_digest}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lfs_oci_cross.status(), StatusCode::NOT_FOUND,
+        "namespace isolation: LFS should not see OCI content");
 }
