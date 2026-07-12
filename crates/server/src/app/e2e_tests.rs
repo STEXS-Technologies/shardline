@@ -46,6 +46,15 @@ use shardline_server_core::{AuthProvider, auth::LocalEd25519Provider};
 ///
 /// The returned [`TempDir`] must be kept alive for the lifetime of the Router.
 async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
+    test_app_for_frontends_with_role(frontends, ServerRole::All).await
+}
+
+/// Like [`test_app`] but with an explicit [`ServerRole`] so testers can
+/// exercise role-split code paths (e.g. Api-only or Transfer-only).
+async fn test_app_for_frontends_with_role(
+    frontends: &[ServerFrontend],
+    role: ServerRole,
+) -> (Router, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
     let object_store =
@@ -67,7 +76,7 @@ async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         tmp.path().to_path_buf(),
         chunk_size,
     )
-    .with_server_role(ServerRole::All)
+    .with_server_role(role)
     .with_server_frontends(frontends.to_vec())
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
@@ -79,7 +88,7 @@ async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
 
     let state = Arc::new(AppState {
         config,
-        role: ServerRole::All,
+        role,
         backend: ServerBackend::Local(backend),
         auth: None,
         provider_tokens: None,
@@ -195,13 +204,34 @@ async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                 }
             }
             ServerFrontend::Oci => {
-                app = app
-                    .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                    .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                    .route(
-                        "/v2/{*path}",
-                        axum::routing::any(super::protocol_routes::oci_dispatch),
-                    );
+                match role {
+                    ServerRole::All => {
+                        app = app
+                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                            .route(
+                                "/v2/{*path}",
+                                axum::routing::any(super::protocol_routes::oci_dispatch),
+                            );
+                    }
+                    ServerRole::Api => {
+                        app = app
+                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                            .route(
+                                "/v2/{*path}",
+                                axum::routing::any(super::protocol_routes::oci_api_dispatch),
+                            );
+                    }
+                    ServerRole::Transfer => {
+                        app = app.route(
+                            "/v2/{*path}",
+                            axum::routing::any(
+                                super::protocol_routes::oci_transfer_dispatch,
+                            ),
+                        );
+                    }
+                }
             }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
@@ -392,13 +422,34 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                 }
             }
             ServerFrontend::Oci => {
-                app = app
-                    .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                    .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                    .route(
-                        "/v2/{*path}",
-                        axum::routing::any(super::protocol_routes::oci_dispatch),
-                    );
+                match state.role {
+                    ServerRole::All => {
+                        app = app
+                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                            .route(
+                                "/v2/{*path}",
+                                axum::routing::any(super::protocol_routes::oci_dispatch),
+                            );
+                    }
+                    ServerRole::Api => {
+                        app = app
+                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                            .route(
+                                "/v2/{*path}",
+                                axum::routing::any(super::protocol_routes::oci_api_dispatch),
+                            );
+                    }
+                    ServerRole::Transfer => {
+                        app = app.route(
+                            "/v2/{*path}",
+                            axum::routing::any(
+                                super::protocol_routes::oci_transfer_dispatch,
+                            ),
+                        );
+                    }
+                }
             }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
@@ -629,13 +680,34 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                 }
             }
             ServerFrontend::Oci => {
-                app = app
-                    .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                    .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                    .route(
-                        "/v2/{*path}",
-                        axum::routing::any(super::protocol_routes::oci_dispatch),
-                    );
+                match state.role {
+                    ServerRole::All => {
+                        app = app
+                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                            .route(
+                                "/v2/{*path}",
+                                axum::routing::any(super::protocol_routes::oci_dispatch),
+                            );
+                    }
+                    ServerRole::Api => {
+                        app = app
+                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                            .route(
+                                "/v2/{*path}",
+                                axum::routing::any(super::protocol_routes::oci_api_dispatch),
+                            );
+                    }
+                    ServerRole::Transfer => {
+                        app = app.route(
+                            "/v2/{*path}",
+                            axum::routing::any(
+                                super::protocol_routes::oci_transfer_dispatch,
+                            ),
+                        );
+                    }
+                }
             }
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
@@ -5375,4 +5447,96 @@ async fn hub_whoami_without_auth_returns_ok() {
 
     // Without auth configured, whoami should still return OK with default values
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ── OCI role-split ────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_api_role_serves_manifest_but_not_blob_upload() {
+    let (app, _tmp) =
+        test_app_for_frontends_with_role(&[ServerFrontend::Oci], ServerRole::Api).await;
+
+    // Manifest GET should work on the API role
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v2/test/manifests/latest")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should return 404 (manifest not found) rather than 404 (route not found)
+    // because the API role serves manifest routes but the manifest doesn't exist yet.
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "API role should serve manifest routes (returning not-found for missing content)"
+    );
+
+    // Blob upload POST should fail with 404 on API role
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/test/blobs/uploads/")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(&b"test data"[..]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "API role should reject blob upload (transfer operation)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_transfer_role_serves_blob_upload_but_not_manifest() {
+    let (app, _tmp) =
+        test_app_for_frontends_with_role(&[ServerFrontend::Oci], ServerRole::Transfer).await;
+
+    // Blob upload POST should work on the Transfer role
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/test/blobs/uploads/")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(&b"test data"[..]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "Transfer role should serve blob upload (not return 404)"
+    );
+
+    // Manifest GET should fail with 404 on Transfer role
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v2/test/manifests/latest")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "Transfer role should reject manifest operations"
+    );
 }
