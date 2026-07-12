@@ -69,7 +69,6 @@ fn authorize_write(state: &HubState, headers: &HeaderMap) -> Result<(), HubApiEr
 /// Returns [`HubApiError::NotFound`] if the service is unknown or the repo
 /// does not exist. Returns [`HubApiError::Unauthorized`] or
 /// [`HubApiError::Forbidden`] on auth failure.
-#[allow(clippy::indexing_slicing)]
 pub async fn info_refs(
     State(state): State<HubState>,
     Path((repo_type, ns, repo)): Path<(String, String, String)>,
@@ -105,19 +104,20 @@ pub async fn info_refs(
     let mut body = String::new();
     body.push_str(&pktline::encode_line(&format!("# service={service}\n"))?);
     body.push_str(FLUSH);
-    if refs.is_empty() {
-        body.push_str(&pktline::encode_line(&format!(
-            "0000000000000000000000000000000000000000 capabilities^{{}}\x00{capabilities}\n",
-        ))?);
-    } else {
-        let first = &refs[0];
+    if let Some(first) = refs.first() {
         body.push_str(&pktline::encode_line(&format!(
             "{} {} capabilities^{{}}\x00{capabilities}\n",
             first.sha1, first.name
         ))?);
-        for r in &refs[1..] {
+        // SAFETY: refs has at least one element (first is Some), so skip(1)
+        // is safe and yields an empty iterator when refs.len() == 1.
+        for r in refs.iter().skip(1) {
             body.push_str(&pktline::encode_line(&format!("{} {}\n", r.sha1, r.name))?);
         }
+    } else {
+        body.push_str(&pktline::encode_line(&format!(
+            "0000000000000000000000000000000000000000 capabilities^{{}}\x00{capabilities}\n",
+        ))?);
     }
     body.push_str(FLUSH);
 
@@ -511,7 +511,6 @@ fn tree_object_from_entries(entries: &[(u32, String, [u8; 20])]) -> GitObject {
 ///
 /// `prefix` is the current directory path (empty string for root).
 /// `sub_trees` collects any sub-tree objects created during recursion.
-#[allow(clippy::indexing_slicing)]
 fn build_tree_entries<'input>(
     files: &[&'input HubFileEntry],
     prefix: &str,
@@ -549,7 +548,12 @@ fn build_tree_entries<'input>(
     dir_names.sort();
 
     for dir_name in &dir_names {
-        let dir_files = &children[dir_name];
+        // SAFETY: dir_name comes from children.keys(), guaranteed to exist
+        let dir_files = match children.get(dir_name) {
+            Some(f) => f,
+            // This arm is unreachable because dir_name comes from keys()
+            None => continue,
+        };
         let sub_prefix = if prefix.is_empty() {
             dir_name.clone()
         } else {
@@ -619,7 +623,6 @@ fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
     Some(GitObject::blob(content.into_bytes()))
 }
 
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Vec<u8>) {
     let mut updates = Vec::new();
     let mut pack_start = 0;
@@ -636,33 +639,33 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
         }
 
         let parts: Vec<&str> = s.split_whitespace().collect();
-        if parts.len() >= 3 {
+        if let [first, second, third, ..] = parts.as_slice() {
             updates.push((
-                parts[0].to_owned(),
-                parts[1].to_owned(),
-                parts[2].to_owned(),
+                first.to_string(),
+                second.to_string(),
+                third.to_string(),
             ));
         }
     }
 
-    let mut pos = 0;
-    while pos + 4 <= body.len() {
-        let hex_len = &body[pos..pos + 4];
+    let mut pos = 0usize;
+    while pos.wrapping_add(4) <= body.len() {
+        let hex_len = body.get(pos..pos.wrapping_add(4)).unwrap_or(&[]);
         if let Ok(hex_str) = std::str::from_utf8(hex_len)
             && let Ok(len) = u16::from_str_radix(hex_str, 16)
         {
             if len == 0 {
-                pack_start = pos + 4;
+                pack_start = pos.wrapping_add(4);
                 break;
             }
-            pos += len as usize;
+            pos = pos.wrapping_add(len as usize);
             continue;
         }
         break;
     }
 
     let pack_data = if pack_start < body.len() {
-        body[pack_start..].to_vec()
+        body.get(pack_start..).unwrap_or(&[]).to_vec()
     } else {
         Vec::new()
     };
@@ -681,18 +684,26 @@ const MAX_TOTAL_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
 /// # Errors
 ///
 /// Returns `PackError` if the pack data is malformed or incomplete.
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
     if data.len() < 12 {
         return Ok(Vec::new());
     }
 
-    if &data[0..4] != b"PACK" {
+    // SAFETY: data.len() >= 12 checked above, so range [0..4] is within bounds.
+    // Using .get().unwrap_or(&[]) for bounds safety: if the precondition is
+    // violated, an empty slice won't match "PACK" and we return an empty vec.
+    if data.get(0..4).unwrap_or(&[]) != b"PACK" {
         return Ok(Vec::new());
     }
 
-    let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    let num_objects = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    // SAFETY: data.len() >= 12 checked above ensures indices 4..8 are valid.
+    let mut version_arr = [0u8; 4];
+    version_arr.copy_from_slice(data.get(4..8).unwrap_or(&[0, 0, 0, 0]));
+    let version = u32::from_be_bytes(version_arr);
+    // SAFETY: data.len() >= 12 checked above ensures indices 8..12 are valid.
+    let mut num_objects_arr = [0u8; 4];
+    num_objects_arr.copy_from_slice(data.get(8..12).unwrap_or(&[0, 0, 0, 0]));
+    let num_objects = u32::from_be_bytes(num_objects_arr);
 
     if version != 2 {
         return Ok(Vec::new());
@@ -700,7 +711,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
 
     let mut objects = Vec::new();
     let mut sha_index: HashMap<[u8; 20], usize> = HashMap::new();
-    let mut pos = 12;
+    let mut pos: usize = 12;
     let mut total_decompressed: usize = 0;
 
     for _ in 0..num_objects {
@@ -708,18 +719,21 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
             break;
         }
 
-        let byte = data[pos];
-        pos += 1;
+        // SAFETY: pos < data.len() checked above, so data.get(pos) is Some.
+        // .unwrap_or(&0) provides a default that won't match valid pack entries.
+        let byte = *data.get(pos).unwrap_or(&0);
+        pos = pos.wrapping_add(1);
 
         let obj_type = (byte >> 4) & 0x07;
         let mut _size = (byte & 0x0f) as u64;
-        let mut shift = 4;
+        let mut shift: u32 = 4;
 
         let mut current = byte;
         while current & 0x80 != 0 && pos < data.len() {
-            current = data[pos];
-            pos += 1;
-            shift += 7;
+            // SAFETY: while condition ensures pos < data.len()
+            current = *data.get(pos).unwrap_or(&0);
+            pos = pos.wrapping_add(1);
+            shift = shift.wrapping_add(7);
             if shift >= 64 {
                 return Err(PackError::ShiftOverflow);
             }
@@ -728,10 +742,11 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
 
         match obj_type {
             1..=4 => {
-                let remaining = &data[pos..];
+                // SAFETY: pos may equal data.len() (empty slice is valid for decompress_zlib)
+                let remaining = data.get(pos..).unwrap_or(&[]);
                 match decompress_zlib(remaining) {
                     Ok((decompressed, bytes_used)) => {
-                        pos += bytes_used;
+                        pos = pos.wrapping_add(bytes_used);
                         total_decompressed = total_decompressed
                             .checked_add(decompressed.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
@@ -758,10 +773,11 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
             6 => {
                 // OFS_DELTA — resolve against a base object by negative offset.
                 let offset = parse_ofs_delta_offset(data, &mut pos)?;
-                let remaining = &data[pos..];
+                // SAFETY: pos may equal data.len() (empty slice is valid for decompress_zlib)
+                let remaining = data.get(pos..).unwrap_or(&[]);
                 match decompress_zlib(remaining) {
                     Ok((delta_data, bytes_used)) => {
-                        pos += bytes_used;
+                        pos = pos.wrapping_add(bytes_used);
                         total_decompressed = total_decompressed
                             .checked_add(delta_data.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
@@ -772,7 +788,11 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                             .len()
                             .checked_sub(offset)
                             .ok_or(PackError::InvalidDelta)?;
-                        let base = objects[base_idx].clone();
+                        // SAFETY: checked_sub ensures base_idx < objects.len()
+                        let base = objects
+                            .get(base_idx)
+                            .ok_or(PackError::InvalidDelta)?
+                            .clone();
                         let resolved_data = apply_delta(&base.data, &delta_data)?;
                         total_decompressed = total_decompressed
                             .checked_add(resolved_data.len())
@@ -791,18 +811,22 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                     Err(_) => break,
                 }
             }
-            7 => {
-                // REF_DELTA — resolve against a base object by SHA.
-                if pos + 20 > data.len() {
-                    return Err(PackError::InvalidDelta);
-                }
-                let mut base_sha = [0u8; 20];
-                base_sha.copy_from_slice(&data[pos..pos + 20]);
-                pos += 20;
-                let remaining = &data[pos..];
+                7 => {
+                    // REF_DELTA — resolve against a base object by SHA.
+                    if pos.wrapping_add(20) > data.len() {
+                        return Err(PackError::InvalidDelta);
+                    }
+                    let mut base_sha = [0u8; 20];
+                    // SAFETY: pos.wrapping_add(20) > data.len() check above guarantees range is valid
+                    base_sha.copy_from_slice(
+                        data.get(pos..pos.wrapping_add(20)).ok_or(PackError::InvalidDelta)?,
+                    );
+                    pos = pos.wrapping_add(20);
+                    // SAFETY: pos may equal data.len() (empty slice is valid for decompress_zlib)
+                    let remaining = data.get(pos..).unwrap_or(&[]);
                 match decompress_zlib(remaining) {
                     Ok((delta_data, bytes_used)) => {
-                        pos += bytes_used;
+                        pos = pos.wrapping_add(bytes_used);
                         total_decompressed = total_decompressed
                             .checked_add(delta_data.len())
                             .ok_or(PackError::ExcessiveDecompressedSize)?;
@@ -810,7 +834,12 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
                         let &base_idx = sha_index.get(&base_sha).ok_or(PackError::InvalidDelta)?;
-                        let base = objects[base_idx].clone();
+                        // SAFETY: base_idx comes from sha_index which is populated
+                        // with every object's index as they are pushed to objects
+                        let base = objects
+                            .get(base_idx)
+                            .ok_or(PackError::InvalidDelta)?
+                            .clone();
                         let resolved_data = apply_delta(&base.data, &delta_data)?;
                         total_decompressed = total_decompressed
                             .checked_add(resolved_data.len())
@@ -839,7 +868,6 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
 /// Maximum allowed decompressed size for zlib data (512 MB).
 const MAX_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
 
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
     use flate2::Decompress;
     use flate2::FlushDecompress;
@@ -853,25 +881,39 @@ fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::
         let before_in = decompressor.total_in();
         let before_out = decompressor.total_out();
 
-        let in_chunk = &data[input_pos..];
+        // SAFETY: input_pos tracks consumed bytes and never exceeds data.len()
+        let in_chunk = data.get(input_pos..).unwrap_or(&[]);
         let in_len = in_chunk.len().min(4096);
 
-        let flush = if input_pos + in_len >= data.len() {
+        let flush = if input_pos
+            .checked_add(in_len)
+            .is_some_and(|sum| sum >= data.len())
+        {
             FlushDecompress::Finish
         } else {
             FlushDecompress::None
         };
 
         // Allocate buffer for potential output.
-        let buf_len = (in_len * 4).max(256);
+        let buf_len = in_len.saturating_mul(4).max(256);
         let start = output.len();
-        output.resize(start + buf_len, 0);
-        let status = decompressor.decompress(&in_chunk[..in_len], &mut output[start..], flush)?;
+        output.resize(start.wrapping_add(buf_len), 0);
+        // SAFETY: in_len = min(in_chunk.len(), 4096) so ..in_len is within bounds.
+        // SAFETY: output was just resized to start + buf_len, so output[start..]
+        // has at least buf_len elements available.
+        let status = decompressor.decompress(
+            in_chunk.get(..in_len).unwrap_or(&[]),
+            // SAFETY: output was just resized to start + buf_len, so output[start..]
+            // has at least buf_len elements available. .unwrap_or(&mut []) handles
+            // the impossible out-of-bounds case safely.
+            output.get_mut(start..).unwrap_or(&mut []),
+            flush,
+        )?;
 
-        let consumed = decompressor.total_in() - before_in;
-        let produced = decompressor.total_out() - before_out;
-        output.truncate(start + produced as usize);
-        input_pos += consumed as usize;
+        let consumed = decompressor.total_in().wrapping_sub(before_in);
+        let produced = decompressor.total_out().wrapping_sub(before_out);
+        output.truncate(start.wrapping_add(produced as usize));
+        input_pos = input_pos.wrapping_add(consumed as usize);
 
         if status == flate2::Status::StreamEnd || in_len == 0 {
             break;
@@ -1024,7 +1066,6 @@ pub fn parse_commit_object(data: &[u8]) -> Result<(String, Option<String>, Strin
 /// and `100755`) are looked up in the object map and added as
 /// [`HubFileEntry`] values.  LFS pointer blobs are detected by their
 /// magic prefix and stored with `is_lfs: true`.
-#[allow(clippy::arithmetic_side_effects)]
 #[doc(hidden)]
 pub fn walk_git_tree(
     tree_sha: &[u8; 20],
@@ -1034,7 +1075,6 @@ pub fn walk_git_tree(
     walk_git_tree_inner(tree_sha, objects, prefix, 0)
 }
 
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn walk_git_tree_inner(
     tree_sha: &[u8; 20],
     objects: &HashMap<[u8; 20], &GitObject>,
@@ -1062,31 +1102,66 @@ fn walk_git_tree_inner(
 
     while pos < data.len() {
         // Parse mode (octal string until space).
-        let space_pos = data[pos..]
+        // SAFETY: While loop ensures pos < data.len(), so data.get(pos..) is Some.
+        // .position() scans from pos for the first space byte. If found, space_pos
+        // is relative to pos, so pos + space_pos < data.len().
+        let tail = data.get(pos..).ok_or("tree position out of bounds")?;
+        let space_pos = tail
             .iter()
             .position(|&b| b == b' ')
             .ok_or("invalid tree entry: missing space after mode")?;
-        let mode_str = std::str::from_utf8(&data[pos..pos + space_pos])
+        // SAFETY: space_pos found within data[pos..], so it fits within bounds.
+        // Using .and_then chaining avoids the addition expression entirely.
+        let mode_slice = data
+            .get(pos..)
+            .and_then(|s| s.get(..space_pos))
+            .ok_or("invalid tree entry: mode range out of bounds")?;
+        let mode_str = std::str::from_utf8(mode_slice)
             .map_err(|e| format!("invalid mode encoding: {e}"))?;
 
         // Parse name (until null byte).
-        let name_start = pos + space_pos + 1;
-        let null_pos = data[name_start..]
+        // SAFETY: pos + space_pos < data.len() (proven above), so name_start <= data.len()
+        let name_start = pos
+            .checked_add(space_pos)
+            .and_then(|p| p.checked_add(1))
+            .ok_or("tree arithmetic overflow")?;
+        // SAFETY: name_start <= data.len() so the slice is valid (empty if equal)
+        let name_tail = data.get(name_start..).ok_or("name position out of bounds")?;
+        let null_pos = name_tail
             .iter()
             .position(|&b| b == 0)
             .ok_or("invalid tree entry: missing null after name")?;
-        let name = std::str::from_utf8(&data[name_start..name_start + null_pos])
+        // SAFETY: null_pos found within data[name_start..], so it fits within bounds.
+        let name_slice = data
+            .get(name_start..)
+            .and_then(|s| s.get(..null_pos))
+            .ok_or("invalid tree entry: name range out of bounds")?;
+        let name = std::str::from_utf8(name_slice)
             .map_err(|e| format!("invalid name encoding: {e}"))?;
 
         // Parse SHA (20 bytes after null).
-        let sha_start = name_start + null_pos + 1;
-        if sha_start + 20 > data.len() {
+        // SAFETY: name_start + null_pos < data.len() (proven above), so sha_start <= data.len()
+        let sha_start = name_start
+            .checked_add(null_pos)
+            .and_then(|p| p.checked_add(1))
+            .ok_or("tree arithmetic overflow")?;
+        // SAFETY: sha_start + 20 <= data.len() checked below with checked_add
+        let sha_end = sha_start.checked_add(20).ok_or("tree arithmetic overflow")?;
+        if sha_end > data.len() {
             return Err("invalid tree entry: truncated SHA".to_owned());
         }
         let mut entry_sha = [0u8; 20];
-        entry_sha.copy_from_slice(&data[sha_start..sha_start + 20]);
+        // SAFETY: sha_start + 20 <= data.len() checked above
+        let sha_slice = data
+            .get(sha_start..)
+            .and_then(|s| s.get(..20))
+            .ok_or("invalid tree entry: SHA range out of bounds")?;
+        entry_sha.copy_from_slice(sha_slice);
 
-        pos = sha_start + 20;
+        // SAFETY: sha_start + 20 <= data.len() (checked above) so next pos is valid or == len
+        pos = sha_start
+            .checked_add(20)
+            .ok_or("tree arithmetic overflow")?;
 
         let full_path = if prefix.is_empty() {
             name.to_owned()
@@ -1096,7 +1171,8 @@ fn walk_git_tree_inner(
 
         if mode_str == "40000" {
             // Directory — recurse into subtree.
-            let mut sub_entries = walk_git_tree_inner(&entry_sha, objects, &full_path, depth + 1)?;
+            let next_depth = depth.checked_add(1).ok_or("tree depth overflow")?;
+            let mut sub_entries = walk_git_tree_inner(&entry_sha, objects, &full_path, next_depth)?;
             entries.append(&mut sub_entries);
         } else if mode_str == "100644" || mode_str == "100755" {
             // Regular file.
@@ -1208,7 +1284,13 @@ fn build_report_response(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+// Test code intentionally uses unwrap/expect/indexing/vec-push for clarity
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::vec_init_then_push
+)]
 mod tests {
     use super::*;
 
@@ -1427,7 +1509,6 @@ mod tests {
     // --- apply_delta tests ---
 
     #[test]
-    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_simple() {
         // Base: "Hello, World!"
         let base = b"Hello, World!";
@@ -1463,7 +1544,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_empty() {
         // Base: "abc", delta produces empty output (target size 0)
         let base = b"abc";
@@ -1479,7 +1559,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_invalid() {
         // Source size doesn't match base length
         let base = b"Hello, World!";

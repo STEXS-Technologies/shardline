@@ -102,7 +102,7 @@ impl OciBackend for MockS3Backend {
         let mut guard = self.uploads.lock().unwrap();
         let state = guard.get_mut(upload_id).ok_or(OciAdapterError::NotFound)?;
         let etag_counter = state.next_etag;
-        state.next_etag += 1;
+        state.next_etag = state.next_etag.wrapping_add(1);
         state.parts.push((part_idx, bytes));
         Ok(Self::etag_for(etag_counter))
     }

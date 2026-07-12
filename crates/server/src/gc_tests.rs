@@ -1135,7 +1135,7 @@ async fn exercise_gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Erro
 
     // Write some orphan chunks to give GC work to do
     let orphan_hashes: Vec<String> = (0..5)
-        .map(|i| format!("{:02x}", i * 17).repeat(32))
+        .map(|i: usize| format!("{:02x}", i.wrapping_mul(17)).repeat(32))
         .collect();
     for hash in &orphan_hashes {
         write_orphan_chunk(storage.path(), hash, b"orphan-data").await?;

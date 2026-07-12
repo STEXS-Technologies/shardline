@@ -289,7 +289,6 @@ pub(crate) async fn lfs_delete_object(
 /// Accepts a chunk of bytes and stores it at the specified offset using a temp
 /// file keyed by OID.  When the final chunk arrives (offset + chunk_size ==
 /// total), the accumulated file is promoted to the permanent object store.
-#[allow(clippy::arithmetic_side_effects)]
 #[tracing::instrument(skip(state, headers, body), fields(oid))]
 pub(crate) async fn lfs_patch_object(
     State(state): State<Arc<AppState>>,
@@ -329,7 +328,11 @@ pub(crate) async fn lfs_patch_object(
         }
     };
 
-    let expected_chunk_size = end - offset + 1;
+    let expected_chunk_size = end
+        .checked_sub(offset)
+        .ok_or(ServerError::Overflow)?
+        .checked_add(1)
+        .ok_or(ServerError::Overflow)?;
 
     let content_length = headers
         .get(CONTENT_LENGTH)
@@ -368,7 +371,7 @@ pub(crate) async fn lfs_patch_object(
     // starving the async runtime.  A per-OID Mutex serializes concurrent PATCH
     // requests for the same object, preventing data corruption in the shared
     // temp file.
-    let is_final = offset + chunk_size == total;
+    let is_final = offset.checked_add(chunk_size) == Some(total);
     let root_dir = state.config.root_dir().to_path_buf();
     let backend = state.backend.clone();
     let oid_for_closure = oid.clone();

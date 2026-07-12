@@ -5,7 +5,6 @@
 //! implementation that generates non-delta packs.
 // Clippy allows
 #![allow(clippy::shadow_unrelated)]
-#![allow(clippy::indexing_slicing)]
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -270,7 +269,6 @@ pub fn empty_pack() -> Result<Vec<u8>, PackError> {
 ///
 /// Returns [`PackError::InvalidDelta`] if the delta data is malformed or the
 /// base object doesn't match the expected source size.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
     let mut pos = 0;
 
@@ -289,8 +287,8 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
     let mut result = Vec::with_capacity(target_size);
 
     while pos < delta.len() {
-        let cmd = delta[pos];
-        pos += 1;
+        let cmd = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+        pos = pos.wrapping_add(1);
 
         if cmd & 0x80 != 0 {
             // Copy instruction: copy bytes from the base object.
@@ -302,24 +300,22 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             let mut shift = 0;
             for i in 0..4 {
                 if cmd & (1 << i) != 0 {
-                    if pos >= delta.len() {
-                        return Err(PackError::InvalidDelta);
-                    }
-                    copy_offset |= (delta[pos] as usize) << shift;
-                    pos += 1;
-                    shift += 8;
+                    let offset_byte =
+                        delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+                    copy_offset |= (offset_byte as usize).wrapping_shl(shift);
+                    pos = pos.wrapping_add(1);
+                    shift = shift.wrapping_add(8);
                 }
             }
 
             shift = 0;
             for i in 4..7 {
                 if cmd & (1 << i) != 0 {
-                    if pos >= delta.len() {
-                        return Err(PackError::InvalidDelta);
-                    }
-                    copy_size |= (delta[pos] as usize) << shift;
-                    pos += 1;
-                    shift += 8;
+                    let size_byte =
+                        delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+                    copy_size |= (size_byte as usize).wrapping_shl(shift);
+                    pos = pos.wrapping_add(1);
+                    shift = shift.wrapping_add(8);
                 }
             }
 
@@ -328,19 +324,25 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
                 copy_size = 0x10000;
             }
 
-            if copy_offset + copy_size > base.len() {
+            if copy_offset.wrapping_add(copy_size) > base.len() {
                 return Err(PackError::InvalidDelta);
             }
 
-            result.extend_from_slice(&base[copy_offset..copy_offset + copy_size]);
+            result.extend_from_slice(
+                base.get(copy_offset..copy_offset.wrapping_add(copy_size))
+                    .ok_or(PackError::InvalidDelta)?,
+            );
         } else if cmd != 0 {
             // Insert instruction: copy cmd bytes from the delta stream.
             let insert_size = cmd as usize;
-            if pos + insert_size > delta.len() {
+            if pos.wrapping_add(insert_size) > delta.len() {
                 return Err(PackError::InvalidDelta);
             }
-            result.extend_from_slice(&delta[pos..pos + insert_size]);
-            pos += insert_size;
+            result.extend_from_slice(
+                delta.get(pos..pos.wrapping_add(insert_size))
+                    .ok_or(PackError::InvalidDelta)?,
+            );
+            pos = pos.wrapping_add(insert_size);
         } else {
             // cmd == 0 is not valid in the Git delta format.
             return Err(PackError::InvalidDelta);
@@ -357,18 +359,14 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
 /// Parses a variable-length integer from delta data.
 ///
 /// Encoding: MSB-first, 7 bits of value per byte, MSB is continuation flag.
-#[allow(clippy::arithmetic_side_effects)]
 fn parse_delta_varint(data: &[u8], mut pos: usize) -> Result<(usize, usize), PackError> {
     let mut result: usize = 0;
     let mut shift: u32 = 0;
     loop {
-        if pos >= data.len() {
-            return Err(PackError::InvalidDelta);
-        }
-        let byte = data[pos];
-        pos += 1;
-        result |= ((byte & 0x7f) as usize) << shift;
-        shift += 7;
+        let byte = data.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+        pos = pos.wrapping_add(1);
+        result |= ((byte & 0x7f) as usize).wrapping_shl(shift);
+        shift = shift.wrapping_add(7);
         if byte & 0x80 == 0 {
             break;
         }
@@ -384,21 +382,14 @@ fn parse_delta_varint(data: &[u8], mut pos: usize) -> Result<(usize, usize), Pac
 /// # Errors
 ///
 /// Returns [`PackError::InvalidDelta`] if the offset data is malformed.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn parse_ofs_delta_offset(data: &[u8], pos: &mut usize) -> Result<usize, PackError> {
-    if *pos >= data.len() {
-        return Err(PackError::InvalidDelta);
-    }
-    let mut byte = data[*pos];
-    *pos += 1;
+    let mut byte = data.get(*pos).copied().ok_or(PackError::InvalidDelta)?;
+    *pos = (*pos).wrapping_add(1);
     let mut offset = (byte & 0x7f) as usize;
     while byte & 0x80 != 0 {
-        if *pos >= data.len() {
-            return Err(PackError::InvalidDelta);
-        }
-        byte = data[*pos];
-        *pos += 1;
-        offset = ((offset + 1) << 7) | (byte & 0x7f) as usize;
+        byte = data.get(*pos).copied().ok_or(PackError::InvalidDelta)?;
+        *pos = (*pos).wrapping_add(1);
+        offset = offset.wrapping_add(1).wrapping_shl(7) | (byte & 0x7f) as usize;
     }
     Ok(offset)
 }
