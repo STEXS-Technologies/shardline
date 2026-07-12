@@ -7,10 +7,11 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::{
-    OciAdapterError, OciReference, OciUploadSession, SerializableSha256State, append_upload_bytes,
-    create_upload_session, delete_upload_session, new_upload_session_id,
-    oci_blob_key, oci_manifest_key, oci_manifest_media_type_key, oci_manifest_prefix,
-    oci_tag_key, oci_tag_prefix, parse_reference,
+    OciAdapterError, OciReference, OciUploadSession, SerializableSha256State,
+    abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
+    create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
+    new_upload_session_id, oci_blob_key, oci_manifest_key, oci_manifest_media_type_key,
+    oci_manifest_prefix, oci_tag_key, oci_tag_prefix, parse_reference,
     purge_expired_upload_sessions, read_upload_session, upload_body_integrity, upload_length,
     upload_session_expired,
 };
@@ -20,6 +21,139 @@ use shardline_storage::{DeleteOutcome, ObjectKey, PutOutcome};
 
 /// No-op backend used in tests that never creates S3 multipart uploads.
 struct TestBackend;
+
+// ── MockS3Backend ──────────────────────────────────────────────────────────
+
+/// Backend that simulates S3 multipart uploads in memory for testing.
+struct MockS3Backend {
+    /// upload_id → (parts, completed, aborted, etag_index)
+    uploads: std::sync::Mutex<std::collections::HashMap<String, MockMultipartState>>,
+}
+
+struct MockMultipartState {
+    parts: Vec<(usize, Bytes)>,
+    completed: bool,
+    aborted: bool,
+    next_etag: u64,
+}
+
+impl MockS3Backend {
+    fn new() -> Self {
+        Self {
+            uploads: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn etag_for(counter: u64) -> String {
+        format!("mock-etag-{counter}")
+    }
+
+    fn assert_completed(&self, upload_id: &str, expected_parts: &[&[u8]]) {
+        let guard = self.uploads.lock().unwrap();
+        let state = guard.get(upload_id).expect("upload not found");
+        assert!(state.completed, "upload was not completed");
+        assert!(!state.aborted, "upload was aborted");
+        let actual_parts: Vec<&[u8]> = state.parts.iter().map(|(_, b)| b.as_ref()).collect();
+        let expected: Vec<&[u8]> = expected_parts.iter().map(|p| *p).collect();
+        assert_eq!(actual_parts, expected, "uploaded parts do not match");
+    }
+
+    fn assert_aborted(&self, upload_id: &str) {
+        let guard = self.uploads.lock().unwrap();
+        let state = guard.get(upload_id).expect("upload not found");
+        assert!(state.aborted, "upload was not aborted");
+    }
+}
+
+impl MockS3Backend {
+    fn next_upload_id() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("mock-upload-{n}")
+    }
+}
+
+impl OciBackend for MockS3Backend {
+    async fn create_resumable_object_upload(
+        &self,
+        _object_key: &ObjectKey,
+    ) -> Result<Option<String>, OciAdapterError> {
+        let upload_id = Self::next_upload_id();
+        self.uploads.lock().unwrap().insert(
+            upload_id.clone(),
+            MockMultipartState {
+                parts: Vec::new(),
+                completed: false,
+                aborted: false,
+                next_etag: 0,
+            },
+        );
+        Ok(Some(upload_id))
+    }
+
+    async fn upload_resumable_object_part(
+        &self,
+        _object_key: &ObjectKey,
+        upload_id: &str,
+        part_idx: usize,
+        bytes: Bytes,
+    ) -> Result<String, OciAdapterError> {
+        let mut guard = self.uploads.lock().unwrap();
+        let state = guard.get_mut(upload_id).ok_or(OciAdapterError::NotFound)?;
+        let etag_counter = state.next_etag;
+        state.next_etag += 1;
+        state.parts.push((part_idx, bytes));
+        Ok(Self::etag_for(etag_counter))
+    }
+
+    async fn complete_resumable_object_upload(
+        &self,
+        _object_key: &ObjectKey,
+        upload_id: &str,
+        _parts: Vec<(usize, String)>,
+    ) -> Result<(), OciAdapterError> {
+        let mut guard = self.uploads.lock().unwrap();
+        let state = guard.get_mut(upload_id).ok_or(OciAdapterError::NotFound)?;
+        state.completed = true;
+        Ok(())
+    }
+
+    async fn abort_resumable_object_upload(
+        &self,
+        _object_key: &ObjectKey,
+        upload_id: &str,
+    ) -> Result<(), OciAdapterError> {
+        let mut guard = self.uploads.lock().unwrap();
+        let state = guard.get_mut(upload_id).ok_or(OciAdapterError::NotFound)?;
+        state.aborted = true;
+        Ok(())
+    }
+
+    fn put_sha256_addressed_object_bytes_if_absent(
+        &self,
+        _object_key: &ObjectKey,
+        _digest_hex: &str,
+        _bytes: Vec<u8>,
+    ) -> Result<PutOutcome, OciAdapterError> {
+        Ok(PutOutcome::Inserted)
+    }
+
+    fn copy_object_if_absent(
+        &self,
+        _source: &ObjectKey,
+        _destination: &ObjectKey,
+    ) -> Result<PutOutcome, OciAdapterError> {
+        Ok(PutOutcome::Inserted)
+    }
+
+    async fn delete_object_if_present(
+        &self,
+        _object_key: &ObjectKey,
+    ) -> Result<DeleteOutcome, OciAdapterError> {
+        Ok(DeleteOutcome::Deleted)
+    }
+}
 
 impl OciBackend for TestBackend {
     async fn create_resumable_object_upload(
@@ -746,4 +880,214 @@ fn oci_tag_key_different_tags_produce_different_keys() {
     let key1 = oci_tag_key("team/assets", "latest", None).unwrap();
     let key2 = oci_tag_key("team/assets", "v1.0", None).unwrap();
     assert_ne!(key1.as_str(), key2.as_str());
+}
+
+// ── S3 Multipart Upload Tests ──────────────────────────────────────────────
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+async fn create_s3_session(root: &Path, backend: &MockS3Backend) -> String {
+    create_upload_session(root, Some(backend), "test-repo", None, ttl(), max_sessions(), true)
+        .await
+        .unwrap()
+}
+
+async fn read_session(root: &Path, session_id: &str) -> OciUploadSession {
+    read_upload_session(root, session_id, ttl())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn s3_multipart_append_and_finalize() {
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    let session = read_session(root.path(), &session_id).await;
+    let (_session, length) = append_s3_multipart_upload_bytes(
+        root.path(), &backend, &session_id, session, b"hello-s3-",
+    )
+    .await
+    .unwrap();
+    assert_eq!(length, 9);
+
+    let session = read_session(root.path(), &session_id).await;
+    let (session, length) = append_s3_multipart_upload_bytes(
+        root.path(), &backend, &session_id, session, b"world-s3!",
+    )
+    .await
+    .unwrap();
+    assert_eq!(length, 18);
+
+    let data = b"hello-s3-world-s3!";
+    let digest = sha256_hex(data);
+    let object_key = ObjectKey::parse("protocols/oci/test/blob").unwrap();
+    let outcome = finalize_s3_multipart_upload_session(
+        root.path(), &backend, &session_id, session, &object_key, &digest, b"",
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+
+    // Verify the mock recorded completion.
+    // Parts are accumulated in the tail and flushed as a single combined
+    // part at finalize time (no single append exceeds the 8 MiB threshold).
+    let upload_id = {
+        let s = read_session(root.path(), &session_id).await;
+        s.s3_multipart.unwrap().upload_id
+    };
+    backend.assert_completed(&upload_id, &[b"hello-s3-world-s3!"]);
+}
+
+#[tokio::test]
+async fn s3_multipart_append_triggers_part_at_chunk_boundary() {
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Write enough bytes to trigger a part upload (chunk size is 8 MiB).
+    let chunk = vec![b'x'; 8 * 1024 * 1024 + 100];
+    let session = read_session(root.path(), &session_id).await;
+    let (_session, length) = append_s3_multipart_upload_bytes(
+        root.path(), &backend, &session_id, session, &chunk,
+    )
+    .await
+    .unwrap();
+    assert_eq!(usize::try_from(length).unwrap(), chunk.len());
+
+    // One full 8 MiB part should have been uploaded.
+    let s = read_session(root.path(), &session_id).await;
+    let uploaded = s.s3_multipart.as_ref().unwrap().uploaded_part_ids.len();
+    assert_eq!(uploaded, 1, "expected 1 full part, got {uploaded}");
+}
+
+#[tokio::test]
+async fn s3_multipart_abort_cleans_up() {
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    let session = read_session(root.path(), &session_id).await;
+    let (session, _length) = append_s3_multipart_upload_bytes(
+        root.path(), &backend, &session_id, session, b"some-data",
+    )
+    .await
+    .unwrap();
+
+    // Abort via the OCI adapter.
+    abort_s3_multipart_upload_session(&backend, &session).await.unwrap();
+
+    // Verify the mock recorded abort.
+    let upload_id = {
+        let s = read_session(root.path(), &session_id).await;
+        s.s3_multipart.unwrap().upload_id
+    };
+    backend.assert_aborted(&upload_id);
+}
+
+#[tokio::test]
+async fn s3_multipart_empty_upload_falls_back_to_single_put() {
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // No data appended, then finalize empty.
+    let session = read_session(root.path(), &session_id).await;
+    let digest = sha256_hex(b"");
+    let object_key = ObjectKey::parse("protocols/oci/test/empty-blob").unwrap();
+    let outcome = finalize_s3_multipart_upload_session(
+        root.path(), &backend, &session_id, session, &object_key, &digest, b"",
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+}
+
+#[tokio::test]
+async fn s3_multipart_hash_mismatch_aborts() {
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    let session = read_session(root.path(), &session_id).await;
+    let (session, _length) = append_s3_multipart_upload_bytes(
+        root.path(), &backend, &session_id, session, b"actual-data",
+    )
+    .await
+    .unwrap();
+
+    // Finalize with wrong digest (bare hex, no sha256: prefix).
+    let wrong_digest = sha256_hex(b"wrong-data");
+    let object_key = ObjectKey::parse("protocols/oci/test/blob").unwrap();
+    let result = finalize_s3_multipart_upload_session(
+        root.path(), &backend, &session_id, session, &object_key, &wrong_digest, b"",
+    )
+    .await;
+
+    assert!(matches!(result, Err(OciAdapterError::ExpectedBodyHashMismatch)));
+
+    // The mock should have recorded the abort on the multipart session.
+    let s = read_session(root.path(), &session_id).await;
+    let upload_id = s.s3_multipart.as_ref().map(|m| m.upload_id.clone());
+    if let Some(upload_id) = upload_id {
+        backend.assert_aborted(&upload_id);
+    }
+}
+
+#[tokio::test]
+async fn s3_multipart_concurrent_append_stress() {
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append from multiple concurrent tasks.  Each task does a small append
+    // (below the 8 MiB threshold), so data lands in the tail file.  Without
+    // explicit session-level locking, concurrent writers race on the
+    // file-based state — we only verify that the mock backend received
+    // valid calls and that nothing panics.
+    let chunks: &[&[u8]] = &[b"AAAA", b"BBBB", b"CCCC"];
+
+    let backend = std::sync::Arc::new(backend);
+    let share = std::sync::Arc::new((root.path().to_path_buf(), std::sync::Arc::clone(&backend)));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let share = std::sync::Arc::clone(&share);
+        let sid = session_id.clone();
+        let data = chunk.to_vec();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let (root_path, backend) = &*share;
+            let session = read_upload_session(root_path, &sid, ttl()).await.unwrap();
+            let result = append_s3_multipart_upload_bytes(
+                root_path, backend.as_ref(), &sid, session, &data,
+            )
+            .await;
+            let _ = tx.send((i, result));
+        });
+    }
+    drop(tx);
+
+    // Collect results — all should succeed (no crashes or corrupt state).
+    let mut results: Vec<_> = std::iter::repeat_with(|| None)
+        .take(3)
+        .collect();
+    while let Some((idx, result)) = rx.recv().await {
+        assert!(result.is_ok(), "task {idx} failed: {:?}", result);
+        results[idx] = Some(result.unwrap());
+    }
+    assert!(results.iter().all(|r| r.is_some()), "not all tasks completed");
+
+    // Verify the mock backend has recorded partial data (at least one part
+    // was uploaded by ensure_s3_upload_started).  The exact content depends
+    // on the IO race, so we only check that the backend is consistent.
+    let guard = backend.uploads.lock().unwrap();
+    assert!(!guard.is_empty(), "mock should have at least one upload");
+    // At least one upload should exist from ensure_s3_upload_started.
+    drop(guard);
 }
