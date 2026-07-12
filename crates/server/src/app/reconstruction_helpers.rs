@@ -266,7 +266,6 @@ pub fn parse_batch_reconstruction_query(query: &str) -> Result<Vec<String>, Serv
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, Uri, header::RANGE};
-    use shardline_protocol::ByteRange;
 
     // --- parse_batch_reconstruction_query tests ---
 

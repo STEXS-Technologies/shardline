@@ -125,7 +125,11 @@ mod tests {
 
     #[test]
     fn optional_chunk_container_keys_with_multiple_frontends_returns_one_xorb_key() {
-        let frontends = [ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Hub];
+        let frontends = [
+            ServerFrontend::Xet,
+            ServerFrontend::Lfs,
+            ServerFrontend::Hub,
+        ];
         let keys = optional_chunk_container_keys(&frontends, VALID_HASH).unwrap();
         assert_eq!(keys.len(), 1);
         assert!(keys[0].as_str().starts_with("xorbs/default/"));
@@ -150,8 +154,7 @@ mod tests {
     #[test]
     fn managed_protocol_object_identity_with_xet_and_xorb_key_returns_hash() {
         let xorb_key = xorb_object_key(VALID_HASH).unwrap();
-        let result =
-            managed_protocol_object_identity(&[ServerFrontend::Xet], &xorb_key).unwrap();
+        let result = managed_protocol_object_identity(&[ServerFrontend::Xet], &xorb_key).unwrap();
         assert_eq!(result.as_deref(), Some(VALID_HASH));
     }
 
@@ -218,8 +221,7 @@ mod tests {
     fn managed_protocol_object_identity_with_shard_key_returns_hash() {
         // Shard keys follow the format shards/<prefix>/<hash>.shard
         let shard_key = shardline_xet_adapter::shard_object_key(VALID_HASH).unwrap();
-        let result =
-            managed_protocol_object_identity(&[ServerFrontend::Xet], &shard_key).unwrap();
+        let result = managed_protocol_object_identity(&[ServerFrontend::Xet], &shard_key).unwrap();
         assert_eq!(
             result.as_deref(),
             Some(VALID_HASH),
@@ -232,8 +234,7 @@ mod tests {
         // Chunk keys use the format <prefix>/<hash> which is neither an xorb nor
         // a shard key, so managed_protocol_object_identity should return None.
         let chunk_key = shardline_server_core::chunk_object_key(VALID_HASH).unwrap();
-        let result =
-            managed_protocol_object_identity(&[ServerFrontend::Xet], &chunk_key).unwrap();
+        let result = managed_protocol_object_identity(&[ServerFrontend::Xet], &chunk_key).unwrap();
         assert_eq!(result, None, "chunk key is not an xorb or shard");
     }
 }

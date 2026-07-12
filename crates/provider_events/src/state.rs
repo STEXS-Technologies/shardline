@@ -210,7 +210,10 @@ mod tests {
         assert_eq!(outcome.owner, "team");
         assert_eq!(outcome.repo, "repo");
         assert_eq!(outcome.delivery_id, "delivery-access-1");
-        assert_eq!(outcome.event_kind, ProviderWebhookOutcomeKind::AccessChanged);
+        assert_eq!(
+            outcome.event_kind,
+            ProviderWebhookOutcomeKind::AccessChanged
+        );
         assert_eq!(outcome.affected_file_versions, 0);
         assert_eq!(outcome.affected_chunks, 0);
         assert_eq!(outcome.applied_holds, 0);
@@ -390,7 +393,9 @@ mod tests {
             "delivery-rev-3",
         );
 
-        let _a = apply_access_changed(&index, &access_event, 500).await.unwrap();
+        let _a = apply_access_changed(&index, &access_event, 500)
+            .await
+            .unwrap();
         let _r = apply_revision_pushed(&index, &rev_event, "refs/heads/dev", 600)
             .await
             .unwrap();

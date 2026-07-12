@@ -228,7 +228,10 @@ mod tests {
         };
         let json = serde_json::to_value(&response).unwrap();
         let obj = &json["objects"][0];
-        assert_eq!(obj["actions"]["download"]["href"], "https://example.com/obj");
+        assert_eq!(
+            obj["actions"]["download"]["href"],
+            "https://example.com/obj"
+        );
     }
 
     // --- LfsBatchResponse with error on object ---

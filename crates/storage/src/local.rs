@@ -156,10 +156,10 @@ impl LocalObjectStore {
         limit: usize,
     ) -> Result<Vec<ObjectMetadata>, LocalObjectStoreError> {
         let prefix_str = prefix.as_str();
-        if let Some(start_after) = start_after {
-            if !start_after.as_str().starts_with(prefix_str) {
-                return Err(LocalObjectStoreError::InvalidStartAfter);
-            }
+        if let Some(start_after) = start_after
+            && !start_after.as_str().starts_with(prefix_str)
+        {
+            return Err(LocalObjectStoreError::InvalidStartAfter);
         }
         let directory = self.root.join(prefix_str);
         let Some(entries) = read_dir_if_exists(&directory)? else {
@@ -1363,8 +1363,7 @@ mod tests {
 
         // Try to store SAME key with SAME bytes but WRONG hash — should fail
         let wrong_hash_integrity = ObjectIntegrity::new(super::chunk_hash(b"other"), 13);
-        let result =
-            store.put_if_absent(&key, ObjectBody::from_slice(body), &wrong_hash_integrity);
+        let result = store.put_if_absent(&key, ObjectBody::from_slice(body), &wrong_hash_integrity);
         assert!(matches!(
             result,
             Err(LocalObjectStoreError::IntegrityHashMismatch)
@@ -1442,16 +1441,10 @@ mod tests {
 
         // Verify each returns its own bytes
         let range = ByteRange::new(0, 9).unwrap();
-        assert_eq!(
-            store.read_range(&key_a, range).unwrap(),
-            b"alpha data"
-        );
+        assert_eq!(store.read_range(&key_a, range).unwrap(), b"alpha data");
 
         let range = ByteRange::new(0, 9).unwrap();
-        assert_eq!(
-            store.read_range(&key_b, range).unwrap(),
-            b"bravo data"
-        );
+        assert_eq!(store.read_range(&key_b, range).unwrap(), b"bravo data");
 
         // Delete one
         assert!(matches!(
@@ -1462,10 +1455,7 @@ mod tests {
         // Verify the other still exists
         assert!(store.contains(&key_b).unwrap());
         let range = ByteRange::new(0, 9).unwrap();
-        assert_eq!(
-            store.read_range(&key_b, range).unwrap(),
-            b"bravo data"
-        );
+        assert_eq!(store.read_range(&key_b, range).unwrap(), b"bravo data");
     }
 
     #[test]
@@ -1475,12 +1465,7 @@ mod tests {
 
         // Create a 1MB object with a repeating pattern
         let pattern: Vec<u8> = (0..=255).collect();
-        let body: Vec<u8> = pattern
-            .iter()
-            .copied()
-            .cycle()
-            .take(1024 * 1024)
-            .collect();
+        let body: Vec<u8> = pattern.iter().copied().cycle().take(1024 * 1024).collect();
         assert_eq!(body.len(), 1024 * 1024);
 
         let key = ObjectKey::parse("xorbs/default/cc/large.xorb").unwrap();

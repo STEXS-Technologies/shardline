@@ -19,11 +19,11 @@ use shardline_protocol::TokenScope;
 use futures_util::StreamExt;
 use shardline_storage::DeleteOutcome;
 
+use crate::upload_ingest::read_body_to_bytes;
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     ServerError, lfs_object_key, upload_ingest::RequestBodyReader,
 };
-use crate::upload_ingest::read_body_to_bytes;
 
 use super::{AppState, MAX_LFS_BATCH_OBJECTS, authorize, direct_object_response, scope_from_auth};
 
@@ -45,6 +45,7 @@ fn lfs_validation_response(message: &str) -> Response {
 static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[allow(clippy::unwrap_used)]
 fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
     let mut map = LFS_PATCH_LOCKS.lock().unwrap();
     map.entry(oid.to_owned())
@@ -285,6 +286,7 @@ pub(crate) async fn lfs_delete_object(
 /// Accepts a chunk of bytes and stores it at the specified offset using a temp
 /// file keyed by OID.  When the final chunk arrives (offset + chunk_size ==
 /// total), the accumulated file is promoted to the permanent object store.
+#[allow(clippy::arithmetic_side_effects)]
 #[tracing::instrument(skip(state, headers, body), fields(oid))]
 pub(crate) async fn lfs_patch_object(
     State(state): State<Arc<AppState>>,
@@ -314,7 +316,7 @@ pub(crate) async fn lfs_patch_object(
     // Parse the Content-Range header: "bytes start-end/total".
     let (offset, end, total) = match parse_content_range(&content_range) {
         Ok(range) => range,
-        Err(_) => {
+        Err(()) => {
             return Ok((
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
@@ -341,7 +343,8 @@ pub(crate) async fn lfs_patch_object(
     }
 
     let start = std::time::Instant::now();
-    let mut body_reader = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    let mut body_reader =
+        RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let chunk_bytes: Vec<u8> = read_body_to_bytes(&mut body_reader).await?;
     let chunk_size = chunk_bytes.len() as u64;
 
@@ -373,17 +376,19 @@ pub(crate) async fn lfs_patch_object(
 
     tokio::task::spawn_blocking(move || {
         let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);
+        #[allow(clippy::unwrap_used)]
         let _lock = lock_arc.lock().unwrap();
 
         let tmp_dir = root_dir.join("tmp").join("lfs-patch");
         std::fs::create_dir_all(&tmp_dir).ok();
         let tmp_path = tmp_dir.join(&oid_for_closure);
         {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .open(&tmp_path)?;
+        #[allow(clippy::suspicious_open_options)]
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&tmp_path)?;
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&chunk_bytes)?;
         }
@@ -401,8 +406,7 @@ pub(crate) async fn lfs_patch_object(
         Ok::<_, ServerError>(())
     })
     .await
-    .map_err(ServerError::BlockingTask)?
-    ?;
+    .map_err(ServerError::BlockingTask)??;
 
     Ok(StatusCode::OK.into_response())
 }
@@ -475,10 +479,10 @@ fn parse_content_range(value: &str) -> Result<(u64, u64, u64), ()> {
     let value = value.trim();
     let value = value.strip_prefix("bytes ").ok_or(())?;
     let (range_part, total_part) = value.split_once('/').ok_or(())?;
-    let total: u64 = total_part.parse().map_err(|_| ())?;
+    let total: u64 = total_part.parse().map_err(|_err| ())?;
     let mut parts = range_part.split('-');
-    let start: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_| ())?;
-    let end: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_| ())?;
+    let start: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_err| ())?;
+    let end: u64 = parts.next().ok_or(())?.trim().parse().map_err(|_err| ())?;
     if end < start {
         return Err(());
     }
@@ -487,32 +491,24 @@ fn parse_content_range(value: &str) -> Result<(u64, u64, u64), ()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        num::NonZeroUsize,
-        sync::Arc,
-    };
+    use std::{num::NonZeroUsize, sync::Arc};
 
     use axum::{
         Router,
         body::Body,
         http::{Request, StatusCode},
-        routing::{delete, get, head, patch, post, put},
+        routing::{get, post},
     };
     use serde_json::{Value, json};
     use sha2::Digest;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    use crate::{
-        ServerConfig, ServerFrontend, ServerRole,
-        app::AppState,
-        lfs_object_key,
-    };
+    use crate::{ServerConfig, ServerFrontend, ServerRole, app::AppState, lfs_object_key};
 
     use super::{
-        parse_content_range, acquire_lfs_patch_lock,
-        lfs_batch, lfs_get_object, lfs_head_object, lfs_put_object,
-        lfs_delete_object, lfs_patch_object, lfs_verify_object,
+        acquire_lfs_patch_lock, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
+        lfs_patch_object, lfs_put_object, lfs_verify_object, parse_content_range,
     };
 
     // ---------------------------------------------------------------------------
@@ -548,8 +544,7 @@ mod tests {
             .await
             .expect("backend from config");
 
-        let transfer_limiter =
-            crate::TransferLimiter::new(chunk_size, chunk_size);
+        let transfer_limiter = crate::TransferLimiter::new(chunk_size, chunk_size);
 
         let state = Arc::new(AppState {
             config,
@@ -595,10 +590,7 @@ mod tests {
     fn parse_content_range_accepts_with_whitespace() {
         // The parser trims the entire value and the prefix, but does NOT
         // trim internal whitespace between range and total parts.
-        assert_eq!(
-            parse_content_range("bytes 0-99/200"),
-            Ok((0, 99, 200))
-        );
+        assert_eq!(parse_content_range("bytes 0-99/200"), Ok((0, 99, 200)));
     }
 
     #[test]
@@ -733,10 +725,12 @@ mod tests {
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0]["oid"], oid);
         assert_eq!(objects[0]["size"], 512);
-        assert!(objects[0]["actions"]["upload"]["href"]
-            .as_str()
-            .unwrap()
-            .contains(&oid));
+        assert!(
+            objects[0]["actions"]["upload"]["href"]
+                .as_str()
+                .unwrap()
+                .contains(&oid)
+        );
         assert!(objects[0]["error"].is_null());
     }
 
@@ -1474,7 +1468,7 @@ mod tests {
         let app = lfs_router(state.clone());
 
         let chunk1 = b"hello-world-part-AAAA"; // 20 bytes
-        let chunk2 = b"BBBB-part-two-last!!";   // 20 bytes
+        let chunk2 = b"BBBB-part-two-last!!"; // 20 bytes
         let full_content = [chunk1.as_slice(), chunk2.as_slice()].concat();
         let oid = test_oid(&full_content);
         let total = full_content.len() as u64;
@@ -1482,46 +1476,39 @@ mod tests {
         let app1 = app.clone();
         let oid1 = oid.clone();
         let h1 = tokio::spawn(async move {
-            app1
-                .oneshot(
-                    Request::builder()
-                        .method("PATCH")
-                        .uri(format!("/v1/lfs/objects/{oid1}"))
-                        .header(
-                            "content-range",
-                            format!("bytes 0-{}/{}", chunk1.len() as u64 - 1, total),
-                        )
-                        .header("content-length", chunk1.len())
-                        .body(Body::from(chunk1.to_vec()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
+            app1.oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid1}"))
+                    .header(
+                        "content-range",
+                        format!("bytes 0-{}/{}", chunk1.len() as u64 - 1, total),
+                    )
+                    .header("content-length", chunk1.len())
+                    .body(Body::from(chunk1.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
         });
 
         let app2 = app.clone();
         let oid2 = oid.clone();
         let h2 = tokio::spawn(async move {
-            app2
-                .oneshot(
-                    Request::builder()
-                        .method("PATCH")
-                        .uri(format!("/v1/lfs/objects/{oid2}"))
-                        .header(
-                            "content-range",
-                            format!(
-                                "bytes {}-{}/{}",
-                                chunk1.len(),
-                                total - 1,
-                                total
-                            ),
-                        )
-                        .header("content-length", chunk2.len())
-                        .body(Body::from(chunk2.to_vec()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
+            app2.oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid2}"))
+                    .header(
+                        "content-range",
+                        format!("bytes {}-{}/{}", chunk1.len(), total - 1, total),
+                    )
+                    .header("content-length", chunk2.len())
+                    .body(Body::from(chunk2.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
         });
 
         let (r1, r2) = tokio::join!(h1, h2);

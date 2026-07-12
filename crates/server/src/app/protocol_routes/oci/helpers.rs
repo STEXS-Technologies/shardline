@@ -112,7 +112,10 @@ mod tests {
 
     #[test]
     fn api_rejects_post_blob_uploads() {
-        assert!(!oci_route_served_by_api(&Method::POST, &blob_uploads_path()));
+        assert!(!oci_route_served_by_api(
+            &Method::POST,
+            &blob_uploads_path()
+        ));
     }
 
     #[test]
@@ -201,7 +204,10 @@ mod tests {
 
     #[test]
     fn transfer_rejects_get_manifest() {
-        assert!(!oci_route_served_by_transfer(&Method::GET, &manifest_path()));
+        assert!(!oci_route_served_by_transfer(
+            &Method::GET,
+            &manifest_path()
+        ));
     }
 
     #[test]
@@ -214,7 +220,10 @@ mod tests {
 
     #[test]
     fn transfer_rejects_put_manifest() {
-        assert!(!oci_route_served_by_transfer(&Method::PUT, &manifest_path()));
+        assert!(!oci_route_served_by_transfer(
+            &Method::PUT,
+            &manifest_path()
+        ));
     }
 
     #[test]

@@ -99,7 +99,9 @@ pub(crate) fn ensure_upload_growth_within_limit(
     Ok(())
 }
 
-pub(crate) fn parse_query_map(uri: &axum::http::Uri) -> Result<BTreeMap<String, String>, ServerError> {
+pub(crate) fn parse_query_map(
+    uri: &axum::http::Uri,
+) -> Result<BTreeMap<String, String>, ServerError> {
     let Some(query) = uri.query() else {
         return Ok(BTreeMap::new());
     };
@@ -112,7 +114,10 @@ pub(crate) fn parse_query_map(uri: &axum::http::Uri) -> Result<BTreeMap<String, 
         .collect())
 }
 
-pub(crate) fn parse_query_values(uri: &axum::http::Uri, key: &str) -> Result<Vec<String>, ServerError> {
+pub(crate) fn parse_query_values(
+    uri: &axum::http::Uri,
+    key: &str,
+) -> Result<Vec<String>, ServerError> {
     let Some(query) = uri.query() else {
         return Ok(Vec::new());
     };

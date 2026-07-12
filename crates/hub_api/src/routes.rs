@@ -114,11 +114,9 @@ async fn deliver_one_webhook(
     // The attack window is very narrow in practice and requires a cooperating
     // authoritative DNS server, so this is accepted as a known limitation.
     {
-        let parsed_url = url::Url::parse(url)
-            .map_err(|e| format!("webhook URL parse failed: {e}"))?;
-        let host = parsed_url
-            .host_str()
-            .ok_or("webhook URL has no host")?;
+        let parsed_url =
+            url::Url::parse(url).map_err(|e| format!("webhook URL parse failed: {e}"))?;
+        let host = parsed_url.host_str().ok_or("webhook URL has no host")?;
         let port = parsed_url.port_or_known_default().unwrap_or(80);
         let host_port = format!("{host}:{port}");
         for addr in tokio::net::lookup_host(&*host_port).await? {
@@ -497,10 +495,7 @@ async fn repo_search(
     if let Some(sort) = &query.sort {
         match sort.as_str() {
             "lastModified" => {
-                repos.sort_by(|a, b| {
-                    b.updated_at_unix_seconds
-                        .cmp(&a.updated_at_unix_seconds)
-                });
+                repos.sort_by(|a, b| b.updated_at_unix_seconds.cmp(&a.updated_at_unix_seconds));
             }
             "likes" => {
                 // No likes field on HubRepo yet; keep default order.
@@ -603,6 +598,7 @@ fn webhook_response_from_hub(webhook: &shardline_index::hub::HubWebhook) -> Webh
 
 // ---- Repo info (requires Read) ----
 
+#[allow(clippy::collapsible_if, clippy::collapsible_match)]
 async fn repo_info(
     State(state): State<HubState>,
     headers: axum::http::HeaderMap,
@@ -627,9 +623,11 @@ async fn repo_info(
         .map_err(|e| HubApiError::CasError(e.to_string()))
     {
         if let Some(sha) = commit_sha {
-            if let Ok(files) = state.store.get_files(&sha).map_err(|e| {
-                HubApiError::CasError(e.to_string())
-            }) {
+            if let Ok(files) = state
+                .store
+                .get_files(&sha)
+                .map_err(|e| HubApiError::CasError(e.to_string()))
+            {
                 if let Some(readme) = files.iter().find(|f| f.path == "README.md") {
                     if let Some(content) = &readme.inline_content {
                         response.card_data = parse_yaml_frontmatter(content);
@@ -746,12 +744,12 @@ async fn apply_commit(
 ) -> Result<Json<CommitResponse>, HubApiError> {
     // HUB-004: Validate that the NDJSON body's parentCommit (if present) matches
     // the URL path's parent_sha. A mismatch indicates a stale or conflicting request.
-    if let Some(ref body_parent) = parsed.parent_commit {
-        if body_parent != parent_sha {
-            return Err(HubApiError::Conflict(format!(
-                "parentCommit mismatch: body specified {body_parent} but URL resolved to {parent_sha}"
-            )));
-        }
+    if let Some(ref body_parent) = parsed.parent_commit
+        && body_parent != parent_sha
+    {
+        return Err(HubApiError::Conflict(format!(
+            "parentCommit mismatch: body specified {body_parent} but URL resolved to {parent_sha}"
+        )));
     }
 
     let existing_files: Vec<HubFileEntry> = state
@@ -872,13 +870,12 @@ async fn file_tree(
     let entries = if let Some(limit) = query.limit {
         let entries: Vec<TreeEntry> = if let Some(cursor) = &query.cursor {
             // Skip entries until we pass the cursor, then take `limit` entries.
-            let after_cursor = entries
+            entries
                 .into_iter()
                 .skip_while(|e| &e.path != cursor)
                 .skip(1) // skip the cursor entry itself
                 .take(limit)
-                .collect();
-            after_cursor
+                .collect()
         } else {
             entries.into_iter().take(limit).collect()
         };
@@ -998,7 +995,11 @@ async fn resolve_file(
     let result = resolve::resolve_file_from_store(&state, &commit_sha, &file_path)?;
 
     match result {
-        resolve::DownloadResult::Inline { size: _, sha, content } => {
+        resolve::DownloadResult::Inline {
+            size: _,
+            sha,
+            content,
+        } => {
             let data = content.ok_or(HubApiError::NotFound)?;
             let resp_headers = [
                 ("Content-Type", "application/octet-stream"),
@@ -1586,7 +1587,7 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_unspecified() // ::
                 || v6.is_unicast_link_local() // fe80::/10
                 || v6.is_unique_local() // fc00::/7 (RFC 4193)
-                || v6.to_ipv4_mapped().map_or(false, |v4| {
+                || v6.to_ipv4_mapped().is_some_and(|v4| {
                     is_private_ip(&std::net::IpAddr::V4(v4))
                 })
         }
@@ -1859,7 +1860,13 @@ mod tests {
 
         // Add a commit
         store
-            .create_revision("org/model", Some(initial_sha), "sha1", "main", "first commit")
+            .create_revision(
+                "org/model",
+                Some(initial_sha),
+                "sha1",
+                "main",
+                "first commit",
+            )
             .unwrap();
 
         // Store files for the commit

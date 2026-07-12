@@ -94,7 +94,10 @@ async fn exercise_gc_mark_and_sweep() -> Result<(), Box<dyn Error>> {
         return Err(CliE2eInvariantError::new("gc did not quarantine the orphan chunk").into());
     }
     if !stdout.contains("deleted_chunks: 0") {
-        return Err(CliE2eInvariantError::new("gc deleted a quarantined chunk before retention expired").into());
+        return Err(CliE2eInvariantError::new(
+            "gc deleted a quarantined chunk before retention expired",
+        )
+        .into());
     }
 
     // The chunk file must still exist (not yet swept).
@@ -242,10 +245,14 @@ async fn exercise_gc_mark_and_sweep_for_native_xet_objects() -> Result<(), Box<d
     }
 
     if !xorb_path.exists() {
-        return Err(CliE2eInvariantError::new("gc prematurely removed the orphan xorb object").into());
+        return Err(
+            CliE2eInvariantError::new("gc prematurely removed the orphan xorb object").into(),
+        );
     }
     if !shard_path.exists() {
-        return Err(CliE2eInvariantError::new("gc prematurely removed the orphan shard object").into());
+        return Err(
+            CliE2eInvariantError::new("gc prematurely removed the orphan shard object").into(),
+        );
     }
 
     Ok(())

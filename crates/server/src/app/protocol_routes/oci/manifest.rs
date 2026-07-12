@@ -387,10 +387,7 @@ mod tests {
 
     #[test]
     fn normalize_media_type_passthrough_plain() {
-        assert_eq!(
-            normalize_media_type("application/json"),
-            "application/json"
-        );
+        assert_eq!(normalize_media_type("application/json"), "application/json");
     }
 
     #[test]
@@ -558,22 +555,26 @@ mod tests {
     #[test]
     fn accept_header_absent_allows_any() {
         let headers = HeaderMap::new();
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn accept_wildcard_accepts_any() {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -583,22 +584,26 @@ mod tests {
             ACCEPT,
             HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
         );
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn accept_type_wildcard() {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/*"));
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -608,11 +613,13 @@ mod tests {
             ACCEPT,
             HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
         );
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -640,11 +647,13 @@ mod tests {
                 "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json",
             ),
         );
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -654,25 +663,26 @@ mod tests {
             ACCEPT,
             HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json; q=0.9"),
         );
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn accept_with_parameters_type_wildcard() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("application/*; q=0.5"),
+        headers.insert(ACCEPT, HeaderValue::from_static("application/*; q=0.5"));
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
         );
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
     }
 
     #[test]
@@ -682,11 +692,13 @@ mod tests {
             ACCEPT,
             HeaderValue::from_static(", application/vnd.oci.image.manifest.v1+json"),
         );
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -696,11 +708,13 @@ mod tests {
             ACCEPT,
             HeaderValue::from_static("bogus, application/vnd.oci.image.manifest.v1+json"),
         );
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -711,10 +725,12 @@ mod tests {
             HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
         );
         // The media_type has a parameter; normalize_media_type should strip it before comparison
-        assert!(ensure_manifest_representation_is_acceptable(
-            &headers,
-            "application/vnd.oci.image.manifest.v1+json; charset=utf-8"
-        )
-        .is_ok());
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json; charset=utf-8"
+            )
+            .is_ok()
+        );
     }
 }

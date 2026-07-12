@@ -2,16 +2,34 @@
 
 use libfuzzer_sys::fuzz_target;
 use shardline_server::{
-    FuzzQuarantineAction, FuzzRetentionAction, FuzzWebhookAction,
-    fuzz_classify_quarantine, fuzz_classify_retention, fuzz_classify_webhook,
+    FuzzQuarantineAction, FuzzRetentionAction, FuzzWebhookAction, fuzz_classify_quarantine,
+    fuzz_classify_retention, fuzz_classify_webhook,
 };
 
 fuzz_target!(|data: (
-    bool, bool, bool,           // quarantine: object_exists, is_reachable, is_held
-    Option<u64>, u64, bool, u64, // retention: release_after, held_at, exists, now
-    u64, u64, u64,               // webhook: processed_at, stale_cutoff, max_processed_at
+    bool,
+    bool,
+    bool, // quarantine: object_exists, is_reachable, is_held
+    Option<u64>,
+    u64,
+    bool,
+    u64, // retention: release_after, held_at, exists, now
+    u64,
+    u64,
+    u64, // webhook: processed_at, stale_cutoff, max_processed_at
 )| {
-    let (q_exists, q_reachable, q_held, r_release, r_held_at, r_exists, r_now, w_processed, w_stale, w_max) = data;
+    let (
+        q_exists,
+        q_reachable,
+        q_held,
+        r_release,
+        r_held_at,
+        r_exists,
+        r_now,
+        w_processed,
+        w_stale,
+        w_max,
+    ) = data;
 
     // --- Quarantine classification ---
     let q1 = fuzz_classify_quarantine(q_exists, q_reachable, q_held);
@@ -33,8 +51,12 @@ fuzz_target!(|data: (
 
     // Verify state consistency
     if r_release.is_some_and(|ra| ra <= r_now) {
-        assert_eq!(r1, FuzzRetentionAction::DeleteExpired,
-            "release_after={ra:?} <= now={r_now} should expire", ra = r_release);
+        assert_eq!(
+            r1,
+            FuzzRetentionAction::DeleteExpired,
+            "release_after={ra:?} <= now={r_now} should expire",
+            ra = r_release
+        );
     } else if !r_exists {
         assert_eq!(r1, FuzzRetentionAction::DeleteMissing);
     } else {

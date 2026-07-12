@@ -361,10 +361,7 @@ mod tests {
         write_field_name(&mut buf, "second", &mut first).unwrap();
 
         assert!(!first);
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            r#""first":,"second":"#
-        );
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""first":,"second":"#);
     }
 
     #[test]
@@ -376,10 +373,7 @@ mod tests {
         write_field_name(&mut buf, "b", &mut first).unwrap();
         write_field_name(&mut buf, "c", &mut first).unwrap();
 
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            r#""a":,"b":,"c":"#
-        );
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""a":,"b":,"c":"#);
     }
 
     // -----------------------------------------------------------------------
@@ -390,13 +384,10 @@ mod tests {
     fn write_named_value_string() {
         let mut buf = Vec::new();
         let mut first = true;
-        write_named_value(&mut buf, "name", &"Alice".to_string(), &mut first).unwrap();
+        write_named_value(&mut buf, "name", &"Alice".to_owned(), &mut first).unwrap();
 
         assert!(!first);
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            r#""name":"Alice""#
-        );
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""name":"Alice""#);
     }
 
     #[test]
@@ -417,10 +408,7 @@ mod tests {
         write_named_value(&mut buf, "x", &1u64, &mut first).unwrap();
         write_named_value(&mut buf, "y", &2u64, &mut first).unwrap();
 
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            r#""x":1,"y":2"#
-        );
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""x":1,"y":2"#);
     }
 
     // -----------------------------------------------------------------------
@@ -459,9 +447,9 @@ mod tests {
     #[test]
     fn backup_manifest_object_entry_fields() {
         let entry = BackupManifestObjectEntry {
-            key: "objects/abc".to_string(),
+            key: "objects/abc".to_owned(),
             length: 1024,
-            checksum: Some("deadbeef".to_string()),
+            checksum: Some("deadbeef".to_owned()),
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -473,7 +461,7 @@ mod tests {
     #[test]
     fn backup_manifest_object_entry_no_checksum() {
         let entry = BackupManifestObjectEntry {
-            key: "objects/xyz".to_string(),
+            key: "objects/xyz".to_owned(),
             length: 0,
             checksum: None,
         };
@@ -490,8 +478,8 @@ mod tests {
     fn backup_manifest_report_serializable() {
         let report = BackupManifestReport {
             manifest_version: 1,
-            metadata_backend: "test".to_string(),
-            object_backend: "test".to_string(),
+            metadata_backend: "test".to_owned(),
+            object_backend: "test".to_owned(),
             object_count: 5,
             object_bytes: 100,
             latest_records: 1,

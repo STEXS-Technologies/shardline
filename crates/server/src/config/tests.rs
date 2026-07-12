@@ -1260,7 +1260,10 @@ fn read_secret_file_bytes_rejects_nonexistent_file() {
         },
     );
 
-    assert!(matches!(bytes, Err(super::ServerConfigError::TokenSigningKey(_))));
+    assert!(matches!(
+        bytes,
+        Err(super::ServerConfigError::TokenSigningKey(_))
+    ));
 }
 
 #[test]
@@ -1299,12 +1302,7 @@ fn read_secret_file_bytes_rejects_oversized_file() {
 
 #[test]
 fn optional_s3_secret_returns_none_when_neither_set() {
-    let result = optional_s3_secret_from_sources(
-        "TEST_ENV",
-        None,
-        "TEST_FILE_ENV",
-        None,
-    );
+    let result = optional_s3_secret_from_sources("TEST_ENV", None, "TEST_FILE_ENV", None);
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), None);
@@ -1384,7 +1382,10 @@ fn configure_provider_runtime_from_paths_noop_when_both_none() {
     let result = result.unwrap();
     assert_eq!(result.provider_config_path(), config.provider_config_path());
     assert_eq!(result.provider_api_key(), config.provider_api_key());
-    assert_eq!(result.provider_token_issuer(), config.provider_token_issuer());
+    assert_eq!(
+        result.provider_token_issuer(),
+        config.provider_token_issuer()
+    );
 }
 
 #[test]

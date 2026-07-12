@@ -1,7 +1,7 @@
 use std::{
     str::FromStr,
-    sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -157,8 +157,8 @@ impl JwksProvider {
                         .unwrap_or(DEFAULT_JWKS_REFRESH_INTERVAL)
                 };
                 tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = futures_util::future::poll_fn(|_| {
+                    () = tokio::time::sleep(interval) => {}
+                    () = futures_util::future::poll_fn(|_| {
                         if shutdown.load(Ordering::Relaxed) {
                             std::task::Poll::Ready(())
                         } else {
@@ -223,6 +223,7 @@ impl JwksProvider {
         }
     }
 
+    #[allow(clippy::option_if_let_else, clippy::arithmetic_side_effects)]
     fn verify_jwt_claims(
         &self,
         header_b64: &str,
@@ -241,12 +242,9 @@ impl JwksProvider {
                 let mut attempt = 0;
                 loop {
                     if let Ok(guard) = self.cached_keys.try_read() {
-                        break guard
-                            .as_ref()
-                            .map(|c| Arc::clone(&c.keys))
-                            .ok_or_else(|| {
-                                AuthError::ProviderError("JWKS keys not available".to_owned())
-                            });
+                        break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
+                            AuthError::ProviderError("JWKS keys not available".to_owned())
+                        });
                     }
                     attempt += 1;
                     if attempt >= MAX_RETRIES {
@@ -498,8 +496,14 @@ mod tests {
         let jwk: Jwk = serde_json::from_value(json).expect("should deserialize EC JWK");
         assert_eq!(jwk.kid, "ec-key-1");
         assert_eq!(jwk.key_type, "EC");
-        assert_eq!(jwk.x_coord.as_deref(), Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4"));
-        assert_eq!(jwk.y_coord.as_deref(), Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"));
+        assert_eq!(
+            jwk.x_coord.as_deref(),
+            Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4")
+        );
+        assert_eq!(
+            jwk.y_coord.as_deref(),
+            Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM")
+        );
     }
 
     // ── validate_algorithm ───────────────────────────────────────────────

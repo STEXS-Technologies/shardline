@@ -74,6 +74,7 @@ mod tests {
     // --- DownloadResult enum ---
 
     #[test]
+    #[allow(clippy::panic)]
     fn download_result_inline_has_correct_fields() {
         let content = vec![0u8; 100];
         let result = DownloadResult::Inline {
@@ -83,7 +84,11 @@ mod tests {
         };
 
         match result {
-            DownloadResult::Inline { size, sha, content: c } => {
+            DownloadResult::Inline {
+                size,
+                sha,
+                content: c,
+            } => {
                 assert_eq!(size, 100);
                 assert_eq!(sha, "abc123");
                 assert_eq!(c.as_deref(), Some(content.as_slice()));
@@ -93,6 +98,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn download_result_inline_without_content() {
         let result = DownloadResult::Inline {
             size: 500,
@@ -111,6 +117,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn download_result_lfs_redirect_has_correct_fields() {
         let result = DownloadResult::LfsRedirect {
             oid: "deadbeef".to_owned(),

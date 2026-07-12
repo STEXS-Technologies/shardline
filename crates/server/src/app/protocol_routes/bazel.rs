@@ -80,7 +80,10 @@ pub(crate) async fn bazel_head_ac(
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-            (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_owned(),
+            ),
         ],
     )
         .into_response())
@@ -151,7 +154,10 @@ pub(crate) async fn bazel_head_cas(
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-            (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_owned(),
+            ),
         ],
     )
         .into_response())
@@ -178,18 +184,16 @@ pub(crate) async fn bazel_get(
         BazelCacheKind::Ac,
         &hash,
         auth.as_ref().map(scope_from_auth),
-    ) {
-        if state.backend.object_length(&ac_key).await.is_ok() {
-            return direct_object_response(
-                &state,
-                &headers,
-                &ac_key,
-                "application/octet-stream",
-                None,
-                "bazel",
-            )
-            .await;
-        }
+    ) && state.backend.object_length(&ac_key).await.is_ok() {
+        return direct_object_response(
+            &state,
+            &headers,
+            &ac_key,
+            "application/octet-stream",
+            None,
+            "bazel",
+        )
+        .await;
     }
 
     let cas_key = bazel_cache_object_key(
@@ -244,17 +248,18 @@ pub(crate) async fn bazel_head(
         BazelCacheKind::Ac,
         &hash,
         auth.as_ref().map(scope_from_auth),
-    ) {
-        if let Ok(total_length) = state.backend.object_length(&ac_key).await {
-            return Ok((
-                StatusCode::OK,
-                [
-                    (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-                    (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_owned()),
-                ],
-            )
-                .into_response());
-        }
+    ) && let Ok(total_length) = state.backend.object_length(&ac_key).await {
+        return Ok((
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/octet-stream".to_owned(),
+                ),
+            ],
+        )
+            .into_response());
     }
 
     let cas_key = bazel_cache_object_key(
@@ -267,7 +272,10 @@ pub(crate) async fn bazel_head(
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_LENGTH, total_length.to_string()),
-            (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_owned(),
+            ),
         ],
     )
         .into_response())
@@ -382,10 +390,8 @@ mod tests {
             RepositoryScope::new(RepositoryProvider::GitHub, "team1", "repo", None).unwrap();
         let scope2 =
             RepositoryScope::new(RepositoryProvider::GitHub, "team2", "repo", None).unwrap();
-        let key1 =
-            bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope1)).unwrap();
-        let key2 =
-            bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope2)).unwrap();
+        let key1 = bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope1)).unwrap();
+        let key2 = bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope2)).unwrap();
         assert_ne!(key1.as_str(), key2.as_str());
     }
 
@@ -393,10 +399,8 @@ mod tests {
     fn same_scope_produces_deterministic_key() {
         let hash = "f".repeat(64);
         let scope = test_scope();
-        let key1 =
-            bazel_cache_object_key(BazelCacheKind::Ac, &hash, Some(&scope)).unwrap();
-        let key2 =
-            bazel_cache_object_key(BazelCacheKind::Ac, &hash, Some(&scope)).unwrap();
+        let key1 = bazel_cache_object_key(BazelCacheKind::Ac, &hash, Some(&scope)).unwrap();
+        let key2 = bazel_cache_object_key(BazelCacheKind::Ac, &hash, Some(&scope)).unwrap();
         assert_eq!(key1.as_str(), key2.as_str());
     }
 
@@ -423,7 +427,10 @@ mod tests {
 
     #[test]
     fn authorize_with_valid_token_returns_context() {
-        use axum::http::{HeaderMap, header::{AUTHORIZATION, HeaderValue}};
+        use axum::http::{
+            HeaderMap,
+            header::{AUTHORIZATION, HeaderValue},
+        };
         use shardline_protocol::{TokenClaims, TokenSigner};
 
         use crate::auth::ServerAuth;

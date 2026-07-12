@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn metrics_layer_is_cloneable() {
         let layer = MetricsLayer;
-        let _clone = layer.clone();
+        let _clone = layer;
     }
 
     #[test]

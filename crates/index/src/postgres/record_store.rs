@@ -222,7 +222,10 @@ impl super::PostgresRecordStore {
         let scope_key = shared_repository_record_scope_key(repository);
         let escaped_prefix = format!(
             "{}%",
-            scope_key.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+            scope_key
+                .replace('\\', "\\\\")
+                .replace('_', "\\_")
+                .replace('%', "\\%")
         );
         let rows = query(
             "SELECT record_key, record_kind, scope_key, file_id, content_hash
@@ -255,7 +258,10 @@ impl super::PostgresRecordStore {
         let scope_key = shared_repository_record_scope_key(repository);
         let escaped_prefix = format!(
             "{}%",
-            scope_key.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+            scope_key
+                .replace('\\', "\\\\")
+                .replace('_', "\\_")
+                .replace('%', "\\%")
         );
         let mut rows = query(
             "SELECT record_key,

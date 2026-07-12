@@ -431,12 +431,17 @@ mod tests {
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
     fn test_scope() -> RepositoryScope {
-        RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"))
-            .unwrap()
+        RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "test-owner",
+            "test-repo",
+            Some("main"),
+        )
+        .unwrap()
     }
 
     fn make_hash(ch: char) -> String {
-        std::iter::repeat(ch).take(64).collect()
+        std::iter::repeat_n(ch, 64).collect()
     }
 
     fn file_record_json_bytes(scope: &RepositoryScope, chunk_hash: &str) -> Vec<u8> {

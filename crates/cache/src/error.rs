@@ -74,7 +74,10 @@ mod tests {
     fn from_try_from_int_error() {
         let int_err = i64::try_from(u64::MAX).unwrap_err();
         let err: ReconstructionCacheError = int_err.into();
-        assert!(matches!(err, ReconstructionCacheError::NumericConversion(_)));
+        assert!(matches!(
+            err,
+            ReconstructionCacheError::NumericConversion(_)
+        ));
     }
 
     #[test]

@@ -150,11 +150,7 @@ mod tests {
 
     #[test]
     fn repository_record_scope_key_omits_revision() {
-        let scope = RepositoryRecordScope::new(
-            RepositoryProvider::GitHub,
-            "owner",
-            "name",
-        );
+        let scope = RepositoryRecordScope::new(RepositoryProvider::GitHub, "owner", "name");
         let key = repository_record_scope_key(&scope);
         // Should contain provider, owner, name but NOT the revision
         assert_eq!(key, "6:github5:owner4:name");

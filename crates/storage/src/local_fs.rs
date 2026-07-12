@@ -99,9 +99,8 @@ pub(crate) fn hard_link_file_if_absent(
 
     #[cfg(not(unix))]
     {
-        path.strip_prefix(root).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path escapes root")
-        })?;
+        path.strip_prefix(root)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"))?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         fs::hard_link(temporary, path)
@@ -125,9 +124,8 @@ pub(crate) fn put_bytes_if_absent(
 
     #[cfg(not(unix))]
     {
-        path.strip_prefix(root).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path escapes root")
-        })?;
+        path.strip_prefix(root)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"))?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -155,9 +153,8 @@ pub(crate) fn write_bytes_atomically(root: &Path, path: &Path, bytes: &[u8]) -> 
     #[cfg(not(unix))]
     {
         // Defense-in-depth: ensure the path stays within the root directory.
-        path.strip_prefix(root).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path escapes root")
-        })?;
+        path.strip_prefix(root)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"))?;
         let parent = path.parent().ok_or_else(invalid_local_path_error)?;
         fs::create_dir_all(parent)?;
         let temporary = write_temporary_file(path, bytes)?;
@@ -317,6 +314,7 @@ const fn anchored_path_options() -> AnchoredPathOptions {
     AnchoredPathOptions::new(Some(LOCAL_DIRECTORY_MODE), Some(LOCAL_FILE_MODE))
 }
 
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn ensure_file_matches_bytes(mut file: File, expected: &[u8]) -> io::Result<()> {
     use std::io::Read;
     const LOCAL_FILE_COMPARE_CHUNK_BYTES: usize = 256 * 1024;
@@ -424,7 +422,11 @@ mod tests {
     fn put_bytes_if_absent_creates_parent_directories() {
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
-        let path = root.join("deep").join("nested").join("dir").join("chunk.bin");
+        let path = root
+            .join("deep")
+            .join("nested")
+            .join("dir")
+            .join("chunk.bin");
 
         let result = put_bytes_if_absent(&root, &path, b"data");
         assert!(matches!(result, Ok(PutBytesIfAbsentOutcome::Inserted)));
@@ -551,8 +553,8 @@ mod tests {
     #[test]
     fn set_before_local_write_hook_is_called_on_write() {
         use super::{set_before_local_write_hook, write_bytes_atomically};
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let called = Arc::new(AtomicBool::new(false));
         let flag = called.clone();

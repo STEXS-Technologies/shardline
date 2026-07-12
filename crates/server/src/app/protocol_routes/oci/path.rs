@@ -185,10 +185,7 @@ mod tests {
 
     #[test]
     fn empty_path_returns_not_found() {
-        assert!(matches!(
-            parse_oci_path(""),
-            Err(ServerError::NotFound)
-        ));
+        assert!(matches!(parse_oci_path(""), Err(ServerError::NotFound)));
     }
 
     // ── Repository validation ───────────────────────────────────────────
@@ -225,9 +222,6 @@ mod tests {
     #[test]
     fn blob_uploads_session_not_confused_with_blob() {
         let result = parse_oci_path("team/assets/blobs/uploads/abc123");
-        assert!(matches!(
-            result,
-            Ok(OciPath::BlobUploadSession { .. })
-        ));
+        assert!(matches!(result, Ok(OciPath::BlobUploadSession { .. })));
     }
 }

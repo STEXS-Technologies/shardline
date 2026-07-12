@@ -141,8 +141,10 @@ pub fn parse_chunk_header(
     if chunk_header_bytes[..XORB_OBJECT_FORMAT_IDENT.len()] == XORB_OBJECT_FORMAT_IDENT {
         return Err(CoreError::ChunkHeaderParse);
     }
-    let mut header = XorbChunkHeader::default();
-    header.version = chunk_header_bytes[0];
+    let mut header = XorbChunkHeader {
+        version: chunk_header_bytes[0],
+        ..Default::default()
+    };
     header
         .compressed_length
         .copy_from_slice(&chunk_header_bytes[1..4]);

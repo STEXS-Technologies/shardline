@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(clippy::let_underscore_must_use)]
 
 use libfuzzer_sys::fuzz_target;
 

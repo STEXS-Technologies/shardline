@@ -59,7 +59,14 @@ mod tests {
             Some("main"),
         )
         .unwrap();
-        TokenClaims::new("test-issuer", "test-subject", TokenScope::Write, repo, u64::MAX).unwrap()
+        TokenClaims::new(
+            "test-issuer",
+            "test-subject",
+            TokenScope::Write,
+            repo,
+            u64::MAX,
+        )
+        .unwrap()
     }
 
     // ── LocalEd25519Provider::new ────────────────────────────────────────

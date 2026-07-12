@@ -382,8 +382,7 @@ mod tests {
     fn scope_isolation_bazel_with_vs_without_scope() {
         let hash = "a".repeat(64);
         let scope = RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap();
-        let key_with =
-            bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope)).unwrap();
+        let key_with = bazel_cache_object_key(BazelCacheKind::Cas, &hash, Some(&scope)).unwrap();
         let key_without = bazel_cache_object_key(BazelCacheKind::Cas, &hash, None).unwrap();
         assert_ne!(key_with, key_without);
     }

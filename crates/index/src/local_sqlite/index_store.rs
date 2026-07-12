@@ -531,8 +531,8 @@ mod tests {
         store
             .insert_reconstruction(&file_id, &reconstruction)
             .expect("insert should succeed");
-        let loaded = ReconstructionStore::reconstruction(&store, &file_id)
-            .expect("lookup should succeed");
+        let loaded =
+            ReconstructionStore::reconstruction(&store, &file_id).expect("lookup should succeed");
         assert_eq!(loaded, Some(reconstruction));
     }
 
@@ -540,8 +540,8 @@ mod tests {
     fn reconstruction_returns_none_for_missing_file_id() {
         let store = make_store();
         let file_id = FileId::new(ShardlineHash::from_bytes([99; 32]));
-        let loaded = ReconstructionStore::reconstruction(&store, &file_id)
-            .expect("lookup should succeed");
+        let loaded =
+            ReconstructionStore::reconstruction(&store, &file_id).expect("lookup should succeed");
         assert_eq!(loaded, None);
     }
 
@@ -554,18 +554,19 @@ mod tests {
         store
             .insert_reconstruction(&file_id, &reconstruction)
             .expect("insert should succeed");
-        let deleted =
-            ReconstructionStore::delete_reconstruction(&store, &file_id).expect("delete should succeed");
+        let deleted = ReconstructionStore::delete_reconstruction(&store, &file_id)
+            .expect("delete should succeed");
         assert!(deleted);
-        let deleted_again =
-            ReconstructionStore::delete_reconstruction(&store, &file_id).expect("second delete should succeed");
+        let deleted_again = ReconstructionStore::delete_reconstruction(&store, &file_id)
+            .expect("second delete should succeed");
         assert!(!deleted_again);
     }
 
     #[test]
     fn list_reconstruction_file_ids_empty_initially() {
         let store = make_store();
-        let ids = ReconstructionStore::list_reconstruction_file_ids(&store).expect("list should succeed");
+        let ids =
+            ReconstructionStore::list_reconstruction_file_ids(&store).expect("list should succeed");
         assert!(ids.is_empty());
     }
 
@@ -578,7 +579,8 @@ mod tests {
         store
             .insert_reconstruction(&file_id, &reconstruction)
             .expect("insert should succeed");
-        let ids = ReconstructionStore::list_reconstruction_file_ids(&store).expect("list should succeed");
+        let ids =
+            ReconstructionStore::list_reconstruction_file_ids(&store).expect("list should succeed");
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], file_id);
     }
@@ -588,9 +590,16 @@ mod tests {
         let store = make_store();
         let object_id = StoredObjectId::new(ShardlineHash::from_bytes([5; 32]));
 
-        assert!(!ReconstructionStore::contains_object(&store, &object_id).expect("check should succeed"));
-        store.insert_object(&object_id).expect("insert should succeed");
-        assert!(ReconstructionStore::contains_object(&store, &object_id).expect("check should succeed"));
+        assert!(
+            !ReconstructionStore::contains_object(&store, &object_id)
+                .expect("check should succeed")
+        );
+        store
+            .insert_object(&object_id)
+            .expect("insert should succeed");
+        assert!(
+            ReconstructionStore::contains_object(&store, &object_id).expect("check should succeed")
+        );
     }
 
     #[test]
@@ -600,9 +609,11 @@ mod tests {
         let object_key = ObjectKey::parse("shards/aa/test.shard").unwrap();
         let mapping = DedupeShardMapping::new(chunk_hash, object_key);
 
-        store.upsert_dedupe_shard_mapping(&mapping).expect("upsert should succeed");
-        let loaded = DedupeStore::dedupe_shard_mapping(&store, &chunk_hash)
-            .expect("lookup should succeed");
+        store
+            .upsert_dedupe_shard_mapping(&mapping)
+            .expect("upsert should succeed");
+        let loaded =
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).expect("lookup should succeed");
         assert_eq!(loaded, Some(mapping));
     }
 
@@ -610,8 +621,8 @@ mod tests {
     fn dedupe_shard_mapping_returns_none_for_missing_hash() {
         let store = make_store();
         let chunk_hash = ShardlineHash::from_bytes([99; 32]);
-        let loaded = DedupeStore::dedupe_shard_mapping(&store, &chunk_hash)
-            .expect("lookup should succeed");
+        let loaded =
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).expect("lookup should succeed");
         assert_eq!(loaded, None);
     }
 
@@ -622,12 +633,14 @@ mod tests {
         let object_key = ObjectKey::parse("shards/bb/test.shard").unwrap();
         let mapping = DedupeShardMapping::new(chunk_hash, object_key);
 
-        store.upsert_dedupe_shard_mapping(&mapping).expect("upsert should succeed");
+        store
+            .upsert_dedupe_shard_mapping(&mapping)
+            .expect("upsert should succeed");
         let deleted = DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash)
             .expect("delete should succeed");
         assert!(deleted);
-        let loaded = DedupeStore::dedupe_shard_mapping(&store, &chunk_hash)
-            .expect("lookup should succeed");
+        let loaded =
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).expect("lookup should succeed");
         assert_eq!(loaded, None);
     }
 

@@ -223,7 +223,7 @@ const fn reconstruction_plan_error_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shardline_protocol::{RepositoryProvider, RepositoryScope, HashParseError};
+    use shardline_protocol::{HashParseError, RepositoryProvider, RepositoryScope};
     use std::time::Duration;
 
     fn valid_hex_hash() -> String {
@@ -241,7 +241,11 @@ mod tests {
         }
     }
 
-    fn make_file_record_with_scope(file_id: &str, content_hash: &str, scope: RepositoryScope) -> FileRecord {
+    fn make_file_record_with_scope(
+        file_id: &str,
+        content_hash: &str,
+        scope: RepositoryScope,
+    ) -> FileRecord {
         FileRecord {
             file_id: file_id.to_owned(),
             content_hash: content_hash.to_owned(),
@@ -253,13 +257,7 @@ mod tests {
     }
 
     fn make_scope() -> RepositoryScope {
-        RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "team",
-            "repo",
-            Some("main"),
-        )
-        .unwrap()
+        RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", Some("main")).unwrap()
     }
 
     // ---- rebuild_key tests ----

@@ -638,6 +638,7 @@ pub fn fuzz_lifecycle_repair_summary(
 }
 
 /// Fuzz-target wrapper for quarantine classification.
+#[must_use]
 pub fn fuzz_classify_quarantine(
     object_exists: bool,
     is_reachable: bool,
@@ -647,6 +648,7 @@ pub fn fuzz_classify_quarantine(
 }
 
 /// Fuzz-target wrapper for retention hold classification.
+#[must_use]
 pub fn fuzz_classify_retention(
     release_after_unix_seconds: Option<u64>,
     held_at_unix_seconds: u64,
@@ -663,6 +665,7 @@ pub fn fuzz_classify_retention(
 }
 
 /// Fuzz-target wrapper for webhook delivery classification.
+#[must_use]
 pub fn fuzz_classify_webhook(
     processed_at_unix_seconds: u64,
     stale_cutoff_unix_seconds: u64,

@@ -1,5 +1,4 @@
 use crate::error::XetAdapterError;
-use crate::xorb::XorbParseError;
 
 use super::XorbVisitError;
 
@@ -13,8 +12,8 @@ pub fn map_xorb_visit_error(error: XorbVisitError<XetAdapterError>) -> XetAdapte
 
 #[cfg(test)]
 mod tests {
-    use crate::{XetAdapterError, xorb::XorbParseError};
     use super::{XorbVisitError, map_xorb_visit_error};
+    use crate::{XetAdapterError, xorb::XorbParseError};
 
     #[test]
     fn parse_variant_maps_hash_mismatch() {

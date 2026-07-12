@@ -180,7 +180,10 @@ async fn put_if_absent_pooled_bytes(
 mod tests {
     use axum::body::Bytes;
 
-    use super::{ChunkBuffer, chunk_object_key_and_integrity, put_if_absent_chunk_buffer, put_if_absent_pooled_chunk_buffer};
+    use super::{
+        ChunkBuffer, chunk_object_key_and_integrity, put_if_absent_chunk_buffer,
+        put_if_absent_pooled_chunk_buffer,
+    };
     use crate::local_backend::chunk_hash;
     use crate::object_store::ServerObjectStore;
     use shardline_index::xet_hash_hex_string;
@@ -351,7 +354,9 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk = ChunkBuffer::Pooled(Bytes::from_static(b"pooled test"));
-        let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk).await.unwrap();
+        let (outcome, _reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
+            .await
+            .unwrap();
         assert!(outcome.inserted);
     }
 
@@ -360,11 +365,15 @@ mod tests {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"pooled dedup"));
-        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1).await.unwrap();
+        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk1)
+            .await
+            .unwrap();
         assert!(outcome1.inserted);
 
         let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"pooled dedup"));
-        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2).await.unwrap();
+        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
+            .await
+            .unwrap();
         assert!(!outcome2.inserted);
     }
 
@@ -375,7 +384,9 @@ mod tests {
         // Use Bytes::from(Vec) so the buffer is Arc-backed and convertible
         // back to BytesMut via try_into_mut().
         let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0u8; 8]));
-        let (_outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk).await.unwrap();
+        let (_outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
+            .await
+            .unwrap();
         // When Bytes has a single reference, try_into_mut() succeeds
         assert!(reusable.is_some());
         let buf = reusable.unwrap();

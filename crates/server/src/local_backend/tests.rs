@@ -758,7 +758,10 @@ async fn local_backend_new_creates_root_and_chunks_directories() {
 
     // The root directory must exist.
     let root_exists = fs::metadata(temp.path()).await.is_ok();
-    assert!(root_exists, "root directory must exist after backend creation");
+    assert!(
+        root_exists,
+        "root directory must exist after backend creation"
+    );
 
     // The chunks directory (object store root) must exist.
     let chunks_dir = temp.path().join("chunks");
@@ -790,8 +793,14 @@ async fn upload_file_returns_non_empty_content_hash() {
         .await
         .expect("upload");
 
-    assert!(!response.content_hash.is_empty(), "content_hash must not be empty");
-    assert_eq!(response.total_bytes, 11, "total_bytes must match input length");
+    assert!(
+        !response.content_hash.is_empty(),
+        "content_hash must not be empty"
+    );
+    assert_eq!(
+        response.total_bytes, 11,
+        "total_bytes must match input length"
+    );
     assert_eq!(response.file_id, "hello.txt");
 }
 
@@ -912,9 +921,7 @@ async fn file_record_nonexistent_file_returns_not_found() {
     .await
     .expect("backend");
 
-    let result = backend
-        .file_record("does-not-exist.bin", None, None)
-        .await;
+    let result = backend.file_record("does-not-exist.bin", None, None).await;
 
     assert!(
         matches!(result, Err(ServerError::NotFound)),
@@ -941,11 +948,7 @@ async fn file_record_with_content_hash_nonexistent_returns_not_found() {
         .expect("upload");
 
     let result = backend
-        .file_record(
-            "exists.bin",
-            Some(&"a".repeat(64)),
-            None,
-        )
+        .file_record("exists.bin", Some(&"a".repeat(64)), None)
         .await;
 
     assert!(
@@ -975,10 +978,7 @@ async fn xorb_upload_stored_and_length_matches() {
         .expect("upload xorb");
     assert!(response.was_inserted, "first upload must insert");
 
-    let stored_length = backend
-        .xorb_length(&hash)
-        .await
-        .expect("xorb length");
+    let stored_length = backend.xorb_length(&hash).await.expect("xorb length");
     assert_eq!(stored_length, expected_length);
 
     // Second upload must be idempotent.
@@ -1033,13 +1033,8 @@ async fn upload_file_with_repository_scope_round_trip() {
     .await
     .expect("backend");
 
-    let scope = RepositoryScope::new(
-        RepositoryProvider::GitHub,
-        "org",
-        "repo",
-        Some("main"),
-    )
-    .expect("scope");
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
+        .expect("scope");
 
     let payload = b"scoped file payload";
     let response = backend
@@ -1075,9 +1070,7 @@ async fn download_file_nonexistent_returns_not_found() {
     .await
     .expect("backend");
 
-    let result = backend
-        .download_file("ghost.bin", None, None)
-        .await;
+    let result = backend.download_file("ghost.bin", None, None).await;
 
     assert!(
         matches!(result, Err(ServerError::NotFound)),

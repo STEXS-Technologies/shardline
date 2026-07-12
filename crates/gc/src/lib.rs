@@ -144,6 +144,7 @@ impl From<shardline_server_core::RebuildOverflowError> for GcError {
     }
 }
 
+#[allow(clippy::wildcard_enum_match_arm)]
 impl From<GcError> for shardline_server_core::ServerObjectStoreError {
     fn from(err: GcError) -> Self {
         match err {
@@ -530,7 +531,7 @@ where
 
     // Auto-release quarantine entries whose objects were deleted externally.
     for key in &missing_object_keys {
-        let _ = index_store.delete_quarantine_candidate(key).await;
+        let _result = index_store.delete_quarantine_candidate(key).await;
     }
 
     index_store
@@ -771,7 +772,7 @@ mod tests {
 
     #[test]
     fn gc_error_io_display_nonempty() {
-        let err = GcError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test"));
+        let err = GcError::Io(std::io::Error::other("test"));
         let display = err.to_string();
         assert!(!display.is_empty());
         assert_eq!(display, "local storage operation failed");
@@ -779,8 +780,7 @@ mod tests {
 
     #[test]
     fn gc_error_json_display_nonempty() {
-        let json_err =
-            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
         let err = GcError::Json(json_err);
         let display = err.to_string();
         assert!(!display.is_empty());
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn gc_error_into_server_object_store_error_io() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let gc_err = GcError::Io(io_err);
         let server_err: ServerObjectStoreError = gc_err.into();
         assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
@@ -911,7 +911,9 @@ mod tests {
     fn quarantine_record_path_produces_prefix_directory_from_first_two_chars() {
         let hash = "ff00112233445566ff00112233445566ff00112233445566ff00112233445566";
         let result = quarantine_record_path(Path::new("/root"), hash);
-        let expected = PathBuf::from("/root/ff/ff00112233445566ff00112233445566ff00112233445566ff00112233445566.json");
+        let expected = PathBuf::from(
+            "/root/ff/ff00112233445566ff00112233445566ff00112233445566ff00112233445566.json",
+        );
         assert_eq!(result, expected);
     }
 

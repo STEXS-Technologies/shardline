@@ -295,6 +295,7 @@ pub enum ServerError {
 
 impl ServerError {
     /// Maps this error to the OCI Distribution specification error code.
+    #[allow(clippy::wildcard_enum_match_arm)]
     const fn oci_error_code(&self) -> &'static str {
         match self {
             Self::NotFound => "MANIFEST_UNKNOWN",

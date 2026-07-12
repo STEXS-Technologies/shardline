@@ -44,10 +44,8 @@ pub(crate) async fn oci_post_blob_upload(
     let query = parse_query_map(uri)?;
     // The OCI spec allows a `digest-algorithm` query parameter on blob upload
     // initiation. Only SHA-256 is supported; reject any other algorithm per spec.
-    if let Some(algo) = query.get("digest-algorithm").map(String::as_str) {
-        if algo != "sha256" {
-            return Err(ServerError::InvalidDigest);
-        }
+    if let Some(algo) = query.get("digest-algorithm").map(String::as_str) && algo != "sha256" {
+        return Err(ServerError::InvalidDigest);
     }
     if let Some(mount_digest) = query.get("mount") {
         let digest_hex = parse_sha256_digest(mount_digest)?;
