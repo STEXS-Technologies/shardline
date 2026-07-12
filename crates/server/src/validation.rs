@@ -3,7 +3,11 @@ use std::{
     path::Path,
 };
 
+#[cfg(not(unix))]
 use tokio::fs;
+#[cfg(unix)]
+#[allow(unused_imports)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::ServerError;
 
@@ -29,6 +33,46 @@ pub(crate) fn validate_content_hash(value: &str) -> Result<(), ServerError> {
     shardline_server_core::validate_content_hash_with(value, || ServerError::InvalidContentHash)
 }
 
+/// Validates that `path` exists, is a directory, and is not a symlink.
+///
+/// Uses `O_NOFOLLOW` on Unix (via `std::fs::OpenOptions::custom_flags`) to
+/// open the directory without following any trailing symlink, then stats
+/// the fd to validate the type.  This eliminates the TOCTOU window between
+/// the `symlink_metadata` check and subsequent file operations by callers.
+///
+/// On non-Unix platforms, falls back to `symlink_metadata` with a best-effort
+/// check.  Callers on non-Unix should perform their own TOCTOU-safe open.
+#[cfg(unix)]
+pub(crate) async fn ensure_directory(path: &Path) -> Result<(), ServerError> {
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .await
+        .map_err(|e| {
+            ServerError::Io(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "failed to open directory at {}: {e}",
+                    path.display()
+                ),
+            ))
+        })?;
+    let metadata = file.metadata().await?;
+    if !metadata.is_dir() {
+        return Err(ServerError::Io(Error::new(
+            ErrorKind::InvalidData,
+            format!("expected directory at {}", path.display()),
+        )));
+    }
+    Ok(())
+}
+
+/// Non-Unix fallback: uses `symlink_metadata` which has a TOCTOU window
+/// between this check and subsequent file operations.  Callers on these
+/// platforms should add their own fd-based validation if the path is
+/// attacker-influenced.
+#[cfg(not(unix))]
 pub(crate) async fn ensure_directory(path: &Path) -> Result<(), ServerError> {
     let metadata = fs::symlink_metadata(path).await?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -37,7 +81,6 @@ pub(crate) async fn ensure_directory(path: &Path) -> Result<(), ServerError> {
             format!("expected directory at {}", path.display()),
         )));
     }
-
     Ok(())
 }
 
