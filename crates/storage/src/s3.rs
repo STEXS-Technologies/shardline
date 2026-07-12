@@ -1,7 +1,6 @@
 #![allow(
     clippy::let_underscore_must_use,
     clippy::manual_inspect,
-    clippy::arithmetic_side_effects
 )]
 
 use std::{
@@ -49,6 +48,10 @@ fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreError> {
 /// [`temp_key_for`], i.e. contains `.tmp.` followed by at least one digit.
 fn is_temp_upload_key(key: &str) -> bool {
     key.find(".tmp.").is_some_and(|pos| {
+        // SAFETY: pos comes from find(".tmp.") which matches 5 chars,
+        // so pos + 5 is always <= key.len(). The get() call is a safety
+        // net — it will never return None in practice.
+        #[allow(clippy::arithmetic_side_effects)]
         key.as_bytes()
             .get(pos + 5)
             .is_some_and(|b| b.is_ascii_digit())
@@ -954,6 +957,7 @@ impl S3ObjectStore {
     /// Copies a large object from `source_location` to `destination_location`
     /// by streaming the content through the server.  Used when the source exceeds
     /// S3's single-part COPY limit (5 GiB).
+    #[allow(clippy::arithmetic_side_effects)]
     async fn streaming_large_copy(
         &self,
         source_location: &ObjectStorePath,

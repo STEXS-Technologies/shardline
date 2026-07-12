@@ -1380,7 +1380,6 @@ fn parse_rows_from_content(
 }
 
 /// Parses JSONL (newline-delimited JSON) rows.
-#[allow(clippy::arithmetic_side_effects)]
 fn parse_jsonl_rows(
     text: &str,
     offset: usize,
@@ -1398,8 +1397,11 @@ fn parse_jsonl_rows(
         if line.is_empty() {
             continue;
         }
+        let line_number = i
+            .checked_add(1)
+            .ok_or_else(|| HubApiError::PathValidation("line number overflow".to_owned()))?;
         let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-            HubApiError::PathValidation(format!("invalid JSON at line {}: {e}", i + 1))
+            HubApiError::PathValidation(format!("invalid JSON at line {}: {e}", line_number))
         })?;
         let columns = value
             .as_object()
@@ -1475,10 +1477,9 @@ fn parse_csv_line(line: &str) -> Vec<&str> {
                 let field = &current[1..end]; // strip opening/closing quotes
                 fields.push(field);
                 // Skip closing quote and comma separator.
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    current = &current[end + 1..];
-                }
+                current = end
+                    .checked_add(1)
+                    .map_or("", |n| current.get(n..).unwrap_or(""));
                 if current.starts_with(',') {
                     current = &current[1..];
                 }
@@ -1492,10 +1493,9 @@ fn parse_csv_line(line: &str) -> Vec<&str> {
             match current.find(',') {
                 Some(pos) => {
                     fields.push(&current[..pos]);
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        current = &current[pos + 1..];
-                    }
+                    current = pos
+                        .checked_add(1)
+                        .map_or("", |n| current.get(n..).unwrap_or(""));
                 }
                 None => {
                     fields.push(current);

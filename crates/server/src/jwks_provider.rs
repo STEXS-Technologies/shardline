@@ -223,7 +223,7 @@ impl JwksProvider {
         }
     }
 
-    #[allow(clippy::option_if_let_else, clippy::arithmetic_side_effects)]
+    #[allow(clippy::option_if_let_else)]
     fn verify_jwt_claims(
         &self,
         header_b64: &str,
@@ -239,14 +239,14 @@ impl JwksProvider {
                 // contention during key rotation.
                 const MAX_RETRIES: usize = 5;
                 const RETRY_DELAY_MS: u64 = 10;
-                let mut attempt = 0;
+                let mut attempt: usize = 0;
                 loop {
                     if let Ok(guard) = self.cached_keys.try_read() {
                         break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
                             AuthError::ProviderError("JWKS keys not available".to_owned())
                         });
                     }
-                    attempt += 1;
+                    attempt = attempt.wrapping_add(1);
                     if attempt >= MAX_RETRIES {
                         break Err(AuthError::ProviderError(
                             "JWKS cache lock contended".to_owned(),

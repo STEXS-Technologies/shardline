@@ -13,7 +13,6 @@ const MAX_PAYLOAD: usize = 0xFFFF - 4;
 /// # Errors
 ///
 /// Returns `Err` if `line` exceeds 65516 bytes (pkt-line max payload).
-#[allow(clippy::arithmetic_side_effects)]
 pub fn encode_line(line: &str) -> Result<String, PktLineError> {
     if line.len() > MAX_PAYLOAD {
         return Err(PktLineError::PayloadTooLarge {
@@ -21,7 +20,7 @@ pub fn encode_line(line: &str) -> Result<String, PktLineError> {
             max: MAX_PAYLOAD,
         });
     }
-    let len = line.len() + 4;
+    let len = line.len().wrapping_add(4);
     Ok(format!("{len:04x}{line}"))
 }
 
@@ -30,7 +29,6 @@ pub fn encode_line(line: &str) -> Result<String, PktLineError> {
 /// # Errors
 ///
 /// Returns `Err` if `data` exceeds 65516 bytes.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn encode_line_bytes(data: &[u8]) -> Result<String, PktLineError> {
     if data.len() > MAX_PAYLOAD {
         return Err(PktLineError::PayloadTooLarge {
@@ -38,7 +36,7 @@ pub fn encode_line_bytes(data: &[u8]) -> Result<String, PktLineError> {
             max: MAX_PAYLOAD,
         });
     }
-    let len = data.len() + 4;
+    let len = data.len().wrapping_add(4);
     let mut out = format!("{len:04x}");
     out.push_str(&String::from_utf8_lossy(data));
     Ok(out)
@@ -84,12 +82,11 @@ pub const RESPONSE_END: &str = "0002";
 /// - `2`: progress/error messages
 /// - `3`: fatal error
 #[must_use]
-#[allow(clippy::arithmetic_side_effects)]
 pub fn sideband_data(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     // Each chunk is at most 65516 bytes of payload
     for chunk in data.chunks(65516) {
-        let len = chunk.len() + 5; // 4-byte length prefix + 1-byte channel
+        let len = chunk.len().wrapping_add(5); // 4-byte length prefix + 1-byte channel
         out.extend_from_slice(format!("{len:04x}").as_bytes());
         out.push(b'1'); // channel 1 = pack data
         out.extend_from_slice(chunk);
@@ -99,9 +96,8 @@ pub fn sideband_data(data: &[u8]) -> Vec<u8> {
 
 /// Wraps a message in sideband channel 2 (progress).
 #[must_use]
-#[allow(clippy::arithmetic_side_effects)]
 pub fn sideband_progress(msg: &str) -> Vec<u8> {
-    let len = msg.len() + 5;
+    let len = msg.len().wrapping_add(5);
     let mut out = format!("{len:04x}").into_bytes();
     out.push(b'2');
     out.extend_from_slice(msg.as_bytes());
@@ -110,9 +106,8 @@ pub fn sideband_progress(msg: &str) -> Vec<u8> {
 
 /// Wraps a message in sideband channel 3 (fatal).
 #[must_use]
-#[allow(clippy::arithmetic_side_effects)]
 pub fn sideband_fatal(msg: &str) -> Vec<u8> {
-    let len = msg.len() + 5;
+    let len = msg.len().wrapping_add(5);
     let mut out = format!("{len:04x}").into_bytes();
     out.push(b'3');
     out.extend_from_slice(msg.as_bytes());
@@ -124,13 +119,15 @@ pub fn sideband_fatal(msg: &str) -> Vec<u8> {
 /// Returns a list of decoded lines (without the 4-byte length prefix).
 /// Stops at flush packet (`0000`).
 #[must_use]
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
     let mut lines = Vec::new();
-    let mut pos = 0;
+    let mut pos: usize = 0;
 
-    while pos + 4 <= data.len() {
-        let hex_len = &data[pos..pos + 4];
+    // SAFETY: guarded by `data.len()` comparison on this same line
+    while pos.wrapping_add(4) <= data.len() {
+        // SAFETY: guarded by `pos + 4 <= data.len()` check in the while condition
+        #[allow(clippy::indexing_slicing)]
+        let hex_len = &data[pos..pos.wrapping_add(4)];
         let Ok(hex_str) = std::str::from_utf8(hex_len) else {
             break;
         };
@@ -143,13 +140,17 @@ pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
             break;
         }
 
-        if (len as usize) < 4 || pos + len as usize > data.len() {
+        // SAFETY: checked against data.len() on this same line
+        if (len as usize) < 4 || pos.wrapping_add(len as usize) > data.len() {
             break;
         }
 
-        let payload = &data[pos + 4..pos + len as usize];
+        // SAFETY: guarded by the bounds check immediately above
+        #[allow(clippy::indexing_slicing)]
+        let payload = &data[pos.wrapping_add(4)..pos.wrapping_add(len as usize)];
         lines.push(payload.to_vec());
-        pos += len as usize;
+        // SAFETY: len is bounded by pkt-line max payload (65520 bytes), so wrapping is safe
+        pos = pos.wrapping_add(len as usize);
     }
 
     lines
@@ -160,14 +161,16 @@ pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
 /// Returns the reassembled data from channel 1 (pack data).
 /// Channel 2 (progress) and channel 3 (fatal) are logged but not returned.
 #[must_use]
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
     let mut pack_data = Vec::new();
     let mut messages = Vec::new();
-    let mut pos = 0;
+    let mut pos: usize = 0;
 
-    while pos + 4 <= data.len() {
-        let hex_len = &data[pos..pos + 4];
+    // SAFETY: guarded by `data.len()` comparison on this same line
+    while pos.wrapping_add(4) <= data.len() {
+        // SAFETY: guarded by `pos + 4 <= data.len()` check in the while condition
+        #[allow(clippy::indexing_slicing)]
+        let hex_len = &data[pos..pos.wrapping_add(4)];
         let Ok(hex_str) = std::str::from_utf8(hex_len) else {
             break;
         };
@@ -179,12 +182,17 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
             break;
         }
 
-        if (len as usize) < 5 || pos + len as usize > data.len() {
+        // SAFETY: checked against data.len() on this same line
+        if (len as usize) < 5 || pos.wrapping_add(len as usize) > data.len() {
             break;
         }
 
-        let channel = data[pos + 4];
-        let payload = &data[pos + 5..pos + len as usize];
+        // SAFETY: guarded by the bounds check immediately above (len >= 5, so pos + 5 <= pos + len <= data.len())
+        #[allow(clippy::indexing_slicing)]
+        let channel = data[pos.wrapping_add(4)];
+        // SAFETY: guarded by the same bounds check above
+        #[allow(clippy::indexing_slicing)]
+        let payload = &data[pos.wrapping_add(5)..pos.wrapping_add(len as usize)];
 
         match channel {
             b'1' => pack_data.extend_from_slice(payload),
@@ -196,7 +204,8 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
             _ => {}
         }
 
-        pos += len as usize;
+        // SAFETY: len is bounded by pkt-line max payload (65520 bytes), so wrapping is safe
+        pos = pos.wrapping_add(len as usize);
     }
 
     (pack_data, messages)

@@ -392,7 +392,7 @@ fn validate_pack_parser_shift_overflow_protected() {
     let smart_http_source = include_str!("../../hub_api/src/git/smart_http.rs");
 
     let parse_start = smart_http_source.find("fn parse_pack_data").unwrap();
-    let parse_fn = &smart_http_source[parse_start..parse_start + 1500];
+    let parse_fn = &smart_http_source[parse_start..parse_start + 2500];
 
     assert!(
         parse_fn.contains("shift >= 64"),

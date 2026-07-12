@@ -314,7 +314,7 @@ const fn anchored_path_options() -> AnchoredPathOptions {
     AnchoredPathOptions::new(Some(LOCAL_DIRECTORY_MODE), Some(LOCAL_FILE_MODE))
 }
 
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[allow(clippy::indexing_slicing)]
 fn ensure_file_matches_bytes(mut file: File, expected: &[u8]) -> io::Result<()> {
     use std::io::Read;
     const LOCAL_FILE_COMPARE_CHUNK_BYTES: usize = 256 * 1024;
@@ -334,7 +334,12 @@ fn ensure_file_matches_bytes(mut file: File, expected: &[u8]) -> io::Result<()> 
             Some(ec) if chunk == ec => {}
             _ => break,
         }
-        offset += read;
+        offset = offset.checked_add(read).ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "offset overflow while comparing file contents",
+            )
+        })?;
     }
     Err(io::Error::new(
         ErrorKind::AlreadyExists,

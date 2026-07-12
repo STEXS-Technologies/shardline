@@ -10,7 +10,6 @@
         clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::arithmetic_side_effects,
         clippy::shadow_unrelated,
         clippy::format_push_string
     )
