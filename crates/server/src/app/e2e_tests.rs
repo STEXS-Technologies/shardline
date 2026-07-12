@@ -100,6 +100,9 @@ async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         app = app.route("/v1/stats", get(super::operational::stats));
     }
 
+    // HubState is built conditionally when Hub frontend is requested.
+    let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
+
     for frontend in frontends {
         match frontend {
             ServerFrontend::Xet => {
@@ -200,12 +203,38 @@ async fn test_app(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                         axum::routing::any(super::protocol_routes::oci_dispatch),
                     );
             }
-            ServerFrontend::Hub => {} // Hub not tested in E2E
+            ServerFrontend::Hub => {
+                hub_state = Some(build_test_hub_state(tmp.path()).await);
+            }
         }
     }
 
     let app: Router = app.with_state(Arc::clone(&state));
+
+    // Merge Hub routes at the type-erased Router<()> level.
+    let app = if let Some(hs) = hub_state {
+        app.merge(shardline_hub_api::hub_routes(hs))
+    } else {
+        app
+    };
+
     (app, tmp)
+}
+
+/// Builds a [`HubState`] backed by a temporary SQLite database for E2E tests.
+/// Auth and HTTP client are disabled; only the local SQLite store is wired.
+async fn build_test_hub_state(root: &std::path::Path) -> shardline_hub_api::routes::HubState {
+    let hub_root = root.join("hub");
+    std::fs::create_dir_all(&hub_root).ok();
+    let store = shardline_index::LocalIndexStore::new(hub_root.clone())
+        .expect("hub sqlite store");
+    shardline_index::hub::ensure_hub_tables(&hub_root).ok();
+    let boxed = shardline_index::hub::BoxedHubStore::from_store(store);
+    shardline_hub_api::routes::HubState {
+        store: boxed,
+        auth: None,
+        http_client: None,
+    }
 }
 
 /// Signing key shared by both test-app builders and token helpers so that
@@ -269,6 +298,8 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         app = app.route("/v1/stats", get(super::operational::stats));
     }
 
+    let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
+
     for frontend in frontends {
         match frontend {
             ServerFrontend::Xet => {
@@ -369,11 +400,20 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                         axum::routing::any(super::protocol_routes::oci_dispatch),
                     );
             }
-            ServerFrontend::Hub => {}
+            ServerFrontend::Hub => {
+                hub_state = Some(build_test_hub_state(tmp.path()).await);
+            }
         }
     }
 
     let app: Router = app.with_state(Arc::clone(&state));
+
+    let app = if let Some(hs) = hub_state {
+        app.merge(shardline_hub_api::hub_routes(hs))
+    } else {
+        app
+    };
+
     (app, tmp)
 }
 
@@ -487,6 +527,8 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
             .route("/v1/stats", get(super::operational::stats));
     }
 
+    let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
+
     for frontend in frontends {
         match frontend {
             ServerFrontend::Xet => {
@@ -595,11 +637,20 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                         axum::routing::any(super::protocol_routes::oci_dispatch),
                     );
             }
-            ServerFrontend::Hub => {}
+            ServerFrontend::Hub => {
+                hub_state = Some(build_test_hub_state(tmp.path()).await);
+            }
         }
     }
 
     let app: Router = app.with_state(Arc::clone(&state));
+
+    let app = if let Some(hs) = hub_state {
+        app.merge(shardline_hub_api::hub_routes(hs))
+    } else {
+        app
+    };
+
     (app, tmp, _config_dir)
 }
 
@@ -5178,4 +5229,150 @@ async fn provider_multiple_webhooks_in_sequence() {
             "webhook {i} should be accepted"
         );
     }
+}
+
+// ── Hub frontend ─────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_health_endpoint_returns_200() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_create_and_list_repo() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a model repo (name = "owner/name" per Hub API convention)
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "test-team/test-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // List repos (should contain the one we just created)
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let repos = json["repos"].as_array().unwrap();
+    assert!(!repos.is_empty(), "should have at least one repo");
+    assert_eq!(repos[0]["id"], "test-team/test-model");
+    assert_eq!(repos[0]["type"], "model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_repo_info_returns_repo_details() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo first via the type-specific endpoint
+    let create_body = serde_json::json!({
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/info-team/info-model")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "repo create should succeed"
+    );
+
+    // Fetch repo info
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/info-team/info-model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["id"], "info-team/info-model");
+    assert_eq!(json["type"], "model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_repo_not_found_returns_404() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/nonexistent/nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_whoami_without_auth_returns_ok() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/whoami-v2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Without auth configured, whoami should still return OK with default values
+    assert_eq!(response.status(), StatusCode::OK);
 }
