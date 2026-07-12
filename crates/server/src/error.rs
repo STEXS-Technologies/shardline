@@ -295,6 +295,10 @@ pub enum ServerError {
 
 impl ServerError {
     /// Maps this error to the OCI Distribution specification error code.
+    ///
+    /// When adding a new [`ServerError`] variant, add it explicitly to this match.
+    /// If the variant has an OCI-specific code, map it above the catch-all.
+    /// If it is an internal error (no OCI-specific meaning), keep it in the catch-all.
     #[allow(clippy::wildcard_enum_match_arm)]
     const fn oci_error_code(&self) -> &'static str {
         match self {
@@ -310,7 +314,49 @@ impl ServerError {
             Self::NotAcceptable => "UNSUPPORTED",
             Self::ExpectedBodyHashMismatch => "DIGEST_INVALID",
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => "TOO_MANY_REQUESTS",
-            _ => "INTERNAL",
+            // All remaining variants are internal server errors with no
+            // OCI-specific code. Add new OCI-mappable variants above.
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::RequestBodyRead(_)
+            | Self::RequestQueryTooLarge
+            | Self::RequestBodyFrameOutOfBounds
+            | Self::NumericConversion(_)
+            | Self::HashParse(_)
+            | Self::ObjectStore(_)
+            | Self::Index(_)
+            | Self::StoredFileMetadataTooLarge { .. }
+            | Self::StoredFileMetadataLengthMismatch
+            | Self::InvalidFileId
+            | Self::InvalidContentHash
+            | Self::InvalidXorbPrefix
+            | Self::XorbHashMismatch
+            | Self::InvalidSerializedXorb
+            | Self::InvalidSerializedShard(_)
+            | Self::MissingReferencedXorb
+            | Self::TooManyShardTerms
+            | Self::TooManyBatchReconstructionFileIds
+            | Self::Overflow
+            | Self::InvalidRangeHeader
+            | Self::RangeNotSatisfiable
+            | Self::SigningKeyError(_)
+            | Self::ProviderTokensDisabled
+            | Self::MissingProviderApiKey
+            | Self::InvalidProviderApiKey
+            | Self::MissingProviderSubject
+            | Self::InvalidProviderTokenRequest
+            | Self::MissingProviderWebhookAuthentication
+            | Self::InvalidProviderWebhookAuthentication
+            | Self::InvalidProviderWebhookPayload
+            | Self::UnknownProvider
+            | Self::ProviderDenied
+            | Self::Provider(_)
+            | Self::ReconstructionCache(_)
+            | Self::Config(_)
+            | Self::UnauthorizedChallenge(_)
+            | Self::MissingReconstructionCacheRedisUrl
+            | Self::TransferLimiterClosed
+            | Self::BlockingTask(_) => "INTERNAL",
         }
     }
 

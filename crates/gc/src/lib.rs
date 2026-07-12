@@ -155,7 +155,21 @@ impl From<GcError> for shardline_server_core::ServerObjectStoreError {
             GcError::NumericConversion(e) => Self::NumericConversion(e),
             GcError::InvalidContentHash => Self::InvalidContentHash,
             GcError::Overflow => Self::Overflow,
-            other => Self::Io(std::io::Error::other(other)),
+            // All remaining GcError variants that don't directly map to an
+            // object-store error are wrapped as I/O errors.  When adding a new
+            // GcError variant, add it explicitly above this line.
+            GcError::Json(_)
+            | GcError::ObjectPrefix(_)
+            | GcError::IndexStore(_)
+            | GcError::MemoryIndexStore(_)
+            | GcError::MemoryRecordStore(_)
+            | GcError::PostgresMetadata(_)
+            | GcError::RetentionHold(_)
+            | GcError::QuarantineCandidate(_)
+            | GcError::WebhookDelivery(_)
+            | GcError::FileRecordInvariant(_)
+            | GcError::InvalidLifecycleMetadata(_)
+            | GcError::XetAdapter(_) => Self::Io(std::io::Error::other(err)),
         }
     }
 }
