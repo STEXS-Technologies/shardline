@@ -1405,7 +1405,10 @@ fn canonical_provider_states(states: Vec<ProviderRepositoryState>) -> Vec<Canoni
 async fn local_record_store_lifecycle_create_read_list_delete() {
     let result = exercise_local_record_store_lifecycle().await;
     let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "record store lifecycle regression: {error:?}");
+    assert!(
+        result.is_ok(),
+        "record store lifecycle regression: {error:?}"
+    );
 }
 
 async fn exercise_local_record_store_lifecycle() -> Result<(), Box<dyn Error>> {

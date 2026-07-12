@@ -91,11 +91,9 @@ impl AsyncIndexStore for LocalIndexStore {
         let store = self.clone();
         let object_id = *object_id;
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LocalIndexStore::insert_object(&store, &object_id)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+            tokio::task::spawn_blocking(move || LocalIndexStore::insert_object(&store, &object_id))
+                .await
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
     }
 
@@ -119,11 +117,9 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'_, Vec<DedupeShardMapping>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                DedupeStore::list_dedupe_shard_mappings(&store)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+            tokio::task::spawn_blocking(move || DedupeStore::list_dedupe_shard_mappings(&store))
+                .await
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
     }
 
@@ -195,11 +191,9 @@ impl AsyncIndexStore for LocalIndexStore {
     ) -> IndexStoreFuture<'_, Vec<QuarantineCandidate>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::list_quarantine_candidates(&store)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+            tokio::task::spawn_blocking(move || LifecycleStore::list_quarantine_candidates(&store))
+                .await
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
     }
 
@@ -258,22 +252,18 @@ impl AsyncIndexStore for LocalIndexStore {
         let store = self.clone();
         let object_key = object_key.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::retention_hold(&store, &object_key)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+            tokio::task::spawn_blocking(move || LifecycleStore::retention_hold(&store, &object_key))
+                .await
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
     }
 
     fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::list_retention_holds(&store)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+            tokio::task::spawn_blocking(move || LifecycleStore::list_retention_holds(&store))
+                .await
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
     }
 
@@ -343,11 +333,9 @@ impl AsyncIndexStore for LocalIndexStore {
     fn list_webhook_deliveries(&self) -> IndexStoreFuture<'_, Vec<WebhookDelivery>, Self::Error> {
         let store = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                LifecycleStore::list_webhook_deliveries(&store)
-            })
-            .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+            tokio::task::spawn_blocking(move || LifecycleStore::list_webhook_deliveries(&store))
+                .await
+                .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
         })
     }
 
@@ -587,11 +575,19 @@ mod tests {
         let store = make_store();
         let object_id = StoredObjectId::new(ShardlineHash::from_bytes([5; 32]));
 
-        assert!(!AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
+        assert!(
+            !AsyncIndexStore::contains_object(&store, &object_id)
+                .await
+                .unwrap()
+        );
         AsyncIndexStore::insert_object(&store, &object_id)
             .await
             .expect("insert should succeed");
-        assert!(AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
+        assert!(
+            AsyncIndexStore::contains_object(&store, &object_id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

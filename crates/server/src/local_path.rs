@@ -60,11 +60,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn map_symlinked_component() {
         let path = PathBuf::from("/test");
-        let result = super::map_directory_path_error(DirectoryPathError::SymlinkedComponent(
-            path.clone(),
-        ));
+        let result =
+            super::map_directory_path_error(DirectoryPathError::SymlinkedComponent(path));
         let msg = match &result {
             ServerError::Io(e) if e.kind() == ErrorKind::InvalidData => e.to_string(),
             other => panic!("expected Io(InvalidData), got {other:?}"),
@@ -76,6 +76,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn map_non_directory_component() {
         let path = PathBuf::from("/test");
         let result =
@@ -89,6 +90,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn map_io_error() {
         let io_err = Error::new(ErrorKind::NotFound, "test");
         let result = super::map_directory_path_error(DirectoryPathError::Io(io_err));

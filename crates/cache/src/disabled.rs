@@ -48,14 +48,12 @@ mod tests {
 
     #[test]
     fn new_constructs_without_panic() {
-        let cache = DisabledReconstructionCache::new();
-        drop(cache);
+        let _cache = DisabledReconstructionCache::new();
     }
 
     #[test]
     fn default_constructs_without_panic() {
-        let cache = DisabledReconstructionCache::default();
-        drop(cache);
+        let _cache = DisabledReconstructionCache;
     }
 
     #[tokio::test]

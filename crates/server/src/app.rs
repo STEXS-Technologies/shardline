@@ -50,10 +50,9 @@ use operational::{
     upload_xorb,
 };
 use protocol_routes::{
-    bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas,
-    bazel_put, bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object,
-    lfs_get_object, lfs_head_object, lfs_patch_object, lfs_put_object, lfs_verify_object,
-    oci_api_dispatch, oci_dispatch,
+    bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
+    bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
+    lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
     oci_registry_token, oci_transfer_dispatch, oci_v2_root,
 };
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
@@ -223,12 +222,13 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // converted via `.with_state()`.
     let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
     for frontend in state.config.server_frontends() {
+        #[allow(clippy::wildcard_enum_match_arm)]
         match frontend {
             ServerFrontend::Hub => {
                 hub_state = Some(build_hub_state(&state)?);
             }
             _ => {
-                app = register_frontend_routes(app, *frontend, role, &state)?;
+                app = register_frontend_routes(app, *frontend, role, &state);
             }
         }
     }
@@ -285,13 +285,13 @@ fn register_frontend_routes(
     frontend: ServerFrontend,
     role: ServerRole,
     _app_state: &AppState,
-) -> Result<Router<Arc<AppState>>, ServerError> {
+) -> Router<Arc<AppState>> {
     match frontend {
-        ServerFrontend::Xet => Ok(register_xet_routes(app, role)),
-        ServerFrontend::Lfs => Ok(register_lfs_routes(app, role)),
-        ServerFrontend::BazelHttp => Ok(register_bazel_routes(app, role)),
-        ServerFrontend::Oci => Ok(register_oci_routes(app, role)),
-        ServerFrontend::Hub => Ok(app), // Hub routes are built separately
+        ServerFrontend::Xet => register_xet_routes(app, role),
+        ServerFrontend::Lfs => register_lfs_routes(app, role),
+        ServerFrontend::BazelHttp => register_bazel_routes(app, role),
+        ServerFrontend::Oci => register_oci_routes(app, role),
+        ServerFrontend::Hub => app, // Hub routes are built separately
     }
 }
 
@@ -522,6 +522,7 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
     }
 }
 
+#[allow(clippy::unwrap_used)]
 pub(super) async fn security_headers_middleware(
     request: axum::extract::Request,
     next: Next,
@@ -530,10 +531,7 @@ pub(super) async fn security_headers_middleware(
     let (mut parts, body) = response.into_parts();
     let headers = &mut parts.headers;
     if !headers.contains_key(header::X_CONTENT_TYPE_OPTIONS) {
-        headers.insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            "nosniff".parse().unwrap(),
-        );
+        headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     }
     if !headers.contains_key(header::X_FRAME_OPTIONS) {
         headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());

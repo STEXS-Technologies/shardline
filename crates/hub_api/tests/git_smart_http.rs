@@ -95,8 +95,12 @@ fn build_simple_commit(
     let blob_sha = blob.sha1();
     let tree = create_tree_object(&[(0o100644u32, file_path, &blob_sha)]);
     let tree_sha = tree.sha1();
-    let commit =
-        create_commit_object(&tree_sha, parent_sha, "Test User <test@example.com>", message);
+    let commit = create_commit_object(
+        &tree_sha,
+        parent_sha,
+        "Test User <test@example.com>",
+        message,
+    );
     let commit_sha = commit.sha1();
     (vec![blob, tree, commit], commit_sha)
 }
@@ -640,26 +644,16 @@ async fn receive_pack_rejects_non_fast_forward_push() {
     let null_sha = "0000000000000000000000000000000000000000";
 
     // Step 1: Push commit_A to refs/heads/main (old=0000).
-    let (objects_a, commit_a_sha) = build_simple_commit(
-        "file_a.txt",
-        b"content A",
-        "Commit A",
-        None,
-    );
-    let body_a = build_receive_pack_with_objects(
-        null_sha,
-        "refs/heads/main",
-        &objects_a,
-        &commit_a_sha,
-    );
+    let (objects_a, commit_a_sha) =
+        build_simple_commit("file_a.txt", b"content A", "Commit A", None);
+    let body_a =
+        build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects_a, &commit_a_sha);
 
     let response = app()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/models/test-{uid}/ff-reject/git-receive-pack"
-                ))
+                .uri(format!("/models/test-{uid}/ff-reject/git-receive-pack"))
                 .header("content-type", "application/x-git-receive-pack")
                 .body(Body::from(body_a))
                 .unwrap(),
@@ -692,12 +686,8 @@ async fn receive_pack_rejects_non_fast_forward_push() {
     // commit_B. This IS a fast-forward (commit_A → commit_B).
     // To trigger non-fast-forward, we need old_sha that DOESN'T match
     // the current ref. Use old=<some wrong sha>.
-    let (objects_b, commit_b_sha) = build_simple_commit(
-        "file_b.txt",
-        b"content B",
-        "Commit B",
-        None,
-    );
+    let (objects_b, commit_b_sha) =
+        build_simple_commit("file_b.txt", b"content B", "Commit B", None);
 
     // Use a bogus old_sha that doesn't match the current ref.
     // refs/heads/main is at commit_A, but we claim it's at all-zeros.
@@ -718,9 +708,7 @@ async fn receive_pack_rejects_non_fast_forward_push() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/models/test-{uid}/ff-reject/git-receive-pack"
-                ))
+                .uri(format!("/models/test-{uid}/ff-reject/git-receive-pack"))
                 .header("content-type", "application/x-git-receive-pack")
                 .body(Body::from(body_b))
                 .unwrap(),
@@ -754,26 +742,16 @@ async fn receive_pack_pushes_tag() {
     let null_sha = "0000000000000000000000000000000000000000";
 
     // Step 1: Push a commit to refs/heads/main.
-    let (objects_a, commit_a_sha) = build_simple_commit(
-        "README.md",
-        b"# Tag Test",
-        "Add README",
-        None,
-    );
-    let body_a = build_receive_pack_with_objects(
-        null_sha,
-        "refs/heads/main",
-        &objects_a,
-        &commit_a_sha,
-    );
+    let (objects_a, commit_a_sha) =
+        build_simple_commit("README.md", b"# Tag Test", "Add README", None);
+    let body_a =
+        build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects_a, &commit_a_sha);
 
     let response = app()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/models/test-{uid}/tag-test/git-receive-pack"
-                ))
+                .uri(format!("/models/test-{uid}/tag-test/git-receive-pack"))
                 .header("content-type", "application/x-git-receive-pack")
                 .body(Body::from(body_a))
                 .unwrap(),
@@ -791,12 +769,8 @@ async fn receive_pack_pushes_tag() {
     // Step 2: Push a lightweight tag refs/tags/v1.0.
     // The current store uses (repo_id, sha) as primary key, so the tag
     // must use a unique SHA. We create a separate commit for the tag.
-    let (tag_objects, tag_commit_sha) = build_simple_commit(
-        "tagged.txt",
-        b"tagged content",
-        "Tag v1.0",
-        None,
-    );
+    let (tag_objects, tag_commit_sha) =
+        build_simple_commit("tagged.txt", b"tagged content", "Tag v1.0", None);
 
     let tag_ref_line = format!(
         "{} {} refs/tags/v1.0\n",
@@ -817,9 +791,7 @@ async fn receive_pack_pushes_tag() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/models/test-{uid}/tag-test/git-receive-pack"
-                ))
+                .uri(format!("/models/test-{uid}/tag-test/git-receive-pack"))
                 .header("content-type", "application/x-git-receive-pack")
                 .body(Body::from(tag_body))
                 .unwrap(),
@@ -888,9 +860,8 @@ async fn receive_pack_stores_lfs_objects() {
 
     // Build a commit containing an LFS pointer blob.
     let lfs_oid = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let lfs_pointer = format!(
-        "version https://git-lfs.github.com/spec/v1\noid sha256:{lfs_oid}\nsize 1234\n"
-    );
+    let lfs_pointer =
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{lfs_oid}\nsize 1234\n");
 
     let lfs_blob = create_blob_object(lfs_pointer.as_bytes());
     let lfs_blob_sha = lfs_blob.sha1();
@@ -906,32 +877,29 @@ async fn receive_pack_stores_lfs_objects() {
     ]);
     let tree_sha = tree.sha1();
 
-    let commit =
-        create_commit_object(&tree_sha, None, "Test User <test@example.com>", "Add LFS file");
+    let commit = create_commit_object(
+        &tree_sha,
+        None,
+        "Test User <test@example.com>",
+        "Add LFS file",
+    );
     let commit_sha = commit.sha1();
 
     let objects = vec![lfs_blob, readme_blob, tree, commit];
     let null_sha = "0000000000000000000000000000000000000000";
-    let body = build_receive_pack_with_objects(
-        null_sha,
-        "refs/heads/main",
-        &objects,
-        &commit_sha,
-    );
+    let body = build_receive_pack_with_objects(null_sha, "refs/heads/main", &objects, &commit_sha);
 
     let response = app()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/models/test-{uid}/lfs-push/git-receive-pack"
-                ))
+                .uri(format!("/models/test-{uid}/lfs-push/git-receive-pack"))
                 .header("content-type", "application/x-git-receive-pack")
                 .body(Body::from(body))
                 .unwrap(),
         )
         .await
-    .unwrap();
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = collect_body_bytes(response).await;
     let body_str = String::from_utf8(body).unwrap();

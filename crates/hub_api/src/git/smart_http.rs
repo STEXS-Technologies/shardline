@@ -14,8 +14,8 @@ use axum::{
 use serde::Deserialize;
 
 use super::pack::{
-    GitObject, ObjectType, PackError, apply_delta, create_commit_object, empty_pack,
-    generate_pack, parse_ofs_delta_offset,
+    GitObject, ObjectType, PackError, apply_delta, create_commit_object, empty_pack, generate_pack,
+    parse_ofs_delta_offset,
 };
 use super::pktline::{self, FLUSH};
 use crate::error::HubApiError;
@@ -418,7 +418,9 @@ async fn generate_pack_for_refs(state: &HubState, refs: &[GitRef]) -> Result<Vec
         }
 
         // Resolve files from HubStore for this ref's commit SHA.
-        let files = state.store.get_files(&git_ref.sha1)
+        let files = state
+            .store
+            .get_files(&git_ref.sha1)
             .map_err(|e| HubApiError::CasError(e.to_string()))?;
 
         // Build tree (and all sub-trees) from file entries.
@@ -676,6 +678,9 @@ const MAX_TREE_DEPTH: usize = 128;
 /// Prevents zlib-bomb attacks that decompress to many GB of memory.
 const MAX_TOTAL_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
 
+/// # Errors
+///
+/// Returns `PackError` if the pack data is malformed or incomplete.
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
     if data.len() < 12 {
@@ -804,9 +809,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                         if total_decompressed > MAX_TOTAL_DECOMPRESSED_SIZE {
                             return Err(PackError::ExcessiveDecompressedSize);
                         }
-                        let &base_idx = sha_index
-                            .get(&base_sha)
-                            .ok_or(PackError::InvalidDelta)?;
+                        let &base_idx = sha_index.get(&base_sha).ok_or(PackError::InvalidDelta)?;
                         let base = objects[base_idx].clone();
                         let resolved_data = apply_delta(&base.data, &delta_data)?;
                         total_decompressed = total_decompressed
@@ -836,6 +839,7 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
 /// Maximum allowed decompressed size for zlib data (512 MB).
 const MAX_DECOMPRESSED_SIZE: usize = 512 * 1024 * 1024;
 
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
     use flate2::Decompress;
     use flate2::FlushDecompress;
@@ -862,11 +866,7 @@ fn decompress_zlib(data: &[u8]) -> Result<(Vec<u8>, usize), Box<dyn std::error::
         let buf_len = (in_len * 4).max(256);
         let start = output.len();
         output.resize(start + buf_len, 0);
-        let status = decompressor.decompress(
-            &in_chunk[..in_len],
-            &mut output[start..],
-            flush,
-        )?;
+        let status = decompressor.decompress(&in_chunk[..in_len], &mut output[start..], flush)?;
 
         let consumed = decompressor.total_in() - before_in;
         let produced = decompressor.total_out() - before_out;
@@ -909,11 +909,10 @@ async fn store_push_objects(
     }
 
     // Find the commit object for new_sha.
-    let new_sha_bytes =
-        hex::decode(new_sha).map_err(|e| format!("invalid commit SHA hex: {e}"))?;
+    let new_sha_bytes = hex::decode(new_sha).map_err(|e| format!("invalid commit SHA hex: {e}"))?;
     let new_sha_arr: [u8; 20] = new_sha_bytes
         .try_into()
-        .map_err(|_| "commit SHA must be 20 bytes".to_owned())?;
+        .map_err(|_err| "commit SHA must be 20 bytes".to_owned())?;
 
     let commit_obj = sha_to_obj
         .get(&new_sha_arr)
@@ -931,7 +930,7 @@ async fn store_push_objects(
         hex::decode(&tree_sha_hex).map_err(|e| format!("invalid tree SHA: {e}"))?;
     let tree_sha_arr: [u8; 20] = tree_sha_bytes
         .try_into()
-        .map_err(|_| "tree SHA must be 20 bytes".to_owned())?;
+        .map_err(|_err| "tree SHA must be 20 bytes".to_owned())?;
 
     let files = walk_git_tree(&tree_sha_arr, &sha_to_obj, "")?;
 
@@ -978,7 +977,7 @@ async fn store_push_objects(
             }
             _ => {}
         }
-        Some(old_sha.as_ref())
+        Some(old_sha)
     };
 
     // Create revision in the store.
@@ -995,8 +994,7 @@ async fn store_push_objects(
 /// Format: `"tree <sha>\nparent <sha>\nauthor ...\ncommitter ...\n\n<message>"`
 #[doc(hidden)]
 pub fn parse_commit_object(data: &[u8]) -> Result<(String, Option<String>, String), String> {
-    let text =
-        std::str::from_utf8(data).map_err(|e| format!("invalid commit encoding: {e}"))?;
+    let text = std::str::from_utf8(data).map_err(|e| format!("invalid commit encoding: {e}"))?;
 
     let mut tree_sha = None;
     let mut parent_sha = None;
@@ -1036,6 +1034,7 @@ pub fn walk_git_tree(
     walk_git_tree_inner(tree_sha, objects, prefix, 0)
 }
 
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn walk_git_tree_inner(
     tree_sha: &[u8; 20],
     objects: &HashMap<[u8; 20], &GitObject>,
@@ -1101,9 +1100,9 @@ fn walk_git_tree_inner(
             entries.append(&mut sub_entries);
         } else if mode_str == "100644" || mode_str == "100755" {
             // Regular file.
-            let blob_obj = objects.get(&entry_sha).ok_or_else(|| {
-                format!("blob object not found: {}", hex::encode(entry_sha))
-            })?;
+            let blob_obj = objects
+                .get(&entry_sha)
+                .ok_or_else(|| format!("blob object not found: {}", hex::encode(entry_sha)))?;
 
             if blob_obj.object_type != ObjectType::Blob {
                 return Err(format!(
@@ -1119,8 +1118,8 @@ fn walk_git_tree_inner(
             {
                 let text = std::str::from_utf8(&blob_obj.data)
                     .map_err(|e| format!("invalid LFS pointer encoding: {e}"))?;
-                let oid = parse_lfs_pointer_field(text, "oid")
-                    .ok_or("LFS pointer missing oid field")?;
+                let oid =
+                    parse_lfs_pointer_field(text, "oid").ok_or("LFS pointer missing oid field")?;
                 let size_str = parse_lfs_pointer_field(text, "size")
                     .ok_or("LFS pointer missing size field")?;
                 let size: u64 = size_str
@@ -1428,6 +1427,7 @@ mod tests {
     // --- apply_delta tests ---
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_simple() {
         // Base: "Hello, World!"
         let base = b"Hello, World!";
@@ -1463,6 +1463,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_empty() {
         // Base: "abc", delta produces empty output (target size 0)
         let base = b"abc";
@@ -1478,6 +1479,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_invalid() {
         // Source size doesn't match base length
         let base = b"Hello, World!";
@@ -1570,7 +1572,7 @@ mod tests {
         let entries = walk_git_tree(&current_sha, &objects, "").unwrap();
         assert_eq!(entries.len(), 1, "should find the file at depth 128");
         // Path is 127 "d/" prefixes + "f"
-        let expected_prefix = std::iter::repeat("d/").take(127).collect::<String>();
+        let expected_prefix = "d/".repeat(127);
         let expected_path = format!("{expected_prefix}f");
         assert_eq!(entries[0].path, expected_path);
     }
@@ -1708,7 +1710,13 @@ mod tests {
             .unwrap();
         state
             .store
-            .create_revision("org/dedup", Some("sha_a"), "sha_b", "refs/heads/dev", "second")
+            .create_revision(
+                "org/dedup",
+                Some("sha_a"),
+                "sha_b",
+                "refs/heads/dev",
+                "second",
+            )
             .unwrap();
         // Also add a HEAD entry pointing to sha_a
         state
@@ -1731,8 +1739,14 @@ mod tests {
         // Verify all expected ref names are present.
         let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"HEAD"), "should contain HEAD: {refs:?}");
-        assert!(names.contains(&"refs/heads/main"), "should contain main: {refs:?}");
-        assert!(names.contains(&"refs/heads/dev"), "should contain dev: {refs:?}");
+        assert!(
+            names.contains(&"refs/heads/main"),
+            "should contain main: {refs:?}"
+        );
+        assert!(
+            names.contains(&"refs/heads/dev"),
+            "should contain dev: {refs:?}"
+        );
     }
 
     #[tokio::test]
@@ -1812,10 +1826,7 @@ mod tests {
 
         // There should be exactly one HEAD entry.
         let head_count = refs.iter().filter(|r| r.name == "HEAD").count();
-        assert_eq!(
-            head_count, 1,
-            "HEAD should appear exactly once: {refs:?}"
-        );
+        assert_eq!(head_count, 1, "HEAD should appear exactly once: {refs:?}");
     }
 
     #[tokio::test]

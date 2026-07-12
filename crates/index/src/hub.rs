@@ -366,10 +366,7 @@ trait ErasedHubStore: Send + Sync {
         repo_id: &str,
     ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>>;
 
-    fn delete_repo(
-        &self,
-        repo_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn delete_repo(&self, repo_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     fn delete_webhook(
         &self,
@@ -503,10 +500,7 @@ impl<T: HubStore> ErasedHubStore for T {
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
-    fn delete_repo(
-        &self,
-        repo_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn delete_repo(&self, repo_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_repo(self, repo_id)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
@@ -882,10 +876,7 @@ where
         T::list_webhooks(&self.0, repo_id).map_err(Into::into)
     }
 
-    fn delete_repo(
-        &self,
-        repo_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn delete_repo(&self, repo_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         T::delete_repo(&self.0, repo_id).map_err(Into::into)
     }
 
@@ -991,10 +982,10 @@ mod tests {
     #[test]
     fn hub_repo_fields() {
         let repo = HubRepo {
-            repo_id: "owner/name".to_string(),
+            repo_id: "owner/name".to_owned(),
             repo_type: HubRepoType::Model,
             private: false,
-            default_branch: "main".to_string(),
+            default_branch: "main".to_owned(),
             created_at_unix_seconds: 1000,
             updated_at_unix_seconds: 2000,
         };
@@ -1009,7 +1000,7 @@ mod tests {
     #[test]
     fn hub_repo_private_flag() {
         let public = HubRepo {
-            repo_id: "a/b".to_string(),
+            repo_id: "a/b".to_owned(),
             repo_type: HubRepoType::Dataset,
             private: false,
             default_branch: String::new(),
@@ -1019,7 +1010,7 @@ mod tests {
         assert!(!public.private);
 
         let private = HubRepo {
-            repo_id: "a/b".to_string(),
+            repo_id: "a/b".to_owned(),
             repo_type: HubRepoType::Dataset,
             private: true,
             default_branch: String::new(),
@@ -1052,6 +1043,7 @@ mod tests {
 
     struct MockHubStore;
 
+    #[allow(clippy::unimplemented)]
     impl HubStore for MockHubStore {
         type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -1146,11 +1138,7 @@ mod tests {
             unimplemented!()
         }
 
-        fn delete_webhook(
-            &self,
-            _repo_id: &str,
-            _webhook_id: &str,
-        ) -> Result<(), Self::Error> {
+        fn delete_webhook(&self, _repo_id: &str, _webhook_id: &str) -> Result<(), Self::Error> {
             unimplemented!()
         }
 

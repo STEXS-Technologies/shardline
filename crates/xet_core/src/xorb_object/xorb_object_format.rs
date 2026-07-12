@@ -643,12 +643,8 @@ impl SerializedXorbObject {
             .iter()
             .map(|chunk_data| crate::merklehash::compute_data_hash(chunk_data))
             .collect();
-        xorb_object_info.unpacked_chunk_offsets = xorb
-            .xorb_info
-            .chunk_boundaries
-            .iter()
-            .copied()
-            .collect();
+        xorb_object_info.unpacked_chunk_offsets =
+            xorb.xorb_info.chunk_boundaries.to_vec();
 
         let size_upper_bound = xorb.num_bytes()
             + size_of::<XorbObjectInfoV1>()
@@ -820,6 +816,7 @@ pub mod test_utils {
         RawXorbData::from_chunks(&chunks, vec![0])
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn build_xorb_object(
         num_chunks: u32,
         chunk_size: ChunkSize,

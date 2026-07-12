@@ -10,8 +10,8 @@ use tokio::{
 };
 
 use crate::{
-    ServerError, error::ObjectStoreError, object_store::run_before_local_object_read_hook,
-    object_store::ServerObjectStore,
+    ServerError, error::ObjectStoreError, object_store::ServerObjectStore,
+    object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
@@ -125,8 +125,8 @@ async fn local_store_byte_range_stream(
     let path = object_store.path_for_key(&object_key);
     run_before_local_object_read_hook(&path);
     // Re-validate length after hook (file may have grown).
-    let metadata = file.metadata().await?;
-    if metadata.len() != total_length {
+    let post_hook_metadata = file.metadata().await?;
+    if post_hook_metadata.len() != total_length {
         return Err(ServerError::ObjectStore(
             ObjectStoreError::StoredLengthMismatch,
         ));

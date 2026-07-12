@@ -349,20 +349,16 @@ mod tests {
     use shardline_protocol::TokenScope;
 
     use super::{
-        OCI_REGISTRY_SERVICE, MIN_OCI_TOKEN_EXPIRES_IN_SECONDS, oci_bearer_challenge,
-        parse_oci_registry_actions, parse_oci_registry_token_query,
-        parse_oci_registry_token_scope, parse_oci_registry_token_scopes,
-        scope_allows_oci_exchange,
+        MIN_OCI_TOKEN_EXPIRES_IN_SECONDS, OCI_REGISTRY_SERVICE, oci_bearer_challenge,
+        parse_oci_registry_actions, parse_oci_registry_token_query, parse_oci_registry_token_scope,
+        parse_oci_registry_token_scopes, scope_allows_oci_exchange,
     };
 
     // ── parse_oci_registry_token_scope ──────────────────────────────────────
 
     #[test]
     fn parse_scope_none_returns_none() {
-        assert_eq!(
-            parse_oci_registry_token_scope(None).unwrap(),
-            (None, None)
-        );
+        assert_eq!(parse_oci_registry_token_scope(None).unwrap(), (None, None));
     }
 
     #[test]
@@ -467,10 +463,7 @@ mod tests {
 
     #[test]
     fn parse_scopes_empty_vec() {
-        assert_eq!(
-            parse_oci_registry_token_scopes(&[]).unwrap(),
-            (None, None)
-        );
+        assert_eq!(parse_oci_registry_token_scopes(&[]).unwrap(), (None, None));
     }
 
     #[test]
@@ -530,27 +523,21 @@ mod tests {
 
     #[test]
     fn parse_query_with_service() {
-        let query =
-            parse_oci_registry_token_query(&uri("/v2/token?service=shardline")).unwrap();
+        let query = parse_oci_registry_token_query(&uri("/v2/token?service=shardline")).unwrap();
         assert_eq!(query.service.as_deref(), Some("shardline"));
     }
 
     #[test]
     fn parse_query_with_scope() {
-        let query = parse_oci_registry_token_query(&uri(
-            "/v2/token?scope=repository:repo:pull",
-        ))
-        .unwrap();
+        let query =
+            parse_oci_registry_token_query(&uri("/v2/token?scope=repository:repo:pull")).unwrap();
         assert_eq!(query.scopes.len(), 1);
         assert_eq!(query.scopes[0], "repository:repo:pull");
     }
 
     #[test]
     fn parse_query_with_multiple_scopes() {
-        let query = parse_oci_registry_token_query(&uri(
-            "/v2/token?scope=a&scope=b",
-        ))
-        .unwrap();
+        let query = parse_oci_registry_token_query(&uri("/v2/token?scope=a&scope=b")).unwrap();
         assert_eq!(query.scopes.len(), 2);
     }
 
@@ -558,22 +545,34 @@ mod tests {
 
     #[test]
     fn exchange_read_scope_allows_read() {
-        assert!(scope_allows_oci_exchange(TokenScope::Read, Some(TokenScope::Read)));
+        assert!(scope_allows_oci_exchange(
+            TokenScope::Read,
+            Some(TokenScope::Read)
+        ));
     }
 
     #[test]
     fn exchange_read_scope_denies_write() {
-        assert!(!scope_allows_oci_exchange(TokenScope::Read, Some(TokenScope::Write)));
+        assert!(!scope_allows_oci_exchange(
+            TokenScope::Read,
+            Some(TokenScope::Write)
+        ));
     }
 
     #[test]
     fn exchange_write_scope_allows_read() {
-        assert!(scope_allows_oci_exchange(TokenScope::Write, Some(TokenScope::Read)));
+        assert!(scope_allows_oci_exchange(
+            TokenScope::Write,
+            Some(TokenScope::Read)
+        ));
     }
 
     #[test]
     fn exchange_write_scope_allows_write() {
-        assert!(scope_allows_oci_exchange(TokenScope::Write, Some(TokenScope::Write)));
+        assert!(scope_allows_oci_exchange(
+            TokenScope::Write,
+            Some(TokenScope::Write)
+        ));
     }
 
     #[test]
@@ -590,7 +589,7 @@ mod tests {
     #[test]
     fn challenge_with_repository_read() {
         let challenge = oci_bearer_challenge("https://example.com", Some("repo"), TokenScope::Read);
-        assert!(challenge.contains(&format!("realm=\"https://example.com/v2/token\"")));
+        assert!(challenge.contains("realm=\"https://example.com/v2/token\""));
         assert!(challenge.contains(&format!("service=\"{OCI_REGISTRY_SERVICE}\"")));
         assert!(challenge.contains("scope=\"repository:repo:pull\""));
     }
@@ -605,7 +604,7 @@ mod tests {
     #[test]
     fn challenge_without_repository() {
         let challenge = oci_bearer_challenge("https://example.com", None, TokenScope::Read);
-        assert!(challenge.contains(&format!("realm=\"https://example.com/v2/token\"")));
+        assert!(challenge.contains("realm=\"https://example.com/v2/token\""));
         assert!(challenge.contains(&format!("service=\"{OCI_REGISTRY_SERVICE}\"")));
         assert!(!challenge.contains("scope="));
     }

@@ -16,7 +16,10 @@ fn repo_type_from_str(s: &str) -> Result<HubRepoType, PostgresMetadataStoreError
 
 /// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
 fn escape_like(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+    value
+        .replace('\\', "\\\\")
+        .replace('_', "\\_")
+        .replace('%', "\\%")
 }
 
 /// Runs an async future to completion on the current tokio runtime.

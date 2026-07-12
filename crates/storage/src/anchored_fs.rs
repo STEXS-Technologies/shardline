@@ -516,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn anchored_target_final_path() {
         let dir = tempdir().unwrap();
         let parent_path = dir.path().to_path_buf();
@@ -525,13 +526,14 @@ mod tests {
             .unwrap();
         let file_name: OsString = "output.bin".into();
 
-        let target = AnchoredTarget::new(file, parent_path.clone(), file_name.clone());
+        let target = AnchoredTarget::new(file, parent_path, file_name.clone());
         let final_path = target.final_path();
         // final_path should end with the file_name
         assert_eq!(final_path.file_name().unwrap(), file_name.as_os_str());
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn anchored_target_logical_path() {
         let dir = tempdir().unwrap();
         let parent_path = dir.path().to_path_buf();
@@ -541,7 +543,7 @@ mod tests {
             .unwrap();
         let file_name: OsString = "data.txt".into();
 
-        let target = AnchoredTarget::new(file, parent_path.clone(), file_name.clone());
+        let target = AnchoredTarget::new(file, parent_path.clone(), file_name);
         assert_eq!(target.logical_path(), parent_path.join("data.txt"));
     }
 
@@ -552,7 +554,12 @@ mod tests {
         let root = tempdir().unwrap();
         let path = root.path().join("sub/dir/file.txt");
 
-        let result = open_anchored_target(root.path(), &path, AnchoredPathOptions::new(None, None), invalid_path_error);
+        let result = open_anchored_target(
+            root.path(),
+            &path,
+            AnchoredPathOptions::new(None, None),
+            invalid_path_error,
+        );
         assert!(result.is_ok());
         let target = result.unwrap();
         assert_eq!(target.file_name(), OsStr::new("file.txt"));
@@ -565,7 +572,12 @@ mod tests {
         // Construct a path that resolves outside root via canonicalization
         let path = PathBuf::from("/tmp/definitely-not-inside-root.txt");
 
-        let result = open_anchored_target(root.path(), &path, AnchoredPathOptions::new(None, None), invalid_path_error);
+        let result = open_anchored_target(
+            root.path(),
+            &path,
+            AnchoredPathOptions::new(None, None),
+            invalid_path_error,
+        );
         assert!(result.is_err());
     }
 
@@ -574,7 +586,12 @@ mod tests {
         let root = tempdir().unwrap();
         let path = root.path().join("../escape.txt");
 
-        let result = open_anchored_target(root.path(), &path, AnchoredPathOptions::new(None, None), invalid_path_error);
+        let result = open_anchored_target(
+            root.path(),
+            &path,
+            AnchoredPathOptions::new(None, None),
+            invalid_path_error,
+        );
         assert!(result.is_err());
     }
 
@@ -616,10 +633,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let child_name: &OsStr = "child".as_ref();
         fs::create_dir(dir.path().join("child")).unwrap();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
         let result = open_or_create_child_directory(&parent, child_name, false, None);
         assert!(result.is_ok());
@@ -629,10 +643,7 @@ mod tests {
     fn open_or_create_child_create_missing() {
         let dir = tempdir().unwrap();
         let child_name: &OsStr = "newchild".as_ref();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
         let result = open_or_create_child_directory(&parent, child_name, true, None);
         assert!(result.is_ok());
@@ -643,10 +654,7 @@ mod tests {
     fn open_or_create_child_no_create_missing() {
         let dir = tempdir().unwrap();
         let child_name: &OsStr = "nochild".as_ref();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
         let result = open_or_create_child_directory(&parent, child_name, false, None);
         assert!(result.is_err());
@@ -657,15 +665,8 @@ mod tests {
     #[test]
     fn write_anchored_temporary_file_basic() {
         let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
-        let target = AnchoredTarget::new(
-            parent,
-            dir.path().to_path_buf(),
-            "target.txt".into(),
-        );
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
+        let target = AnchoredTarget::new(parent, dir.path().to_path_buf(), "target.txt".into());
         let payload = b"hello world";
 
         let result = write_anchored_temporary_file(&target, payload, None);
@@ -674,7 +675,10 @@ mod tests {
 
         // Temp file name should contain the target name and ".tmp-"
         let tmp_name = tmp_path.file_name().unwrap().to_string_lossy();
-        assert!(tmp_name.starts_with("target.txt.tmp-"), "unexpected temp name: {tmp_name}");
+        assert!(
+            tmp_name.starts_with("target.txt.tmp-"),
+            "unexpected temp name: {tmp_name}"
+        );
 
         // File content should match
         let contents = fs::read(&tmp_path).unwrap();
@@ -721,10 +725,7 @@ mod tests {
         let real_dir = dir.path().join("real");
         fs::create_dir(&real_dir).unwrap();
 
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .open(&real_dir)
-            .unwrap();
+        let file = fs::OpenOptions::new().read(true).open(&real_dir).unwrap();
         let target = AnchoredTarget::new(file, real_dir.clone(), "f.txt".into());
 
         // Replace the real directory with a symlink
@@ -742,10 +743,7 @@ mod tests {
         let real_dir = dir.path().join("real");
         fs::create_dir(&real_dir).unwrap();
 
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .open(&real_dir)
-            .unwrap();
+        let file = fs::OpenOptions::new().read(true).open(&real_dir).unwrap();
         let target = AnchoredTarget::new(file, real_dir.clone(), "f.txt".into());
 
         // Rename the directory
@@ -894,10 +892,7 @@ mod tests {
     #[test]
     fn fd_child_path_beneath_parent() {
         let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
         let child = fd_child_path(&parent, OsStr::new("file.txt"));
         // The fd_child_path uses /proc/self/fd/N, which on Linux resolves to the real path.
@@ -910,10 +905,7 @@ mod tests {
     #[test]
     fn rename_at_ok() {
         let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
         fs::write(dir.path().join("old.txt"), "data").unwrap();
 
         assert!(rename_at(&parent, OsStr::new("old.txt"), OsStr::new("new.txt")).is_ok());
@@ -924,10 +916,7 @@ mod tests {
     #[test]
     fn rename_at_null_byte_in_name() {
         let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
         let bad_name = OsStr::from_bytes(b"old\x00txt");
         let result = rename_at(&parent, bad_name, OsStr::new("new.txt"));
@@ -939,10 +928,7 @@ mod tests {
     #[test]
     fn remove_at_existing() {
         let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
         fs::write(dir.path().join("file.txt"), "data").unwrap();
 
         assert!(remove_at(&parent, OsStr::new("file.txt")).is_ok());
@@ -952,10 +938,7 @@ mod tests {
     #[test]
     fn remove_at_nonexistent() {
         let dir = tempdir().unwrap();
-        let parent = fs::OpenOptions::new()
-            .read(true)
-            .open(dir.path())
-            .unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
         let result = remove_at(&parent, OsStr::new("nope.txt"));
         assert!(result.is_err());

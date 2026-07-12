@@ -4,10 +4,8 @@ use axum::{Router, routing};
 use tokio::sync::Semaphore;
 
 use crate::{
-    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter,
-    app::ProtocolMetrics,
-    reconstruction_cache::ReconstructionCacheService,
-    server_role::ServerRole,
+    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter, app::ProtocolMetrics,
+    reconstruction_cache::ReconstructionCacheService, server_role::ServerRole,
 };
 
 /// A guard that holds a `tempfile::TempDir` and an `Arc<AppState>` backed by a
@@ -16,7 +14,7 @@ use crate::{
 pub(crate) struct OciTestContext {
     /// The temporary directory holding all test data. Kept alive for the
     /// duration of the test so that the backend has a valid root.
-    pub temp: tempfile::TempDir,
+    pub _temp: tempfile::TempDir,
     pub state: Arc<AppState>,
 }
 
@@ -62,7 +60,7 @@ pub(crate) async fn build_oci_test_state() -> OciTestContext {
         protocol_metrics: ProtocolMetrics::default(),
     });
 
-    OciTestContext { temp, state }
+    OciTestContext { _temp: temp, state }
 }
 
 /// Builds an Axum [`Router`] with the OCI dispatch routes wired up for the

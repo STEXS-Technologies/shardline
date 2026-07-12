@@ -4,10 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{
-    Connection, Error as SqliteError, MappedRows, OptionalExtension, Row,
-    params,
-};
+use rusqlite::{Connection, Error as SqliteError, MappedRows, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Error as JsonError;
 use shardline_protocol::{ChunkRange, HashParseError, RangeError, unix_now_seconds_lossy};
@@ -236,7 +233,7 @@ impl LocalRecordStore {
             Ok::<_, LocalIndexStoreError>(())
         })
         .await
-        .map_err(|_| LocalIndexStoreError::BlockingTask)?
+        .map_err(|_err| LocalIndexStoreError::BlockingTask)?
     }
 
     /// Atomically commits native shard metadata.
@@ -271,7 +268,7 @@ impl LocalRecordStore {
             Ok::<_, LocalIndexStoreError>(())
         })
         .await
-        .map_err(|_| LocalIndexStoreError::BlockingTask)?
+        .map_err(|_err| LocalIndexStoreError::BlockingTask)?
     }
 
     fn list_record_locators(
@@ -293,10 +290,13 @@ impl LocalRecordStore {
     }
 
     fn escape_like(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
-}
+        value
+            .replace('\\', "\\\\")
+            .replace('_', "\\_")
+            .replace('%', "\\%")
+    }
 
-fn list_repository_record_locators(
+    fn list_repository_record_locators(
         &self,
         kind: LocalRecordKind,
         repository: &RepositoryRecordScope,

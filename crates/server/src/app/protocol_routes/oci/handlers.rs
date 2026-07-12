@@ -240,11 +240,7 @@ async fn oci_delete_blob(
         start_after = page.last().cloned();
     }
 
-    match state
-        .backend
-        .delete_object_if_present(&object_key)
-        .await?
-    {
+    match state.backend.delete_object_if_present(&object_key).await? {
         DeleteOutcome::Deleted => {}
         DeleteOutcome::NotFound => return Err(ServerError::NotFound),
     }
@@ -262,9 +258,10 @@ fn manifest_references_digest(body: &[u8], target_digest: &str) -> bool {
     };
     let mut refs = Vec::new();
     collect_digest_refs(&doc, &mut refs);
-    refs.iter().any(|d| *d == target_digest)
+    refs.contains(&target_digest)
 }
 
+#[allow(clippy::single_char_lifetime_names, clippy::wildcard_enum_match_arm)]
 fn collect_digest_refs<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
     match value {
         serde_json::Value::Object(map) => {
@@ -289,8 +286,10 @@ fn collect_digest_refs<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>)
 mod tests {
     use super::*;
 
-    const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const DIGEST_A: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[test]
     fn manifest_references_digest_returns_true_when_digest_present() {

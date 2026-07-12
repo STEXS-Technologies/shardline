@@ -60,18 +60,14 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, Option<QuarantineCandidate>, Self::Error> {
             let store = self.clone();
             let object_key = object_key.clone();
-            Box::pin(async move {
-                LifecycleStore::quarantine_candidate(&store, &object_key)
-            })
+            Box::pin(async move { LifecycleStore::quarantine_candidate(&store, &object_key) })
         }
 
         fn list_quarantine_candidates(
             &self,
         ) -> IndexStoreFuture<'_, Vec<QuarantineCandidate>, Self::Error> {
             let store = self.clone();
-            Box::pin(async move {
-                LifecycleStore::list_quarantine_candidates(&store)
-            })
+            Box::pin(async move { LifecycleStore::list_quarantine_candidates(&store) })
         }
 
         fn upsert_quarantine_candidate<'operation>(
@@ -80,9 +76,7 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, (), Self::Error> {
             let store = self.clone();
             let candidate = candidate.clone();
-            Box::pin(async move {
-                LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
-            })
+            Box::pin(async move { LifecycleStore::upsert_quarantine_candidate(&store, &candidate) })
         }
 
         fn delete_quarantine_candidate<'operation>(
@@ -91,9 +85,9 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
             let store = self.clone();
             let object_key = object_key.clone();
-            Box::pin(async move {
-                LifecycleStore::delete_quarantine_candidate(&store, &object_key)
-            })
+            Box::pin(
+                async move { LifecycleStore::delete_quarantine_candidate(&store, &object_key) },
+            )
         }
 
         fn retention_hold<'operation>(
@@ -102,16 +96,12 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, Option<RetentionHold>, Self::Error> {
             let store = self.clone();
             let object_key = object_key.clone();
-            Box::pin(async move {
-                LifecycleStore::retention_hold(&store, &object_key)
-            })
+            Box::pin(async move { LifecycleStore::retention_hold(&store, &object_key) })
         }
 
         fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
             let store = self.clone();
-            Box::pin(async move {
-                LifecycleStore::list_retention_holds(&store)
-            })
+            Box::pin(async move { LifecycleStore::list_retention_holds(&store) })
         }
 
         fn upsert_retention_hold<'operation>(
@@ -120,9 +110,7 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, (), Self::Error> {
             let store = self.clone();
             let hold = hold.clone();
-            Box::pin(async move {
-                LifecycleStore::upsert_retention_hold(&store, &hold)
-            })
+            Box::pin(async move { LifecycleStore::upsert_retention_hold(&store, &hold) })
         }
 
         fn delete_retention_hold<'operation>(
@@ -131,9 +119,7 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
             let store = self.clone();
             let object_key = object_key.clone();
-            Box::pin(async move {
-                LifecycleStore::delete_retention_hold(&store, &object_key)
-            })
+            Box::pin(async move { LifecycleStore::delete_retention_hold(&store, &object_key) })
         }
 
         fn record_webhook_delivery<'operation>(
@@ -142,18 +128,14 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
             let store = self.clone();
             let delivery = delivery.clone();
-            Box::pin(async move {
-                LifecycleStore::record_webhook_delivery(&store, &delivery)
-            })
+            Box::pin(async move { LifecycleStore::record_webhook_delivery(&store, &delivery) })
         }
 
         fn list_webhook_deliveries(
             &self,
         ) -> IndexStoreFuture<'_, Vec<WebhookDelivery>, Self::Error> {
             let store = self.clone();
-            Box::pin(async move {
-                LifecycleStore::list_webhook_deliveries(&store)
-            })
+            Box::pin(async move { LifecycleStore::list_webhook_deliveries(&store) })
         }
 
         fn delete_webhook_delivery<'operation>(
@@ -162,9 +144,7 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, bool, Self::Error> {
             let store = self.clone();
             let delivery = delivery.clone();
-            Box::pin(async move {
-                LifecycleStore::delete_webhook_delivery(&store, &delivery)
-            })
+            Box::pin(async move { LifecycleStore::delete_webhook_delivery(&store, &delivery) })
         }
 
         fn provider_repository_state<'operation>(
@@ -185,9 +165,7 @@ macro_rules! impl_async_lifecycle_delegation {
             &self,
         ) -> IndexStoreFuture<'_, Vec<ProviderRepositoryState>, Self::Error> {
             let store = self.clone();
-            Box::pin(async move {
-                LifecycleStore::list_provider_repository_states(&store)
-            })
+            Box::pin(async move { LifecycleStore::list_provider_repository_states(&store) })
         }
 
         fn upsert_provider_repository_state<'operation>(
@@ -196,9 +174,9 @@ macro_rules! impl_async_lifecycle_delegation {
         ) -> IndexStoreFuture<'operation, (), Self::Error> {
             let store = self.clone();
             let state = state.clone();
-            Box::pin(async move {
-                LifecycleStore::upsert_provider_repository_state(&store, &state)
-            })
+            Box::pin(
+                async move { LifecycleStore::upsert_provider_repository_state(&store, &state) },
+            )
         }
 
         fn delete_provider_repository_state<'operation>(
@@ -211,9 +189,7 @@ macro_rules! impl_async_lifecycle_delegation {
             let owner = owner.to_owned();
             let repo = repo.to_owned();
             Box::pin(async move {
-                LifecycleStore::delete_provider_repository_state(
-                    &store, provider, &owner, &repo,
-                )
+                LifecycleStore::delete_provider_repository_state(&store, provider, &owner, &repo)
             })
         }
     };

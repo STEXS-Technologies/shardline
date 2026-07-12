@@ -34,12 +34,12 @@ use getrandom::fill as getrandom_fill;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, compress256, digest::generic_array::GenericArray};
 use shardline_protocol::RepositoryScope;
-use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectPrefix, PutOutcome};
 #[cfg(unix)]
 use shardline_storage::anchored_fs::{
-    AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target, remove_if_present,
-    write_anchored_temporary_file,
+    AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target,
+    remove_if_present, write_anchored_temporary_file,
 };
+use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectPrefix, PutOutcome};
 #[cfg(not(unix))]
 use std::io::Write;
 use tokio::fs;
@@ -630,10 +630,7 @@ pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), 
             }
         }
     }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    first_error.map_or_else(|| Ok(()), Err)
 }
 
 /// # Errors
@@ -767,17 +764,14 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     let tail = read_upload_tail(root, session_id).await?;
     if !tail.is_empty() {
         match backend
-            .upload_resumable_object_part(
-                &temp_key,
-                &upload_id,
-                part_ids.len(),
-                Bytes::from(tail),
-            )
+            .upload_resumable_object_part(&temp_key, &upload_id, part_ids.len(), Bytes::from(tail))
             .await
         {
             Ok(part_id) => part_ids.push(part_id),
             Err(error) => {
-                let _ = backend.abort_resumable_object_upload(&temp_key, &upload_id).await;
+                let _result = backend
+                    .abort_resumable_object_upload(&temp_key, &upload_id)
+                    .await;
                 return Err(error);
             }
         }
@@ -802,15 +796,15 @@ pub async fn finalize_s3_multipart_upload_session<B: OciBackend>(
     {
         Ok(()) => {}
         Err(error) => {
-            let _ = backend.abort_resumable_object_upload(&temp_key, &upload_id).await;
+            let _result = backend
+                .abort_resumable_object_upload(&temp_key, &upload_id)
+                .await;
             return Err(error);
         }
     }
     let canonical_key = crate::protocol_support::shared_sha256_object_key(digest_hex)?;
     let canonical_outcome = backend.copy_object_if_absent(&temp_key, &canonical_key)?;
-    let _deleted = backend
-        .delete_object_if_present(&temp_key)
-        .await?;
+    let _deleted = backend.delete_object_if_present(&temp_key).await?;
     if canonical_key == *object_key {
         return Ok(canonical_outcome);
     }
@@ -958,14 +952,14 @@ pub async fn purge_expired_upload_sessions<B: OciBackend>(
         if upload_session_expired(&session, ttl_seconds, now_unix_seconds) || missing_local_body {
             // Abort S3 multipart before removing local metadata so orphaned
             // S3 uploads do not accumulate.
-            if let (Some(backend), Some(multipart)) = (&backend, &session.s3_multipart) {
-                if !multipart.upload_id.is_empty() {
-                    let temp_key = ObjectKey::parse(&multipart.temporary_object_key)
-                        .map_err(|_| OciAdapterError::InvalidContentHash)?;
-                    let _ = backend
-                        .abort_resumable_object_upload(&temp_key, &multipart.upload_id)
-                        .await;
-                }
+            if let (Some(backend), Some(multipart)) = (&backend, &session.s3_multipart)
+                && !multipart.upload_id.is_empty()
+            {
+                let temp_key = ObjectKey::parse(&multipart.temporary_object_key)
+                    .map_err(|_err| OciAdapterError::InvalidContentHash)?;
+                let _result = backend
+                    .abort_resumable_object_upload(&temp_key, &multipart.upload_id)
+                    .await;
             }
             delete_upload_session(root, stem).await?;
         }
@@ -1026,7 +1020,7 @@ async fn ensure_s3_upload_started<B: OciBackend>(
         session.s3_multipart = None;
         // Overwrite the placeholder so on-disk state matches in-memory.
         // A subsequent read will attempt S3 upload creation again.
-        let _ = persist_upload_session(root, session_id, session.clone()).await;
+        let _result = persist_upload_session(root, session_id, session.clone()).await;
         return Err(OciAdapterError::NotFound);
     };
 
@@ -1086,9 +1080,17 @@ fn unix_now_seconds_checked() -> Result<u64, OciAdapterError> {
 #[cfg(unix)]
 fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fn invalid_path_error() -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "path must have a parent directory")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "path must have a parent directory",
+        )
     }
-    let anchored = open_anchored_target(root, path, AnchoredPathOptions::new(None, None), invalid_path_error)?;
+    let anchored = open_anchored_target(
+        root,
+        path,
+        AnchoredPathOptions::new(None, None),
+        invalid_path_error,
+    )?;
     let final_path = anchored.final_path();
     let temporary = write_anchored_temporary_file(&anchored, bytes, None)?;
     match std::fs::rename(&temporary, &final_path) {
@@ -1098,7 +1100,10 @@ fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Res
             return Err(error);
         }
     }
-    if let Err(error) = ensure_parent_path_matches_anchor(&anchored, "upload directory path changed during anchored write") {
+    if let Err(error) = ensure_parent_path_matches_anchor(
+        &anchored,
+        "upload directory path changed during anchored write",
+    ) {
         remove_if_present(&final_path)?;
         return Err(error);
     }
@@ -1108,9 +1113,8 @@ fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Res
 #[cfg(not(unix))]
 fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // Defense-in-depth: ensure the path stays within the root directory.
-    path.strip_prefix(root).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
-    })?;
+    path.strip_prefix(root)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"))?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,

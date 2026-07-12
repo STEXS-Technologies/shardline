@@ -3,6 +3,9 @@
 //! Implements the Git pack format for serving pack files during
 //! `git clone` and `git fetch` operations. This is a minimal
 //! implementation that generates non-delta packs.
+// Clippy allows
+#![allow(clippy::shadow_unrelated)]
+#![allow(clippy::indexing_slicing)]
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -42,7 +45,10 @@ impl std::error::Error for PackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Zlib(e) => Some(e),
-            Self::TooManyObjects | Self::ShiftOverflow | Self::InvalidDelta | Self::ExcessiveDecompressedSize => None,
+            Self::TooManyObjects
+            | Self::ShiftOverflow
+            | Self::InvalidDelta
+            | Self::ExcessiveDecompressedSize => None,
         }
     }
 }
@@ -465,6 +471,7 @@ mod tests {
     // --- apply_delta tests ---
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_complex_multi_step() {
         // Base: "ABCDEFGH" (8 bytes)
         let base = b"ABCDEFGH";
@@ -501,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_target_size_mismatch() {
         // Base: "Hello"
         let base = b"Hello";
@@ -529,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_base_size_mismatch() {
         // Source size in delta doesn't match the actual base length
         let base = b"Hello, World!";
@@ -544,10 +553,7 @@ mod tests {
         delta.push(0x05);
 
         let result = apply_delta(base, &delta);
-        assert!(
-            result.is_err(),
-            "should fail when base size doesn't match"
-        );
+        assert!(result.is_err(), "should fail when base size doesn't match");
         assert!(
             matches!(result.unwrap_err(), PackError::InvalidDelta),
             "error should be InvalidDelta"
@@ -555,6 +561,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_truncated_data() {
         // Delta that is truncated mid-copy-instruction
         let base = b"Hello, World!";
@@ -571,13 +578,11 @@ mod tests {
         // Truncated — missing the size byte
 
         let result = apply_delta(base, &delta);
-        assert!(
-            result.is_err(),
-            "should fail on truncated delta data"
-        );
+        assert!(result.is_err(), "should fail on truncated delta data");
     }
 
     #[test]
+    #[allow(clippy::vec_init_then_push)]
     fn apply_delta_cmd_zero_is_invalid() {
         // cmd == 0 is not valid in the Git delta format
         let base = b"Hello";
@@ -683,7 +688,10 @@ mod tests {
         let data = [0x80];
         let mut pos = 0;
         let result = parse_ofs_delta_offset(&data, &mut pos);
-        assert!(result.is_err(), "trailing continuation byte should be an error");
+        assert!(
+            result.is_err(),
+            "trailing continuation byte should be an error"
+        );
     }
 
     #[test]

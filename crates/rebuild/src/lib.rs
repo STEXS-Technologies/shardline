@@ -829,11 +829,13 @@ mod tests {
     // ---- RebuildError From conversions ----
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn rebuild_error_from_parse_stored_file_record_too_large() {
-        let source = shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
-            observed_bytes: 999,
-            maximum_bytes: 100,
-        };
+        let source =
+            shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+                observed_bytes: 999,
+                maximum_bytes: 100,
+            };
         let error: RebuildError = source.into();
         match error {
             RebuildError::StoredFileMetadataTooLarge {
@@ -882,24 +884,18 @@ mod tests {
     #[test]
     fn rebuild_error_display_messages_are_non_empty() {
         let errors: Vec<RebuildError> = vec![
-            RebuildError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "test",
-            )),
-            RebuildError::Json(serde_json::from_str::<serde_json::Value>("bad json}}").unwrap_err()),
+            RebuildError::Io(std::io::Error::other("test")),
+            RebuildError::Json(
+                serde_json::from_str::<serde_json::Value>("bad json}}").unwrap_err(),
+            ),
             RebuildError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
             RebuildError::InvalidContentHash,
             RebuildError::InvalidFileId,
             RebuildError::Overflow,
-            RebuildError::ObjectPrefix(
-                shardline_storage::ObjectPrefixError::UnsafePath,
-            ),
-            RebuildError::LocalObjectStore(
-                shardline_storage::LocalObjectStoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "test",
-                )),
-            ),
+            RebuildError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
+            RebuildError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
+                std::io::Error::other("test"),
+            )),
             RebuildError::StoredFileMetadataTooLarge {
                 observed_bytes: 1,
                 maximum_bytes: 0,

@@ -755,7 +755,8 @@ mod tests {
     #[test]
     fn reconstruction_plan_issue_chunk_hash_maps_to_invalid_content_hash() {
         let mut report = clean_report();
-        let err = FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
+        let err =
+            FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
         push_reconstruction_plan_issue(&mut report, "loc".to_owned(), &err).unwrap();
         assert_eq!(report.issue_count(), 1);
         assert_eq!(report.issues[0].kind, FsckIssueKind::InvalidContentHash);
@@ -829,7 +830,9 @@ mod tests {
         assert_eq!(report.issues[0].kind, FsckIssueKind::TotalBytesMismatch);
         assert_eq!(
             report.issues[0].detail,
-            FsckIssueDetail::InvalidReconstructionPlan(FsckReconstructionPlanDetail::LengthOverflow)
+            FsckIssueDetail::InvalidReconstructionPlan(
+                FsckReconstructionPlanDetail::LengthOverflow
+            )
         );
     }
 
@@ -851,7 +854,9 @@ mod tests {
 
     #[test]
     fn reconstruction_plan_error_detail_chunk_hash() {
-        let err = FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidCharacter);
+        let err = FileRecordInvariantError::ChunkHash(
+            shardline_protocol::HashParseError::InvalidCharacter,
+        );
         assert_eq!(
             reconstruction_plan_error_detail(&err),
             FsckReconstructionPlanDetail::ChunkHashInvalid
@@ -917,7 +922,10 @@ mod tests {
     #[test]
     fn fsck_issue_kind_as_str_all_variants() {
         let cases: &[(FsckIssueKind, &str)] = &[
-            (FsckIssueKind::OversizedRecordMetadata, "oversized_record_metadata"),
+            (
+                FsckIssueKind::OversizedRecordMetadata,
+                "oversized_record_metadata",
+            ),
             (FsckIssueKind::InvalidRecordJson, "invalid_record_json"),
             (FsckIssueKind::InvalidFileId, "invalid_file_id"),
             (FsckIssueKind::InvalidContentHash, "invalid_content_hash"),
@@ -931,22 +939,64 @@ mod tests {
             (FsckIssueKind::MissingChunk, "missing_chunk"),
             (FsckIssueKind::ChunkHashMismatch, "chunk_hash_mismatch"),
             (FsckIssueKind::ChunkLengthMismatch, "chunk_length_mismatch"),
-            (FsckIssueKind::MissingVersionRecord, "missing_version_record"),
-            (FsckIssueKind::MismatchedVersionRecord, "mismatched_version_record"),
-            (FsckIssueKind::MissingDedupeShardObject, "missing_dedupe_shard_object"),
-            (FsckIssueKind::InvalidRetainedShard, "invalid_retained_shard"),
-            (FsckIssueKind::InvalidDedupeShardMapping, "invalid_dedupe_shard_mapping"),
+            (
+                FsckIssueKind::MissingVersionRecord,
+                "missing_version_record",
+            ),
+            (
+                FsckIssueKind::MismatchedVersionRecord,
+                "mismatched_version_record",
+            ),
+            (
+                FsckIssueKind::MissingDedupeShardObject,
+                "missing_dedupe_shard_object",
+            ),
+            (
+                FsckIssueKind::InvalidRetainedShard,
+                "invalid_retained_shard",
+            ),
+            (
+                FsckIssueKind::InvalidDedupeShardMapping,
+                "invalid_dedupe_shard_mapping",
+            ),
             (FsckIssueKind::EmptyReconstruction, "empty_reconstruction"),
-            (FsckIssueKind::MissingReconstructionXorb, "missing_reconstruction_xorb"),
-            (FsckIssueKind::InvalidQuarantineCandidate, "invalid_quarantine_candidate"),
-            (FsckIssueKind::MissingQuarantinedObject, "missing_quarantined_object"),
-            (FsckIssueKind::QuarantineLengthMismatch, "quarantine_length_mismatch"),
-            (FsckIssueKind::ReachableQuarantinedObject, "reachable_quarantined_object"),
-            (FsckIssueKind::InvalidRetentionHold, "invalid_retention_hold"),
+            (
+                FsckIssueKind::MissingReconstructionXorb,
+                "missing_reconstruction_xorb",
+            ),
+            (
+                FsckIssueKind::InvalidQuarantineCandidate,
+                "invalid_quarantine_candidate",
+            ),
+            (
+                FsckIssueKind::MissingQuarantinedObject,
+                "missing_quarantined_object",
+            ),
+            (
+                FsckIssueKind::QuarantineLengthMismatch,
+                "quarantine_length_mismatch",
+            ),
+            (
+                FsckIssueKind::ReachableQuarantinedObject,
+                "reachable_quarantined_object",
+            ),
+            (
+                FsckIssueKind::InvalidRetentionHold,
+                "invalid_retention_hold",
+            ),
             (FsckIssueKind::MissingHeldObject, "missing_held_object"),
-            (FsckIssueKind::HeldQuarantinedObject, "held_quarantined_object"),
-            (FsckIssueKind::InvalidWebhookDeliveryTimestamp, "invalid_webhook_delivery_timestamp"),
-            (FsckIssueKind::InvalidProviderRepositoryState, "invalid_provider_repository_state"),
+            (
+                FsckIssueKind::HeldQuarantinedObject,
+                "held_quarantined_object",
+            ),
+            (
+                FsckIssueKind::InvalidWebhookDeliveryTimestamp,
+                "invalid_webhook_delivery_timestamp",
+            ),
+            (
+                FsckIssueKind::InvalidProviderRepositoryState,
+                "invalid_provider_repository_state",
+            ),
             (
                 FsckIssueKind::InvalidProviderRepositoryStateTimestamp,
                 "invalid_provider_repository_state_timestamp",
@@ -1000,7 +1050,11 @@ mod tests {
             ProviderRepositoryStateTimestampField::LastDriftCheckedAtUnixSeconds,
         ];
         for field in all_fields {
-            assert_eq!(field.to_string(), field.as_str(), "Display mismatch for {field:?}");
+            assert_eq!(
+                field.to_string(),
+                field.as_str(),
+                "Display mismatch for {field:?}"
+            );
         }
     }
 

@@ -122,22 +122,15 @@ mod tests {
         impl AuthProvider for MockProvider {
             fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
                 // Build a valid claim so we can reach the scope-check logic.
-                let repo =
-                    shardline_protocol::RepositoryScope::new(
-                        shardline_protocol::RepositoryProvider::GitHub,
-                        "owner",
-                        "repo",
-                        Some("main"),
-                    )
-                    .unwrap();
-                Ok(TokenClaims::new(
-                    "issuer",
-                    "subject",
-                    TokenScope::Read,
-                    repo,
-                    u64::MAX,
-                )
-                .unwrap())
+            let repo = shardline_protocol::RepositoryScope::new(
+                shardline_protocol::RepositoryProvider::GitHub,
+                "owner",
+                "repo",
+                Some("main"),
+            )
+            .map_err(|_err| AuthError::InvalidToken)?;
+            TokenClaims::new("issuer", "subject", TokenScope::Read, repo, u64::MAX)
+                .map_err(|_err| AuthError::InvalidToken)
             }
             fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
                 Err(AuthError::ProviderError(

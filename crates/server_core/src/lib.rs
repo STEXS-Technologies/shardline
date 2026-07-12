@@ -1131,7 +1131,7 @@ mod tests {
     fn chunk_object_key_invalid_hex() {
         // Non-hex characters (uppercase, 'g', symbols)
         let invalid_hashes = [
-            "G".repeat(64),                     // uppercase
+            "G".repeat(64),                        // uppercase
             format!("{}g{}", "a".repeat(62), "g"), // 'g' is not hex
             format!("{}!{}", "a".repeat(62), "!"), // symbol
             format!("{}z{}", "a".repeat(62), "z"), // 'z' is not hex
@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn content_hash_determinism_same_inputs_same_hash() {
         let chunks = vec![shardline_index::FileChunkRecord {
-            hash: "aabbccdd".to_string(),
+            hash: "aabbccdd".to_owned(),
             offset: 0,
             length: 100,
             range_start: 0,
@@ -1279,7 +1279,7 @@ mod tests {
     #[test]
     fn content_hash_determinism_different_inputs_different_hash() {
         let chunks1 = vec![shardline_index::FileChunkRecord {
-            hash: "aabbccdd".to_string(),
+            hash: "aabbccdd".to_owned(),
             offset: 0,
             length: 100,
             range_start: 0,
@@ -1288,7 +1288,7 @@ mod tests {
             packed_end: 100,
         }];
         let chunks2 = vec![shardline_index::FileChunkRecord {
-            hash: "00112233".to_string(),
+            hash: "00112233".to_owned(),
             offset: 0,
             length: 100,
             range_start: 0,
@@ -1397,7 +1397,9 @@ mod tests {
     fn read_full_object_returns_correct_bytes() {
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
         let body = b"hello world";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 11);
         store
@@ -1412,7 +1414,9 @@ mod tests {
     fn read_full_object_length_zero_returns_empty() {
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
 
         let data = read_full_object(&store, &key, 0).unwrap();
         assert!(data.is_empty());
@@ -1422,7 +1426,9 @@ mod tests {
     fn read_full_object_wrong_length_returns_mismatch() {
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
         let body = b"abc";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 3);
         store
@@ -1440,7 +1446,9 @@ mod tests {
     fn read_full_object_nonexistent_returns_error() {
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
 
         let err = read_full_object(&store, &key, 5).unwrap_err();
         assert!(
@@ -1455,8 +1463,12 @@ mod tests {
     fn copy_if_absent_inserts_and_idempotent() {
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let source_key = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
-        let dest_key = ObjectKey::parse("bb/2222222222222222222222222222222222222222222222222222222222222222").unwrap();
+        let source_key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
+        let dest_key =
+            ObjectKey::parse("bb/2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
 
         let body = b"copy me";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 7);
@@ -1482,8 +1494,12 @@ mod tests {
     fn copy_if_absent_nonexistent_source_returns_error() {
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let source_key = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
-        let dest_key = ObjectKey::parse("bb/2222222222222222222222222222222222222222222222222222222222222222").unwrap();
+        let source_key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
+        let dest_key =
+            ObjectKey::parse("bb/2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
 
         let err = store.copy_if_absent(&source_key, &dest_key).unwrap_err();
         assert!(
@@ -1495,8 +1511,12 @@ mod tests {
     #[test]
     fn copy_if_absent_blackhole_returns_not_found() {
         let store = ServerObjectStore::blackhole();
-        let source = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
-        let dest = ObjectKey::parse("bb/2222222222222222222222222222222222222222222222222222222222222222").unwrap();
+        let source =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
+        let dest =
+            ObjectKey::parse("bb/2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
 
         let err = store.copy_if_absent(&source, &dest).unwrap_err();
         assert!(
@@ -1511,15 +1531,21 @@ mod tests {
     fn put_overwrite_inserts_and_overwrites() {
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
 
         let body1 = b"first";
         let integrity1 = ObjectIntegrity::new(chunk_hash(body1), 5);
-        store.put_overwrite(&key, ObjectBody::from_slice(body1), &integrity1).unwrap();
+        store
+            .put_overwrite(&key, ObjectBody::from_slice(body1), &integrity1)
+            .unwrap();
 
         let body2 = b"second version";
         let integrity2 = ObjectIntegrity::new(chunk_hash(body2), 14);
-        store.put_overwrite(&key, ObjectBody::from_slice(body2), &integrity2).unwrap();
+        store
+            .put_overwrite(&key, ObjectBody::from_slice(body2), &integrity2)
+            .unwrap();
 
         use shardline_protocol::ByteRange;
         let range = ByteRange::new(0, 13).unwrap();
@@ -1563,7 +1589,7 @@ mod tests {
 
     fn sample_file_record() -> shardline_index::FileRecord {
         shardline_index::FileRecord {
-            file_id: "test-file-id".to_string(),
+            file_id: "test-file-id".to_owned(),
             content_hash: "aabbccdd".repeat(8),
             total_bytes: 100,
             chunk_size: 10,
@@ -1574,8 +1600,8 @@ mod tests {
 
     #[test]
     fn ops_locator_display_returns_record_key() {
-        use shardline_index::{LocalRecordStore, RecordTraversal};
         use crate::OpsRecordStore;
+        use shardline_index::{LocalRecordStore, RecordTraversal};
 
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalRecordStore::new(storage.path().join("index")).unwrap();
@@ -1589,22 +1615,24 @@ mod tests {
 
     #[test]
     fn ops_locator_file_id_returns_file_id() {
-        use shardline_index::{LocalRecordStore, RecordTraversal};
         use crate::OpsRecordStore;
+        use shardline_index::{LocalRecordStore, RecordTraversal};
 
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalRecordStore::new(storage.path().join("index")).unwrap();
         let record = sample_file_record();
         let locator = store.version_record_locator(&record);
 
-        let file_id = store.locator_file_id(&locator, crate::OpsRecordKind::Version).unwrap();
+        let file_id = store
+            .locator_file_id(&locator, crate::OpsRecordKind::Version)
+            .unwrap();
         assert_eq!(file_id, "test-file-id");
     }
 
     #[test]
     fn ops_locator_content_hash_version_returns_hash() {
-        use shardline_index::{LocalRecordStore, RecordTraversal};
         use crate::OpsRecordStore;
+        use shardline_index::{LocalRecordStore, RecordTraversal};
 
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalRecordStore::new(storage.path().join("index")).unwrap();
@@ -1619,8 +1647,8 @@ mod tests {
 
     #[test]
     fn ops_locator_content_hash_latest_returns_none() {
-        use shardline_index::{LocalRecordStore, RecordTraversal};
         use crate::OpsRecordStore;
+        use shardline_index::{LocalRecordStore, RecordTraversal};
 
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalRecordStore::new(storage.path().join("index")).unwrap();
@@ -1648,7 +1676,10 @@ mod tests {
         let oversized = vec![0u8; (MAX_LOCAL_RECORD_METADATA_BYTES + 1) as usize];
         let err = parse_stored_file_record_bytes(&oversized).unwrap_err();
         assert!(
-            matches!(err, ParseStoredFileRecordError::StoredFileMetadataTooLarge { .. }),
+            matches!(
+                err,
+                ParseStoredFileRecordError::StoredFileMetadataTooLarge { .. }
+            ),
             "expected StoredFileMetadataTooLarge, got: {err}"
         );
     }

@@ -170,7 +170,9 @@ impl OidcProvider {
                                 });
                             }
                         }
-                        Err(e) => tracing::warn!("OIDC JWKS refresh: failed to parse response: {e}"),
+                        Err(e) => {
+                            tracing::warn!("OIDC JWKS refresh: failed to parse response: {e}")
+                        }
                     },
                     Err(e) => tracing::warn!("OIDC JWKS refresh: HTTP error: {e}"),
                 }
@@ -426,8 +428,14 @@ mod tests {
         let jwk: Jwk = serde_json::from_value(json).expect("should deserialize EC JWK");
         assert_eq!(jwk.kid, "ec-key-1");
         assert_eq!(jwk.key_type, "EC");
-        assert_eq!(jwk.x_coord.as_deref(), Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4"));
-        assert_eq!(jwk.y_coord.as_deref(), Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"));
+        assert_eq!(
+            jwk.x_coord.as_deref(),
+            Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4")
+        );
+        assert_eq!(
+            jwk.y_coord.as_deref(),
+            Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM")
+        );
     }
 
     // ── JwksResponse deserialization ─────────────────────────────────────
@@ -453,7 +461,8 @@ mod tests {
                 }
             ]
         });
-        let resp: JwksResponse = serde_json::from_value(json).expect("should deserialize JWKS response");
+        let resp: JwksResponse =
+            serde_json::from_value(json).expect("should deserialize JWKS response");
         assert_eq!(resp.keys.len(), 2);
         assert_eq!(resp.keys[0].kid, "k1");
         assert_eq!(resp.keys[1].kid, "k2");
@@ -462,7 +471,8 @@ mod tests {
     #[test]
     fn jwks_response_deserialize_empty() {
         let json = json!({ "keys": [] });
-        let resp: JwksResponse = serde_json::from_value(json).expect("should deserialize empty JWKS");
+        let resp: JwksResponse =
+            serde_json::from_value(json).expect("should deserialize empty JWKS");
         assert!(resp.keys.is_empty());
     }
 
@@ -475,7 +485,8 @@ mod tests {
             "issuer": "https://example.com",
             "authorization_endpoint": "https://example.com/auth"
         });
-        let disco: OidcDiscovery = serde_json::from_value(json).expect("should deserialize discovery doc");
+        let disco: OidcDiscovery =
+            serde_json::from_value(json).expect("should deserialize discovery doc");
         assert_eq!(disco.jwks_uri, "https://example.com/.well-known/jwks");
     }
 }

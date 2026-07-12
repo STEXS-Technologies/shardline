@@ -10,8 +10,7 @@ use std::{
 use serde_json::to_string_pretty;
 use shardline::{
     BenchConfig, BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
-    effective_root,
-    install_gc_schedule, load_runtime_server_config, mint_admin_token_from_sources,
+    effective_root, install_gc_schedule, load_runtime_server_config, mint_admin_token_from_sources,
     print_hold_list_summary, print_hold_summary, render_completion, render_manpage,
     run_backup_manifest, run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc,
     run_health_check, run_hold_list, run_hold_release, run_hold_set, run_index_rebuild,
@@ -280,39 +279,39 @@ async fn main() -> ExitCode {
         }) => {
             let retention_seconds = retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS);
             match run_gc(
-            root.as_deref(),
-            mark,
-            sweep,
-            retention_seconds,
-            retention_report.as_deref(),
-            orphan_inventory.as_deref(),
-        )
-        .await
-        {
-            Ok(report) => {
-                let root = match resolve_root(root.as_deref()) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::from(2);
-                    }
-                };
-                report_output::print_local_gc_cli_summary(
-                    &report,
-                    gc_mode_name(mark, sweep),
-                    &root,
-                    retention_seconds,
-                    mark,
-                    retention_report.as_deref(),
-                    orphan_inventory.as_deref(),
-                );
-                ExitCode::SUCCESS
+                root.as_deref(),
+                mark,
+                sweep,
+                retention_seconds,
+                retention_report.as_deref(),
+                orphan_inventory.as_deref(),
+            )
+            .await
+            {
+                Ok(report) => {
+                    let root = match resolve_root(root.as_deref()) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            return ExitCode::from(2);
+                        }
+                    };
+                    report_output::print_local_gc_cli_summary(
+                        &report,
+                        gc_mode_name(mark, sweep),
+                        &root,
+                        retention_seconds,
+                        mark,
+                        retention_report.as_deref(),
+                        orphan_inventory.as_deref(),
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::from(2)
+                }
             }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(2)
-            }
-        }
         }
         Ok(CliCommand::GcScheduleInstall {
             output_dir,

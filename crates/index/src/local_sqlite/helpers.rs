@@ -28,9 +28,8 @@ use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS, LegacyQuarantineCandidateRecord,
     LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
-    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES,
-    StoredObjectPresenceRecord, i64_to_u64, invalid_metadata_path_error,
-    invalid_record_metadata_path_error, u64_to_i64,
+    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, StoredObjectPresenceRecord,
+    i64_to_u64, invalid_metadata_path_error, invalid_record_metadata_path_error, u64_to_i64,
 };
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
@@ -167,9 +166,8 @@ pub(super) fn ensure_legacy_import_state(
     // Acquire a write lock immediately to prevent TOCTOU between the
     // existence check and the import.  Two concurrent callers that both
     // see "not yet imported" will serialize here.
-    let transaction = connection.transaction_with_behavior(
-        rusqlite::TransactionBehavior::Immediate,
-    )?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     let import_completed = transaction
         .query_row(
@@ -1278,8 +1276,7 @@ mod tests {
         let db_path = root.join("metadata.sqlite3");
         let connection = Connection::open(&db_path).unwrap();
 
-        ensure_local_schema_migrations_table(&connection)
-            .expect("should create migrations table");
+        ensure_local_schema_migrations_table(&connection).expect("should create migrations table");
 
         let exists: bool = connection
             .query_row(
@@ -1313,7 +1310,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(exists, "migrations table should still exist after idempotent calls");
+        assert!(
+            exists,
+            "migrations table should still exist after idempotent calls"
+        );
     }
 
     #[test]
@@ -1327,20 +1327,16 @@ mod tests {
         ensure_local_schema_migrations_table(&connection).unwrap();
 
         apply_pending_local_migrations(&mut connection).expect("first migration should succeed");
-        apply_pending_local_migrations(&mut connection).expect("second migration should succeed (idempotent)");
+        apply_pending_local_migrations(&mut connection)
+            .expect("second migration should succeed (idempotent)");
 
         let count: i64 = connection
             .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE}"
-                ),
+                &format!("SELECT COUNT(*) FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE}"),
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(
-            count > 0,
-            "should have applied at least one migration"
-        );
+        assert!(count > 0, "should have applied at least one migration");
     }
 }

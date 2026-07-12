@@ -104,9 +104,9 @@ fn inspect_repository_record_for_xorb(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::to_vec;
     use shardline_index::{FileChunkRecord, FileRecord};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
-    use serde_json::to_vec;
 
     use super::inspect_repository_record_for_xorb;
 
@@ -120,13 +120,13 @@ mod tests {
 
     fn make_record(scope: &RepositoryScope, chunk_hash: &str) -> FileRecord {
         FileRecord {
-            file_id: "test.txt".to_string(),
-            content_hash: "deadbeef".to_string(),
+            file_id: "test.txt".to_owned(),
+            content_hash: "deadbeef".to_owned(),
             total_bytes: 100,
             chunk_size: 64,
             repository_scope: Some(scope.clone()),
             chunks: vec![FileChunkRecord {
-                hash: chunk_hash.to_string(),
+                hash: chunk_hash.to_owned(),
                 offset: 0,
                 length: 100,
                 range_start: 0,
@@ -188,12 +188,8 @@ mod tests {
         let scope = make_scope();
         let mut found = false;
 
-        let result = inspect_repository_record_for_xorb(
-            &mut found,
-            b"not valid json",
-            "anything",
-            &scope,
-        );
+        let result =
+            inspect_repository_record_for_xorb(&mut found, b"not valid json", "anything", &scope);
         assert!(result.is_err());
     }
 }

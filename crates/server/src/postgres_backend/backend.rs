@@ -124,9 +124,9 @@ impl PostgresBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_store::ServerObjectStore;
     use std::num::NonZeroUsize;
     use tempfile::tempdir;
-    use crate::object_store::ServerObjectStore;
 
     const TEST_POSTGRES_URL: &str = "postgres://localhost:5432/test";
 
@@ -158,10 +158,7 @@ mod tests {
             object_store,
         )
         .await;
-        assert!(
-            backend.is_ok(),
-            "constructor should succeed with lazy pool"
-        );
+        assert!(backend.is_ok(), "constructor should succeed with lazy pool");
     }
 
     #[tokio::test]

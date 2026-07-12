@@ -52,7 +52,7 @@ impl CacheInner {
         }
     }
 
-    fn insert(&mut self, key: ReconstructionCacheKey, entry: MemoryEntry) {
+    fn insert(&mut self, key: &ReconstructionCacheKey, entry: MemoryEntry) {
         let inserted_at = entry.inserted_at;
         if let Some(old) = self.entries.insert(key.clone(), entry) {
             self.eviction_order
@@ -64,8 +64,8 @@ impl CacheInner {
             .insert(EvictionKey(inserted_at, seq), key.clone());
         // Keep the entry's seq in sync with the eviction_order key so that
         // remove() can find and delete the correct eviction entry.
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.seq = seq;
+        if let Some(cached) = self.entries.get_mut(key) {
+            cached.seq = seq;
         }
     }
 
@@ -147,8 +147,9 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 // Use a timeout so we can clean up the orphaned loading
                 // entry and let the next caller retry.
                 tokio::select! {
-                    _ = notify.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    () = notify.notified() => {}
+                    () = tokio::time::sleep(Duration::from_secs(30)) => {
+                        #[allow(clippy::shadow_unrelated)]
                         let mut inner = self.inner.write().await;
                         inner.loading.remove(key);
                         return Ok(None);
@@ -191,7 +192,7 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 inner.evict_oldest();
             }
             inner.insert(
-                key.clone(),
+                key,
                 MemoryEntry {
                     payload: Arc::new(payload.to_vec()),
                     expires_at,
@@ -221,7 +222,6 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
 mod tests {
     use std::{
         num::{NonZeroU64, NonZeroUsize},
-        sync::Arc,
         time::Duration,
     };
 
@@ -377,10 +377,8 @@ mod tests {
             let cache = std::sync::Arc::clone(&cache);
             handles.push(tokio::spawn(async move {
                 for i in 0..20 {
-                    let key = ReconstructionCacheKey::latest(
-                        &format!("evict-key-{task_id}-{i}"),
-                        None,
-                    );
+                    let key =
+                        ReconstructionCacheKey::latest(&format!("evict-key-{task_id}-{i}"), None);
                     let payload = format!("evict-payload-{task_id}-{i}");
                     let _ = cache.put(&key, payload.as_bytes()).await;
                     // Also read back randomly

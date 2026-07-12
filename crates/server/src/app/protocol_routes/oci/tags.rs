@@ -300,16 +300,10 @@ mod tests {
     #[test]
     fn created_response_with_digest() {
         let digest_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let response = oci_created_response(
-            "/v2/team/assets/blobs/uploads/abc",
-            Some(digest_hex),
-        )
-        .unwrap();
+        let response =
+            oci_created_response("/v2/team/assets/blobs/uploads/abc", Some(digest_hex)).unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
-        assert!(response
-            .headers()
-            .get("Docker-Content-Digest")
-            .is_some());
+        assert!(response.headers().get("Docker-Content-Digest").is_some());
         assert_eq!(
             response
                 .headers()
@@ -323,8 +317,7 @@ mod tests {
 
     #[test]
     fn created_response_without_digest() {
-        let response =
-            oci_created_response("/v2/team/assets/blobs/uploads/abc", None).unwrap();
+        let response = oci_created_response("/v2/team/assets/blobs/uploads/abc", None).unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         assert!(response.headers().get("Docker-Content-Digest").is_none());
     }

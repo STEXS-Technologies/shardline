@@ -215,7 +215,10 @@ mod tests {
             let now = 1_000_000_u64;
             let retention = 86_400_u64;
 
-            let orphan = make_orphan("aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233", 512);
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                512,
+            );
             let candidate = QuarantineCandidate::new(
                 orphan.object_key.clone(),
                 orphan.bytes,
@@ -223,7 +226,10 @@ mod tests {
                 checked_add(now, retention).unwrap(),
             )
             .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             // Reconcile with empty orphan_objects — the quarantine entry should
             // be released because the object is no longer orphaned.
@@ -333,7 +339,10 @@ mod tests {
             let index_store = MemoryIndexStore::new();
             let now = 1_000_000_u64;
 
-            let orphan = make_orphan("aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233", 256);
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                256,
+            );
             let hold = shardline_index::RetentionHold::new(
                 orphan.object_key.clone(),
                 "operator hold".to_owned(),
@@ -362,7 +371,10 @@ mod tests {
             let now = 1_000_000_u64;
             let retention = 86_400_u64;
 
-            let orphan = make_orphan("aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233", 1024);
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                1024,
+            );
             let mut orphan_objects = HashMap::new();
             orphan_objects.insert(orphan.hash.clone(), orphan.clone());
 
@@ -423,7 +435,10 @@ mod tests {
             let now = 1_000_000_u64;
             let retention = 86_400_u64;
 
-            let orphan = make_orphan("aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233", 512);
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                512,
+            );
             let mut orphan_objects = HashMap::new();
             orphan_objects.insert(orphan.hash.clone(), orphan.clone());
 
@@ -496,7 +511,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let index_store = MemoryIndexStore::new();
-            let orphan = make_orphan("aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233", 100);
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                100,
+            );
             // Hold that has already expired.
             let hold = shardline_index::RetentionHold::new(
                 orphan.object_key.clone(),

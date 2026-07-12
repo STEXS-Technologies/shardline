@@ -39,6 +39,10 @@ fn open_hub_connection_rw(root: &Path) -> Result<Connection, LocalIndexStoreErro
 
 /// Ensures the hub SQLite tables exist in the given root directory.
 /// Creates the database file and tables if they don't exist.
+///
+/// # Errors
+///
+/// Returns an error if the database connection or table creation fails.
 pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = root.join("metadata.sqlite3");
     let conn = Connection::open(&db_path)?;
@@ -70,7 +74,7 @@ pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::erro
             active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
             created_at_unix_seconds INTEGER NOT NULL,
             FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
-        );"
+        );",
     )?;
     Ok(())
 }
@@ -571,7 +575,10 @@ use rusqlite::OptionalExtension;
 
 /// Escapes LIKE wildcards in user-supplied values to prevent pattern injection.
 fn escape_like(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('_', "\\_").replace('%', "\\%")
+    value
+        .replace('\\', "\\\\")
+        .replace('_', "\\_")
+        .replace('%', "\\%")
 }
 
 #[cfg(test)]
@@ -1438,7 +1445,9 @@ mod tests {
         store
             .delete_webhook("org/model", &wh.id)
             .expect("delete_webhook");
-        let webhooks = store.list_webhooks("org/model").expect("list_webhooks after delete");
+        let webhooks = store
+            .list_webhooks("org/model")
+            .expect("list_webhooks after delete");
         assert_eq!(webhooks.len(), 1);
         assert_eq!(webhooks[0].id, wh2.id);
 
@@ -1663,7 +1672,9 @@ mod tests {
             },
         ];
 
-        store.store_files("commit_inline", &files).expect("store_files");
+        store
+            .store_files("commit_inline", &files)
+            .expect("store_files");
         let retrieved = store.get_files("commit_inline").expect("get_files");
 
         assert_eq!(retrieved.len(), 3);
@@ -1718,10 +1729,7 @@ mod tests {
             }));
         }
 
-        let results: Vec<_> = handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         let successes = results.iter().filter(|r| r.is_ok()).count();
         let failures = results.iter().filter(|r| r.is_err()).count();
@@ -1781,7 +1789,11 @@ mod tests {
         // The existing files are still there because the prior store already committed,
         // and this empty store is a new transaction (INSERT OR REPLACE with no rows = no-op).
         let files = store.get_files("commit_rollback").unwrap();
-        assert_eq!(files.len(), 1, "existing files should persist after separate store_files");
+        assert_eq!(
+            files.len(),
+            1,
+            "existing files should persist after separate store_files"
+        );
     }
 
     #[test]
@@ -1908,8 +1920,7 @@ mod tests {
         // Verify SHA appears in revisions list
         let revs = store.list_revisions("org/llm").unwrap();
         assert_eq!(revs.len(), 2);
-        let shas: Vec<&str> = revs.iter().map(|r| r.sha.as_str()).collect();
-        assert!(shas.contains(&commit_sha));
+        assert!(revs.iter().map(|r| r.sha.as_str()).any(|x| x == commit_sha));
 
         // Resolve revision by SHA
         let resolved = store.resolve_revision("org/llm", commit_sha).unwrap();

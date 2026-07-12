@@ -315,6 +315,7 @@ mod tests {
     // --- parse_ndjson_commit tests ---
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn parse_ndjson_valid_single_file() {
         let content_b64 = STANDARD.encode(b"hello world");
         let body = format!(
@@ -355,6 +356,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn parse_ndjson_valid_multiple_files() {
         let b1 = STANDARD.encode(b"file one");
         let b2 = STANDARD.encode(b"file two");
@@ -378,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn parse_ndjson_valid_delete() {
         let body = "\
             {\"header\":{\"message\":\"delete file\",\"parentCommit\":\"\"}}\n\
@@ -391,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn parse_ndjson_valid_lfs_pointer() {
         let body = "\
             {\"header\":{\"message\":\"lfs file\",\"parentCommit\":\"\"}}\n\
@@ -400,7 +404,10 @@ mod tests {
         match &result.instructions[0] {
             CommitInstruction::LfsPointer { path, oid, size } => {
                 assert_eq!(path, "model.bin");
-                assert_eq!(oid, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+                assert_eq!(
+                    oid,
+                    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                );
                 assert_eq!(*size, 1048576);
             }
             other => panic!("expected LfsPointer, got {other:?}"),
@@ -423,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unreachable)]
     fn parse_ndjson_oversized_file() {
         // MAX_INLINE_FILE_BYTES is 10 MiB.  Generate a valid base64 string
         // that decodes to exactly MAX_INLINE_FILE_BYTES + 1 bytes.

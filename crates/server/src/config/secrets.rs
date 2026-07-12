@@ -267,9 +267,7 @@ fn parse_env_bool(name: &str) -> Result<Option<bool>, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ensure_secret_size_within_limit, open_secret_file, read_secret_file_bytes,
-    };
+    use super::{ensure_secret_size_within_limit, open_secret_file, read_secret_file_bytes};
     use shardline_protocol::parse_bool;
     use std::io::Write;
     use std::path::Path;

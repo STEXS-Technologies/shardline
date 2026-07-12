@@ -941,7 +941,10 @@ async fn exercise_gc_fails_closed_on_missing_quarantined_object_metadata()
     index_store.upsert_quarantine_candidate(&candidate)?;
 
     let result = run_local_gc(storage.path().to_path_buf(), LocalGcOptions::mark_only(60)).await;
-    assert!(result.is_ok(), "gc should auto-release missing quarantine entries: {result:?}");
+    assert!(
+        result.is_ok(),
+        "gc should auto-release missing quarantine entries: {result:?}"
+    );
     assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_none());
 
     Ok(())
@@ -1151,6 +1154,7 @@ async fn exercise_gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Erro
             let chunk_path = chunk_dir.join(&hash_hex);
             let _ = std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .open(&chunk_path)
                 .map(|mut f| f.write_all(content.as_bytes()));
@@ -1160,11 +1164,7 @@ async fn exercise_gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Erro
 
     // Run GC mark + sweep with zero retention while background uploads happen
     let root = storage.path().to_path_buf();
-    let report = run_local_gc(
-        root.clone(),
-        LocalGcOptions::mark_only(3_600),
-    )
-    .await?;
+    let report = run_local_gc(root.clone(), LocalGcOptions::mark_only(3_600)).await?;
 
     // Wait for background uploads to finish
     let _background_result = background_handle.await.ok();

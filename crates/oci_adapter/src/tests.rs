@@ -6,6 +6,7 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use crate::traits::OciBackend;
 use crate::{
     OciAdapterError, OciReference, OciUploadSession, SerializableSha256State,
     abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
@@ -15,7 +16,6 @@ use crate::{
     purge_expired_upload_sessions, read_upload_session, upload_body_integrity, upload_length,
     upload_session_expired,
 };
-use crate::traits::OciBackend;
 use shardline_protocol::{RepositoryProvider, RepositoryScope};
 use shardline_storage::{DeleteOutcome, ObjectKey, PutOutcome};
 
@@ -54,7 +54,7 @@ impl MockS3Backend {
         assert!(state.completed, "upload was not completed");
         assert!(!state.aborted, "upload was aborted");
         let actual_parts: Vec<&[u8]> = state.parts.iter().map(|(_, b)| b.as_ref()).collect();
-        let expected: Vec<&[u8]> = expected_parts.iter().map(|p| *p).collect();
+        let expected: Vec<&[u8]> = expected_parts.to_vec();
         assert_eq!(actual_parts, expected, "uploaded parts do not match");
     }
 
@@ -229,7 +229,10 @@ fn max_sessions() -> NonZeroUsize {
     NonZeroUsize::new(100).unwrap()
 }
 
-fn create_test_session(root: &Path, use_s3: bool) -> impl Future<Output = Result<String, OciAdapterError>> {
+fn create_test_session(
+    root: &Path,
+    use_s3: bool,
+) -> impl Future<Output = Result<String, OciAdapterError>> {
     let root = root.to_path_buf();
     async move {
         create_upload_session(
@@ -265,29 +268,17 @@ async fn create_upload_session_returns_valid_session_id() {
 async fn create_upload_session_respects_limit() {
     let root = temp_root();
     let max = NonZeroUsize::new(1).unwrap();
-    let session_id = create_upload_session(
-        root.path(),
-        NO_BACKEND,
-        "my-repo",
-        None,
-        ttl(),
-        max,
-        false,
-    )
-    .await
-    .unwrap();
+    let session_id =
+        create_upload_session(root.path(), NO_BACKEND, "my-repo", None, ttl(), max, false)
+            .await
+            .unwrap();
     assert!(!session_id.is_empty());
-    let result = create_upload_session(
-        root.path(),
-        NO_BACKEND,
-        "my-repo",
-        None,
-        ttl(),
-        max,
-        false,
-    )
-    .await;
-    assert!(matches!(result, Err(OciAdapterError::TooManyUploadSessions)));
+    let result =
+        create_upload_session(root.path(), NO_BACKEND, "my-repo", None, ttl(), max, false).await;
+    assert!(matches!(
+        result,
+        Err(OciAdapterError::TooManyUploadSessions)
+    ));
 }
 
 #[tokio::test]
@@ -367,12 +358,7 @@ async fn create_upload_session_rejects_invalid_repository_scope() {
 #[tokio::test]
 async fn read_upload_session_returns_not_found_for_nonexistent() {
     let root = temp_root();
-    let result = read_upload_session(
-        root.path(),
-        "10000000000000000000000000000000",
-        ttl(),
-    )
-    .await;
+    let result = read_upload_session(root.path(), "10000000000000000000000000000000", ttl()).await;
     assert!(matches!(result, Err(OciAdapterError::NotFound)));
 }
 
@@ -413,11 +399,7 @@ async fn upload_length_returns_correct_value() {
 #[tokio::test]
 async fn upload_length_returns_not_found_for_missing() {
     let root = temp_root();
-    let result = upload_length(
-        root.path(),
-        "10000000000000000000000000000001",
-    )
-    .await;
+    let result = upload_length(root.path(), "10000000000000000000000000000001").await;
     assert!(matches!(result, Err(OciAdapterError::NotFound)));
 }
 
@@ -614,7 +596,8 @@ fn serializable_sha256_state_matches_reference_digest() {
 // ── Key construction tests ──────────────────────────────────────────────────
 
 const VALID_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const VALID_DIGEST_FULL: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const VALID_DIGEST_FULL: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn test_scope() -> RepositoryScope {
     RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap()
@@ -678,7 +661,10 @@ fn oci_manifest_key_with_scope() {
         !s.contains("/global/"),
         "should not contain global namespace with scope, got: {s}"
     );
-    assert!(s.contains("/manifests/"), "expected manifests path, got: {s}");
+    assert!(
+        s.contains("/manifests/"),
+        "expected manifests path, got: {s}"
+    );
 }
 
 #[test]
@@ -741,7 +727,10 @@ fn oci_manifest_prefix_with_scope() {
         !s.contains("/global/"),
         "should not contain global namespace with scope, got: {s}"
     );
-    assert!(s.contains("/manifests/"), "expected manifests path, got: {s}");
+    assert!(
+        s.contains("/manifests/"),
+        "expected manifests path, got: {s}"
+    );
 }
 
 #[test]
@@ -891,15 +880,21 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 async fn create_s3_session(root: &Path, backend: &MockS3Backend) -> String {
-    create_upload_session(root, Some(backend), "test-repo", None, ttl(), max_sessions(), true)
-        .await
-        .unwrap()
+    create_upload_session(
+        root,
+        Some(backend),
+        "test-repo",
+        None,
+        ttl(),
+        max_sessions(),
+        true,
+    )
+    .await
+    .unwrap()
 }
 
 async fn read_session(root: &Path, session_id: &str) -> OciUploadSession {
-    read_upload_session(root, session_id, ttl())
-        .await
-        .unwrap()
+    read_upload_session(root, session_id, ttl()).await.unwrap()
 }
 
 #[tokio::test]
@@ -909,26 +904,30 @@ async fn s3_multipart_append_and_finalize() {
     let session_id = create_s3_session(root.path(), &backend).await;
 
     let session = read_session(root.path(), &session_id).await;
-    let (_session, length) = append_s3_multipart_upload_bytes(
-        root.path(), &backend, &session_id, session, b"hello-s3-",
-    )
-    .await
-    .unwrap();
+    let (_session, length) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"hello-s3-")
+            .await
+            .unwrap();
     assert_eq!(length, 9);
 
     let session = read_session(root.path(), &session_id).await;
-    let (session, length) = append_s3_multipart_upload_bytes(
-        root.path(), &backend, &session_id, session, b"world-s3!",
-    )
-    .await
-    .unwrap();
+    let (session, length) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"world-s3!")
+            .await
+            .unwrap();
     assert_eq!(length, 18);
 
     let data = b"hello-s3-world-s3!";
     let digest = sha256_hex(data);
     let object_key = ObjectKey::parse("protocols/oci/test/blob").unwrap();
     let outcome = finalize_s3_multipart_upload_session(
-        root.path(), &backend, &session_id, session, &object_key, &digest, b"",
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &digest,
+        b"",
     )
     .await
     .unwrap();
@@ -953,11 +952,10 @@ async fn s3_multipart_append_triggers_part_at_chunk_boundary() {
     // Write enough bytes to trigger a part upload (chunk size is 8 MiB).
     let chunk = vec![b'x'; 8 * 1024 * 1024 + 100];
     let session = read_session(root.path(), &session_id).await;
-    let (_session, length) = append_s3_multipart_upload_bytes(
-        root.path(), &backend, &session_id, session, &chunk,
-    )
-    .await
-    .unwrap();
+    let (_session, length) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &chunk)
+            .await
+            .unwrap();
     assert_eq!(usize::try_from(length).unwrap(), chunk.len());
 
     // One full 8 MiB part should have been uploaded.
@@ -973,14 +971,15 @@ async fn s3_multipart_abort_cleans_up() {
     let session_id = create_s3_session(root.path(), &backend).await;
 
     let session = read_session(root.path(), &session_id).await;
-    let (session, _length) = append_s3_multipart_upload_bytes(
-        root.path(), &backend, &session_id, session, b"some-data",
-    )
-    .await
-    .unwrap();
+    let (session, _length) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"some-data")
+            .await
+            .unwrap();
 
     // Abort via the OCI adapter.
-    abort_s3_multipart_upload_session(&backend, &session).await.unwrap();
+    abort_s3_multipart_upload_session(&backend, &session)
+        .await
+        .unwrap();
 
     // Verify the mock recorded abort.
     let upload_id = {
@@ -1001,7 +1000,13 @@ async fn s3_multipart_empty_upload_falls_back_to_single_put() {
     let digest = sha256_hex(b"");
     let object_key = ObjectKey::parse("protocols/oci/test/empty-blob").unwrap();
     let outcome = finalize_s3_multipart_upload_session(
-        root.path(), &backend, &session_id, session, &object_key, &digest, b"",
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &digest,
+        b"",
     )
     .await
     .unwrap();
@@ -1016,7 +1021,11 @@ async fn s3_multipart_hash_mismatch_aborts() {
 
     let session = read_session(root.path(), &session_id).await;
     let (session, _length) = append_s3_multipart_upload_bytes(
-        root.path(), &backend, &session_id, session, b"actual-data",
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        b"actual-data",
     )
     .await
     .unwrap();
@@ -1025,11 +1034,20 @@ async fn s3_multipart_hash_mismatch_aborts() {
     let wrong_digest = sha256_hex(b"wrong-data");
     let object_key = ObjectKey::parse("protocols/oci/test/blob").unwrap();
     let result = finalize_s3_multipart_upload_session(
-        root.path(), &backend, &session_id, session, &object_key, &wrong_digest, b"",
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &wrong_digest,
+        b"",
     )
     .await;
 
-    assert!(matches!(result, Err(OciAdapterError::ExpectedBodyHashMismatch)));
+    assert!(matches!(
+        result,
+        Err(OciAdapterError::ExpectedBodyHashMismatch)
+    ));
 
     // The mock should have recorded the abort on the multipart session.
     let s = read_session(root.path(), &session_id).await;
@@ -1064,24 +1082,24 @@ async fn s3_multipart_concurrent_append_stress() {
         tokio::spawn(async move {
             let (root_path, backend) = &*share;
             let session = read_upload_session(root_path, &sid, ttl()).await.unwrap();
-            let result = append_s3_multipart_upload_bytes(
-                root_path, backend.as_ref(), &sid, session, &data,
-            )
-            .await;
+            let result =
+                append_s3_multipart_upload_bytes(root_path, backend.as_ref(), &sid, session, &data)
+                    .await;
             let _ = tx.send((i, result));
         });
     }
     drop(tx);
 
     // Collect results — all should succeed (no crashes or corrupt state).
-    let mut results: Vec<_> = std::iter::repeat_with(|| None)
-        .take(3)
-        .collect();
+    let mut results: Vec<_> = std::iter::repeat_with(|| None).take(3).collect();
     while let Some((idx, result)) = rx.recv().await {
         assert!(result.is_ok(), "task {idx} failed: {:?}", result);
         results[idx] = Some(result.unwrap());
     }
-    assert!(results.iter().all(|r| r.is_some()), "not all tasks completed");
+    assert!(
+        results.iter().all(|r| r.is_some()),
+        "not all tasks completed"
+    );
 
     // Verify the mock backend has recorded partial data (at least one part
     // was uploaded by ensure_s3_upload_started).  The exact content depends

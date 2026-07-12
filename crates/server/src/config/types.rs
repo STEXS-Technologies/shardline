@@ -13,6 +13,7 @@ use shardline_protocol::{SecretBytes, SecretString};
 use shardline_storage::S3ObjectStoreConfig;
 use thiserror::Error;
 
+use super::secrets::ensure_secret_size_within_limit;
 use crate::{
     reconstruction_cache::{
         DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES, DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
@@ -21,7 +22,6 @@ use crate::{
     server_frontend::ServerFrontend,
     server_role::ServerRole,
 };
-use super::secrets::ensure_secret_size_within_limit;
 
 /// Authentication configuration.
 #[derive(Clone, PartialEq, Eq)]
@@ -185,27 +185,32 @@ impl fmt::Debug for ProviderConfig {
     }
 }
 
-pub(crate) const MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize = match NonZeroUsize::new(64) {
+pub(crate) const MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize =
+    match NonZeroUsize::new(64) {
+        Some(value) => value,
+        None => NonZeroUsize::MIN,
+    };
+
+pub(crate) const MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize =
+    match NonZeroUsize::new(1024) {
+        Some(value) => value,
+        None => NonZeroUsize::MIN,
+    };
+
+pub(crate) const MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize = match NonZeroUsize::new(64)
+{
     Some(value) => value,
     None => NonZeroUsize::MIN,
 };
 
-pub(crate) const MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize = match NonZeroUsize::new(1024) {
-    Some(value) => value,
-    None => NonZeroUsize::MIN,
-};
+pub(crate) const MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize =
+    match NonZeroUsize::new(256) {
+        Some(value) => value,
+        None => NonZeroUsize::MIN,
+    };
 
-pub(crate) const MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize = match NonZeroUsize::new(64) {
-    Some(value) => value,
-    None => NonZeroUsize::MIN,
-};
-
-pub(crate) const MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS: NonZeroUsize = match NonZeroUsize::new(256) {
-    Some(value) => value,
-    None => NonZeroUsize::MIN,
-};
-
-pub(crate) const DEFAULT_MAX_REQUEST_BODY_BYTES: NonZeroUsize = match NonZeroUsize::new(67_108_864) {
+pub(crate) const DEFAULT_MAX_REQUEST_BODY_BYTES: NonZeroUsize = match NonZeroUsize::new(67_108_864)
+{
     Some(value) => value,
     None => NonZeroUsize::MIN,
 };
@@ -220,10 +225,11 @@ pub(crate) const DEFAULT_MAX_SHARD_XORBS: NonZeroUsize = match NonZeroUsize::new
     None => NonZeroUsize::MIN,
 };
 
-pub(crate) const DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS: NonZeroUsize = match NonZeroUsize::new(65_536) {
-    Some(value) => value,
-    None => NonZeroUsize::MIN,
-};
+pub(crate) const DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS: NonZeroUsize =
+    match NonZeroUsize::new(65_536) {
+        Some(value) => value,
+        None => NonZeroUsize::MIN,
+    };
 
 pub(crate) const DEFAULT_MAX_SHARD_XORB_CHUNKS: NonZeroUsize = match NonZeroUsize::new(65_536) {
     Some(value) => value,
@@ -1264,9 +1270,7 @@ pub enum ServerConfigError {
     )]
     HubRequiresAuth,
     /// Passthrough auth provider requires a loopback bind address.
-    #[error(
-        "passthrough auth provider requires a loopback bind address, got {bind_addr}"
-    )]
+    #[error("passthrough auth provider requires a loopback bind address, got {bind_addr}")]
     PassthroughProviderRequiresLoopbackBind {
         /// The rejected bind address.
         bind_addr: SocketAddr,

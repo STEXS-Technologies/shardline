@@ -1,3 +1,9 @@
+#![allow(
+    clippy::let_underscore_must_use,
+    clippy::manual_inspect,
+    clippy::arithmetic_side_effects
+)]
+
 use std::{
     fmt,
     fs::File,
@@ -36,14 +42,17 @@ fn temp_key_for(key: &ObjectKey) -> Result<ObjectKey, S3ObjectStoreError> {
     let pid = std::process::id();
     let suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
     ObjectKey::parse(&format!("{}.{suffix}", key.as_str()))
-        .map_err(|_| S3ObjectStoreError::InvalidListedKey)
+        .map_err(|_err| S3ObjectStoreError::InvalidListedKey)
 }
 
 /// Returns `true` if `key` looks like a temp upload artifact produced by
 /// [`temp_key_for`], i.e. contains `.tmp.` followed by at least one digit.
 fn is_temp_upload_key(key: &str) -> bool {
-    key.find(".tmp.")
-        .map_or(false, |pos| key.as_bytes().get(pos + 5).map_or(false, |b| b.is_ascii_digit()))
+    key.find(".tmp.").is_some_and(|pos| {
+        key.as_bytes()
+            .get(pos + 5)
+            .is_some_and(|b| b.is_ascii_digit())
+    })
 }
 
 use tokio::{
@@ -691,12 +700,13 @@ impl S3ObjectStore {
         let pid = std::process::id();
         let temp_suffix = format!("tmp.{counter}.{pid}.{now_nanos}");
         let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
-            .map_err(|_| S3ObjectStoreError::InvalidListedKey)?;
+            .map_err(|_err| S3ObjectStoreError::InvalidListedKey)?;
         let temp_location = self.location_for_key(&temp_key)?;
-        self.block_on(
-            self.inner
-                .put_opts(&temp_location, bytes.clone().into(), PutMode::Create.into()),
-        )?;
+        self.block_on(self.inner.put_opts(
+            &temp_location,
+            bytes.into(),
+            PutMode::Create.into(),
+        ))?;
 
         // Atomically replace the live key with the temp content via copy,
         // then remove the temp key.
@@ -1133,10 +1143,10 @@ impl ObjectStore for S3ObjectStore {
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         let location = self.location_for_key(key)?;
         let external_range = validated_external_range(range)?;
-        let result = self.block_on(
-            self.inner
-                .get_opts(&location, GetOptions::new().with_range(Some(external_range.clone()))),
-        )?;
+        let result = self.block_on(self.inner.get_opts(
+            &location,
+            GetOptions::new().with_range(Some(external_range.clone())),
+        ))?;
         if result.range != external_range {
             return Err(S3ObjectStoreError::RangeOutOfBounds);
         }

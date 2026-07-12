@@ -235,7 +235,9 @@ pub(super) fn managed_object_hash_or_object_key(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use shardline_storage::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
+    use shardline_storage::{
+        DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome,
+    };
 
     /// A mock object store that returns metadata for a set of known keys.
     struct MockObjectStore {
@@ -250,6 +252,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::unreachable)]
     impl ObjectStore for MockObjectStore {
         type Error = std::io::Error;
 
@@ -282,10 +285,7 @@ mod tests {
             }
         }
 
-        fn list_prefix(
-            &self,
-            _prefix: &ObjectPrefix,
-        ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+        fn list_prefix(&self, _prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
             unreachable!("not used in tests")
         }
 

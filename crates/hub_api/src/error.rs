@@ -69,7 +69,12 @@ pub enum HubApiError {
 impl IntoResponse for HubApiError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            Self::Io(_) | Self::Json(_) | Self::CasError(_) | Self::PktLine(_) | Self::Pack(_) | Self::SigningKeyError(_) => (
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::CasError(_)
+            | Self::PktLine(_)
+            | Self::Pack(_)
+            | Self::SigningKeyError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_owned(),
             ),
