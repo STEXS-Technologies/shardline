@@ -9,7 +9,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
 };
 
-use crate::{ServerError, error::ObjectStoreError, object_store::ServerObjectStore};
+use crate::{
+    ServerError, error::ObjectStoreError, object_store::run_before_local_object_read_hook,
+    object_store::ServerObjectStore,
+};
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
@@ -117,6 +120,18 @@ async fn local_store_byte_range_stream(
             ObjectStoreError::StoredLengthMismatch,
         ));
     }
+
+    // TOCTOU guard: expose hook point for concurrent-growth testing.
+    let path = object_store.path_for_key(&object_key);
+    run_before_local_object_read_hook(&path);
+    // Re-validate length after hook (file may have grown).
+    let metadata = file.metadata().await?;
+    if metadata.len() != total_length {
+        return Err(ServerError::ObjectStore(
+            ObjectStoreError::StoredLengthMismatch,
+        ));
+    }
+
     if range.end_inclusive() >= total_length {
         return Err(ServerError::RangeNotSatisfiable);
     }
@@ -178,6 +193,8 @@ async fn s3_store_byte_range_stream(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use futures_util::StreamExt;
     use shardline_protocol::ByteRange;
     use shardline_storage::{LocalObjectStore, ObjectKey};
@@ -252,6 +269,58 @@ mod tests {
         assert!(written.is_ok());
 
         let byte_stream = local_object_byte_stream(object_store, object_key, 100).await;
+
+        assert!(matches!(
+            byte_stream,
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_object_byte_range_stream_rejects_growth_after_length_validation() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf());
+        assert!(object_store.is_ok());
+        let Ok(object_store) = object_store else {
+            return;
+        };
+        let object_key = ObjectKey::parse("ab/object");
+        assert!(object_key.is_ok());
+        let Ok(object_key) = object_key else {
+            return;
+        };
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            let created = fs::create_dir_all(parent).await;
+            assert!(created.is_ok());
+        }
+        // Write initial content.
+        let written = fs::write(&path, b"abcd").await;
+        assert!(written.is_ok());
+
+        // Open a writer handle for the hook to append through.
+        let writer_path = path.clone();
+        let hook_writer = std::sync::Mutex::new(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&writer_path)
+                .unwrap(),
+        );
+        crate::object_store::set_before_local_object_read_hook(path, move || {
+            let mut writer = hook_writer.lock().unwrap();
+            let _ = writer.write_all(b"extra");
+            let _ = writer.sync_all();
+        });
+
+        let byte_stream = local_object_byte_range_stream(
+            object_store,
+            object_key,
+            4, // total_length = 4, but file will grow to 9 after hook fires
+            ByteRange::new(0, 3).unwrap(),
+        )
+        .await;
 
         assert!(matches!(
             byte_stream,

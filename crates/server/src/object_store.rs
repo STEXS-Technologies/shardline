@@ -265,7 +265,7 @@ fn validate_local_object_length(file: &File, expected_length: u64) -> Result<u64
 }
 
 #[cfg(test)]
-fn run_before_local_object_read_hook(path: &Path) {
+pub(crate) fn run_before_local_object_read_hook(path: &Path) {
     let hook = match BEFORE_LOCAL_OBJECT_READ_HOOK.lock() {
         Ok(mut guard) => take_local_object_read_hook_for_path(&mut guard, path),
         Err(poisoned) => take_local_object_read_hook_for_path(&mut poisoned.into_inner(), path),
@@ -287,10 +287,10 @@ fn take_local_object_read_hook_for_path(
 }
 
 #[cfg(not(test))]
-const fn run_before_local_object_read_hook(_path: &Path) {}
+pub(crate) const fn run_before_local_object_read_hook(_path: &Path) {}
 
 #[cfg(test)]
-fn set_before_local_object_read_hook(path: PathBuf, hook: impl FnOnce() + Send + 'static) {
+pub(crate) fn set_before_local_object_read_hook(path: PathBuf, hook: impl FnOnce() + Send + 'static) {
     let mut slot = match BEFORE_LOCAL_OBJECT_READ_HOOK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
