@@ -327,6 +327,12 @@ pub fn fd_child_path(directory: &File, child: &OsStr) -> PathBuf {
 /// works even after the parent directory is renamed. On macOS, `/dev/fd/N` cannot traverse
 /// children, so this uses `renameat` with the parent FD instead.
 ///
+/// # Safety
+///
+/// Uses `libc::renameat` which is safe when called with valid file descriptors
+/// (the `parent` FD is guaranteed open by the borrow) and valid C strings
+/// (produced by `CString::new` which rejects interior null bytes).
+///
 /// # Errors
 ///
 /// Returns an error when either name contains a null byte or the rename fails.
@@ -384,6 +390,11 @@ pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Resul
 /// Removes a file within a directory using FD-relative operations.
 ///
 /// On macOS, `/dev/fd/N` cannot traverse children, so this uses `unlinkat`.
+///
+/// # Safety
+///
+/// Uses `libc::unlinkat` which is safe when called with a valid file descriptor
+/// (the `parent` FD is guaranteed open by the borrow) and a valid C string.
 ///
 /// # Errors
 ///

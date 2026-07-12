@@ -45,9 +45,12 @@ fn lfs_validation_response(message: &str) -> Response {
 static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[allow(clippy::unwrap_used)]
 fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
-    let mut map = LFS_PATCH_LOCKS.lock().unwrap();
+    // Recover from poisoning: if a previous lock-holder panicked, the map
+    // contents are still valid (simple OID→lock mapping), so continue.
+    let mut map = LFS_PATCH_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     map.entry(oid.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
@@ -376,8 +379,9 @@ pub(crate) async fn lfs_patch_object(
 
     tokio::task::spawn_blocking(move || {
         let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);
-        #[allow(clippy::unwrap_used)]
-        let _lock = lock_arc.lock().unwrap();
+        // Recover from poisoning: the lock is a simple empty-token Mutex<()>,
+        // so its state is trivially consistent even if a previous holder panicked.
+        let _lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = root_dir.join("tmp").join("lfs-patch");
         std::fs::create_dir_all(&tmp_dir).ok();
