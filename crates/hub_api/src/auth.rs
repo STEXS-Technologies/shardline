@@ -245,4 +245,102 @@ mod tests {
             "expected SigningKeyError(\"boom\"), got {err:?}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // authorize with provider errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn authorize_expired_token_returns_invalid_token() {
+        struct ExpiredProvider;
+        impl AuthProvider for ExpiredProvider {
+            fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+                Err(AuthError::ExpiredToken)
+            }
+            fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+                Err(AuthError::ProviderError("mock does not mint".to_owned()))
+            }
+        }
+        let auth = HubAuth::new(Box::new(ExpiredProvider));
+        let headers = make_auth_header("Bearer sometoken");
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::InvalidToken)));
+    }
+
+    #[test]
+    fn authorize_invalid_signature_returns_invalid_token() {
+        struct BadSigProvider;
+        impl AuthProvider for BadSigProvider {
+            fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+                Err(AuthError::InvalidToken)
+            }
+            fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+                Err(AuthError::ProviderError("mock does not mint".to_owned()))
+            }
+        }
+        let auth = HubAuth::new(Box::new(BadSigProvider));
+        let headers = make_auth_header("Bearer badtoken");
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::InvalidToken)));
+    }
+
+    #[test]
+    fn authorize_insufficient_scope_returns_forbidden() {
+        struct ReadOnlyProvider;
+        impl AuthProvider for ReadOnlyProvider {
+            fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+                let repo = shardline_protocol::RepositoryScope::new(
+                    shardline_protocol::RepositoryProvider::GitHub,
+                    "owner",
+                    "repo",
+                    Some("main"),
+                )
+                .map_err(|_err| AuthError::InvalidToken)?;
+                TokenClaims::new("issuer", "subject", TokenScope::Read, repo, u64::MAX)
+                    .map_err(|_err| AuthError::InvalidToken)
+            }
+            fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+                Err(AuthError::ProviderError("mock does not mint".to_owned()))
+            }
+        }
+        let auth = HubAuth::new(Box::new(ReadOnlyProvider));
+        let headers = make_auth_header("Bearer token");
+        // Read-only token trying to write → Forbidden
+        let result = auth.authorize(&headers, TokenScope::Write);
+        assert!(matches!(result, Err(HubApiError::Forbidden)));
+    }
+
+    #[test]
+    fn authorize_provider_error_returns_signing_key_error() {
+        struct ErrorProvider;
+        #[allow(clippy::unreachable)]
+        impl AuthProvider for ErrorProvider {
+            fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+                Err(AuthError::ProviderError("downstream is down".to_owned()))
+            }
+            fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+                unreachable!()
+            }
+        }
+        let auth = HubAuth::new(Box::new(ErrorProvider));
+        let headers = make_auth_header("Bearer token");
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(
+            matches!(&result, Err(HubApiError::SigningKeyError(msg)) if msg == "downstream is down")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // authorize with no auth configured (permissive path in routes.rs but
+    // HubAuth::authorize always requires auth, so this just tests the
+    // error path when headers are missing)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn authorize_missing_header_returns_unauthorized() {
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let headers = HeaderMap::new();
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::Unauthorized)));
+    }
 }

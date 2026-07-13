@@ -668,4 +668,176 @@ mod tests {
         let deserialized: RepoType = serde_json::from_str(&value).unwrap();
         assert_eq!(deserialized, RepoType::Space);
     }
+
+    // -----------------------------------------------------------------------
+    // LfsBatchOperation serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lfs_batch_operation_download_serializes_to_lowercase() {
+        let json = serde_json::to_string(&LfsBatchOperation::Download).unwrap();
+        assert_eq!(json, "\"download\"");
+    }
+
+    #[test]
+    fn lfs_batch_operation_upload_serializes_to_lowercase() {
+        let json = serde_json::to_string(&LfsBatchOperation::Upload).unwrap();
+        assert_eq!(json, "\"upload\"");
+    }
+
+    #[test]
+    fn lfs_batch_operation_verify_serializes_to_lowercase() {
+        let json = serde_json::to_string(&LfsBatchOperation::Verify).unwrap();
+        assert_eq!(json, "\"verify\"");
+    }
+
+    #[test]
+    fn lfs_batch_operation_roundtrip_download() {
+        let op: LfsBatchOperation = serde_json::from_str("\"download\"").unwrap();
+        assert_eq!(op, LfsBatchOperation::Download);
+    }
+
+    #[test]
+    fn lfs_batch_operation_roundtrip_upload() {
+        let op: LfsBatchOperation = serde_json::from_str("\"upload\"").unwrap();
+        assert_eq!(op, LfsBatchOperation::Upload);
+    }
+
+    #[test]
+    fn lfs_batch_operation_roundtrip_verify() {
+        let op: LfsBatchOperation = serde_json::from_str("\"verify\"").unwrap();
+        assert_eq!(op, LfsBatchOperation::Verify);
+    }
+
+    // -----------------------------------------------------------------------
+    // WebhookCreateRequest defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn webhook_create_request_default_events_is_push() {
+        let req: WebhookCreateRequest =
+            serde_json::from_str(r#"{"url": "https://example.com/hook"}"#).unwrap();
+        assert_eq!(req.events, vec!["push"]);
+    }
+
+    #[test]
+    fn webhook_create_request_secret_is_optional() {
+        let req: WebhookCreateRequest =
+            serde_json::from_str(r#"{"url": "https://example.com/hook", "events": ["push"]}"#)
+                .unwrap();
+        assert!(req.secret.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // RepoSearchQuery defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_search_query_default_limit() {
+        let q: RepoSearchQuery = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(q.limit, 50);
+        assert_eq!(q.q, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // TreeQuery defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tree_query_defaults() {
+        let q: TreeQuery = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(q.limit.is_none());
+        assert!(q.cursor.is_none());
+        assert!(!q.recursive);
+    }
+
+    // -----------------------------------------------------------------------
+    // DatasetFirstRowsQuery defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dataset_first_rows_query_defaults() {
+        let q: DatasetFirstRowsQuery = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(q.config, "default");
+        assert_eq!(q.split, "train");
+        assert_eq!(q.limit, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // DatasetViewerQuery defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dataset_viewer_query_defaults() {
+        let q: DatasetViewerQuery = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(q.config, "default");
+        assert_eq!(q.offset, 0);
+        assert_eq!(q.length, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // RepoCreateRequest serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_create_request_roundtrip() {
+        let json = r#"{"type":"model","name":"org/repo","private":true}"#;
+        let req: RepoCreateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.repo_type, RepoType::Model);
+        assert_eq!(req.name, "org/repo");
+        assert!(req.private);
+
+        let serialized = serde_json::to_string(&req).unwrap();
+        let deserialized: RepoCreateRequest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.repo_type, RepoType::Model);
+        assert_eq!(deserialized.name, "org/repo");
+        assert!(deserialized.private);
+    }
+
+    // -----------------------------------------------------------------------
+    // RepoResponse serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_response_serialization() {
+        let resp = RepoResponse {
+            id: "org/repo".into(),
+            repo_type: RepoType::Model,
+            private: false,
+            url: "/models/org/repo".into(),
+            default_branch: Some("main".into()),
+            tags: vec![],
+            downloads: 0,
+            likes: 0,
+            last_modified: Some("2024-01-01T00:00:00+00:00".into()),
+            pipeline_tag: None,
+            card_data: None,
+            security_status: serde_json::json!({}),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "org/repo");
+        assert_eq!(json["type"], "model");
+        assert_eq!(json["url"], "/models/org/repo");
+        assert_eq!(json["default_branch"], "main");
+    }
+
+    // -----------------------------------------------------------------------
+    // WebhookEventPayload serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn webhook_event_payload_serialization() {
+        let payload = WebhookEventPayload {
+            event: "push".into(),
+            repository: "org/repo".into(),
+            revision: "abc123".into(),
+            timestamp: 42,
+            data: serde_json::json!({"key": "value"}),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["event"], "push");
+        assert_eq!(json["repository"], "org/repo");
+        assert_eq!(json["timestamp"], 42);
+        assert_eq!(json["data"]["key"], "value");
+    }
 }

@@ -496,7 +496,139 @@ impl<T: RecordTraversal + RecordMutation> RecordStore for T {}
 mod tests {
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
-    use super::{FileChunkRecord, FileRecord, FileRecordInvariantError};
+    use super::{FileChunkRecord, FileRecord, FileRecordInvariantError, RepositoryRecordScope};
+
+    #[test]
+    fn file_record_storage_layout_referenced_terms_when_chunk_size_is_zero() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 8,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: Vec::new(),
+        };
+        assert_eq!(
+            record.storage_layout(),
+            super::FileRecordStorageLayout::ReferencedObjectTerms
+        );
+    }
+
+    #[test]
+    fn file_record_storage_layout_stored_chunks_when_chunk_size_nonzero() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 8,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: Vec::new(),
+        };
+        assert_eq!(
+            record.storage_layout(),
+            super::FileRecordStorageLayout::StoredChunks
+        );
+    }
+
+    #[test]
+    fn repository_record_scope_from_repository_scope_drops_revision() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", Some("v2"))
+                .unwrap();
+        let record_scope = RepositoryRecordScope::from_repository_scope(&scope);
+
+        assert_eq!(record_scope.provider(), RepositoryProvider::GitLab);
+        assert_eq!(record_scope.owner(), "group");
+        assert_eq!(record_scope.name(), "project");
+    }
+
+    #[test]
+    fn file_record_reconstruction_plan_rejects_empty_chunk() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 0,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 1,
+            }],
+        };
+        assert_eq!(
+            record.validate_reconstruction_plan(),
+            Err(FileRecordInvariantError::EmptyChunk)
+        );
+    }
+
+    #[test]
+    fn file_record_reconstruction_plan_rejects_invalid_chunk_range() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 4,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 2,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+        assert_eq!(
+            record.validate_reconstruction_plan(),
+            Err(FileRecordInvariantError::InvalidChunkRange)
+        );
+    }
+
+    #[test]
+    fn file_record_reconstruction_plan_rejects_invalid_packed_range() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 4,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 4,
+                packed_end: 2,
+            }],
+        };
+        assert_eq!(
+            record.validate_reconstruction_plan(),
+            Err(FileRecordInvariantError::InvalidPackedRange)
+        );
+    }
+
+    #[test]
+    fn file_record_reconstruction_plan_rejects_empty_chunks_with_nonzero_total_bytes() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 4,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![],
+        };
+        assert_eq!(
+            record.validate_reconstruction_plan(),
+            Err(FileRecordInvariantError::TotalBytesMismatch)
+        );
+    }
 
     #[test]
     fn file_record_preserves_repository_scope_and_chunk_order() {

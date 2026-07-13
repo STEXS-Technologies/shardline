@@ -114,6 +114,10 @@ mod tests {
         (status, body)
     }
 
+    // -----------------------------------------------------------------------
+    // Status code mappings
+    // -----------------------------------------------------------------------
+
     #[test]
     fn not_found_maps_to_404() {
         let (status, body) = status_and_body(HubApiError::NotFound);
@@ -164,6 +168,13 @@ mod tests {
     }
 
     #[test]
+    fn conflict_maps_to_409() {
+        let (status, body) = status_and_body(HubApiError::Conflict("parent mismatch".into()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("conflict: parent mismatch"));
+    }
+
+    #[test]
     fn io_error_maps_to_500() {
         let io_err = std::io::Error::other("disk failure");
         let (status, body) = status_and_body(HubApiError::Io(io_err));
@@ -187,6 +198,36 @@ mod tests {
     }
 
     #[test]
+    fn signing_key_error_maps_to_500() {
+        let (status, body) = status_and_body(HubApiError::SigningKeyError("misconfig".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("internal error"));
+    }
+
+    #[test]
+    fn pkt_line_error_maps_to_500() {
+        let err = HubApiError::from(crate::git::pktline::PktLineError::PayloadTooLarge {
+            size: 100,
+            max: 50,
+        });
+        let (status, body) = status_and_body(err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("internal error"));
+    }
+
+    #[test]
+    fn pack_error_maps_to_500() {
+        let err = HubApiError::from(crate::git::pack::PackError::TooManyObjects);
+        let (status, body) = status_and_body(err);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("internal error"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Display implementations
+    // -----------------------------------------------------------------------
+
+    #[test]
     fn error_display_messages() {
         assert_eq!(HubApiError::NotFound.to_string(), "not found");
         assert_eq!(HubApiError::Unauthorized.to_string(), "unauthorized");
@@ -208,5 +249,49 @@ mod tests {
             HubApiError::CasError("y".into()).to_string(),
             "cas error: y"
         );
+        assert_eq!(
+            HubApiError::Conflict("parent mismatch".into()).to_string(),
+            "conflict: parent mismatch"
+        );
+        assert_eq!(
+            HubApiError::SigningKeyError("key not found".into()).to_string(),
+            "token signing key is misconfigured: key not found"
+        );
+        assert!(HubApiError::Io(std::io::Error::other("disk full"))
+            .to_string()
+            .contains("io error"));
+        assert!(HubApiError::Json(serde_json::from_str::<()>("bad").unwrap_err())
+            .to_string()
+            .contains("json error"));
+    }
+
+    // -----------------------------------------------------------------------
+    // From conversions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_pkt_line_error() {
+        let err: HubApiError =
+            crate::git::pktline::PktLineError::PayloadTooLarge { size: 100, max: 50 }.into();
+        assert!(matches!(err, HubApiError::PktLine(_)));
+    }
+
+    #[test]
+    fn from_pack_error() {
+        let err: HubApiError = crate::git::pack::PackError::TooManyObjects.into();
+        assert!(matches!(err, HubApiError::Pack(_)));
+    }
+
+    #[test]
+    fn from_io_error() {
+        let err: HubApiError = std::io::Error::other("fail").into();
+        assert!(matches!(err, HubApiError::Io(_)));
+    }
+
+    #[test]
+    fn from_json_error() {
+        let json_err = serde_json::from_str::<()>("bad").unwrap_err();
+        let err: HubApiError = json_err.into();
+        assert!(matches!(err, HubApiError::Json(_)));
     }
 }
