@@ -299,7 +299,6 @@ impl ServerError {
     /// When adding a new [`ServerError`] variant, add it explicitly to this match.
     /// If the variant has an OCI-specific code, map it above the catch-all.
     /// If it is an internal error (no OCI-specific meaning), keep it in the catch-all.
-    #[allow(clippy::wildcard_enum_match_arm)]
     const fn oci_error_code(&self) -> &'static str {
         match self {
             Self::NotFound => "MANIFEST_UNKNOWN",

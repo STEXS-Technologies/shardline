@@ -312,7 +312,6 @@ impl FileUploadIngestor {
 
     /// `windows(2)` always yields slices of exactly two elements, so indexing
     /// at 0 and 1 is infallible.
-    #[allow(clippy::indexing_slicing)]
     fn record_completed_chunks(&mut self) -> Result<(), ServerError> {
         let expected_chunks = usize::try_from(self.next_sequence)?;
         if self.completed_chunks.len() != expected_chunks {
@@ -322,7 +321,11 @@ impl FileUploadIngestor {
         let already_sorted = self
             .completed_chunks
             .windows(2)
-            .all(|w| w[0].sequence <= w[1].sequence);
+            .all(|w: &[SequencedStoredChunkOutcome]| {
+                w.first()
+                    .zip(w.get(1))
+                    .is_some_and(|(a, b)| a.sequence <= b.sequence)
+            });
         if !already_sorted {
             self.completed_chunks
                 .sort_unstable_by_key(|outcome| outcome.sequence);

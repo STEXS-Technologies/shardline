@@ -10,14 +10,13 @@ pub enum RepoType {
 }
 
 impl RepoType {
-    /// Parses a repository type string.
+    /// Parses a repository type string from an API response.
     ///
     /// # Errors
     ///
     /// Returns `None` for unrecognized types.
     #[must_use]
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn from_api_str(value: &str) -> Option<Self> {
         match value {
             "models" | "model" => Some(Self::Model),
             "datasets" | "dataset" => Some(Self::Dataset),
@@ -580,47 +579,47 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // RepoType::from_str
+    // RepoType::from_api_str
     // -----------------------------------------------------------------------
 
     #[test]
     fn from_str_models() {
-        assert_eq!(RepoType::from_str("models"), Some(RepoType::Model));
+        assert_eq!(RepoType::from_api_str("models"), Some(RepoType::Model));
     }
 
     #[test]
     fn from_str_model() {
-        assert_eq!(RepoType::from_str("model"), Some(RepoType::Model));
+        assert_eq!(RepoType::from_api_str("model"), Some(RepoType::Model));
     }
 
     #[test]
     fn from_str_datasets() {
-        assert_eq!(RepoType::from_str("datasets"), Some(RepoType::Dataset));
+        assert_eq!(RepoType::from_api_str("datasets"), Some(RepoType::Dataset));
     }
 
     #[test]
     fn from_str_dataset() {
-        assert_eq!(RepoType::from_str("dataset"), Some(RepoType::Dataset));
+        assert_eq!(RepoType::from_api_str("dataset"), Some(RepoType::Dataset));
     }
 
     #[test]
     fn from_str_spaces() {
-        assert_eq!(RepoType::from_str("spaces"), Some(RepoType::Space));
+        assert_eq!(RepoType::from_api_str("spaces"), Some(RepoType::Space));
     }
 
     #[test]
     fn from_str_space() {
-        assert_eq!(RepoType::from_str("space"), Some(RepoType::Space));
+        assert_eq!(RepoType::from_api_str("space"), Some(RepoType::Space));
     }
 
     #[test]
     fn from_str_unknown() {
-        assert_eq!(RepoType::from_str("unknown"), None);
+        assert_eq!(RepoType::from_api_str("unknown"), None);
     }
 
     #[test]
     fn from_str_empty() {
-        assert_eq!(RepoType::from_str(""), None);
+        assert_eq!(RepoType::from_api_str(""), None);
     }
 
     // -----------------------------------------------------------------------

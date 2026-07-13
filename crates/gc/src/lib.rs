@@ -143,7 +143,6 @@ impl From<shardline_server_core::RebuildOverflowError> for GcError {
     }
 }
 
-#[allow(clippy::wildcard_enum_match_arm)]
 impl From<GcError> for shardline_server_core::ServerObjectStoreError {
     fn from(err: GcError) -> Self {
         match err {

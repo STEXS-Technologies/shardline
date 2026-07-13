@@ -1495,4 +1495,80 @@ mod tests {
         assert_eq!(read.len(), 1);
         assert_eq!(read[0], body[1_048_575]);
     }
+
+    #[test]
+    fn local_object_store_copies_existing_object() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let source = ObjectKey::parse("ab/source").unwrap();
+        let dest = ObjectKey::parse("cd/dest").unwrap();
+        let body = b"hello world";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 11);
+
+        // Put source
+        assert!(matches!(store.put_if_absent(&source, ObjectBody::from_slice(body), &integrity), Ok(PutOutcome::Inserted)));
+        // Copy to dest
+        assert!(matches!(store.copy_object_if_absent(&source, &dest), Ok(PutOutcome::Inserted)));
+        // Second copy is idempotent
+        assert!(matches!(store.copy_object_if_absent(&source, &dest), Ok(PutOutcome::AlreadyExists)));
+        // Dest is readable and matches
+        let dest_data = store.read_range(&dest, ByteRange::new(0, 10).unwrap()).unwrap();
+        assert_eq!(dest_data, body);
+    }
+
+    #[test]
+    fn local_object_store_copy_returns_not_found_for_missing_source() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let source = ObjectKey::parse("ab/missing").unwrap();
+        let dest = ObjectKey::parse("cd/dest").unwrap();
+        let result = store.copy_object_if_absent(&source, &dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_object_store_put_overwrite_replaces_existing_content() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("ab/overwrite").unwrap();
+        let original = b"original content";
+        let replacement = b"replacement content";
+
+        store.put_if_absent(&key, ObjectBody::from_slice(original), &ObjectIntegrity::new(super::chunk_hash(original), original.len() as u64)).unwrap();
+        store.put_overwrite(&key, ObjectBody::from_slice(replacement), &ObjectIntegrity::new(super::chunk_hash(replacement), replacement.len() as u64)).unwrap();
+
+        let data = store.read_range(&key, ByteRange::new(0, replacement.len() as u64 - 1).unwrap()).unwrap();
+        assert_eq!(data, replacement);
+    }
+
+    #[test]
+    fn local_object_store_list_flat_namespace_page_returns_requested_page() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let prefix = ObjectPrefix::parse("ab/").unwrap();
+        let key_a = ObjectKey::parse("ab/aaaa").unwrap();
+        let key_b = ObjectKey::parse("ab/bbbb").unwrap();
+        let body = b"data";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
+
+        store.put_if_absent(&key_a, ObjectBody::from_slice(body), &integrity).unwrap();
+        store.put_if_absent(&key_b, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        // List with no start_after returns both
+        let page = store.list_flat_namespace_page(&prefix, None, 10).unwrap();
+        assert_eq!(page.len(), 2);
+
+        // List with start_after returns remaining
+        let page = store.list_flat_namespace_page(&prefix, Some(&key_a), 10).unwrap();
+        assert_eq!(page.len(), 1);
+    }
+
+    #[test]
+    fn local_object_store_open_missing_file_returns_error() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("ab/missing").unwrap();
+        let result = store.open_object_file(&key);
+        assert!(result.is_err());
+    }
 }

@@ -1,5 +1,7 @@
 use prometheus::{IntCounter, IntGauge, Registry};
 
+use crate::{must_counter, must_gauge};
+
 pub struct ProtocolMetrics {
     pub lfs_uploads: IntCounter,
     pub lfs_downloads: IntCounter,
@@ -15,63 +17,48 @@ pub struct ProtocolMetrics {
 }
 
 impl ProtocolMetrics {
-    /// # Panics
-    ///
-    /// Panics if prometheus metric registration fails (should not happen with static names).
     #[must_use]
-    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let lfs_uploads = IntCounter::new(
+        let lfs_uploads = must_counter(
             "shardline_lfs_upload_requests_total",
             "Git LFS upload requests",
-        )
-        .expect("prometheus metric names are static constants");
-        let lfs_downloads = IntCounter::new(
+        );
+        let lfs_downloads = must_counter(
             "shardline_lfs_download_requests_total",
             "Git LFS download requests",
-        )
-        .expect("prometheus metric names are static constants");
+        );
         let oci_uploads =
-            IntCounter::new("shardline_oci_upload_requests_total", "OCI upload requests")
-                .expect("prometheus metric names are static constants");
-        let oci_downloads = IntCounter::new(
+            must_counter("shardline_oci_upload_requests_total", "OCI upload requests");
+        let oci_downloads = must_counter(
             "shardline_oci_download_requests_total",
             "OCI download requests",
-        )
-        .expect("prometheus metric names are static constants");
+        );
         let hub_api_requests =
-            IntCounter::new("shardline_hub_api_requests_total", "Hub API requests")
-                .expect("prometheus metric names are static constants");
-        let hub_api_commits = IntCounter::new(
+            must_counter("shardline_hub_api_requests_total", "Hub API requests");
+        let hub_api_commits = must_counter(
             "shardline_hub_api_commit_operations_total",
             "Hub API commit operations",
-        )
-        .expect("prometheus metric names are static constants");
-        let hub_api_file_uploads = IntCounter::new(
+        );
+        let hub_api_file_uploads = must_counter(
             "shardline_hub_api_file_uploads_total",
             "Hub API file uploads",
-        )
-        .expect("prometheus metric names are static constants");
-        let hub_api_file_downloads = IntCounter::new(
+        );
+        let hub_api_file_downloads = must_counter(
             "shardline_hub_api_file_downloads_total",
             "Hub API file downloads",
-        )
-        .expect("prometheus metric names are static constants");
-        let oci_registry_token_requests = IntCounter::new(
+        );
+        let oci_registry_token_requests = must_counter(
             "shardline_oci_registry_token_requests_total",
             "OCI registry token requests",
-        )
-        .expect("prometheus metric names are static constants");
-        let oci_registry_token_rate_limited = IntCounter::new(
+        );
+        let oci_registry_token_rate_limited = must_counter(
             "shardline_oci_registry_token_rate_limited_total",
             "OCI registry token requests rate limited",
-        )
-        .expect("prometheus metric names are static constants");
-        let oci_registry_token_active = IntGauge::new(
+        );
+        let oci_registry_token_active = must_gauge(
             "shardline_oci_registry_token_active_requests",
             "Active OCI registry token requests",
-        )
-        .expect("prometheus metric names are static constants");
+        );
 
         registry.register(Box::new(lfs_uploads.clone())).ok();
         registry.register(Box::new(lfs_downloads.clone())).ok();

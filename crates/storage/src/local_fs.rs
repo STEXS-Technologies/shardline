@@ -314,7 +314,6 @@ const fn anchored_path_options() -> AnchoredPathOptions {
     AnchoredPathOptions::new(Some(LOCAL_DIRECTORY_MODE), Some(LOCAL_FILE_MODE))
 }
 
-#[allow(clippy::indexing_slicing)]
 fn ensure_file_matches_bytes(mut file: File, expected: &[u8]) -> io::Result<()> {
     use std::io::Read;
     const LOCAL_FILE_COMPARE_CHUNK_BYTES: usize = 256 * 1024;
@@ -328,7 +327,9 @@ fn ensure_file_matches_bytes(mut file: File, expected: &[u8]) -> io::Result<()> 
             }
             return Ok(());
         }
-        let chunk = &buffer[..read];
+        let chunk = buffer.get(..read).ok_or_else(|| {
+            io::Error::new(ErrorKind::InvalidData, "read exceeded buffer length")
+        })?;
         let expected_chunk = expected.get(offset..).and_then(|s| s.get(..read));
         match expected_chunk {
             Some(ec) if chunk == ec => {}

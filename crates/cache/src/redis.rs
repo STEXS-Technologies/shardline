@@ -175,6 +175,13 @@ mod tests {
         assert!(rendered.contains("***"));
     }
 
+    #[test]
+    fn redis_cache_rejects_empty_url() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("", ttl_seconds);
+        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+    }
+
     #[tokio::test]
     async fn redis_cache_roundtrips_payload_when_live_url_is_available() {
         let Some(redis_url) = env_var("STEXS_REDIS_CACHE_TEST_URL").ok() else {

@@ -1,5 +1,7 @@
 use prometheus::{Histogram, HistogramOpts, IntCounter, Registry};
 
+use crate::{must_counter, must_histogram};
+
 pub struct GcMetrics {
     pub runs: IntCounter,
     pub duration: Histogram,
@@ -8,29 +10,21 @@ pub struct GcMetrics {
 }
 
 impl GcMetrics {
-    /// # Panics
-    ///
-    /// Panics if prometheus metric registration fails (should not happen with static names).
     #[must_use]
-    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let runs = IntCounter::new("shardline_gc_runs_total", "GC runs")
-            .expect("prometheus metric names are static constants");
-        let duration = Histogram::with_opts(
+        let runs = must_counter("shardline_gc_runs_total", "GC runs");
+        let duration = must_histogram(
             HistogramOpts::new("shardline_gc_duration_seconds", "GC duration")
                 .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
-        )
-        .expect("prometheus metric names are static constants");
-        let objects_collected = IntCounter::new(
+        );
+        let objects_collected = must_counter(
             "shardline_gc_objects_collected_total",
             "Objects collected by GC",
-        )
-        .expect("prometheus metric names are static constants");
-        let bytes_collected = IntCounter::new(
+        );
+        let bytes_collected = must_counter(
             "shardline_gc_bytes_collected_total",
             "Bytes collected by GC",
-        )
-        .expect("prometheus metric names are static constants");
+        );
 
         registry.register(Box::new(runs.clone())).ok();
         registry.register(Box::new(duration.clone())).ok();

@@ -222,12 +222,14 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // converted via `.with_state()`.
     let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
     for frontend in state.config.server_frontends() {
-        #[allow(clippy::wildcard_enum_match_arm)]
         match frontend {
             ServerFrontend::Hub => {
                 hub_state = Some(build_hub_state(&state)?);
             }
-            _ => {
+            ServerFrontend::Xet
+            | ServerFrontend::Lfs
+            | ServerFrontend::BazelHttp
+            | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
         }

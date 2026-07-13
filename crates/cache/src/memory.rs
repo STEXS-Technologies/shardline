@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    future::Future,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
@@ -9,7 +10,10 @@ use tokio::time::Instant;
 
 use tokio::sync::{Notify, RwLock};
 
-use crate::{AsyncReconstructionCache, ReconstructionCacheFuture, ReconstructionCacheKey};
+use crate::{
+    AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheFuture,
+    ReconstructionCacheKey,
+};
 
 #[derive(Debug, Clone)]
 struct MemoryEntry {
@@ -107,6 +111,95 @@ impl MemoryReconstructionCache {
             inner: Arc::new(RwLock::new(CacheInner::new())),
         }
     }
+
+    /// Returns the cached value for `key`, or computes it with `loader`.
+    ///
+    /// Concurrent calls for the same key are deduplicated — only one caller
+    /// runs the loader; the rest await the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReconstructionCacheError`] when the loader fails or the
+    /// underlying cache operation encounters an error.
+    pub async fn get_or_load<F, Fut>(
+        &self,
+        key: &ReconstructionCacheKey,
+        loader: F,
+    ) -> Result<Option<Vec<u8>>, ReconstructionCacheError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, ReconstructionCacheError>>,
+    {
+        // Fast path: check the cache without a write lock.
+        {
+            let inner = self.inner.read().await;
+            let now = Instant::now();
+            if let Some(entry) = inner.entries.get(key)
+                && entry.expires_at > now
+            {
+                return Ok(Some(entry.payload.as_ref().clone()));
+            }
+        }
+
+        // Try to become the exclusive loader for this key.
+        let (should_load, notify) = {
+            let mut inner = self.inner.write().await;
+            let now = Instant::now();
+
+            // Re-check after acquiring the write lock.
+            if let Some(entry) = inner.entries.get(key)
+                && entry.expires_at > now
+            {
+                return Ok(Some(entry.payload.as_ref().clone()));
+            }
+
+            // Check if someone else is already loading this key.
+            #[allow(clippy::option_if_let_else)]
+            let (should_load, notify) = if let Some(existing) = inner.loading.get(key) {
+                (false, Arc::clone(existing))
+            } else {
+                let new_notify = Arc::new(Notify::new());
+                inner.loading.insert(key.clone(), Arc::clone(&new_notify));
+                // Clean up any expired entry so the loader can store fresh data.
+                if let Some(entry) = inner.entries.get(key)
+                    && entry.expires_at <= now
+                {
+                    inner.remove(key);
+                }
+                (true, new_notify)
+            };
+            (should_load, notify)
+        };
+
+        if should_load {
+            let result = loader().await;
+            match result {
+                Ok(payload) => {
+                    self.put(key, &payload).await?;
+                    Ok(Some(payload))
+                }
+                Err(e) => {
+                    // Clean up the loading entry so future callers can retry.
+                    let mut inner = self.inner.write().await;
+                    inner.loading.remove(key);
+                    notify.notify_waiters();
+                    Err(e)
+                }
+            }
+        } else {
+            // Someone else is loading — wait for them.
+            notify.notified().await;
+            let inner = self.inner.read().await;
+            let now = Instant::now();
+            if let Some(entry) = inner.entries.get(key)
+                && entry.expires_at > now
+            {
+                Ok(Some(entry.payload.as_ref().clone()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl AsyncReconstructionCache for MemoryReconstructionCache {
@@ -122,10 +215,10 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             let now = Instant::now();
             {
                 let inner = self.inner.read().await;
-                if let Some(entry) = inner.entries.get(key) {
-                    if entry.expires_at > now {
-                        return Ok(Some(entry.payload.as_ref().clone()));
-                    }
+                if let Some(entry) = inner.entries.get(key)
+                    && entry.expires_at > now
+                {
+                    return Ok(Some(entry.payload.as_ref().clone()));
                 } else if !inner.loading.contains_key(key) {
                     return Ok(None);
                 }
@@ -149,9 +242,8 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
                 tokio::select! {
                     () = notify.notified() => {}
                     () = tokio::time::sleep(Duration::from_secs(30)) => {
-                        #[allow(clippy::shadow_unrelated)]
-                        let mut inner = self.inner.write().await;
-                        inner.loading.remove(key);
+                        let mut write_guard = self.inner.write().await;
+                        write_guard.loading.remove(key);
                         return Ok(None);
                     }
                 }
@@ -222,11 +314,12 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
 mod tests {
     use std::{
         num::{NonZeroU64, NonZeroUsize},
+        sync::atomic::{AtomicU64, Ordering},
         time::Duration,
     };
 
     use super::MemoryReconstructionCache;
-    use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
+    use crate::{AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheKey};
 
     #[tokio::test]
     async fn memory_cache_roundtrips_one_payload() {
@@ -278,6 +371,143 @@ mod tests {
 
         assert!(value.is_ok());
         assert_eq!(value.ok(), Some(None));
+    }
+
+    // ── TTL expiry (wall-clock) ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_cache_expires_entries_after_ttl_wall_clock() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(1).unwrap(),
+            NonZeroUsize::new(100).unwrap(),
+        );
+        let key = ReconstructionCacheKey::latest("test-file", None);
+        cache.put(&key, b"hello").await.unwrap();
+
+        // Immediately readable
+        let result = cache.get(&key).await.unwrap();
+        assert_eq!(result, Some(b"hello".to_vec()));
+
+        // After expiry
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let result = cache.get(&key).await.unwrap();
+        assert_eq!(result, None, "expired entry should return None");
+    }
+
+    // ── Eviction with max_entries = 1 ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_cache_evicts_oldest_when_at_capacity_one() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap(),
+            NonZeroUsize::new(1).unwrap(), // only 1 entry
+        );
+        let key_a = ReconstructionCacheKey::latest("file-a", None);
+        let key_b = ReconstructionCacheKey::latest("file-b", None);
+
+        cache.put(&key_a, b"aaa").await.unwrap();
+        cache.put(&key_b, b"bbb").await.unwrap();
+
+        // key_a should be evicted (oldest)
+        let result = cache.get(&key_a).await.unwrap();
+        assert_eq!(result, None, "oldest entry should be evicted");
+
+        // key_b should still be present
+        let result = cache.get(&key_b).await.unwrap();
+        assert_eq!(result, Some(b"bbb".to_vec()));
+    }
+
+    // ── Concurrent get_or_load deduplication ──────────────────────────────
+
+    #[tokio::test]
+    async fn memory_cache_concurrent_get_or_load_deduplicates() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap(),
+            NonZeroUsize::new(100).unwrap(),
+        ));
+        let key = ReconstructionCacheKey::latest("dedup-test", None);
+        let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+        // Spawn 10 concurrent get_or_load calls with a slow loader
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let cache = std::sync::Arc::clone(&cache);
+            let key = key.clone();
+            let load_count = std::sync::Arc::clone(&load_count);
+            handles.push(tokio::spawn(async move {
+                cache
+                    .get_or_load(&key, || {
+                        load_count.fetch_add(1, Ordering::Relaxed);
+                        Box::pin(async { Ok::<_, ReconstructionCacheError>(b"result".to_vec()) })
+                    })
+                    .await
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result.is_ok(), "get_or_load should succeed");
+            assert_eq!(result.unwrap(), Some(b"result".to_vec()));
+        }
+
+        // Loader should only have been called once
+        assert_eq!(load_count.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Loader failure cleanup ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_cache_loader_failure_cleans_up_pending() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap(),
+            NonZeroUsize::new(100).unwrap(),
+        );
+        let key = ReconstructionCacheKey::latest("fail-test", None);
+
+        // First call: loader fails with Operation error
+        let result = cache
+            .get_or_load(&key, || {
+                Box::pin(async { Err::<Vec<u8>, _>(ReconstructionCacheError::Operation) })
+            })
+            .await;
+        assert!(result.is_err());
+
+        // Second call should retry (not cache the error)
+        let result = cache
+            .get_or_load(&key, || {
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"success".to_vec()) })
+            })
+            .await;
+        assert_eq!(result.unwrap(), Some(b"success".to_vec()));
+    }
+
+    // ── Delete ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_cache_delete_removes_entry() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap(),
+            NonZeroUsize::new(100).unwrap(),
+        );
+        let key = ReconstructionCacheKey::latest("del-test", None);
+
+        cache.put(&key, b"data").await.unwrap();
+        assert!(cache.get(&key).await.unwrap().is_some());
+
+        let deleted = cache.delete(&key).await.unwrap();
+        assert!(deleted);
+        assert!(cache.get(&key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_cache_delete_missing_returns_false() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap(),
+            NonZeroUsize::new(100).unwrap(),
+        );
+        let key = ReconstructionCacheKey::latest("missing", None);
+        let deleted = cache.delete(&key).await.unwrap();
+        assert!(!deleted);
     }
 
     // ── Concurrency stress tests ──────────────────────────────────────────

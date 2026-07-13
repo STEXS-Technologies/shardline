@@ -1,6 +1,5 @@
 #![deny(unsafe_code)]
 #![allow(
-    clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::let_underscore_must_use
 )]

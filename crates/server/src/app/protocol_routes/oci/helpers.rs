@@ -2,8 +2,7 @@ use axum::http::Method;
 
 use super::path::OciPath;
 
-#[allow(clippy::missing_const_for_fn)]
-pub(crate) fn oci_route_served_by_api(method: &Method, path: &OciPath) -> bool {
+pub(crate) const fn oci_route_served_by_api(method: &Method, path: &OciPath) -> bool {
     matches!(
         (method, path),
         (
@@ -16,8 +15,7 @@ pub(crate) fn oci_route_served_by_api(method: &Method, path: &OciPath) -> bool {
     )
 }
 
-#[allow(clippy::missing_const_for_fn)]
-pub(crate) fn oci_route_served_by_transfer(method: &Method, path: &OciPath) -> bool {
+pub(crate) const fn oci_route_served_by_transfer(method: &Method, path: &OciPath) -> bool {
     matches!(
         (method, path),
         (

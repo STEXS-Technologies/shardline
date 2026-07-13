@@ -311,8 +311,10 @@ impl AuthProvider for OidcProvider {
         if parts.len() != 3 {
             return Err(AuthError::InvalidToken);
         }
-        #[allow(clippy::indexing_slicing)]
-        self.verify_jwt_claims(parts[0], parts[1], parts[2])
+        let header = parts.first().ok_or(AuthError::InvalidToken)?;
+        let payload = parts.get(1).ok_or(AuthError::InvalidToken)?;
+        let signature = parts.get(2).ok_or(AuthError::InvalidToken)?;
+        self.verify_jwt_claims(header, payload, signature)
     }
 
     fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {

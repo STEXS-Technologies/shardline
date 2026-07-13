@@ -101,12 +101,16 @@ pub fn resolve_platform_symlinks(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
+    use std::path::Path;
     #[cfg(unix)]
     use std::fs::create_dir_all;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
-    use super::{DirectoryPathError, ensure_directory_path_components_are_not_symlinked};
+    use super::{
+        DirectoryPathError, ensure_directory_path_components_are_not_symlinked,
+        resolve_platform_symlinks,
+    };
 
     #[cfg(unix)]
     #[test]
@@ -162,5 +166,19 @@ mod tests {
             ensure_directory_path_components_are_not_symlinked(&sandbox.path().join("missing"));
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_platform_symlinks_normal_path_returns_itself() {
+        let path = Path::new("/tmp/test/path");
+        let result = resolve_platform_symlinks(path);
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn resolve_platform_symlinks_relative_path_returns_itself() {
+        let path = Path::new("relative/path");
+        let result = resolve_platform_symlinks(path);
+        assert_eq!(result, path);
     }
 }

@@ -1,5 +1,7 @@
 use prometheus::{Histogram, HistogramOpts, IntCounter, Registry};
 
+use crate::{must_counter, must_histogram};
+
 pub struct XetMetrics {
     pub shard_uploads: IntCounter,
     pub shard_upload_bytes: IntCounter,
@@ -14,38 +16,27 @@ pub struct XetMetrics {
 }
 
 impl XetMetrics {
-    /// # Panics
-    ///
-    /// Panics if prometheus metric registration fails (should not happen with static names).
     #[must_use]
-    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let shard_uploads = IntCounter::new(
+        let shard_uploads = must_counter(
             "shardline_xet_shard_uploads_total",
             "Xet shard metadata uploads",
-        )
-        .expect("prometheus metric names are static constants");
-        let shard_upload_bytes = IntCounter::new(
+        );
+        let shard_upload_bytes = must_counter(
             "shardline_xet_shard_upload_bytes_total",
             "Xet shard metadata bytes uploaded",
-        )
-        .expect("prometheus metric names are static constants");
-        let xorb_uploads = IntCounter::new("shardline_xet_xorb_uploads_total", "Xet xorb uploads")
-            .expect("prometheus metric names are static constants");
-        let xorb_upload_bytes = IntCounter::new(
+        );
+        let xorb_uploads = must_counter("shardline_xet_xorb_uploads_total", "Xet xorb uploads");
+        let xorb_upload_bytes = must_counter(
             "shardline_xet_xorb_upload_bytes_total",
             "Xet xorb bytes uploaded",
-        )
-        .expect("prometheus metric names are static constants");
-        let xorb_downloads =
-            IntCounter::new("shardline_xet_xorb_downloads_total", "Xet xorb downloads")
-                .expect("prometheus metric names are static constants");
-        let reconstruction_requests = IntCounter::new(
+        );
+        let xorb_downloads = must_counter("shardline_xet_xorb_downloads_total", "Xet xorb downloads");
+        let reconstruction_requests = must_counter(
             "shardline_xet_reconstruction_requests_total",
             "Xet file reconstruction requests",
-        )
-        .expect("prometheus metric names are static constants");
-        let reconstruction_duration = Histogram::with_opts(
+        );
+        let reconstruction_duration = must_histogram(
             HistogramOpts::new(
                 "shardline_xet_reconstruction_duration_seconds",
                 "Xet reconstruction latency",
@@ -53,9 +44,8 @@ impl XetMetrics {
             .buckets(vec![
                 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
             ]),
-        )
-        .expect("prometheus metric names are static constants");
-        let reconstruction_chunks = Histogram::with_opts(
+        );
+        let reconstruction_chunks = must_histogram(
             HistogramOpts::new(
                 "shardline_xet_reconstruction_chunks_total",
                 "Chunks per Xet reconstruction",
@@ -63,18 +53,15 @@ impl XetMetrics {
             .buckets(vec![
                 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
             ]),
-        )
-        .expect("prometheus metric names are static constants");
-        let dedupe_shard_queries = IntCounter::new(
+        );
+        let dedupe_shard_queries = must_counter(
             "shardline_xet_dedupe_shard_queries_total",
             "Xet dedupe shard lookups",
-        )
-        .expect("prometheus metric names are static constants");
-        let dedupe_shard_hits = IntCounter::new(
+        );
+        let dedupe_shard_hits = must_counter(
             "shardline_xet_dedupe_shard_hits_total",
             "Xet dedupe shard cache hits",
-        )
-        .expect("prometheus metric names are static constants");
+        );
 
         registry.register(Box::new(shard_uploads.clone())).ok();
         registry.register(Box::new(shard_upload_bytes.clone())).ok();

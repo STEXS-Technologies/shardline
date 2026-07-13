@@ -126,8 +126,9 @@ pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
     // SAFETY: guarded by `data.len()` comparison on this same line
     while pos.wrapping_add(4) <= data.len() {
         // SAFETY: guarded by `pos + 4 <= data.len()` check in the while condition
-        #[allow(clippy::indexing_slicing)]
-        let hex_len = &data[pos..pos.wrapping_add(4)];
+        let Some(hex_len) = data.get(pos..pos.wrapping_add(4)) else {
+            break;
+        };
         let Ok(hex_str) = std::str::from_utf8(hex_len) else {
             break;
         };
@@ -146,8 +147,9 @@ pub fn decode_lines(data: &[u8]) -> Vec<Vec<u8>> {
         }
 
         // SAFETY: guarded by the bounds check immediately above
-        #[allow(clippy::indexing_slicing)]
-        let payload = &data[pos.wrapping_add(4)..pos.wrapping_add(len as usize)];
+        let Some(payload) = data.get(pos.wrapping_add(4)..pos.wrapping_add(len as usize)) else {
+            break;
+        };
         lines.push(payload.to_vec());
         // SAFETY: len is bounded by pkt-line max payload (65520 bytes), so wrapping is safe
         pos = pos.wrapping_add(len as usize);
@@ -169,8 +171,9 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
     // SAFETY: guarded by `data.len()` comparison on this same line
     while pos.wrapping_add(4) <= data.len() {
         // SAFETY: guarded by `pos + 4 <= data.len()` check in the while condition
-        #[allow(clippy::indexing_slicing)]
-        let hex_len = &data[pos..pos.wrapping_add(4)];
+        let Some(hex_len) = data.get(pos..pos.wrapping_add(4)) else {
+            break;
+        };
         let Ok(hex_str) = std::str::from_utf8(hex_len) else {
             break;
         };
@@ -188,11 +191,13 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
         }
 
         // SAFETY: guarded by the bounds check immediately above (len >= 5, so pos + 5 <= pos + len <= data.len())
-        #[allow(clippy::indexing_slicing)]
-        let channel = data[pos.wrapping_add(4)];
+        let Some(&channel) = data.get(pos.wrapping_add(4)) else {
+            break;
+        };
         // SAFETY: guarded by the same bounds check above
-        #[allow(clippy::indexing_slicing)]
-        let payload = &data[pos.wrapping_add(5)..pos.wrapping_add(len as usize)];
+        let Some(payload) = data.get(pos.wrapping_add(5)..pos.wrapping_add(len as usize)) else {
+            break;
+        };
 
         match channel {
             b'1' => pack_data.extend_from_slice(payload),

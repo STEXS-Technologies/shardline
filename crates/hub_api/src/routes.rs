@@ -598,7 +598,6 @@ fn webhook_response_from_hub(webhook: &shardline_index::hub::HubWebhook) -> Webh
 
 // ---- Repo info (requires Read) ----
 
-#[allow(clippy::collapsible_if, clippy::collapsible_match)]
 async fn repo_info(
     State(state): State<HubState>,
     headers: axum::http::HeaderMap,
@@ -617,24 +616,13 @@ async fn repo_info(
     let mut response = repo_response_from_hub(&entry);
 
     // Populate card_data from README.md YAML front matter when available.
-    if let Ok(commit_sha) = state
-        .store
-        .resolve_revision(&name, &entry.default_branch)
-        .map_err(|e| HubApiError::CasError(e.to_string()))
+    if let Ok(commit_sha) = state.store.resolve_revision(&name, &entry.default_branch)
+        && let Some(sha) = commit_sha
+        && let Ok(files) = state.store.get_files(&sha)
+        && let Some(readme) = files.iter().find(|f| f.path == "README.md")
+        && let Some(content) = &readme.inline_content
     {
-        if let Some(sha) = commit_sha {
-            if let Ok(files) = state
-                .store
-                .get_files(&sha)
-                .map_err(|e| HubApiError::CasError(e.to_string()))
-            {
-                if let Some(readme) = files.iter().find(|f| f.path == "README.md") {
-                    if let Some(content) = &readme.inline_content {
-                        response.card_data = parse_yaml_frontmatter(content);
-                    }
-                }
-            }
-        }
+        response.card_data = parse_yaml_frontmatter(content);
     }
 
     Ok(Json(response))
@@ -1570,8 +1558,7 @@ fn validate_webhook_url(url: &str) -> Result<(), HubApiError> {
 
 /// Returns `true` if the IP address is private, loopback, link-local, or
 /// otherwise reserved (not globally routable).
-#[allow(clippy::missing_const_for_fn)]
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+const fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback() // 127.0.0.0/8
@@ -1587,9 +1574,10 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_unspecified() // ::
                 || v6.is_unicast_link_local() // fe80::/10
                 || v6.is_unique_local() // fc00::/7 (RFC 4193)
-                || v6.to_ipv4_mapped().is_some_and(|v4| {
-                    is_private_ip(&std::net::IpAddr::V4(v4))
-                })
+                || match v6.to_ipv4_mapped() {
+                    Some(v4) => is_private_ip(&std::net::IpAddr::V4(v4)),
+                    None => false,
+                }
         }
     }
 }

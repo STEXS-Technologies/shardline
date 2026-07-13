@@ -223,39 +223,39 @@ impl JwksProvider {
         }
     }
 
-    #[allow(clippy::option_if_let_else)]
     fn verify_jwt_claims(
         &self,
         header_b64: &str,
         payload_b64: &str,
         signature_b64: &str,
     ) -> Result<TokenClaims, AuthError> {
-        let keys = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.block_on(self.get_or_refresh_keys()),
-            Err(_) => {
-                // Fallback: read from cache synchronously (background refresh
-                // task keeps keys fresh).  If the cache is empty, fail.
-                // Retry try_read a few times to tolerate transient write-lock
-                // contention during key rotation.
-                const MAX_RETRIES: usize = 5;
-                const RETRY_DELAY_MS: u64 = 10;
-                let mut attempt: usize = 0;
-                loop {
-                    if let Ok(guard) = self.cached_keys.try_read() {
-                        break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
-                            AuthError::ProviderError("JWKS keys not available".to_owned())
-                        });
+        let keys = tokio::runtime::Handle::try_current()
+            .map_or_else(
+                |_| {
+                    // Fallback: read from cache synchronously (background refresh
+                    // task keeps keys fresh).  If the cache is empty, fail.
+                    // Retry try_read a few times to tolerate transient write-lock
+                    // contention during key rotation.
+                    const MAX_RETRIES: usize = 5;
+                    const RETRY_DELAY_MS: u64 = 10;
+                    let mut attempt: usize = 0;
+                    loop {
+                        if let Ok(guard) = self.cached_keys.try_read() {
+                            break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
+                                AuthError::ProviderError("JWKS keys not available".to_owned())
+                            });
+                        }
+                        attempt = attempt.wrapping_add(1);
+                        if attempt >= MAX_RETRIES {
+                            break Err(AuthError::ProviderError(
+                                "JWKS cache lock contended".to_owned(),
+                            ));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
                     }
-                    attempt = attempt.wrapping_add(1);
-                    if attempt >= MAX_RETRIES {
-                        break Err(AuthError::ProviderError(
-                            "JWKS cache lock contended".to_owned(),
-                        ));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
-                }
-            }
-        }?;
+                },
+                |handle| handle.block_on(self.get_or_refresh_keys()),
+            )?;
 
         let header_json = base64_decode_url(header_b64)
             .map_err(|e| AuthError::ProviderError(format!("invalid JWT header: {e}")))?;
@@ -352,8 +352,10 @@ impl AuthProvider for JwksProvider {
         if parts.len() != 3 {
             return Err(AuthError::InvalidToken);
         }
-        #[allow(clippy::indexing_slicing)]
-        self.verify_jwt_claims(parts[0], parts[1], parts[2])
+        let header = parts.first().ok_or(AuthError::InvalidToken)?;
+        let payload = parts.get(1).ok_or(AuthError::InvalidToken)?;
+        let signature = parts.get(2).ok_or(AuthError::InvalidToken)?;
+        self.verify_jwt_claims(header, payload, signature)
     }
 
     fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
