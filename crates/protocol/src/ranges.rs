@@ -353,4 +353,71 @@ mod tests {
             Err(HttpRangeParseError::Unsatisfiable)
         );
     }
+
+    #[test]
+    fn http_byte_range_rejects_empty_raw_suffix() {
+        assert_eq!(
+            parse_http_byte_range("bytes=", 10),
+            Err(HttpRangeParseError::InvalidSyntax)
+        );
+    }
+
+    #[test]
+    fn http_byte_range_rejects_empty_start_no_end() {
+        // "bytes=-" hits the suffix branch; empty suffix length fails parse as InvalidNumber
+        assert_eq!(
+            parse_http_byte_range("bytes=-", 10),
+            Err(HttpRangeParseError::InvalidNumber)
+        );
+    }
+
+    #[test]
+    fn http_byte_range_rejects_suffix_zero() {
+        assert_eq!(
+            parse_http_byte_range("bytes=-0", 10),
+            Err(HttpRangeParseError::InvalidSyntax)
+        );
+    }
+
+    #[test]
+    fn http_byte_range_suffix_larger_than_resource_clamps_to_start() {
+        let result = parse_http_byte_range("bytes=-999", 100);
+        let expected = ByteRange::new(0, 99);
+        assert!(expected.is_ok());
+        assert_eq!(
+            result,
+            expected.map_err(|_error| HttpRangeParseError::InvalidSyntax)
+        );
+    }
+
+    // --- error Display tests ---
+
+    #[test]
+    fn range_error_display_inverted() {
+        let msg = RangeError::Inverted.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("smaller"), "expected 'smaller' in display, got: {msg}");
+    }
+
+    #[test]
+    fn range_error_display_empty() {
+        let msg = RangeError::Empty.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("at least one chunk"), "expected 'at least one chunk' in display, got: {msg}");
+    }
+
+    #[test]
+    fn http_range_parse_error_display_all_variants() {
+        let cases: &[(HttpRangeParseError, &str)] = &[
+            (HttpRangeParseError::MissingBytesUnit, "syntax"),
+            (HttpRangeParseError::InvalidSyntax, "syntax"),
+            (HttpRangeParseError::InvalidNumber, "invalid number"),
+            (HttpRangeParseError::Unsatisfiable, "satisfiable"),
+        ];
+        for (error, substring) in cases {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "empty display for {error:?}");
+            assert!(msg.contains(substring), "expected '{substring}' in '{msg}' from {error:?}");
+        }
+    }
 }

@@ -197,4 +197,27 @@ mod tests {
     fn repository_access_variants_are_distinct() {
         assert_ne!(RepositoryAccess::Read, RepositoryAccess::Write);
     }
+
+    #[test]
+    fn vcs_reference_error_display_all_variants() {
+        let cases: &[(VcsReferenceError, &str)] = &[
+            (VcsReferenceError::Empty, "empty"),
+            (VcsReferenceError::ControlCharacter, "control"),
+            (VcsReferenceError::TooLong, "length"),
+        ];
+        for (error, substring) in cases {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "empty display for {error:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_component_rejects_tabs() {
+        let result = super::validate_component("\t\t");
+        assert_eq!(result, Err(VcsReferenceError::Empty));
+    }
 }

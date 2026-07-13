@@ -886,4 +886,375 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
     }
+
+    // ---- ObjectStoreError Display tests ----
+
+    use super::ObjectStoreError;
+
+    #[test]
+    fn object_store_error_local_display() {
+        let io_err = std::io::Error::other("disk full");
+        let err = ObjectStoreError::Local(io_err.into());
+        let display = err.to_string();
+        assert_eq!(display, "local storage operation failed");
+    }
+
+    #[test]
+    fn object_store_error_s3_display() {
+        let err = ObjectStoreError::MissingS3Config;
+        let display = err.to_string();
+        assert_eq!(display, "s3 object storage configuration is missing");
+    }
+
+    #[test]
+    fn object_store_error_stored_length_mismatch_display() {
+        let err = ObjectStoreError::StoredLengthMismatch;
+        let display = err.to_string();
+        assert_eq!(
+            display,
+            "stored object length did not match indexed metadata"
+        );
+    }
+
+    #[test]
+    fn object_store_error_migration_source_hash_mismatch_display() {
+        let err = ObjectStoreError::MigrationSourceHashMismatch {
+            key: "test-key".to_owned(),
+            expected_hash: "abc".to_owned(),
+            observed_hash: "def".to_owned(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("storage migration source object hash mismatch"));
+        assert!(display.contains("test-key"));
+        assert!(display.contains("abc"));
+        assert!(display.contains("def"));
+    }
+
+    // ---- IndexError Display tests ----
+
+    use super::IndexError;
+
+    #[test]
+    fn index_error_local_display() {
+        let err = IndexError::MissingRequiredMetadataTable("files".to_owned());
+        let display = err.to_string();
+        assert_eq!(display, "required metadata table is missing: files");
+    }
+
+    #[test]
+    fn index_error_conflicting_rename_target_display() {
+        let err = IndexError::ConflictingRenameTargetRecord;
+        let display = err.to_string();
+        assert_eq!(
+            display,
+            "repository rename target already contains conflicting metadata"
+        );
+    }
+
+    // ---- ServerError Display tests for un-tested variants ----
+
+    #[test]
+    fn server_error_display_io() {
+        let err = ServerError::Io(std::io::Error::other("io failure"));
+        assert_eq!(err.to_string(), "local storage operation failed");
+    }
+
+    #[test]
+    fn server_error_display_json() {
+        let err = ServerError::Json(serde_json::from_str::<()>("invalid").unwrap_err());
+        assert_eq!(err.to_string(), "json operation failed");
+    }
+
+    #[test]
+    fn server_error_display_request_body_read() {
+        let io_err = std::io::Error::other("stream error");
+        let axum_err = axum::Error::new(io_err);
+        let err = ServerError::RequestBodyRead(axum_err);
+        assert_eq!(err.to_string(), "request body stream failed");
+    }
+
+    #[test]
+    fn server_error_display_request_body_too_large() {
+        let err = ServerError::RequestBodyTooLarge;
+        assert_eq!(
+            err.to_string(),
+            "request body exceeded the configured maximum accepted byte count"
+        );
+    }
+
+    #[test]
+    fn server_error_display_numeric_conversion() {
+        // Create a TryFromIntError via a known fallible conversion
+        let huge = 1_000_000_000_000u64;
+        let try_err = i32::try_from(huge).unwrap_err();
+        let err = ServerError::NumericConversion(try_err);
+        assert_eq!(err.to_string(), "numeric conversion exceeded supported bounds");
+    }
+
+    #[test]
+    fn server_error_display_stored_file_metadata_too_large() {
+        let err = ServerError::StoredFileMetadataTooLarge {
+            observed_bytes: 1_000_000,
+            maximum_bytes: 10_000,
+        };
+        let display = err.to_string();
+        assert!(display.contains("stored file metadata exceeded the bounded parser ceiling"));
+    }
+
+    #[test]
+    fn server_error_display_stored_file_metadata_length_mismatch() {
+        let err = ServerError::StoredFileMetadataLengthMismatch;
+        assert_eq!(
+            err.to_string(),
+            "stored file metadata length did not match the validated length"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_file_id() {
+        let err = ServerError::InvalidFileId;
+        assert!(err.to_string().contains("file identifier must be relative"));
+    }
+
+    #[test]
+    fn server_error_display_invalid_content_hash() {
+        let err = ServerError::InvalidContentHash;
+        assert_eq!(
+            err.to_string(),
+            "content hash must be 64 hexadecimal characters"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_xorb_prefix() {
+        let err = ServerError::InvalidXorbPrefix;
+        assert_eq!(err.to_string(), "xorb transfer prefix must be default");
+    }
+
+    #[test]
+    fn server_error_display_xorb_hash_mismatch() {
+        let err = ServerError::XorbHashMismatch;
+        assert_eq!(
+            err.to_string(),
+            "xorb body hash did not match the requested path hash"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_serialized_xorb() {
+        let err = ServerError::InvalidSerializedXorb;
+        assert_eq!(
+            err.to_string(),
+            "xorb body was not a valid serialized xorb object"
+        );
+    }
+
+    #[test]
+    fn server_error_display_missing_referenced_xorb() {
+        let err = ServerError::MissingReferencedXorb;
+        assert_eq!(err.to_string(), "shard referenced a missing xorb");
+    }
+
+    #[test]
+    fn server_error_display_too_many_shard_terms() {
+        let err = ServerError::TooManyShardTerms;
+        assert_eq!(
+            err.to_string(),
+            "shard metadata exceeded bounded parser safety limits"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_range_header() {
+        let err = ServerError::InvalidRangeHeader;
+        assert_eq!(
+            err.to_string(),
+            "range header must use bytes=<start>-<end> syntax"
+        );
+    }
+
+    #[test]
+    fn server_error_display_range_not_satisfiable() {
+        let err = ServerError::RangeNotSatisfiable;
+        assert_eq!(err.to_string(), "requested range is not satisfiable");
+    }
+
+    #[test]
+    fn server_error_display_missing_authorization() {
+        let err = ServerError::MissingAuthorization;
+        assert_eq!(err.to_string(), "authorization header is missing");
+    }
+
+    #[test]
+    fn server_error_display_invalid_authorization_header() {
+        let err = ServerError::InvalidAuthorizationHeader;
+        assert_eq!(
+            err.to_string(),
+            "authorization header must use bearer format"
+        );
+    }
+
+    #[test]
+    fn server_error_display_signing_key_error() {
+        let err = ServerError::SigningKeyError("bad format".to_owned());
+        assert_eq!(
+            err.to_string(),
+            "token signing key is misconfigured: bad format"
+        );
+    }
+
+    #[test]
+    fn server_error_display_insufficient_scope() {
+        let err = ServerError::InsufficientScope;
+        assert_eq!(
+            err.to_string(),
+            "bearer token does not grant the required scope"
+        );
+    }
+
+    #[test]
+    fn server_error_display_provider_tokens_disabled() {
+        let err = ServerError::ProviderTokensDisabled;
+        assert_eq!(
+            err.to_string(),
+            "provider token issuance endpoint is not configured"
+        );
+    }
+
+    #[test]
+    fn server_error_display_missing_provider_api_key() {
+        let err = ServerError::MissingProviderApiKey;
+        assert_eq!(err.to_string(), "provider bootstrap key is missing");
+    }
+
+    #[test]
+    fn server_error_display_invalid_provider_api_key() {
+        let err = ServerError::InvalidProviderApiKey;
+        assert_eq!(err.to_string(), "provider bootstrap key is invalid");
+    }
+
+    #[test]
+    fn server_error_display_missing_provider_subject() {
+        let err = ServerError::MissingProviderSubject;
+        assert_eq!(err.to_string(), "provider subject is missing");
+    }
+
+    #[test]
+    fn server_error_display_invalid_digest() {
+        let err = ServerError::InvalidDigest;
+        assert_eq!(
+            err.to_string(),
+            "digest must use sha256:<64 lowercase hex> format"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_repository_name() {
+        let err = ServerError::InvalidRepositoryName;
+        assert_eq!(err.to_string(), "repository name was invalid");
+    }
+
+    #[test]
+    fn server_error_display_invalid_manifest_reference() {
+        let err = ServerError::InvalidManifestReference;
+        assert_eq!(err.to_string(), "manifest reference was invalid");
+    }
+
+    #[test]
+    fn server_error_display_not_acceptable() {
+        let err = ServerError::NotAcceptable;
+        assert_eq!(
+            err.to_string(),
+            "requested representation was not acceptable"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_upload_session() {
+        let err = ServerError::InvalidUploadSession;
+        assert_eq!(
+            err.to_string(),
+            "upload session identifier was invalid"
+        );
+    }
+
+    #[test]
+    fn server_error_display_too_many_upload_sessions() {
+        let err = ServerError::TooManyUploadSessions;
+        assert_eq!(err.to_string(), "too many active oci upload sessions");
+    }
+
+    #[test]
+    fn server_error_display_missing_reconstruction_cache_redis_url() {
+        let err = ServerError::MissingReconstructionCacheRedisUrl;
+        assert_eq!(
+            err.to_string(),
+            "redis reconstruction cache requires a redis url"
+        );
+    }
+
+    #[test]
+    fn server_error_display_transfer_limiter_closed() {
+        let err = ServerError::TransferLimiterClosed;
+        assert_eq!(
+            err.to_string(),
+            "transfer concurrency limiter is unavailable"
+        );
+    }
+
+    #[test]
+    fn server_error_display_request_query_too_large() {
+        let err = ServerError::RequestQueryTooLarge;
+        assert_eq!(
+            err.to_string(),
+            "request query exceeded the bounded metadata parser budget"
+        );
+    }
+
+    #[test]
+    fn server_error_display_request_body_frame_out_of_bounds() {
+        let err = ServerError::RequestBodyFrameOutOfBounds;
+        assert_eq!(
+            err.to_string(),
+            "request body frame exceeded checked bounds"
+        );
+    }
+
+    #[test]
+    fn server_error_display_object_store() {
+        let err = ServerError::ObjectStore(ObjectStoreError::MissingS3Config);
+        assert_eq!(err.to_string(), "object storage operation failed");
+    }
+
+    #[test]
+    fn server_error_display_index() {
+        let err =
+            ServerError::Index(IndexError::MissingRequiredMetadataTable("test".to_owned()));
+        assert_eq!(err.to_string(), "index adapter operation failed");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_not_found() {
+        let err = ServerError::NotFound;
+        assert_eq!(err.oci_error_code(), "MANIFEST_UNKNOWN");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_invalid_digest() {
+        let err = ServerError::InvalidDigest;
+        assert_eq!(err.oci_error_code(), "DIGEST_INVALID");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_internal_errors() {
+        let err = ServerError::Overflow;
+        assert_eq!(err.oci_error_code(), "INTERNAL");
+    }
+
+    #[test]
+    fn server_error_debug_output() {
+        let err = ServerError::NotFound;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("NotFound"));
+    }
 }

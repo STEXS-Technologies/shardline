@@ -552,4 +552,85 @@ mod tests {
 
         assert_eq!(provider.parse_webhook(request), Ok(None));
     }
+
+    #[test]
+    fn provider_boundary_error_display_all_variants() {
+        let cases: &[(ProviderBoundaryError, &str)] = &[
+            (ProviderBoundaryError::Empty, "empty"),
+            (ProviderBoundaryError::ControlCharacter, "control"),
+            (ProviderBoundaryError::TooLong, "length"),
+        ];
+        for (error, substring) in cases {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "empty display for {error:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_request_const_fields_are_accessible() {
+        let request = WebhookRequest::new("push", "delivery-1", Some("sig"), b"{}");
+        assert_eq!(request.event_name(), "push");
+        assert_eq!(request.delivery_id(), "delivery-1");
+        assert_eq!(request.signature(), Some("sig"));
+        assert_eq!(request.body(), b"{}");
+    }
+
+    #[test]
+    fn repository_visibility_variants_are_distinct() {
+        assert_ne!(RepositoryVisibility::Public, RepositoryVisibility::Private);
+        assert_ne!(RepositoryVisibility::Private, RepositoryVisibility::Internal);
+        assert_ne!(RepositoryVisibility::Internal, RepositoryVisibility::Public);
+    }
+
+    #[test]
+    fn provider_subject_keeps_value() {
+        let subject = ProviderSubject::new("github-user-42");
+        assert!(subject.is_ok());
+        if let Ok(subject) = subject {
+            assert_eq!(subject.as_str(), "github-user-42");
+        }
+    }
+
+    #[test]
+    fn canonical_clone_url_keeps_value() {
+        let url = CanonicalCloneUrl::new("https://github.example/team/assets.git");
+        assert!(url.is_ok());
+        if let Ok(url) = url {
+            assert_eq!(url.as_str(), "https://github.example/team/assets.git");
+        }
+    }
+
+    #[test]
+    fn webhook_delivery_id_keeps_value() {
+        let id = WebhookDeliveryId::new("delivery-abc-123");
+        assert!(id.is_ok());
+        if let Ok(id) = id {
+            assert_eq!(id.as_str(), "delivery-abc-123");
+        }
+    }
+
+    #[test]
+    fn repository_webhook_event_exposes_fields() {
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
+        let delivery_id = WebhookDeliveryId::new("delivery-1");
+        let revision = RevisionRef::new("refs/heads/main");
+        assert!(repository.is_ok());
+        assert!(delivery_id.is_ok());
+        assert!(revision.is_ok());
+        let (Ok(repository), Ok(delivery_id), Ok(revision)) = (repository, delivery_id, revision)
+        else {
+            return;
+        };
+        let event = RepositoryWebhookEvent::new(
+            repository.clone(),
+            delivery_id.clone(),
+            RepositoryWebhookEventKind::RevisionPushed { revision },
+        );
+        assert_eq!(event.repository(), &repository);
+        assert_eq!(event.delivery_id(), &delivery_id);
+    }
 }

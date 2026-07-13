@@ -395,6 +395,75 @@ mod tests {
     };
 
     #[test]
+    fn ingestor_new_with_parallelism_creates_empty_state() {
+        let ingestor = FileUploadIngestor::new_with_parallelism(
+            NonZeroUsize::new(8192).unwrap(),
+            true,
+            NonZeroUsize::new(128).unwrap(),
+        );
+        assert_eq!(ingestor.chunk_size, 8192);
+        assert_eq!(ingestor.max_in_flight_chunks, 128);
+        assert!(ingestor.pending.is_empty());
+        assert_eq!(ingestor.next_sequence, 0);
+        assert_eq!(ingestor.next_offset, 0);
+        assert!(ingestor.completed_chunks.is_empty());
+        assert!(ingestor.in_flight_chunks.is_empty());
+        assert!(ingestor.reusable_pending_buffers.is_empty());
+        assert_eq!(ingestor.inserted_chunks, 0);
+        assert_eq!(ingestor.reused_chunks, 0);
+        assert_eq!(ingestor.stored_bytes, 0);
+        assert!(ingestor.sha256.is_some());
+    }
+
+    #[test]
+    fn ingestor_new_without_sha256_disables_hasher() {
+        let ingestor = FileUploadIngestor::new(NonZeroUsize::new(4096).unwrap(), false);
+        assert!(ingestor.sha256.is_none());
+    }
+
+    #[test]
+    fn ingestor_take_pending_buffer_returns_new_buffer_when_pool_empty() {
+        let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(1024).unwrap(), false);
+        let buffer = ingestor.take_pending_buffer();
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), 1024);
+    }
+
+    #[test]
+    fn ingestor_recycle_pending_buffer_ignores_undersized_buffer() {
+        let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(1024).unwrap(), false);
+        let buffer = bytes::BytesMut::with_capacity(100);
+        ingestor.recycle_pending_buffer(buffer);
+        assert!(ingestor.reusable_pending_buffers.is_empty());
+    }
+
+    #[test]
+    fn ingestor_recycle_pending_buffer_accepts_chunk_sized_buffer() {
+        let mut ingestor = FileUploadIngestor::new(NonZeroUsize::new(1024).unwrap(), false);
+        let mut buffer = bytes::BytesMut::with_capacity(2048);
+        buffer.extend_from_slice(b"some data");
+        ingestor.recycle_pending_buffer(buffer);
+        assert_eq!(ingestor.reusable_pending_buffers.len(), 1);
+        // Buffer should be cleared after recycling
+        assert!(ingestor.reusable_pending_buffers[0].is_empty());
+    }
+
+    #[test]
+    fn ingestor_recycle_pending_buffer_enforces_capacity_limit() {
+        let mut ingestor = FileUploadIngestor::new_with_parallelism(
+            NonZeroUsize::new(1024).unwrap(),
+            false,
+            NonZeroUsize::new(2).unwrap(),
+        );
+        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
+        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
+        ingestor.recycle_pending_buffer(bytes::BytesMut::with_capacity(2048));
+        // Only 2 should be kept (equal to max_in_flight_chunks)
+        assert_eq!(ingestor.reusable_pending_buffers.len(), 2);
+    }
+
+
+    #[test]
     fn ingestor_allocates_pending_buffer_lazily() {
         let ingestor = FileUploadIngestor::new(NonZeroUsize::MAX, false);
 

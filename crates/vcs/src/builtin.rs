@@ -499,4 +499,232 @@ mod tests {
             Err(BuiltInProviderError::InvalidWebhookAuthentication)
         );
     }
+
+    #[test]
+    fn built_in_provider_error_display_all_variants() {
+        let cases: &[(BuiltInProviderError, &str)] = &[
+            (BuiltInProviderError::UnknownRepository, "registered"),
+            (BuiltInProviderError::DuplicateRepository, "registered"),
+            (BuiltInProviderError::InvalidWebhookPayload, "payload"),
+            (BuiltInProviderError::InvalidRepositoryPayload, "repository"),
+            (BuiltInProviderError::InvalidRevisionPayload, "revision"),
+            (BuiltInProviderError::MissingWebhookAuthentication, "missing"),
+            (BuiltInProviderError::InvalidWebhookAuthentication, "invalid"),
+            (BuiltInProviderError::InvalidIntegrationSubject, "subject"),
+            (BuiltInProviderError::InvalidCloneUrl, "url"),
+            (BuiltInProviderError::InvalidDefaultRevision, "revision"),
+        ];
+        for (error, substring) in cases {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "empty display for {error:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_repository_policy_allows_read_subjects() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
+        let subject = ProviderSubject::new("user-1");
+        let other = ProviderSubject::new("user-2");
+        assert!(repo.is_ok());
+        assert!(subject.is_ok());
+        assert!(other.is_ok());
+        let (Ok(repo), Ok(subject), Ok(other)) = (repo, subject, other) else {
+            return;
+        };
+        let metadata = configured_metadata(
+            repo,
+            RepositoryVisibility::Private,
+            "main",
+            "https://example.invalid/team/assets.git",
+        );
+        assert!(metadata.is_ok());
+        let Ok(metadata) = metadata else {
+            return;
+        };
+        let policy = ProviderRepositoryPolicy::new(
+            metadata,
+            HashSet::from([subject.clone()]),
+            HashSet::new(),
+        );
+        assert!(policy.allows(&subject, RepositoryAccess::Read));
+        assert!(!policy.allows(&other, RepositoryAccess::Read));
+        assert!(!policy.allows(&subject, RepositoryAccess::Write));
+    }
+
+    #[test]
+    fn provider_repository_policy_allows_write_subjects() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
+        let subject = ProviderSubject::new("user-1");
+        assert!(repo.is_ok());
+        assert!(subject.is_ok());
+        let (Ok(repo), Ok(subject)) = (repo, subject) else {
+            return;
+        };
+        let metadata = configured_metadata(
+            repo,
+            RepositoryVisibility::Private,
+            "main",
+            "https://example.invalid/team/assets.git",
+        );
+        assert!(metadata.is_ok());
+        let Ok(metadata) = metadata else {
+            return;
+        };
+        let policy = ProviderRepositoryPolicy::new(
+            metadata,
+            HashSet::new(),
+            HashSet::from([subject.clone()]),
+        );
+        assert!(policy.allows(&subject, RepositoryAccess::Write));
+        assert!(!policy.allows(&subject, RepositoryAccess::Read));
+    }
+
+    #[test]
+    fn parse_repository_from_full_name_rejects_missing_slash() {
+        let result = parse_repository_from_full_name(ProviderKind::GitHub, "incomplete");
+        assert_eq!(result, Err(BuiltInProviderError::InvalidRepositoryPayload));
+    }
+
+    #[test]
+    fn parse_gitlab_visibility_maps_correctly() {
+        assert_eq!(super::parse_gitlab_visibility(10), RepositoryVisibility::Private);
+        assert_eq!(super::parse_gitlab_visibility(20), RepositoryVisibility::Internal);
+        assert_eq!(super::parse_gitlab_visibility(0), RepositoryVisibility::Public);
+        assert_eq!(super::parse_gitlab_visibility(99), RepositoryVisibility::Public);
+    }
+
+    #[test]
+    fn normalize_default_revision_prepends_refs_heads() {
+        let result = super::normalize_default_revision("main");
+        assert!(result.is_ok());
+        if let Ok(rev) = result {
+            assert_eq!(rev.as_str(), "refs/heads/main");
+        }
+    }
+
+    #[test]
+    fn normalize_default_revision_preserves_refs_prefix() {
+        let result = super::normalize_default_revision("refs/tags/v1.0");
+        assert!(result.is_ok());
+        if let Ok(rev) = result {
+            assert_eq!(rev.as_str(), "refs/tags/v1.0");
+        }
+    }
+
+    #[test]
+    fn parse_delivery_id_rejects_empty() {
+        let result = super::parse_delivery_id("");
+        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookPayload));
+    }
+
+    #[test]
+    fn parse_revision_rejects_empty() {
+        let result = super::parse_revision("");
+        assert_eq!(result, Err(BuiltInProviderError::InvalidRevisionPayload));
+    }
+
+    #[test]
+    fn catalog_rejects_unknown_repository() {
+        let catalog = BuiltInProviderCatalog::new("integration");
+        assert!(catalog.is_ok());
+        let Ok(catalog) = catalog else {
+            return;
+        };
+        let unknown_repo = RepositoryRef::new(ProviderKind::GitHub, "unknown", "repo");
+        assert!(unknown_repo.is_ok());
+        let Ok(unknown_repo) = unknown_repo else {
+            return;
+        };
+        assert_eq!(
+            catalog.repository(&unknown_repo),
+            Err(BuiltInProviderError::UnknownRepository)
+        );
+    }
+
+    #[test]
+    fn parsed_json_value_extraction() {
+        let json: serde_json::Value = serde_json::from_str(r#"{"a":{"b":"hello","c":42}}"#).unwrap();
+        assert_eq!(super::value_at(&json, &["a", "b"]).and_then(|v| v.as_str()), Some("hello"));
+        assert_eq!(super::value_at(&json, &["a", "c"]).and_then(|v| v.as_u64()), Some(42));
+        assert_eq!(super::value_at(&json, &["a", "missing"]), None);
+        assert_eq!(super::value_at(&json, &["missing"]), None);
+
+        assert_eq!(super::value_str(&json, &["a", "b"]), Some("hello"));
+        assert_eq!(super::value_str(&json, &["a", "c"]), None);
+
+        assert_eq!(super::value_u64(&json, &["a", "c"]), Some(42));
+        assert_eq!(super::value_u64(&json, &["a", "b"]), None);
+    }
+
+    #[test]
+    fn parse_webhook_json_rejects_invalid_body() {
+        let result = super::parse_webhook_json(b"not json");
+        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookPayload));
+    }
+
+    #[test]
+    fn verify_prefixed_hmac_rejects_missing_header() {
+        let result = super::verify_prefixed_hmac_sha256("secret", None, "sha256=", b"{}");
+        assert_eq!(result, Err(BuiltInProviderError::MissingWebhookAuthentication));
+    }
+
+    #[test]
+    fn verify_prefixed_hmac_rejects_wrong_prefix() {
+        let result = super::verify_prefixed_hmac_sha256("secret", Some("sha1=abc"), "sha256=", b"{}");
+        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+    }
+
+    #[test]
+    fn verify_prefixed_hmac_rejects_short_signature() {
+        let result = super::verify_prefixed_hmac_sha256("secret", Some("sha256=abc"), "sha256=", b"{}");
+        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+    }
+
+    #[test]
+    fn configured_metadata_accepts_empty_default_revision_as_refs_heads() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
+        assert!(repo.is_ok());
+        let Ok(repo) = repo else {
+            return;
+        };
+        let result = configured_metadata(
+            repo,
+            RepositoryVisibility::Public,
+            "",
+            "https://example.invalid/team/assets.git",
+        );
+        assert!(result.is_ok(), "empty revision becomes 'refs/heads/' which is valid: {result:?}");
+    }
+
+    #[test]
+    fn configured_metadata_rejects_control_characters_in_clone_url() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "team", "assets");
+        assert!(repo.is_ok());
+        let Ok(repo) = repo else {
+            return;
+        };
+        let result = configured_metadata(
+            repo,
+            RepositoryVisibility::Public,
+            "main",
+            "https://example.invalid/team/assets.git\n",
+        );
+        assert_eq!(result, Err(BuiltInProviderError::InvalidCloneUrl));
+    }
+
+    #[test]
+    fn verify_constant_time_secret_rejects_missing_header() {
+        let result = verify_constant_time_secret("expected", None);
+        assert_eq!(result, Err(BuiltInProviderError::MissingWebhookAuthentication));
+    }
+
+    #[test]
+    fn verify_constant_time_secret_accepts_matching() {
+        let result = verify_constant_time_secret("expected", Some("expected"));
+        assert_eq!(result, Ok(()));
+    }
 }
