@@ -85,3 +85,56 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use prometheus::Registry;
+    use tower::Layer;
+
+    use super::{MetricsLayer, MetricsService};
+    use crate::CasMetrics;
+
+    #[test]
+    fn metrics_layer_and_service_are_clone() {
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+        let _cloned_layer = layer.clone();
+
+        let svc = tower::service_fn(|_req: Request<Body>| {
+            async {
+                Ok::<_, std::convert::Infallible>(
+                    axum::response::Response::builder()
+                        .status(200)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let metrics_svc: MetricsService<_> = layer.layer(svc);
+        let _cloned_svc = metrics_svc;
+    }
+
+    #[test]
+    fn metrics_layer_new_stores_metrics_reference() {
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+        // The layer should be usable to wrap a service.
+        let svc = tower::service_fn(|_req: Request<Body>| {
+            async {
+                Ok::<_, std::convert::Infallible>(
+                    axum::response::Response::builder()
+                        .status(200)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let _wrapped: MetricsService<_> = layer.layer(svc);
+    }
+}

@@ -328,9 +328,18 @@ mod tests {
         io::Write,
     };
 
-    use super::{read_open_local_object_append, set_before_local_object_read_hook};
+    use shardline_index::{FileChunkRecord, FileRecord};
+    use shardline_storage::{ObjectKey, ObjectPrefix};
+
+    use super::{
+        read_full_object, read_open_local_object_append, reconstruct_chunk_file_bytes,
+        reconstruct_file_record_bytes, reconstruct_local_file_bytes, set_before_local_object_read_hook,
+        visit_object_prefix,
+    };
     use crate::ServerError;
+    use crate::chunk_store::chunk_object_key;
     use crate::error::ObjectStoreError;
+    use crate::object_store::ServerObjectStore;
 
     #[test]
     fn local_object_read_rejects_growth_after_length_validation_without_retaining_growth_bytes() {
@@ -355,5 +364,342 @@ mod tests {
             ))
         ));
         assert_eq!(output, b"abcd");
+    }
+
+    // ── reconstruct_local_file_bytes ───────────────────────────────────────
+
+    #[test]
+    fn reconstruct_local_file_bytes_reassembles_chunks_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let chunk1_hash = "aa".repeat(32); // 64 hex chars
+        let chunk2_hash = "bb".repeat(32);
+        let chunk1_data = b"hello ";
+        let chunk2_data = b"world";
+
+        let key1 = chunk_object_key(&chunk1_hash).unwrap();
+        let key2 = chunk_object_key(&chunk2_hash).unwrap();
+
+        // Write chunk files at the local object store paths.
+        let path1 = dir.path().join(key1.as_str());
+        let path2 = dir.path().join(key2.as_str());
+        std::fs::create_dir_all(path1.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
+        std::fs::write(&path1, chunk1_data).unwrap();
+        std::fs::write(&path2, chunk2_data).unwrap();
+
+        let chunks = vec![
+            FileChunkRecord {
+                hash: chunk1_hash,
+                offset: 0,
+                length: 6,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 6,
+            },
+            FileChunkRecord {
+                hash: chunk2_hash,
+                offset: 6,
+                length: 5,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 5,
+            },
+        ];
+
+        let result = reconstruct_local_file_bytes(&store, &chunks, 11);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn reconstruct_local_file_bytes_rejects_non_contiguous_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let hash = "cc".repeat(32);
+        let key = chunk_object_key(&hash).unwrap();
+        let path = dir.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"data").unwrap();
+
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 10, // non-contiguous
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }];
+
+        let result = reconstruct_local_file_bytes(&store, &chunks, 4);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reconstruct_local_file_bytes_rejects_capacity_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let hash = "dd".repeat(32);
+        let key = chunk_object_key(&hash).unwrap();
+        let path = dir.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"data").unwrap();
+
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }];
+
+        // Capacity does not match expected output length.
+        let result = reconstruct_local_file_bytes(&store, &chunks, 99);
+        assert!(matches!(
+            result,
+            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    #[test]
+    fn reconstruct_local_file_bytes_fails_with_blackhole_store() {
+        let store = ServerObjectStore::blackhole();
+        // With non-empty chunks, the function destructures ServerObjectStore::Local
+        // and fails with NotFound since Blackhole is not Local.
+        let hash = "ff".repeat(32);
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }];
+        let result = reconstruct_local_file_bytes(&store, &chunks, 4);
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    // ── reconstruct_chunk_file_bytes ───────────────────────────────────────
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_with_local_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let hash = "ee".repeat(32);
+        let key = chunk_object_key(&hash).unwrap();
+        let path = dir.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"chunk-data").unwrap();
+
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 10,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 10,
+        }];
+
+        let result = reconstruct_chunk_file_bytes(&store, &chunks, 10);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"chunk-data");
+    }
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_empty_chunks_with_local_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let result = reconstruct_chunk_file_bytes(&store, &[], 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"");
+    }
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_blackhole_errors_on_nonzero_length() {
+        let store = ServerObjectStore::blackhole();
+        let hash = "ff".repeat(32);
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }];
+        // Blackhole has no local_root, so it falls through to read_full_object
+        // which calls read_range -> NotFound for blackhole.
+        let result = reconstruct_chunk_file_bytes(&store, &chunks, 4);
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    // ── reconstruct_file_record_bytes ──────────────────────────────────────
+
+    #[test]
+    fn reconstruct_file_record_bytes_with_stored_chunks_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let data = b"stored-bytes";
+        let hash = "11".repeat(32);
+        let key = chunk_object_key(&hash).unwrap();
+        let path = dir.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, data).unwrap();
+        // Verify file has correct length before calling reconstruction.
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(file_len, data.len() as u64, "written file length mismatch");
+
+        let record = FileRecord {
+            file_id: "test.bin".to_owned(),
+            content_hash: "aa".repeat(32),
+            total_bytes: data.len() as u64,
+            chunk_size: data.len() as u64, // nonzero => StoredChunks layout
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash,
+                offset: 0,
+                length: data.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: data.len() as u64,
+            }],
+        };
+
+        let result = reconstruct_file_record_bytes(&store, &[], &record);
+        assert!(
+            result.is_ok(),
+            "reconstruct_file_record_bytes failed: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(result.unwrap(), data);
+    }
+
+    #[test]
+    fn reconstruct_file_record_bytes_referenced_terms_rejects_empty_frontends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        // chunk_size == 0 => ReferencedObjectTerms layout
+        let record = FileRecord {
+            file_id: "ref.bin".to_owned(),
+            content_hash: "bb".repeat(32),
+            total_bytes: 4,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "cc".repeat(32),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+
+        // No frontends provided, so append_referenced_term_bytes will fail.
+        let result = reconstruct_file_record_bytes(&store, &[], &record);
+        assert!(result.is_err());
+    }
+
+    // ── visit_object_prefix ────────────────────────────────────────────────
+
+    #[test]
+    fn visit_object_prefix_with_blackhole_returns_ok() {
+        let store = ServerObjectStore::blackhole();
+        let prefix = ObjectPrefix::parse("test-prefix").unwrap();
+        let result = visit_object_prefix(&store, &prefix, |_metadata| Ok(()));
+        assert!(result.is_ok());
+    }
+
+    // ── read_full_object ───────────────────────────────────────────────────
+
+    #[test]
+    fn read_full_object_zero_length_returns_empty() {
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let result = read_full_object(&store, &key, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"");
+    }
+
+    #[test]
+    fn read_full_object_blackhole_nonzero_returns_not_found() {
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let result = read_full_object(&store, &key, 10);
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[test]
+    fn read_full_object_exceeds_max_returns_too_large() {
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/key").unwrap();
+        // MAX_FULL_OBJECT_READ_BYTES = 1_073_741_824
+        let result = read_full_object(&store, &key, 2_000_000_000);
+        assert!(matches!(result, Err(ServerError::RequestBodyTooLarge)));
+    }
+
+    #[test]
+    fn read_full_object_local_store_reads_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        // ObjectKey::parse accepts "my-object" and creates a path relative to root.
+        let key = ObjectKey::parse("my-object").unwrap();
+        // The local object store's path_for_key returns root.join(key.as_str()).
+        let object_path = dir.path().join(key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let data = b"full-object-data";
+        std::fs::write(&object_path, data).unwrap();
+        let data_len = data.len() as u64;
+
+        let result = read_full_object(&store, &key, data_len);
+        assert!(
+            result.is_ok(),
+            "read_full_object failed: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(result.unwrap(), data);
+    }
+
+    // ── ServerObjectStoreError conversion ──────────────────────────────────
+
+    #[test]
+    fn server_object_store_error_not_found_converts_to_not_found() {
+        use crate::ServerError;
+        let err: ServerError = shardline_server_core::ServerObjectStoreError::NotFound.into();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn server_object_store_error_overflow_converts_to_overflow() {
+        use crate::ServerError;
+        let err: ServerError = shardline_server_core::ServerObjectStoreError::Overflow.into();
+        assert!(matches!(err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn server_object_store_error_invalid_content_hash_converts() {
+        use crate::ServerError;
+        let err: ServerError =
+            shardline_server_core::ServerObjectStoreError::InvalidContentHash.into();
+        assert!(matches!(err, ServerError::InvalidContentHash));
     }
 }

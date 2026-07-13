@@ -293,4 +293,98 @@ mod tests {
         assert!(redis_key.contains(&format!(":gitlab:{owner_hex}:{repo_hex}:")));
         assert!(redis_key.contains(":head:"));
     }
+
+    // ── Additional provider key formats ─────────────────────────────────
+
+    #[test]
+    fn redis_key_format_gitea_provider() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::Gitea, "gitea-org", "gitea-repo", None);
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let key = ReconstructionCacheKey::version("f1.bin", "hash1", Some(&scope));
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        let owner_hex = hex::encode("gitea-org");
+        let repo_hex = hex::encode("gitea-repo");
+        let hash_hex = hex::encode("hash1");
+        let file_hex = hex::encode("f1.bin");
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+        assert!(redis_key.contains(&format!(":gitea:{owner_hex}:{repo_hex}:head:")));
+        assert!(redis_key.ends_with(&format!(":{hash_hex}:{file_hex}")));
+    }
+
+    #[test]
+    fn redis_key_format_codeberg_provider() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::Codeberg, "user", "repo", Some("v2"));
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let key = ReconstructionCacheKey::latest("data.bin", Some(&scope));
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        let owner_hex = hex::encode("user");
+        let repo_hex = hex::encode("repo");
+        let rev_hex = hex::encode("v2");
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+        assert!(redis_key.contains(&format!(":codeberg:{owner_hex}:{repo_hex}:{rev_hex}:")));
+    }
+
+    #[test]
+    fn redis_key_format_generic_provider() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::Generic, "ns", "repo-name", None);
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let key = ReconstructionCacheKey::latest("generic.bin", Some(&scope));
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        let owner_hex = hex::encode("ns");
+        let repo_hex = hex::encode("repo-name");
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+        assert!(redis_key.contains(&format!(":generic:{owner_hex}:{repo_hex}:head:")));
+    }
+
+    // ── Edge cases ──────────────────────────────────────────────────────
+
+    #[test]
+    fn redis_key_format_special_characters_in_names() {
+        let scope = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "my-org/team",
+            "asset.repo_v2",
+            Some("feature/branch"),
+        );
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let key = ReconstructionCacheKey::latest("my file (1).bin", Some(&scope));
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        let owner_hex = hex::encode("my-org/team");
+        let repo_hex = hex::encode("asset.repo_v2");
+        let rev_hex = hex::encode("feature/branch");
+        let file_hex = hex::encode("my file (1).bin");
+        assert!(redis_key.contains(&format!(":github:{owner_hex}:{repo_hex}:{rev_hex}:")));
+        assert!(redis_key.ends_with(&format!(":latest:{file_hex}")));
+    }
+
+    #[test]
+    fn redis_key_format_empty_file_id() {
+        let key = ReconstructionCacheKey::latest("", None);
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        assert!(redis_key.ends_with(":latest:"));
+    }
+
+    #[test]
+    fn redis_key_format_empty_content_hash() {
+        let key = ReconstructionCacheKey::version("f", "", None);
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        // Empty content hash is still hex-encoded as an empty string.
+        let hash_hex = hex::encode("");
+        assert!(redis_key.contains(&format!(":{hash_hex}:")));
+    }
 }

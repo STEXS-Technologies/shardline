@@ -463,4 +463,139 @@ mod tests {
         let result = open_secret_file(&symlink_path);
         assert!(result.is_ok());
     }
+
+    // -----------------------------------------------------------------------
+    // optional_s3_secret_from_sources
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn optional_s3_secret_from_direct_value() {
+        use super::optional_s3_secret_from_sources;
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            Some("direct-value".to_owned()),
+            "TEST_FILE_ENV",
+            None,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some("direct-value".to_owned()));
+    }
+
+    #[test]
+    fn optional_s3_secret_both_sources_returns_err() {
+        use super::optional_s3_secret_from_sources;
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            Some("direct".to_owned()),
+            "TEST_FILE_ENV",
+            Some("/some/file".to_owned()),
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("credential source conflict"));
+    }
+
+    #[test]
+    fn optional_s3_secret_both_none_returns_none() {
+        use super::optional_s3_secret_from_sources;
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            None,
+            "TEST_FILE_ENV",
+            None,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // configure_s3_object_store_config
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn configure_s3_object_store_config_with_minimal_inputs() {
+        use super::{PendingS3ObjectStoreConfig, configure_s3_object_store_config};
+
+        let inputs = PendingS3ObjectStoreConfig {
+            region: "us-west-2".to_owned(),
+            endpoint: None,
+            key_prefix: None,
+            allow_http: Ok(None),
+            virtual_hosted_style_request: Ok(None),
+        };
+        let bucket: Result<String, _> = Ok("my-bucket".to_owned());
+
+        let result = configure_s3_object_store_config(bucket, inputs, || {
+            Ok((None, None, None))
+        });
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.bucket(), "my-bucket");
+        assert!(config.key_prefix().is_none());
+    }
+
+    #[test]
+    fn configure_s3_object_store_config_with_all_inputs() {
+        use super::{PendingS3ObjectStoreConfig, configure_s3_object_store_config};
+
+        let inputs = PendingS3ObjectStoreConfig {
+            region: "eu-central-1".to_owned(),
+            endpoint: Some("https://s3.custom.example".to_owned()),
+            key_prefix: Some("shardline/".to_owned()),
+            allow_http: Ok(Some(true)),
+            virtual_hosted_style_request: Ok(Some(true)),
+        };
+        let bucket: Result<String, _> = Ok("data-bucket".to_owned());
+
+        let result = configure_s3_object_store_config(bucket, inputs, || {
+            Ok((
+                Some("AKID".to_owned()),
+                Some("secret".to_owned()),
+                Some("token".to_owned()),
+            ))
+        });
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.bucket(), "data-bucket");
+        // The key_prefix is normalized (trailing slash stripped).
+        assert!(config.key_prefix().is_some());
+    }
+
+    #[test]
+    fn configure_s3_object_store_config_missing_bucket_errs() {
+        use super::{PendingS3ObjectStoreConfig, configure_s3_object_store_config};
+
+        let inputs = PendingS3ObjectStoreConfig {
+            region: "us-east-1".to_owned(),
+            endpoint: None,
+            key_prefix: None,
+            allow_http: Ok(None),
+            virtual_hosted_style_request: Ok(None),
+        };
+        let bucket: Result<String, _> = Err(ServerConfigError::MissingS3Bucket);
+
+        let result = configure_s3_object_store_config(bucket, inputs, || {
+            Ok((None, None, None))
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn configure_s3_object_store_config_allow_http_parse_err() {
+        use super::{PendingS3ObjectStoreConfig, ServerConfigError, configure_s3_object_store_config};
+
+        let inputs = PendingS3ObjectStoreConfig {
+            region: "us-east-1".to_owned(),
+            endpoint: None,
+            key_prefix: None,
+            allow_http: Err(ServerConfigError::InvalidS3AllowHttp),
+            virtual_hosted_style_request: Ok(None),
+        };
+        let bucket: Result<String, _> = Ok("bucket".to_owned());
+
+        let result = configure_s3_object_store_config(bucket, inputs, || {
+            Ok((None, None, None))
+        });
+        assert!(result.is_err());
+    }
 }
