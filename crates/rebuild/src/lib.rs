@@ -1019,4 +1019,176 @@ mod tests {
         assert!(matches!(error, RebuildError::NumericConversion(_)));
         assert!(!error.to_string().is_empty());
     }
+
+    // ---- RebuildError From impls via #[from] for storage/index adapter errors ----
+
+    #[test]
+    fn rebuild_error_from_object_prefix_error() {
+        let err = shardline_storage::ObjectPrefixError::UnsafePath;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::ObjectPrefix(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_local_object_store_error() {
+        let err = shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("test"));
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::LocalObjectStore(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_s3_object_store_error() {
+        let err = shardline_storage::S3ObjectStoreError::Io(std::io::Error::other("test"));
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::S3ObjectStore(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_xet_adapter_error() {
+        let err = shardline_xet_adapter::XetAdapterError::NotFound;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::XetAdapter(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_index_store_error() {
+        let err = shardline_index::LocalIndexStoreError::Io(std::io::Error::other("test"));
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::IndexStore(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_memory_index_store_error() {
+        let err = shardline_index::MemoryIndexStoreError::LockPoisoned;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::MemoryIndexStore(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_memory_record_store_error() {
+        let err = shardline_index::MemoryRecordStoreError::LockPoisoned;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::MemoryRecordStore(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_hash_parse_error() {
+        let err = shardline_protocol::HashParseError::InvalidLength;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::HashParse(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_invalid_serialized_shard_error() {
+        let err = shardline_server_core::InvalidSerializedShardError::ParserRejectedMetadata;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::XetAdapter(_)));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_not_found() {
+        let err = shardline_server_core::ServerObjectStoreError::NotFound;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::Overflow));
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_overflow() {
+        let err = shardline_server_core::ServerObjectStoreError::Overflow;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::Overflow));
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_invalid_content_hash() {
+        let err = shardline_server_core::ServerObjectStoreError::InvalidContentHash;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::Overflow));
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_stored_length_mismatch() {
+        let err = shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch;
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::Overflow));
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_local() {
+        let inner = shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("test"));
+        let err = shardline_server_core::ServerObjectStoreError::Local(inner);
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::LocalObjectStore(_)));
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_s3() {
+        let inner = shardline_storage::S3ObjectStoreError::Io(std::io::Error::other("test"));
+        let err = shardline_server_core::ServerObjectStoreError::S3(inner);
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::S3ObjectStore(_)));
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_io() {
+        let err = shardline_server_core::ServerObjectStoreError::Io(std::io::Error::other("test"));
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::Io(_)));
+    }
+
+    #[test]
+    fn rebuild_error_from_server_object_store_error_numeric_conversion() {
+        let inner = u64::try_from(-1i32).unwrap_err();
+        let err = shardline_server_core::ServerObjectStoreError::NumericConversion(inner);
+        let error: RebuildError = err.into();
+        assert!(matches!(error, RebuildError::NumericConversion(_)));
+    }
+
+    // ---- RebuildError Display for ALL variants ----
+
+    #[test]
+    fn rebuild_error_display_all_variants_non_empty() {
+        let errors: Vec<RebuildError> = vec![
+            RebuildError::Io(std::io::Error::other("test")),
+            RebuildError::Json(
+                serde_json::from_str::<serde_json::Value>("bad json}}").unwrap_err(),
+            ),
+            RebuildError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+            RebuildError::InvalidContentHash,
+            RebuildError::InvalidFileId,
+            RebuildError::Overflow,
+            RebuildError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
+            RebuildError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
+                std::io::Error::other("test"),
+            )),
+            RebuildError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
+                std::io::Error::other("test"),
+            )),
+            RebuildError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound),
+            RebuildError::IndexStore(shardline_index::LocalIndexStoreError::Io(
+                std::io::Error::other("test"),
+            )),
+            RebuildError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned),
+            RebuildError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned),
+            RebuildError::HashParse(shardline_protocol::HashParseError::InvalidLength),
+            RebuildError::StoredFileMetadataTooLarge {
+                observed_bytes: 1,
+                maximum_bytes: 0,
+            },
+        ];
+
+        for error in &errors {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "display message was empty for: {error:?}");
+        }
+    }
 }

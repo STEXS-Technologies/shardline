@@ -510,6 +510,51 @@ mod tests {
         assert!(!deleted);
     }
 
+    // ── ready() test ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_cache_ready_returns_ok() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        );
+        let result = cache.ready().await;
+        assert!(result.is_ok());
+    }
+
+    // ── get returns None for missing key ──────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_cache_get_returns_none_for_missing_key() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        );
+        let key = ReconstructionCacheKey::latest("nonexistent", None);
+        let result = cache.get(&key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    // ── get returns None for expired entry (not in loading state) ─────────
+
+    #[tokio::test(start_paused = true)]
+    async fn memory_cache_get_returns_none_for_expired_not_loading() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        );
+        let key = ReconstructionCacheKey::latest("expired-test", None);
+        cache.put(&key, b"data").await.unwrap();
+
+        // Advance past TTL
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let result = cache.get(&key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None, "expired entry should return None");
+    }
+
     // ── Concurrency stress tests ──────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -114,7 +114,7 @@ const fn provider_token(provider: RepositoryProvider) -> &'static str {
 mod tests {
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
-    use super::ReconstructionCacheKey;
+    use super::{ReconstructionCacheKey, RepositoryScopeCacheKey, provider_token};
 
     #[test]
     fn cache_key_keeps_version_and_scope_components() {
@@ -140,5 +140,67 @@ mod tests {
         assert_eq!(latest_scope.repo(), "assets");
         assert_eq!(latest_scope.provider(), "github");
         assert_eq!(latest_scope.revision(), Some("main"));
+    }
+
+    // ── None scope ───────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_key_without_scope() {
+        let latest = ReconstructionCacheKey::latest("file.bin", None);
+        assert_eq!(latest.file_id(), "file.bin");
+        assert_eq!(latest.content_hash(), None);
+        assert!(latest.repository_scope().is_none());
+    }
+
+    #[test]
+    fn cache_key_version_without_scope() {
+        let version = ReconstructionCacheKey::version("file.bin", "abc123", None);
+        assert_eq!(version.file_id(), "file.bin");
+        assert_eq!(version.content_hash(), Some("abc123"));
+        assert!(version.repository_scope().is_none());
+    }
+
+    // ── All provider tokens ──────────────────────────────────────────────
+
+    #[test]
+    fn provider_token_all_variants() {
+        assert_eq!(provider_token(RepositoryProvider::GitHub), "github");
+        assert_eq!(provider_token(RepositoryProvider::Gitea), "gitea");
+        assert_eq!(provider_token(RepositoryProvider::GitLab), "gitlab");
+        assert_eq!(provider_token(RepositoryProvider::Codeberg), "codeberg");
+        assert_eq!(provider_token(RepositoryProvider::Generic), "generic");
+    }
+
+    // ── Scope with no revision ───────────────────────────────────────────
+
+    #[test]
+    fn cache_key_scope_without_revision() {
+        let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let latest = ReconstructionCacheKey::latest("doc.pdf", Some(&scope));
+        let scope_key = latest.repository_scope().unwrap();
+        assert_eq!(scope_key.provider(), "gitlab");
+        assert_eq!(scope_key.owner(), "group");
+        assert_eq!(scope_key.repo(), "project");
+        assert_eq!(scope_key.revision(), None);
+    }
+
+    // ── RepositoryScopeCacheKey from_scope ───────────────────────────────
+
+    #[test]
+    fn repository_scope_cache_key_from_scope() {
+        let scope = RepositoryScope::new(RepositoryProvider::Codeberg, "user", "repo", Some("v1"));
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
+        assert_eq!(scope_key.provider(), "codeberg");
+        assert_eq!(scope_key.owner(), "user");
+        assert_eq!(scope_key.repo(), "repo");
+        assert_eq!(scope_key.revision(), Some("v1"));
     }
 }

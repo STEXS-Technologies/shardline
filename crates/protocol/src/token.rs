@@ -814,6 +814,29 @@ mod tests {
         let msg = TokenCodecError::Expired.to_string();
         assert!(!msg.is_empty());
         assert!(msg.contains("expired"));
+
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let msg = TokenCodecError::Json(json_err).to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("json"));
+
+        let msg = TokenCodecError::InvalidHex(hex::FromHexError::InvalidStringLength)
+            .to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("hex") || !msg.is_empty());
+    }
+
+    #[test]
+    fn token_claims_reject_empty_issuer() {
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
+        assert!(repository.is_ok());
+        let Ok(repository) = repository else {
+            return;
+        };
+        let claims = TokenClaims::new("", "subject", TokenScope::Read, repository, 42);
+
+        assert_eq!(claims, Err(TokenClaimsError::EmptyIssuer));
     }
 
     #[test]

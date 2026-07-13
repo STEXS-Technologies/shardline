@@ -176,4 +176,79 @@ mod tests {
             assert!(!v.is_empty());
         }
     }
+
+    #[test]
+    fn object_store_error_display_message() {
+        let err =
+            OciAdapterError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound);
+        assert_eq!(err.to_string(), "object storage adapter operation failed");
+    }
+
+    #[test]
+    fn s3_object_store_error_display_message() {
+        let err = OciAdapterError::S3ObjectStore(
+            shardline_storage::S3ObjectStoreError::Io(std::io::Error::other("test")),
+        );
+        assert_eq!(
+            err.to_string(),
+            "s3 object storage adapter operation failed"
+        );
+    }
+
+    #[test]
+    fn local_object_store_error_display_message() {
+        let err = OciAdapterError::LocalObjectStore(
+            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("test")),
+        );
+        assert_eq!(
+            err.to_string(),
+            "local object storage adapter operation failed"
+        );
+    }
+
+    #[test]
+    fn object_prefix_error_display_message() {
+        let err =
+            OciAdapterError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath);
+        assert_eq!(
+            err.to_string(),
+            "object storage prefix validation failed"
+        );
+    }
+
+    #[test]
+    fn blocking_task_error_display_message() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            #[allow(clippy::panic)]
+            let handle = tokio::spawn(async { panic!("intentional panic for test") });
+            let result = handle.await;
+            let join_err = result.unwrap_err();
+            let err = OciAdapterError::BlockingTask(join_err);
+            assert_eq!(err.to_string(), "blocking worker task failed");
+        });
+    }
+
+    #[test]
+    fn all_from_trait_conversions() {
+        // Verify From<IoError>
+        let io_err = std::io::Error::other("test");
+        let err: OciAdapterError = io_err.into();
+        assert!(matches!(err, OciAdapterError::Io(_)));
+
+        // Verify From<serde_json::Error>
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err: OciAdapterError = json_err.into();
+        assert!(matches!(err, OciAdapterError::Json(_)));
+
+        // Verify From<TryFromIntError>
+        let int_err = u8::try_from(-1i32).unwrap_err();
+        let err: OciAdapterError = int_err.into();
+        assert!(matches!(err, OciAdapterError::NumericConversion(_)));
+
+        // Verify From<ObjectPrefixError>
+        let prefix_err = shardline_storage::ObjectPrefixError::UnsafePath;
+        let err: OciAdapterError = prefix_err.into();
+        assert!(matches!(err, OciAdapterError::ObjectPrefix(_)));
+    }
 }

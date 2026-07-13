@@ -691,6 +691,7 @@ pub use shardline_index::LocalRecordStore;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shardline_storage::ObjectKey;
 
     #[test]
     fn default_retention_seconds_value() {
@@ -992,5 +993,410 @@ mod tests {
             matches!(server_err, ServerObjectStoreError::Io(_)),
             "unmapped GcError variant should be wrapped in Io"
         );
+    }
+
+    // ── GcError Display for all remaining variants ───────────────────────
+
+    #[test]
+    fn gc_error_local_object_store_display() {
+        let inner = LocalObjectStoreError::Io(std::io::Error::other("test"));
+        let err = GcError::LocalObjectStore(inner);
+        assert_eq!(err.to_string(), "local object storage operation failed");
+    }
+
+    #[test]
+    fn gc_error_s3_object_store_display() {
+        let inner = S3ObjectStoreError::Io(std::io::Error::other("test"));
+        let err = GcError::S3ObjectStore(inner);
+        assert_eq!(err.to_string(), "s3 object storage operation failed");
+    }
+
+    #[test]
+    fn gc_error_object_prefix_display() {
+        let inner = ObjectPrefixError::UnsafePath;
+        let err = GcError::ObjectPrefix(inner);
+        assert_eq!(err.to_string(), "object storage prefix validation failed");
+    }
+
+    #[test]
+    fn gc_error_index_store_display() {
+        let inner = shardline_index::LocalIndexStoreError::Io(std::io::Error::other("test"));
+        let err = GcError::IndexStore(inner);
+        assert_eq!(err.to_string(), "index adapter operation failed");
+    }
+
+    #[test]
+    fn gc_error_memory_index_store_display() {
+        let inner = MemoryIndexStoreError::LockPoisoned;
+        let err = GcError::MemoryIndexStore(inner);
+        assert_eq!(err.to_string(), "memory index adapter operation failed");
+    }
+
+    #[test]
+    fn gc_error_memory_record_store_display() {
+        let inner = MemoryRecordStoreError::RecordNotFound;
+        let err = GcError::MemoryRecordStore(inner);
+        assert_eq!(err.to_string(), "memory record adapter operation failed");
+    }
+
+    #[test]
+    fn gc_error_postgres_metadata_display() {
+        let inner = PostgresMetadataStoreError::HashParse(
+            shardline_protocol::HashParseError::InvalidCharacter,
+        );
+        let err = GcError::PostgresMetadata(inner);
+        assert_eq!(err.to_string(), "postgres metadata adapter operation failed");
+    }
+
+    #[test]
+    fn gc_error_retention_hold_display() {
+        let inner = RetentionHoldError::EmptyReason;
+        let err = GcError::RetentionHold(inner);
+        assert_eq!(err.to_string(), "retention hold input was invalid");
+    }
+
+    #[test]
+    fn gc_error_quarantine_candidate_display() {
+        let inner = QuarantineCandidateError::InvertedTimeline;
+        let err = GcError::QuarantineCandidate(inner);
+        assert_eq!(err.to_string(), "quarantine candidate input was invalid");
+    }
+
+    #[test]
+    fn gc_error_webhook_delivery_display() {
+        let inner = WebhookDeliveryError::EmptyRepositoryOwner;
+        let err = GcError::WebhookDelivery(inner);
+        assert_eq!(err.to_string(), "webhook delivery metadata was invalid");
+    }
+
+    #[test]
+    fn gc_error_file_record_invariant_display() {
+        let inner = FileRecordInvariantError::EmptyChunk;
+        let err = GcError::FileRecordInvariant(inner);
+        assert_eq!(err.to_string(), "stored file metadata was invalid");
+    }
+
+    #[test]
+    fn gc_error_invalid_lifecycle_metadata_display() {
+        let inner = InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
+            object_key: "test".to_owned(),
+        };
+        let err = GcError::InvalidLifecycleMetadata(inner);
+        assert_eq!(
+            err.to_string(),
+            "lifecycle metadata was internally inconsistent"
+        );
+    }
+
+    // ── From impl for remaining source types ────────────────────────────
+
+    #[test]
+    fn gc_error_from_local_index_store_error() {
+        let inner = shardline_index::LocalIndexStoreError::Io(std::io::Error::other("test"));
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::IndexStore(_)));
+    }
+
+    #[test]
+    fn gc_error_from_memory_index_store_error() {
+        let inner = MemoryIndexStoreError::LockPoisoned;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::MemoryIndexStore(_)));
+    }
+
+    #[test]
+    fn gc_error_from_memory_record_store_error() {
+        let inner = MemoryRecordStoreError::RecordNotFound;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::MemoryRecordStore(_)));
+    }
+
+    #[test]
+    fn gc_error_from_postgres_metadata_store_error() {
+        let inner = PostgresMetadataStoreError::HashParse(
+            shardline_protocol::HashParseError::InvalidCharacter,
+        );
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::PostgresMetadata(_)));
+    }
+
+    #[test]
+    fn gc_error_from_retention_hold_error() {
+        let inner = RetentionHoldError::EmptyReason;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::RetentionHold(_)));
+    }
+
+    #[test]
+    fn gc_error_from_quarantine_candidate_error() {
+        let inner = QuarantineCandidateError::InvertedTimeline;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::QuarantineCandidate(_)));
+    }
+
+    #[test]
+    fn gc_error_from_webhook_delivery_error() {
+        let inner = WebhookDeliveryError::EmptyRepositoryOwner;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::WebhookDelivery(_)));
+    }
+
+    #[test]
+    fn gc_error_from_file_record_invariant_error() {
+        let inner = FileRecordInvariantError::EmptyChunk;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::FileRecordInvariant(_)));
+    }
+
+    #[test]
+    fn gc_error_from_invalid_lifecycle_metadata_error() {
+        let inner = InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
+            object_key: "test".to_owned(),
+        };
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::InvalidLifecycleMetadata(_)));
+    }
+
+    #[test]
+    fn gc_error_from_object_prefix_error() {
+        let inner = ObjectPrefixError::UnsafePath;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::ObjectPrefix(_)));
+    }
+
+    #[test]
+    fn gc_error_from_xet_adapter_error() {
+        let inner = shardline_xet_adapter::XetAdapterError::NotFound;
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::XetAdapter(_)));
+    }
+
+    #[test]
+    fn gc_error_from_local_object_store_error() {
+        let inner = LocalObjectStoreError::Io(std::io::Error::other("test"));
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::LocalObjectStore(_)));
+    }
+
+    #[test]
+    fn gc_error_from_s3_object_store_error() {
+        let inner = S3ObjectStoreError::Io(std::io::Error::other("test"));
+        let gc_err: GcError = inner.into();
+        assert!(matches!(gc_err, GcError::S3ObjectStore(_)));
+    }
+
+    // ── GcError → ServerObjectStoreError for all unmapped variants ──────
+
+    #[test]
+    fn gc_error_into_server_object_store_error_object_prefix() {
+        let gc_err = GcError::ObjectPrefix(ObjectPrefixError::UnsafePath);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_index_store() {
+        let inner = shardline_index::LocalIndexStoreError::Io(std::io::Error::other("test"));
+        let gc_err = GcError::IndexStore(inner);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_memory_index_store() {
+        let gc_err = GcError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_memory_record_store() {
+        let gc_err = GcError::MemoryRecordStore(MemoryRecordStoreError::RecordNotFound);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_postgres_metadata() {
+        let inner = PostgresMetadataStoreError::HashParse(
+            shardline_protocol::HashParseError::InvalidCharacter,
+        );
+        let gc_err = GcError::PostgresMetadata(inner);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_retention_hold() {
+        let gc_err = GcError::RetentionHold(RetentionHoldError::EmptyReason);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_quarantine_candidate() {
+        let gc_err = GcError::QuarantineCandidate(QuarantineCandidateError::InvertedTimeline);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_webhook_delivery() {
+        let gc_err = GcError::WebhookDelivery(WebhookDeliveryError::EmptyRepositoryOwner);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_file_record_invariant() {
+        let gc_err = GcError::FileRecordInvariant(FileRecordInvariantError::EmptyChunk);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_invalid_lifecycle_metadata() {
+        let inner = InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
+            object_key: "test".to_owned(),
+        };
+        let gc_err = GcError::InvalidLifecycleMetadata(inner);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn gc_error_into_server_object_store_error_xet_adapter() {
+        let gc_err = GcError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
+        let server_err: ServerObjectStoreError = gc_err.into();
+        assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
+    }
+
+    // ── retention_report_entry tests ────────────────────────────────────
+
+    #[test]
+    fn retention_report_entry_expired() {
+        let now = 1_000_000_u64;
+        let object_key = ObjectKey::parse("ab/abcdef").unwrap();
+        let candidate = QuarantineCandidate::new(object_key, 512, now - 100, now - 1)
+            .unwrap();
+        let entry = retention_report_entry(&candidate, &[], now);
+        assert!(entry.expired);
+        assert_eq!(entry.hash, "ab/abcdef");
+        assert_eq!(entry.object_key, "ab/abcdef");
+        assert_eq!(entry.observed_length, 512);
+        assert_eq!(entry.first_seen_unreachable_at_unix_seconds, now - 100);
+        assert_eq!(entry.delete_after_unix_seconds, now - 1);
+        assert_eq!(entry.seconds_until_delete, 0);
+    }
+
+    #[test]
+    fn retention_report_entry_not_expired() {
+        let now = 1_000_000_u64;
+        let object_key = ObjectKey::parse("ab/abcdef").unwrap();
+        let candidate =
+            QuarantineCandidate::new(object_key, 1024, now - 3600, now + 3600).unwrap();
+        let entry = retention_report_entry(&candidate, &[], now);
+        assert!(!entry.expired);
+        assert_eq!(entry.seconds_until_delete, 3600);
+    }
+
+    #[test]
+    fn retention_report_entry_with_xet_frontend_maps_hash() {
+        let now = 1_000_000_u64;
+        let hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let object_key = ObjectKey::parse(&format!("ab/{hash}")).unwrap();
+        let candidate = QuarantineCandidate::new(object_key, 64, now, now + 3600).unwrap();
+        let entry = retention_report_entry(&candidate, &[ServerFrontend::Xet], now);
+        // With Xet frontend, the hash should be extracted from the chunk key
+        assert_eq!(entry.hash, hash);
+    }
+
+    // ── orphan_inventory_entry tests ────────────────────────────────────
+
+    #[test]
+    fn orphan_inventory_entry_untracked() {
+        let hash = "deadbeef".to_owned();
+        let object_key = ObjectKey::parse("ab/deadbeef").unwrap();
+        let orphan = crate::reachability::OrphanObject {
+            hash: hash.clone(),
+            object_key,
+            bytes: 256,
+        };
+        let entry = orphan_inventory_entry(&orphan, None);
+        assert_eq!(entry.hash, hash);
+        assert_eq!(entry.object_key, "ab/deadbeef");
+        assert_eq!(entry.bytes, 256);
+        assert_eq!(entry.quarantine_state, GcOrphanQuarantineState::Untracked);
+        assert_eq!(entry.first_seen_unreachable_at_unix_seconds, None);
+        assert_eq!(entry.delete_after_unix_seconds, None);
+    }
+
+    #[test]
+    fn orphan_inventory_entry_quarantined() {
+        let hash = "cafebabe".to_owned();
+        let object_key = ObjectKey::parse("ab/cafebabe").unwrap();
+        let orphan = crate::reachability::OrphanObject {
+            hash: hash.clone(),
+            object_key: object_key.clone(),
+            bytes: 512,
+        };
+        let now = 1_000_000_u64;
+        let candidate = QuarantineCandidate::new(object_key, 512, now, now + 3600).unwrap();
+        let entry = orphan_inventory_entry(&orphan, Some(&candidate));
+        assert_eq!(entry.hash, hash);
+        assert_eq!(entry.object_key, "ab/cafebabe");
+        assert_eq!(entry.bytes, 512);
+        assert_eq!(
+            entry.quarantine_state,
+            GcOrphanQuarantineState::Quarantined
+        );
+        assert_eq!(
+            entry.first_seen_unreachable_at_unix_seconds,
+            Some(now)
+        );
+        assert_eq!(entry.delete_after_unix_seconds, Some(now + 3600));
+    }
+
+    // ── quarantine_root / quarantine_record_path edge cases ─────────────
+
+    #[test]
+    fn quarantine_root_empty_path() {
+        let result = quarantine_root(Path::new(""));
+        assert_eq!(result, PathBuf::from("gc/quarantine"));
+    }
+
+    #[test]
+    fn quarantine_record_path_with_short_hash() {
+        // Short hashes still produce a valid path (first two chars become prefix).
+        let hash = "ab";
+        let result = quarantine_record_path(Path::new("/root"), hash);
+        assert!(result.to_string_lossy().ends_with("ab.json"));
+        assert!(result.starts_with("/root/ab/"));
+    }
+
+    #[test]
+    fn quarantine_record_path_with_empty_hash() {
+        let hash = "";
+        let result = quarantine_record_path(Path::new("/root"), hash);
+        assert!(result.to_string_lossy().ends_with("/.json"), "got: {:?}", result);
+        // Empty prefix means first two chars are empty → root path
+    }
+
+    // ── run_local_gc is a thin wrapper ──────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_local_gc_with_empty_root_returns_report() {
+        let dir = std::env::temp_dir().join(format!("gc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create minimal chunks subdirectory so ServerObjectStore can initialize.
+        std::fs::create_dir_all(dir.join("chunks")).unwrap();
+        let result = run_local_gc(dir.clone(), LocalGcOptions::dry_run()).await;
+        assert!(result.is_ok(), "dry-run with empty root should succeed: {:?}", result);
+        let report = result.unwrap();
+        assert_eq!(report.scanned_records, 0);
+        assert_eq!(report.orphan_chunks, 0);
+        assert_eq!(report.deleted_chunks, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

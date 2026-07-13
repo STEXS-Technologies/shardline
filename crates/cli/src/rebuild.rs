@@ -30,3 +30,22 @@ pub async fn run_index_rebuild(
     let config = load_server_config(root)?;
     Ok(run_server_index_rebuild(config).await?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_runtime_error_config_display() {
+        let err = RebuildRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid server role"));
+    }
+
+    #[test]
+    fn rebuild_runtime_error_debug() {
+        let err = RebuildRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Config("));
+    }
+}

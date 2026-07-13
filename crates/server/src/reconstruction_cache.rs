@@ -517,4 +517,74 @@ mod tests {
             .collect(),
         }
     }
+
+    // ── ReconstructionCacheAdapter ───────────────────────────────────────
+
+    #[test]
+    fn adapter_parse_disabled() {
+        use super::ReconstructionCacheAdapter;
+        assert_eq!(
+            ReconstructionCacheAdapter::parse("disabled").unwrap(),
+            ReconstructionCacheAdapter::Disabled
+        );
+    }
+
+    #[test]
+    fn adapter_parse_memory() {
+        use super::ReconstructionCacheAdapter;
+        assert_eq!(
+            ReconstructionCacheAdapter::parse("memory").unwrap(),
+            ReconstructionCacheAdapter::Memory
+        );
+    }
+
+    #[test]
+    fn adapter_parse_redis() {
+        use super::ReconstructionCacheAdapter;
+        assert_eq!(
+            ReconstructionCacheAdapter::parse("redis").unwrap(),
+            ReconstructionCacheAdapter::Redis
+        );
+    }
+
+    #[test]
+    fn adapter_parse_invalid() {
+        use super::ReconstructionCacheAdapter;
+        use crate::ServerConfigError;
+        assert!(matches!(
+            ReconstructionCacheAdapter::parse("unknown"),
+            Err(ServerConfigError::InvalidReconstructionCacheAdapter)
+        ));
+    }
+
+    #[test]
+    fn adapter_as_str() {
+        use super::ReconstructionCacheAdapter;
+        assert_eq!(ReconstructionCacheAdapter::Disabled.as_str(), "disabled");
+        assert_eq!(ReconstructionCacheAdapter::Memory.as_str(), "memory");
+        assert_eq!(ReconstructionCacheAdapter::Redis.as_str(), "redis");
+    }
+
+    // ── payload_within_bound ─────────────────────────────────────────────
+
+    #[test]
+    fn payload_within_bound_accepts_small_payload() {
+        use super::payload_within_bound;
+        assert!(payload_within_bound(b"small"));
+    }
+
+    #[test]
+    fn payload_within_bound_rejects_oversized() {
+        use super::{payload_within_bound, MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES};
+        let oversized = vec![0u8; (MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES + 1) as usize];
+        assert!(!payload_within_bound(&oversized));
+    }
+
+    #[test]
+    fn payload_within_bound_accepts_exact_max() {
+        use super::{payload_within_bound, MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES};
+        let exact = vec![0u8; MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES as usize];
+        assert!(payload_within_bound(&exact));
+    }
+
 }
