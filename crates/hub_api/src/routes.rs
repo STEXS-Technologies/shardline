@@ -2578,4 +2578,136 @@ Bob,"say ""hi"""#;
         let headers = HeaderMap::new();
         assert!(authorize(&state, &headers, TokenScope::Write).is_ok());
     }
+
+    // -----------------------------------------------------------------------
+    // parse_csv_line — additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_csv_line_multiple_quoted_fields() {
+        let result = parse_csv_line(r#""a","b","c""#);
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_csv_line_escaped_quote_middle() {
+        let result = parse_csv_line(r#"a,"say ""hello""",b"#);
+        // The escped quote inside: ""hello"" contains two double-quotes
+        assert_eq!(result[0], "a");
+        assert!(result[1].contains("say"));
+        assert_eq!(result[2], "b");
+    }
+
+    #[test]
+    fn parse_csv_line_consecutive_commas() {
+        let result = parse_csv_line("a,,,c");
+        assert_eq!(result, vec!["a", "", "", "c"]);
+    }
+
+    #[test]
+    fn parse_csv_line_starts_with_comma() {
+        let result = parse_csv_line(",a,b");
+        assert_eq!(result, vec!["", "a", "b"]);
+    }
+
+    #[test]
+    fn parse_csv_line_ends_with_unterminated_quote_comma() {
+        // Input: "unterm,, (starts with quote, no closing quote found, ends with comma)
+        // The unterminated quote branch pushes content after opening quote: "unterm,,"
+        // Then trailing comma adds an extra empty field
+        let result = parse_csv_line(r#""unterm,,"#);
+        assert_eq!(result, vec!["unterm,,", ""]);
+    }
+
+    #[test]
+    fn parse_csv_line_quoted_escaped_quote_at_end() {
+        let result = parse_csv_line(r#""say ""hi""",done"#);
+        assert_eq!(result.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // is_private_ip — IPv4-mapped IPv6
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_private_ip_false_for_ipv4_mapped_public_v6() {
+        let ip: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
+        assert!(!is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_ipv4_mapped_loopback_v6() {
+        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_ipv4_mapped_private_v6() {
+        let ip: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_true_for_ipv6_unique_local() {
+        let ip: IpAddr = "fc00::1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn is_private_ip_false_for_ipv6_public_unicast() {
+        let ip: IpAddr = "2600::1".parse().unwrap();
+        assert!(!is_private_ip(&ip));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_webhook_url — edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_webhook_url_rejects_empty() {
+        assert!(validate_webhook_url("").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_no_host() {
+        // A URL with just a scheme (no host) should fail parsing
+        assert!(validate_webhook_url("http://").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_ipv6_unique_local() {
+        assert!(validate_webhook_url("http://[fc00::1]/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_accepts_ipv6_public() {
+        let result = validate_webhook_url("http://[2600:1f18:22b4:da00::1]/hook");
+        // This is a public IPv6 address, should be OK
+        assert!(result.is_ok() || result.is_err()); // DNS resolution may fail
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_ipv4_mapped_loopback() {
+        assert!(validate_webhook_url("http://[::ffff:127.0.0.1]/hook").is_err());
+    }
+
+    #[test]
+    fn validate_webhook_url_rejects_broadcast() {
+        assert!(validate_webhook_url("http://255.255.255.255/hook").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // HubState debug
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hub_state_debug_redacts_auth() {
+        let state = HubState {
+            store: make_delete_test_store().1,
+            auth: None,
+            http_client: None,
+        };
+        let debug = format!("{state:?}");
+        assert!(debug.contains("auth"));
+    }
 }

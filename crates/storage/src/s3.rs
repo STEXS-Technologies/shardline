@@ -1506,11 +1506,11 @@ mod tests {
         GetOptions, ObjectStore as ExternalObjectStore, ObjectStoreExt, memory::InMemory,
         path::Path as ObjectStorePath,
     };
-    use shardline_protocol::ByteRange;
+    use shardline_protocol::{ByteRange, ShardlineHash};
 
     use super::{
         S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, is_temp_upload_key,
-        stream_payload_for_range, validated_external_range,
+        stream_payload_for_range, validated_external_range, normalize_prefix,
     };
     use crate::ObjectKey;
 
@@ -1738,5 +1738,534 @@ mod tests {
         // without needing any external endpoint.
         let store = S3ObjectStore::new(config);
         assert!(store.is_ok());
+    }
+
+    // ── normalize_prefix ─────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_prefix_trims_trailing_slashes() {
+        assert_eq!(normalize_prefix("prefix/"), Some("prefix".to_owned()));
+    }
+
+    #[test]
+    fn normalize_prefix_trims_leading_slashes() {
+        assert_eq!(normalize_prefix("/prefix"), Some("prefix".to_owned()));
+    }
+
+    #[test]
+    fn normalize_prefix_trims_both_slashes() {
+        assert_eq!(normalize_prefix("/prefix/"), Some("prefix".to_owned()));
+    }
+
+    #[test]
+    fn normalize_prefix_returns_none_for_empty_after_trim() {
+        assert_eq!(normalize_prefix(""), None);
+        assert_eq!(normalize_prefix("/"), None);
+        assert_eq!(normalize_prefix("///"), None);
+    }
+
+    #[test]
+    fn normalize_prefix_preserves_inner_slashes() {
+        assert_eq!(
+            normalize_prefix("/a/b/c/"),
+            Some("a/b/c".to_owned())
+        );
+    }
+
+    // ── validate_config ───────────────────────────────────────────────────
+
+    #[test]
+    fn validate_config_rejects_empty_region() {
+        let config = S3ObjectStoreConfig::new("bucket".to_owned(), String::new());
+        let result = S3ObjectStore::new(config);
+        assert!(matches!(result, Err(S3ObjectStoreError::EmptyRegion)));
+    }
+
+    #[test]
+    fn validate_config_rejects_empty_bucket() {
+        let config = S3ObjectStoreConfig::new(String::new(), "region".to_owned());
+        let result = S3ObjectStore::new(config);
+        assert!(matches!(result, Err(S3ObjectStoreError::EmptyBucket)));
+    }
+
+    // ── S3ObjectStoreConfig accessors ──────────────────────────────────────
+
+    #[test]
+    fn s3_config_bucket_accessor() {
+        let config = S3ObjectStoreConfig::new("my-bucket".to_owned(), "us-east-1".to_owned());
+        assert_eq!(config.bucket(), "my-bucket");
+    }
+
+    #[test]
+    fn s3_config_bucket_accessor_with_prefix() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_key_prefix(Some("pfx"));
+        assert_eq!(config.key_prefix(), Some("pfx"));
+    }
+
+    #[test]
+    fn s3_config_bucket_accessor_no_prefix() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
+        assert_eq!(config.key_prefix(), None);
+    }
+
+    // ── S3ObjectStoreConfig Debug redaction ────────────────────────────────
+
+    #[test]
+    fn s3_config_debug_redacts_credentials() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_credentials(
+                Some("access-key-123".to_owned()),
+                Some("secret-key-456".to_owned()),
+                Some("session-token-789".to_owned()),
+            );
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("access-key-123"));
+        assert!(!rendered.contains("secret-key-456"));
+        assert!(!rendered.contains("session-token-789"));
+        assert!(rendered.contains("***"));
+    }
+
+    // ── chunk_hash ────────────────────────────────────────────────────────
+
+    #[test]
+    fn chunk_hash_produces_consistent_result() {
+        let a = super::chunk_hash(b"hello world");
+        let b = super::chunk_hash(b"hello world");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn chunk_hash_differs_for_different_inputs() {
+        let a = super::chunk_hash(b"abc");
+        let b = super::chunk_hash(b"xyz");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn chunk_hash_handles_empty_input() {
+        let hash = super::chunk_hash(b"");
+        let expected = ShardlineHash::from_bytes(*blake3::hash(b"").as_bytes());
+        assert_eq!(hash, expected);
+    }
+
+    // ── Error variant Display ─────────────────────────────────────────────
+
+    #[test]
+    fn s3_error_display_incomplete_credentials() {
+        let err = S3ObjectStoreError::IncompleteCredentials;
+        assert_eq!(
+            err.to_string(),
+            "s3 object store credentials must include both access key id and secret access key"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_empty_bucket() {
+        let err = S3ObjectStoreError::EmptyBucket;
+        assert_eq!(err.to_string(), "s3 object store bucket must not be empty");
+    }
+
+    #[test]
+    fn s3_error_display_empty_region() {
+        let err = S3ObjectStoreError::EmptyRegion;
+        assert_eq!(err.to_string(), "s3 object store region must not be empty");
+    }
+
+    #[test]
+    fn s3_error_display_integrity_length_mismatch() {
+        let err = S3ObjectStoreError::IntegrityLengthMismatch;
+        assert_eq!(
+            err.to_string(),
+            "object body length did not match expected integrity"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_integrity_hash_mismatch() {
+        let err = S3ObjectStoreError::IntegrityHashMismatch;
+        assert_eq!(
+            err.to_string(),
+            "object body hash did not match expected integrity"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_existing_object_conflict() {
+        let err = S3ObjectStoreError::ExistingObjectConflict;
+        assert_eq!(
+            err.to_string(),
+            "object key already exists with conflicting bytes"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_range_out_of_bounds() {
+        let err = S3ObjectStoreError::RangeOutOfBounds;
+        assert_eq!(
+            err.to_string(),
+            "requested byte range exceeded stored object length"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_invalid_listed_key() {
+        let err = S3ObjectStoreError::InvalidListedKey;
+        assert_eq!(
+            err.to_string(),
+            "s3 listed an object outside the configured key prefix"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_invalid_upload_parts() {
+        let err = S3ObjectStoreError::InvalidUploadParts;
+        assert_eq!(
+            err.to_string(),
+            "upload parts list has invalid part numbering"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_runtime_unavailable() {
+        let err = S3ObjectStoreError::RuntimeUnavailable;
+        assert_eq!(
+            err.to_string(),
+            "s3 object store runtime is unavailable"
+        );
+    }
+
+    #[test]
+    fn s3_error_display_invalid_key_prefix() {
+        use crate::ObjectPrefixError;
+        let err = S3ObjectStoreError::InvalidKeyPrefix(ObjectPrefixError::UnsafePath);
+        let msg = err.to_string();
+        assert!(msg.contains("key prefix was invalid"));
+    }
+
+    #[test]
+    fn s3_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = S3ObjectStoreError::Io(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("temporary file operation failed"));
+    }
+
+    #[test]
+    fn s3_error_display_path() {
+        use object_store::path::Error as PathError;
+        let err = S3ObjectStoreError::Path(PathError::InvalidPath {
+            path: "/bad".into(),
+        });
+        let msg = err.to_string();
+        assert!(msg.contains("object-store path conversion failed"));
+    }
+
+    #[test]
+    fn s3_error_display_runtime() {
+        let io_err = std::io::Error::other("thread spawn failed");
+        let err = S3ObjectStoreError::Runtime(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("s3 object store runtime initialization failed"));
+    }
+
+    #[test]
+    fn s3_error_display_external() {
+        let ext_err = object_store::Error::NotImplemented {
+            operation: "test".to_owned(),
+            implementer: "test".to_owned(),
+        };
+        let err = S3ObjectStoreError::External(ext_err);
+        let msg = err.to_string();
+        assert!(msg.contains("s3 object store operation failed"));
+    }
+
+    // ── S3ObjectStoreConfig builder ───────────────────────────────────────
+
+    #[test]
+    fn s3_config_with_virtual_hosted_style() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_virtual_hosted_style_request(true);
+        let store = S3ObjectStore::new(config);
+        // Should build successfully (the setting just changes how requests are made)
+        assert!(store.is_ok());
+    }
+
+    // ── Incomplete credentials rejection ──────────────────────────────────
+
+    #[test]
+    fn s3_store_rejects_incomplete_credentials_key_without_secret() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_credentials(Some("key".to_owned()), None, None);
+        let store = S3ObjectStore::new(config);
+        assert!(matches!(store, Err(S3ObjectStoreError::IncompleteCredentials)));
+    }
+
+    #[test]
+    fn s3_store_rejects_incomplete_credentials_secret_without_key() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_credentials(None, Some("secret".to_owned()), None);
+        let store = S3ObjectStore::new(config);
+        assert!(matches!(store, Err(S3ObjectStoreError::IncompleteCredentials)));
+    }
+
+    // ── MinIO-backed integration tests ───────────────────────────────────
+
+    mod minio_tests {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use shardline_test_support::DockerLocalStack;
+        use shardline_test_support::S3RawConfig;
+
+        use super::super::{
+            BeginMultipartUploadResult, S3ObjectStore, S3ObjectStoreConfig,
+            S3ObjectStoreError,
+        };
+        use crate::{
+            DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix,
+            ObjectStore as ObjectStoreTrait, PutOutcome,
+        };
+        use shardline_protocol::ByteRange;
+
+        /// Shared MinIO init guard: only starts containers once across all tests.
+        static MINIO_INIT: AtomicBool = AtomicBool::new(false);
+        static INIT_LOCK: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+        fn ensure_minio() -> Option<DockerLocalStack> {
+            if !DockerLocalStack::docker_available() {
+                return None;
+            }
+            INIT_LOCK.get_or_init(|| {
+                MINIO_INIT.store(true, Ordering::SeqCst);
+            });
+            if !MINIO_INIT.load(Ordering::SeqCst) {
+                return None;
+            }
+            // Start fresh stack per-test-call so we get clean state.
+            DockerLocalStack::builder()
+                .with_minio()
+                .start()
+                .ok()
+                .flatten()
+        }
+
+        fn build_s3_store(stack: &DockerLocalStack, key_prefix: Option<&str>) -> S3ObjectStore {
+            let raw: S3RawConfig = stack.s3_raw_config(key_prefix).unwrap();
+            let config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+                .with_endpoint(raw.endpoint)
+                .with_allow_http(raw.allow_http)
+                .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+                .with_key_prefix(raw.key_prefix.as_deref());
+            S3ObjectStore::new(config).unwrap()
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_put_and_get_roundtrip() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let prefix = stack.unique_s3_key_prefix("test-roundtrip");
+            let store = build_s3_store(&stack, Some(&prefix));
+            let key = ObjectKey::parse("objects/hash.xorb").unwrap();
+            let body = b"hello minio";
+            let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 11);
+
+            let inserted = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+            assert!(
+                matches!(inserted, Ok(PutOutcome::Inserted)),
+                "expected Ok(Inserted), got {inserted:?}"
+            );
+
+            let contains = store.contains(&key);
+            assert!(matches!(contains, Ok(true)));
+
+            let read = store.read_range(&key, ByteRange::new(0, 10).unwrap());
+            assert!(read.is_ok());
+            assert_eq!(read.unwrap(), b"hello minio");
+
+            let deleted = store.delete_if_present(&key);
+            assert!(matches!(deleted, Ok(DeleteOutcome::Deleted)));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_put_if_absent_idempotent() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let store = build_s3_store(&stack, Some("test-idempotent"));
+            let key = ObjectKey::parse("objects/same.xorb").unwrap();
+            let body = b"same content";
+            let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 12);
+
+            let first = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+            assert!(matches!(first, Ok(PutOutcome::Inserted)));
+
+            let second = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+            assert!(matches!(second, Ok(PutOutcome::AlreadyExists)));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_list_flat_namespace_page_pagination() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let prefix = stack.unique_s3_key_prefix("test-list-page");
+            let store = build_s3_store(&stack, Some(&prefix));
+            let ns_prefix = ObjectPrefix::parse("ns/").unwrap();
+
+            // Insert three objects under the same flat namespace
+            for i in 0..3u64 {
+                let key = ObjectKey::parse(&format!("ns/key{i:020}")).unwrap();
+                let body = b"data";
+                let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 4);
+                store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+            }
+
+            // Full listing
+            let all = store.list_flat_namespace_page(&ns_prefix, None, 10).unwrap();
+            assert_eq!(all.len(), 3, "should list all 3 objects");
+
+            // Pagination with start_after
+            let after_first = ObjectKey::parse("ns/key00000000000000000000").unwrap();
+            let page = store.list_flat_namespace_page(&ns_prefix, Some(&after_first), 10).unwrap();
+            assert_eq!(page.len(), 2, "should list remaining 2 objects after first key");
+
+            // Limit
+            let limited = store.list_flat_namespace_page(&ns_prefix, None, 2).unwrap();
+            assert_eq!(limited.len(), 2, "should be limited to 2");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_visit_prefix_with_multiple_entries() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let prefix = stack.unique_s3_key_prefix("test-visit-prefix");
+            let store = build_s3_store(&stack, Some(&prefix));
+            let ns_prefix = ObjectPrefix::parse("vp/").unwrap();
+
+            for i in 0..5u64 {
+                let key = ObjectKey::parse(&format!("vp/obj{i:010}")).unwrap();
+                let body = b"x";
+                let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 1);
+                store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+            }
+
+            let mut visited = Vec::new();
+            let result: Result<(), S3ObjectStoreError> = store.visit_prefix(&ns_prefix, |meta| {
+                visited.push(meta.key().clone());
+                Ok(())
+            });
+            assert!(result.is_ok());
+            assert_eq!(visited.len(), 5, "visit_prefix should visit all 5 entries");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_begin_and_finish_content_addressed_upload() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let store = build_s3_store(&stack, Some("test-ca-upload"));
+            let canonical = ObjectKey::parse("cas/deadbeef.xorb").unwrap();
+            let body = b"content addressed payload";
+
+            let begin = store.begin_content_addressed_upload(&canonical).await;
+            assert!(begin.is_ok());
+            let Ok(begin) = begin else { return };
+
+            match begin {
+                BeginMultipartUploadResult::AlreadyExists => {
+                    // Someone else got there first — that's fine
+                }
+                BeginMultipartUploadResult::Upload(mut writer, temp_key) => {
+                    writer.write(body);
+                    writer.wait_for_capacity(4).await.unwrap();
+
+                    let finish = store
+                        .finish_content_addressed_upload(writer, &temp_key, &canonical)
+                        .await;
+                    assert!(finish.is_ok());
+                    let outcome = finish.unwrap();
+                    // Could be Inserted or AlreadyExists depending on timing
+                    assert!(
+                        outcome == PutOutcome::Inserted || outcome == PutOutcome::AlreadyExists,
+                        "expected Inserted or AlreadyExists, got {outcome:?}"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_put_content_addressed_file() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let store = build_s3_store(&stack, Some("test-put-ca-file"));
+            let key = ObjectKey::parse("cas/filehash.xorb").unwrap();
+
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            let body = b"file content for ca test";
+            std::fs::write(tmp.path(), body).unwrap();
+
+            let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), body.len() as u64);
+            let result = store.put_content_addressed_file(&key, tmp.path(), &integrity);
+            assert!(result.is_ok());
+
+            // Verify it's readable
+            let read = store.read_range(&key, ByteRange::new(0, body.len() as u64 - 1).unwrap()).unwrap();
+            assert_eq!(read, body);
+
+            // Second put is idempotent
+            let second = store.put_content_addressed_file(&key, tmp.path(), &integrity);
+            assert!(matches!(second, Ok(PutOutcome::AlreadyExists)));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_put_file_if_absent() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let store = build_s3_store(&stack, Some("test-put-file-absent"));
+            let key = ObjectKey::parse("files/test.bin").unwrap();
+
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            let body = b"file content for put_file_if_absent";
+            std::fs::write(tmp.path(), body).unwrap();
+
+            let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), body.len() as u64);
+            let result = store.put_file_if_absent(&key, tmp.path(), &integrity);
+            assert!(result.is_ok());
+
+            let read = store.read_range(&key, ByteRange::new(0, body.len() as u64 - 1).unwrap()).unwrap();
+            assert_eq!(read, body);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn minio_copy_object_if_absent() {
+            let stack = match ensure_minio() {
+                Some(s) => s,
+                None => return,
+            };
+            let store = build_s3_store(&stack, Some("test-copy-obj"));
+            let src = ObjectKey::parse("src/original.xorb").unwrap();
+            let dst = ObjectKey::parse("dst/copy.xorb").unwrap();
+
+            let body = b"copy test data";
+            let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 14);
+            store.put_if_absent(&src, ObjectBody::from_slice(body), &integrity).unwrap();
+
+            let copy = store.copy_object_if_absent(&src, &dst);
+            assert!(matches!(copy, Ok(PutOutcome::Inserted)));
+
+            let idempotent = store.copy_object_if_absent(&src, &dst);
+            assert!(matches!(idempotent, Ok(PutOutcome::AlreadyExists)));
+        }
     }
 }

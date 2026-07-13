@@ -173,3 +173,51 @@ fn postgres_index_store(index_postgres_url: &str) -> Result<PostgresIndexStore, 
         .connect_lazy(index_postgres_url)?;
     Ok(PostgresIndexStore::new(pool))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hold_runtime_error_config_display() {
+        let err = HoldRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid server role"));
+    }
+
+    #[test]
+    fn hold_runtime_error_object_key_display() {
+        let err = HoldRuntimeError::ObjectKey(ObjectKeyError::Empty);
+        let msg = err.to_string();
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn hold_runtime_error_retention_hold_display() {
+        let err = HoldRuntimeError::RetentionHold(RetentionHoldError::EmptyReason);
+        let msg = err.to_string();
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn hold_runtime_error_overflow_display() {
+        let err = HoldRuntimeError::Overflow;
+        assert_eq!(err.to_string(), "retention hold timestamp overflowed");
+    }
+
+    #[test]
+    fn hold_runtime_error_debug() {
+        let err = HoldRuntimeError::Overflow;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Overflow"));
+    }
+
+    #[test]
+    fn hold_runtime_error_local_index_display() {
+        use shardline_index::LocalIndexStoreError;
+        let inner = LocalIndexStoreError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "db missing"));
+        let err = HoldRuntimeError::LocalIndex(inner);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+}

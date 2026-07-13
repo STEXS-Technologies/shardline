@@ -260,4 +260,119 @@ mod tests {
         let msg = sideband_progress("working");
         assert_eq!(msg[4], b'2');
     }
+
+    #[test]
+    fn sideband_fatal_is_channel_3() {
+        let msg = sideband_fatal("error");
+        assert_eq!(msg[4], b'3');
+        let content = String::from_utf8_lossy(&msg[5..]);
+        assert_eq!(content, "error");
+    }
+
+    #[test]
+    fn sideband_data_multiple_chunks() {
+        // Create data larger than 65516 to trigger multiple sideband chunks
+        let data = vec![b'a'; 70000];
+        let multiplexed = sideband_data(&data);
+        // Should contain at least 2 length-prefixed packets
+        assert!(multiplexed.len() > 70000);
+        let (decoded, _) = decode_sideband(&multiplexed);
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn sideband_data_empty() {
+        let multiplexed = sideband_data(b"");
+        assert!(multiplexed.is_empty());
+    }
+
+    #[test]
+    fn sideband_progress_is_parseable() {
+        let msg = sideband_progress("working on it");
+        let (pack, msgs) = decode_sideband(&msg);
+        assert!(pack.is_empty());
+        assert_eq!(msgs, vec!["working on it"]);
+    }
+
+    #[test]
+    fn sideband_mixed_channels() {
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&sideband_data(b"pack-data-here"));
+        combined.extend_from_slice(&sideband_progress("progress message"));
+        combined.extend_from_slice(&sideband_fatal("fatal error"));
+        combined.extend_from_slice(FLUSH.as_bytes());
+
+        let (pack, msgs) = decode_sideband(&combined);
+        assert_eq!(pack, b"pack-data-here");
+        assert_eq!(msgs, vec!["progress message", "fatal error"]);
+    }
+
+    #[test]
+    fn encode_line_bytes_valid() {
+        let encoded = encode_line_bytes(b"binary\x00data").expect("should encode bytes");
+        // "binary\x00data" = 11 bytes, plus 4 hex prefix = 15
+        assert!(encoded.starts_with("000f"));
+        assert_eq!(encoded.len(), 15); // 4 hex + 11 bytes = 15
+    }
+
+    #[test]
+    fn encode_line_bytes_too_large() {
+        let large = vec![0u8; 70000];
+        let result = encode_line_bytes(&large);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(PktLineError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn encode_line_too_large() {
+        let large = "a".repeat(70000);
+        let result = encode_line(&large);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(PktLineError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn decode_lines_empty() {
+        let lines = decode_lines(b"");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn decode_lines_invalid_hex() {
+        let lines = decode_lines(b"zzzz");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn decode_lines_truncated() {
+        // Length prefix says 10 bytes but only 5 are available
+        let lines = decode_lines(b"000aabc");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn decode_lines_multiple() {
+        // "000a" = 10 bytes (4 prefix + 6 payload "hello\n")
+        // "0008" = 8 bytes (4 prefix + 4 payload "bye\n")
+        // "0000" = flush
+        let data = b"000ahello\n0008bye\n0000";
+        let lines = decode_lines(data);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], b"hello\n");
+        assert_eq!(lines[1], b"bye\n");
+    }
+
+    #[test]
+    fn pkt_line_error_display() {
+        let err = PktLineError::PayloadTooLarge { size: 100, max: 50 };
+        let msg = err.to_string();
+        assert!(msg.contains("100"));
+        assert!(msg.contains("50"));
+    }
+
+    #[test]
+    fn delimiter_and_response_end_constants() {
+        assert_eq!(DELIMITER, "0001");
+        assert_eq!(RESPONSE_END, "0002");
+    }
 }

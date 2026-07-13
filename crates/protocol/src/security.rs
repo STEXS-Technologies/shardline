@@ -124,4 +124,53 @@ mod tests {
 
         assert_eq!(secret.expose_secret(), "bootstrap-token");
     }
+
+    #[test]
+    fn secret_bytes_new_wraps_owned() {
+        let data = vec![1, 2, 3, 4];
+        let secret = SecretBytes::new(data);
+        assert_eq!(secret.expose_secret(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn secret_bytes_len_and_is_empty() {
+        let empty = SecretBytes::new(Vec::new());
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+
+        let non_empty = SecretBytes::from_slice(b"abc");
+        assert!(!non_empty.is_empty());
+        assert_eq!(non_empty.len(), 3);
+    }
+
+    #[test]
+    fn secret_bytes_as_ref() {
+        use std::convert::AsRef;
+        let secret = SecretBytes::from_slice(b"hello");
+        let bytes: &[u8] = secret.as_ref();
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn secret_string_new_wraps_owned() {
+        let secret = SecretString::new("owned".to_owned());
+        assert_eq!(secret.expose_secret(), "owned");
+    }
+
+    #[test]
+    fn secret_string_is_empty() {
+        let empty = SecretString::new(String::new());
+        assert!(empty.is_empty());
+
+        let non_empty = SecretString::from_secret("data");
+        assert!(!non_empty.is_empty());
+    }
+
+    #[test]
+    fn secret_string_as_ref() {
+        use std::convert::AsRef;
+        let secret = SecretString::from_secret("text");
+        let s: &str = secret.as_ref();
+        assert_eq!(s, "text");
+    }
 }

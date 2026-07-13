@@ -1681,4 +1681,340 @@ mod tests {
             "expected StoredFileMetadataTooLarge, got: {err}"
         );
     }
+
+    // ── AuthContext ──────────────────────────────────────────────────────
+
+    #[test]
+    fn auth_context_new_and_accessors() {
+        use shardline_protocol::RepositoryScope;
+        let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
+        let claims = TokenClaims::new("iss", "sub", TokenScope::Read, repo, 100).unwrap();
+        let ctx = AuthContext::new(claims.clone());
+
+        assert_eq!(ctx.claims(), &claims);
+        assert_eq!(ctx.subject(), "sub");
+        assert_eq!(ctx.scope(), TokenScope::Read);
+    }
+
+    // ── ShardMetadataLimits ──────────────────────────────────────────────
+
+    #[test]
+    fn shard_metadata_limits_new_and_accessors() {
+        let limits = ShardMetadataLimits::new(
+            NonZeroUsize::new(10).unwrap(),
+            NonZeroUsize::new(20).unwrap(),
+            NonZeroUsize::new(30).unwrap(),
+            NonZeroUsize::new(40).unwrap(),
+        );
+        assert_eq!(limits.max_files().get(), 10);
+        assert_eq!(limits.max_xorbs().get(), 20);
+        assert_eq!(limits.max_reconstruction_terms().get(), 30);
+        assert_eq!(limits.max_xorb_chunks().get(), 40);
+    }
+
+    #[test]
+    fn shard_metadata_limits_default_matches_const() {
+        assert_eq!(ShardMetadataLimits::default(), DEFAULT_SHARD_METADATA_LIMITS);
+    }
+
+    // ── AuthError Display ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_error_display_insufficient_scope() {
+        let msg = AuthError::InsufficientScope.to_string();
+        assert_eq!(msg, "insufficient scope");
+    }
+
+    #[test]
+    fn auth_error_display_provider_error() {
+        let msg = AuthError::ProviderError("oops".to_owned()).to_string();
+        assert_eq!(msg, "provider error: oops");
+    }
+
+    #[test]
+    fn auth_error_from_token_codec_error_expired() {
+        let err: AuthError = TokenCodecError::Expired.into();
+        assert!(matches!(err, AuthError::ExpiredToken));
+    }
+
+    #[test]
+    fn auth_error_from_token_codec_error_invalid_signature() {
+        let err: AuthError = TokenCodecError::InvalidSignature.into();
+        assert!(matches!(err, AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn auth_error_from_token_codec_error_empty_key() {
+        let err: AuthError = TokenCodecError::EmptySigningKey.into();
+        assert!(matches!(err, AuthError::ProviderError(_)));
+    }
+
+    #[test]
+    fn auth_error_from_token_codec_error_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err: AuthError = TokenCodecError::Json(json_err).into();
+        assert!(matches!(err, AuthError::ProviderError(_)));
+    }
+
+    // ── ServerObjectStoreError Display ──────────────────────────────────
+
+    #[test]
+    fn server_object_store_error_display_not_found() {
+        assert_eq!(ServerObjectStoreError::NotFound.to_string(), "content not found");
+    }
+
+    #[test]
+    fn server_object_store_error_display_overflow() {
+        assert_eq!(ServerObjectStoreError::Overflow.to_string(), "arithmetic overflow");
+    }
+
+    #[test]
+    fn server_object_store_error_display_invalid_content_hash() {
+        assert_eq!(
+            ServerObjectStoreError::InvalidContentHash.to_string(),
+            "content hash must be 64 hexadecimal characters"
+        );
+    }
+
+    #[test]
+    fn server_object_store_error_display_stored_object_length_mismatch() {
+        assert_eq!(
+            ServerObjectStoreError::StoredObjectLengthMismatch.to_string(),
+            "stored object length did not match indexed metadata"
+        );
+    }
+
+    // ── Error Display for remaining types ────────────────────────────────
+
+    #[test]
+    fn validate_identifier_error_display() {
+        let msg = ValidateIdentifierError.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("identifier"));
+    }
+
+    #[test]
+    fn validate_content_hash_error_display() {
+        let msg = ValidateContentHashError.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("hexadecimal"));
+    }
+
+    #[test]
+    fn rebuild_overflow_error_display() {
+        let msg = RebuildOverflowError.to_string();
+        assert_eq!(msg, "arithmetic overflow");
+    }
+
+    #[test]
+    fn parse_stored_file_record_error_json_display() {
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = ParseStoredFileRecordError::Json(json_err);
+        let msg = err.to_string();
+        assert_eq!(msg, "json operation failed");
+    }
+
+    // ── provider_directory ───────────────────────────────────────────────
+
+    #[test]
+    fn provider_directory_github() {
+        assert_eq!(provider_directory(RepositoryProvider::GitHub), "github");
+    }
+
+    #[test]
+    fn provider_directory_gitea() {
+        assert_eq!(provider_directory(RepositoryProvider::Gitea), "gitea");
+    }
+
+    // ── chunk_hash ───────────────────────────────────────────────────────
+
+    #[test]
+    fn chunk_hash_produces_deterministic_output() {
+        let data = b"hello world";
+        let hash1 = chunk_hash(data);
+        let hash2 = chunk_hash(data);
+        assert_eq!(hash1, hash2);
+        assert_ne!(hash1, chunk_hash(b"different"));
+    }
+
+    #[test]
+    fn chunk_hash_returns_32_byte_hash() {
+        let hash = chunk_hash(b"test");
+        assert_eq!(hash.as_bytes().len(), 32);
+    }
+
+    // ── unix_now_seconds_checked ─────────────────────────────────────────
+
+    #[test]
+    fn unix_now_seconds_checked_returns_modern_timestamp() {
+        let ts = unix_now_seconds_checked().unwrap();
+        assert!(ts >= 1_700_000_000, "timestamp {ts} too small");
+    }
+
+    // ── ServerObjectStore::local_path_for_key ────────────────────────────
+
+    #[test]
+    fn local_path_for_key_with_local_store_returns_some() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("aa/abcd").unwrap();
+        assert!(store.local_path_for_key(&key).is_some());
+    }
+
+    #[test]
+    fn local_path_for_key_with_s3_returns_none() {
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("aa/abcd").unwrap();
+        assert!(store.local_path_for_key(&key).is_none());
+    }
+
+    #[test]
+    fn local_path_for_key_with_blackhole_returns_none() {
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("aa/abcd").unwrap();
+        assert!(store.local_path_for_key(&key).is_none());
+    }
+
+    // ── InvalidLifecycleMetadataError Display ───────────────────────────
+
+    #[test]
+    fn invalid_lifecycle_metadata_display_delete_before_first_seen() {
+        let err = InvalidLifecycleMetadataError::QuarantineCandidateDeleteBeforeFirstSeen {
+            object_key: "obj".to_owned(),
+            delete_after_unix_seconds: 100,
+            first_seen_unreachable_at_unix_seconds: 200,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("obj"));
+        assert!(msg.contains("delete-after"));
+    }
+
+    #[test]
+    fn invalid_lifecycle_metadata_display_missing_object() {
+        let err = InvalidLifecycleMetadataError::QuarantineCandidateMissingObject {
+            object_key: "obj".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("obj"));
+    }
+
+    #[test]
+    fn invalid_lifecycle_metadata_display_length_mismatch() {
+        let err = InvalidLifecycleMetadataError::QuarantineCandidateLengthMismatch {
+            object_key: "obj".to_owned(),
+            expected_length: 100,
+            observed_length: 200,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("expected length"));
+    }
+
+    #[test]
+    fn invalid_lifecycle_metadata_display_release_before_held() {
+        let err = InvalidLifecycleMetadataError::RetentionHoldReleaseBeforeHeld {
+            object_key: "obj".to_owned(),
+            release_after_unix_seconds: 50,
+            held_at_unix_seconds: 100,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("release-after"));
+    }
+
+    #[test]
+    fn invalid_lifecycle_metadata_display_hold_missing_object() {
+        let err = InvalidLifecycleMetadataError::ActiveRetentionHoldMissingObject {
+            object_key: "obj".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("missing object"));
+    }
+
+    #[test]
+    fn invalid_lifecycle_metadata_display_hold_quarantined() {
+        let err = InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined {
+            object_key: "obj".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("coexisted with quarantine"));
+    }
+
+    // ── ServerObjectStore::visit_prefix and list_flat_namespace_page ────
+
+    #[test]
+    fn server_object_store_visit_prefix_blackhole_empty() {
+        use shardline_storage::ObjectPrefix;
+        let store = ServerObjectStore::blackhole();
+        let prefix = ObjectPrefix::parse("").unwrap();
+        let mut count = 0u64;
+        let result: Result<(), ServerObjectStoreError> = store
+            .visit_prefix(&prefix, |_meta| {
+                count += 1;
+                Ok(())
+            });
+        assert!(result.is_ok());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn server_object_store_list_flat_namespace_page_blackhole_empty() {
+        use shardline_storage::ObjectPrefix;
+        let store = ServerObjectStore::blackhole();
+        let prefix = ObjectPrefix::parse("").unwrap();
+        let result = store
+            .list_flat_namespace_page(&prefix, None, 10)
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── ServerObjectStore::put_content_addressed_file blackhole ─────────
+
+    #[test]
+    fn server_object_store_put_content_addressed_file_blackhole() {
+        use shardline_storage::{ObjectIntegrity, ObjectKey, PutOutcome};
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        let tmp = shardline_test_support::TempStorage::new();
+        let file_path = tmp.path().join("test.bin");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        let integrity = ObjectIntegrity::new(chunk_hash(b"data"), 4);
+        let result = store.put_content_addressed_file(&key, &file_path, &integrity);
+        assert!(matches!(result, Ok(PutOutcome::Inserted)));
+    }
+
+    // ── Additional token.rs / protocol_support.rs cross-tests ───────────
+
+    #[test]
+    fn chunk_object_key_edge_cases() {
+        // Minimum hex boundary
+        let hash = "0000000000000000000000000000000000000000000000000000000000000000";
+        let key = chunk_object_key(hash).unwrap();
+        assert_eq!(key.as_str(), "00/0000000000000000000000000000000000000000000000000000000000000000");
+
+        // Maximum hex boundary
+        let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let key = chunk_object_key(hash).unwrap();
+        assert_eq!(key.as_str(), "ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    }
+
+    #[test]
+    fn chunk_hash_from_chunk_key_if_present_prefix_too_short() {
+        let key = ObjectKey::parse("a/abc").unwrap();
+        let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn chunk_hash_from_chunk_key_if_present_non_hex_prefix() {
+        let key = ObjectKey::parse("gg/abc").unwrap();
+        let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn chunk_hash_from_chunk_key_if_present_hash_does_not_start_with_prefix() {
+        let key = ObjectKey::parse("aa/bbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc").unwrap();
+        let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
+        assert_eq!(result, None);
+    }
 }

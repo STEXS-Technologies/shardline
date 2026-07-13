@@ -176,4 +176,60 @@ mod tests {
             "protocols/shared/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
     }
+
+    #[test]
+    fn stable_hex_id_produces_64_char_hex() {
+        let id = super::stable_hex_id("hello");
+        assert_eq!(id.len(), 64);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn stable_hex_id_is_deterministic() {
+        let a = super::stable_hex_id("test-value");
+        let b = super::stable_hex_id("test-value");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn stable_hex_id_differs_for_different_inputs() {
+        let a = super::stable_hex_id("input-a");
+        let b = super::stable_hex_id("input-b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn scope_namespace_none_returns_global() {
+        assert_eq!(super::scope_namespace(None), "global");
+    }
+
+    #[test]
+    fn scope_namespace_with_scope_returns_64_char_hex() {
+        let scope = shardline_protocol::RepositoryScope::new(
+            shardline_protocol::RepositoryProvider::GitHub,
+            "org",
+            "repo",
+            None,
+        )
+        .unwrap();
+        let ns = super::scope_namespace(Some(&scope));
+        assert_eq!(ns.len(), 64);
+        assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn object_key_valid() {
+        let key = super::object_key("valid/path").unwrap();
+        assert_eq!(key.as_str(), "valid/path");
+    }
+
+    #[test]
+    fn object_key_invalid_empty() {
+        assert!(super::object_key("").is_err());
+    }
+
+    #[test]
+    fn object_key_invalid_unsafe_path() {
+        assert!(super::object_key("../unsafe").is_err());
+    }
 }

@@ -67,7 +67,7 @@ impl RedisReconstructionCache {
         Ok(conn)
     }
 
-    fn redis_key(key: &ReconstructionCacheKey) -> String {
+    pub(crate) fn redis_key(key: &ReconstructionCacheKey) -> String {
         let scope = key.repository_scope().map_or_else(
             || "global".to_owned(),
             |scope| {
@@ -156,6 +156,7 @@ mod tests {
 
     use super::{RECONSTRUCTION_CACHE_PREFIX, RedisReconstructionCache};
     use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
     #[test]
     fn redis_cache_debug_redacts_connection_url() {
@@ -220,5 +221,76 @@ mod tests {
             let _: usize = connection.del(keys).await?;
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn redis_cache_ready_succeeds_when_live_url_is_available() {
+        let Some(redis_url) = env_var("STEXS_REDIS_CACHE_TEST_URL").ok() else {
+            return;
+        };
+
+        let ttl_seconds = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
+        let cache = RedisReconstructionCache::new(&redis_url, ttl_seconds).unwrap();
+        let result = cache.ready().await;
+        assert!(result.is_ok());
+    }
+
+    // ── Repository scope key serialization ────────────────────────────────
+
+    #[test]
+    fn redis_key_format_with_scope() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "my-org", "my-repo", Some("main"));
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let key = ReconstructionCacheKey::latest("file.bin", Some(&scope));
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        // The provider ("github") is NOT hex-encoded (comes from provider_token directly).
+        // owner, repo, and revision ARE hex-encoded (via encode_component).
+        // file_id and content_hash ARE also hex-encoded.
+        let owner_hex = hex::encode("my-org");
+        let repo_hex = hex::encode("my-repo");
+        let revision_hex = hex::encode("main");
+        let file_hex = hex::encode("file.bin");
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+        assert!(redis_key.contains(&format!(":github:{owner_hex}:{repo_hex}:{revision_hex}:")));
+        assert!(redis_key.ends_with(&format!(":latest:{file_hex}")));
+    }
+
+    #[test]
+    fn redis_key_format_without_scope() {
+        let key = ReconstructionCacheKey::latest("file.bin", None);
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+        assert!(redis_key.contains(":global:"));
+    }
+
+    #[test]
+    fn redis_key_format_with_content_hash() {
+        let key = ReconstructionCacheKey::version("file.bin", "abc123", None);
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        let hash_hex = hex::encode("abc123");
+        let file_hex = hex::encode("file.bin");
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+        assert!(redis_key.ends_with(&format!(":{hash_hex}:{file_hex}")));
+    }
+
+    #[test]
+    fn redis_key_format_with_scope_no_revision() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let key = ReconstructionCacheKey::latest("doc.pdf", Some(&scope));
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        let owner_hex = hex::encode("group");
+        let repo_hex = hex::encode("project");
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+        assert!(redis_key.contains(&format!(":gitlab:{owner_hex}:{repo_hex}:")));
+        assert!(redis_key.contains(":head:"));
     }
 }

@@ -287,3 +287,228 @@ fn global_metrics_and_registry_are_accessible() {
     let _m = metrics();
     let _r = registry();
 }
+
+// ── Backend metrics ────────────────────────────────────────────────────────
+
+#[test]
+fn backend_record_s3_request_increments_counter() {
+    let (registry, m) = new_registry_and_metrics();
+    m.backend.record_s3_request(std::time::Duration::from_millis(10));
+    let output = encode(&registry);
+    assert!(output.contains("shardline_s3_requests_total 1"));
+}
+
+#[test]
+fn backend_record_s3_error_increments_counter() {
+    let (registry, m) = new_registry_and_metrics();
+    m.backend.record_s3_error();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_s3_errors_total 1"));
+}
+
+#[test]
+fn backend_record_local_io_increments_counter() {
+    let (registry, m) = new_registry_and_metrics();
+    m.backend.record_local_io(std::time::Duration::from_micros(100));
+    let output = encode(&registry);
+    assert!(output.contains("shardline_local_io_operations_total 1"));
+}
+
+// ── Storage metrics ────────────────────────────────────────────────────────
+
+#[test]
+fn storage_record_object_stored_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.storage.record_object_stored(512);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_objects_total 1"));
+    assert!(output.contains("shardline_objects_bytes_total 512"));
+}
+
+#[test]
+fn storage_record_chunk_stored_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.storage.record_chunk_stored(1024);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_chunks_total 1"));
+    assert!(output.contains("shardline_chunks_bytes_total 1024"));
+}
+
+#[test]
+fn storage_record_xorb_stored_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.storage.record_xorb_stored(2048);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_xorbs_total 1"));
+    assert!(output.contains("shardline_xorbs_bytes_total 2048"));
+}
+
+#[test]
+fn storage_record_shard_stored_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.storage.record_shard_stored();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_shards_total 1"));
+}
+
+#[test]
+fn storage_record_dedup_saves_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.storage.record_dedup_saves(4096);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_dedup_saves_bytes_total 4096"));
+}
+
+// ── System metrics ─────────────────────────────────────────────────────────
+
+#[test]
+fn system_connection_opened_and_closed() {
+    let (registry, m) = new_registry_and_metrics();
+    m.system.connection_opened();
+    m.system.connection_opened();
+    m.system.connection_closed();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_active_connections 1"));
+}
+
+#[test]
+fn system_set_uptime() {
+    let (registry, m) = new_registry_and_metrics();
+    m.system.set_uptime(12345);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_server_uptime_seconds 12345"));
+}
+
+// ── Transfer metrics ───────────────────────────────────────────────────────
+
+#[test]
+fn transfer_record_upload_duration_observes() {
+    let (registry, m) = new_registry_and_metrics();
+    m.transfer.record_upload_duration(0.5);
+    // Verify the histogram was created — it will have a _bucket, _count, _sum
+    let output = encode(&registry);
+    assert!(output.contains("shardline_upload_duration_seconds"));
+}
+
+#[test]
+fn transfer_record_download_duration_observes() {
+    let (registry, m) = new_registry_and_metrics();
+    m.transfer.record_download_duration(0.25);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_download_duration_seconds"));
+}
+
+#[test]
+fn transfer_record_range_request_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.transfer.record_range_request();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_range_requests_total 1"));
+}
+
+// ── Protocol metrics ───────────────────────────────────────────────────────
+
+#[test]
+fn protocol_record_lfs_upload_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.protocol.record_lfs_upload();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_lfs_upload_requests_total 1"));
+}
+
+#[test]
+fn protocol_record_lfs_download_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.protocol.record_lfs_download();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_lfs_download_requests_total 1"));
+}
+
+#[test]
+fn protocol_record_oci_upload_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.protocol.record_oci_upload();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_oci_upload_requests_total 1"));
+}
+
+#[test]
+fn protocol_record_oci_download_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.protocol.record_oci_download();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_oci_download_requests_total 1"));
+}
+
+#[test]
+fn protocol_oci_registry_token_operations() {
+    let (registry, m) = new_registry_and_metrics();
+    m.protocol.record_oci_registry_token_request();
+    m.protocol.record_oci_registry_token_rate_limited();
+    m.protocol.begin_oci_registry_token_request();
+    m.protocol.end_oci_registry_token_request();
+    let output = encode(&registry);
+    assert!(output.contains("shardline_oci_registry_token_requests_total 1"));
+    assert!(output.contains("shardline_oci_registry_token_rate_limited_total 1"));
+    assert!(output.contains("shardline_oci_registry_token_active_requests 0"));
+}
+
+// ── Provider metrics ───────────────────────────────────────────────────────
+
+#[test]
+fn provider_record_webhook_duration_observes() {
+    let (registry, m) = new_registry_and_metrics();
+    m.provider.record_webhook_duration(std::time::Duration::from_millis(100));
+    let output = encode(&registry);
+    assert!(output.contains("shardline_provider_webhook_processing_duration_seconds"));
+}
+
+// ── Xet metrics (direct struct methods) ────────────────────────────────────
+
+#[test]
+fn xet_record_shard_upload_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.xet.record_shard_upload(100);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_xet_shard_uploads_total 1"));
+    assert!(output.contains("shardline_xet_shard_upload_bytes_total 100"));
+}
+
+#[test]
+fn xet_record_xorb_upload_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.xet.record_xorb_upload(200);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_xet_xorb_uploads_total 1"));
+    assert!(output.contains("shardline_xet_xorb_upload_bytes_total 200"));
+}
+
+#[test]
+fn xet_record_xorb_download_increments() {
+    let (registry, m) = new_registry_and_metrics();
+    m.xet.record_xorb_download(300);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_xet_xorb_downloads_total 300"));
+}
+
+#[test]
+fn xet_record_dedupe_shard_query_hit() {
+    let (registry, m) = new_registry_and_metrics();
+    m.xet.record_dedupe_shard_query(true);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_xet_dedupe_shard_queries_total 1"));
+    assert!(output.contains("shardline_xet_dedupe_shard_hits_total 1"));
+}
+
+#[test]
+fn xet_record_dedupe_shard_query_miss() {
+    let (registry, m) = new_registry_and_metrics();
+    m.xet.record_dedupe_shard_query(false);
+    let output = encode(&registry);
+    assert!(output.contains("shardline_xet_dedupe_shard_queries_total 1"));
+    // Hits counter is present with value 0 when it hasn't been incremented
+    assert!(
+        output.contains("shardline_xet_dedupe_shard_hits_total 0"),
+        "expected hits counter at 0, got:\n{output}"
+    );
+}

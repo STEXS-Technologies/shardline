@@ -1109,3 +1109,378 @@ async fn s3_multipart_concurrent_append_stress() {
     // At least one upload should exist from ensure_s3_upload_started.
     drop(guard);
 }
+
+// ── Additional function coverage tests ──────────────────────────────────────
+
+#[test]
+fn global_scope_namespace_returns_global() {
+    assert_eq!(super::global_scope_namespace(), "global");
+}
+
+#[test]
+fn validate_repository_accepts_valid_name() {
+    assert!(super::validate_repository("team/assets").is_ok());
+}
+
+#[test]
+fn validate_repository_rejects_empty() {
+    assert!(matches!(
+        super::validate_repository(""),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn validate_repository_rejects_traversal() {
+    assert!(matches!(
+        super::validate_repository("../assets"),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn oci_blob_location_format() {
+    let loc = super::oci_blob_location("myrepo", "abcdef");
+    assert_eq!(loc, "/v2/myrepo/blobs/sha256:abcdef");
+}
+
+#[test]
+fn oci_manifest_location_format() {
+    let loc = super::oci_manifest_location("myrepo", "latest");
+    assert_eq!(loc, "/v2/myrepo/manifests/latest");
+}
+
+#[test]
+fn oci_manifest_location_with_digest() {
+    let loc = super::oci_manifest_location("myrepo", "sha256:abcdef");
+    assert_eq!(loc, "/v2/myrepo/manifests/sha256:abcdef");
+}
+
+#[test]
+fn upload_session_location_format() {
+    let loc = super::upload_session_location("myrepo", "session-123");
+    assert_eq!(loc, "/v2/myrepo/blobs/uploads/session-123");
+}
+
+#[test]
+fn upload_body_path_for_session_returns_path() {
+    let root = temp_root();
+    let path = super::upload_body_path_for_session(root.path(), "0123456789abcdef").unwrap();
+    assert!(path.to_string_lossy().contains("0123456789abcdef.bin"));
+}
+
+#[test]
+fn upload_body_path_for_session_rejects_invalid_id() {
+    let root = temp_root();
+    let result = super::upload_body_path_for_session(root.path(), "bad/session");
+    assert!(matches!(result, Err(OciAdapterError::InvalidUploadSession)));
+}
+
+#[test]
+fn upload_session_length_without_multipart_returns_none() {
+    let session = OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 0,
+        last_touched_unix_seconds: 0,
+        use_s3_multipart: false,
+        s3_multipart: None,
+    };
+    assert_eq!(super::upload_session_length(&session), None);
+}
+
+#[test]
+fn upload_session_length_with_multipart_returns_length() {
+    let session = OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 0,
+        last_touched_unix_seconds: 0,
+        use_s3_multipart: true,
+        s3_multipart: Some(crate::OciS3MultipartUploadSession {
+            temporary_object_key: "tmp/key".to_owned(),
+            upload_id: "upload-1".to_owned(),
+            uploaded_part_ids: vec![],
+            total_length: 42,
+            sha256_state: crate::SerializableSha256State::default(),
+        }),
+    };
+    assert_eq!(super::upload_session_length(&session), Some(42));
+}
+
+#[test]
+fn upload_session_length_with_multipart_no_data_returns_zero() {
+    let session = OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 0,
+        last_touched_unix_seconds: 0,
+        use_s3_multipart: true,
+        s3_multipart: None,
+    };
+    assert_eq!(super::upload_session_length(&session), Some(0));
+}
+
+#[tokio::test]
+async fn touch_upload_session_persists_updated_timestamp() {
+    let root = temp_root();
+    let session_id = super::create_upload_session(
+        root.path(),
+        NO_BACKEND,
+        "repo",
+        None,
+        ttl(),
+        max_sessions(),
+        false,
+    )
+    .await
+    .unwrap();
+    let session = super::read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap();
+    // Touch the session — the timestamp is seconds-granularity, so we can't
+    // reliably test an increase without sleeping for >1s.  Instead verify
+    // that touch persisted without error and the session remains readable.
+    super::touch_upload_session(root.path(), &session_id, session)
+        .await
+        .unwrap();
+    let updated = super::read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .unwrap();
+    assert!(
+        updated.last_touched_unix_seconds > 0,
+        "touch should set a valid timestamp"
+    );
+}
+
+#[tokio::test]
+async fn abort_s3_multipart_upload_session_no_multipart_returns_ok() {
+    let session = OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 0,
+        last_touched_unix_seconds: 0,
+        use_s3_multipart: false,
+        s3_multipart: None,
+    };
+    let backend = TestBackend;
+    let result = super::abort_s3_multipart_upload_session(&backend, &session).await;
+    assert!(result.is_ok());
+}
+
+#[test]
+fn oci_tag_target_key_global_namespace() {
+    let key = super::oci_tag_target_key(
+        "team/assets",
+        VALID_DIGEST,
+        "latest",
+        None,
+    )
+    .unwrap();
+    let s = key.as_str();
+    assert!(s.contains("protocols/oci/global/repos/"));
+    assert!(s.contains("/tag-targets/"));
+    assert!(s.contains(VALID_DIGEST));
+    assert!(s.ends_with("/latest"));
+}
+
+#[test]
+fn oci_tag_target_key_with_scope() {
+    let scope = test_scope();
+    let key = super::oci_tag_target_key(
+        "team/assets",
+        VALID_DIGEST,
+        "v1",
+        Some(&scope),
+    )
+    .unwrap();
+    let s = key.as_str();
+    assert!(!s.contains("/global/"));
+    assert!(s.contains("/tag-targets/"));
+}
+
+#[test]
+fn oci_tag_target_key_empty_repo_errors() {
+    assert!(matches!(
+        super::oci_tag_target_key("", VALID_DIGEST, "latest", None),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn oci_tag_target_key_empty_tag_errors() {
+    assert!(matches!(
+        super::oci_tag_target_key("team/assets", VALID_DIGEST, "", None),
+        Err(OciAdapterError::InvalidManifestReference)
+    ));
+}
+
+#[test]
+fn oci_tag_target_prefix_global_namespace() {
+    let prefix = super::oci_tag_target_prefix(
+        "team/assets",
+        VALID_DIGEST,
+        None,
+    )
+    .unwrap();
+    let s = prefix.as_str();
+    assert!(s.contains("protocols/oci/global/repos/"));
+    assert!(s.contains("/tag-targets/"));
+    assert!(s.contains(VALID_DIGEST));
+    assert!(s.ends_with('/'));
+}
+
+#[test]
+fn oci_tag_target_prefix_with_scope() {
+    let scope = test_scope();
+    let prefix = super::oci_tag_target_prefix(
+        "team/assets",
+        VALID_DIGEST,
+        Some(&scope),
+    )
+    .unwrap();
+    let s = prefix.as_str();
+    assert!(!s.contains("/global/"));
+    assert!(s.contains("/tag-targets/"));
+}
+
+#[test]
+fn oci_tag_target_prefix_empty_repo_errors() {
+    assert!(matches!(
+        super::oci_tag_target_prefix("", VALID_DIGEST, None),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn oci_tag_target_prefix_invalid_digest_errors() {
+    assert!(matches!(
+        super::oci_tag_target_prefix("team/assets", "not-a-digest", None),
+        Err(OciAdapterError::InvalidDigest)
+    ));
+}
+
+#[test]
+fn oci_tag_key_invalid_tag_errors() {
+    assert!(matches!(
+        super::oci_tag_key("team/assets", "bad/tag", None),
+        Err(OciAdapterError::InvalidManifestReference)
+    ));
+}
+
+#[test]
+fn oci_tag_key_invalid_repo_errors() {
+    assert!(matches!(
+        super::oci_tag_key("", "latest", None),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[tokio::test]
+async fn count_active_upload_sessions_empty_dir_returns_zero() {
+    let root = temp_root();
+    // No upload directory exists yet
+    let count = super::count_active_upload_sessions(root.path(), ttl())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn validate_repository_rejects_uppercase() {
+    assert!(matches!(
+        super::validate_repository("Team/assets"),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn validate_repository_rejects_double_slash() {
+    assert!(matches!(
+        super::validate_repository("team//assets"),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn parse_reference_rejects_invalid_digest() {
+    assert!(matches!(
+        super::parse_reference("sha256:nothex"),
+        Err(OciAdapterError::InvalidDigest)
+    ));
+}
+
+#[test]
+fn oci_blob_key_includes_digest_in_path() {
+    let key = super::oci_blob_key("team/assets", "short-digest", None).unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("short-digest"),
+        "digest should be embedded in key, got: {s}"
+    );
+}
+
+#[test]
+fn oci_manifest_key_includes_digest_in_path() {
+    let key = super::oci_manifest_key("team/assets", "any-digest-string", None).unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("any-digest-string"),
+        "digest should be embedded in key, got: {s}"
+    );
+}
+
+#[test]
+fn oci_manifest_media_type_key_includes_digest_in_path() {
+    let key =
+        super::oci_manifest_media_type_key("team/assets", "test-digest", None).unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("test-digest"),
+        "digest should be embedded in key, got: {s}"
+    );
+}
+
+#[test]
+fn oci_manifest_prefix_invalid_repo_errors() {
+    assert!(matches!(
+        super::oci_manifest_prefix("", None),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn oci_tag_prefix_invalid_repo_errors() {
+    assert!(matches!(
+        super::oci_tag_prefix("", None),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn oci_tag_target_key_invalid_digest_errors() {
+    assert!(matches!(
+        super::oci_tag_target_key("team/assets", "bad", "latest", None),
+        Err(OciAdapterError::InvalidDigest)
+    ));
+}
+
+#[test]
+fn oci_tag_key_with_scope_uses_hashed_namespace() {
+    let scope = test_scope();
+    let key = super::oci_tag_key("team/assets", "stable", Some(&scope)).unwrap();
+    let s = key.as_str();
+    // Must have a 64-char hex namespace (not "global")
+    assert!(!s.contains("/global/"), "expected scoped namespace, got: {s}");
+    assert!(s.contains("/tags/stable"), "expected /tags/stable, got: {s}");
+}
+
+#[test]
+fn oci_tag_key_invalid_tag_uppercase() {
+    // Tags must be valid OCI references; uppercase tags are allowed per spec,
+    // but we test what validate_oci_tag actually rejects.
+    assert!(matches!(
+        super::oci_tag_key("team/assets", "-starts-with-hyphen", None),
+        Err(OciAdapterError::InvalidManifestReference)
+    ));
+}
