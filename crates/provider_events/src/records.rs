@@ -147,3 +147,182 @@ fn record_identity_key(record: &FileRecord) -> String {
         record.file_id, record.content_hash
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use shardline_index::FileChunkRecord;
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_vcs::{ProviderKind, RepositoryRef};
+
+    use super::{
+        record_belongs_to_repository, record_identity_key, renamed_file_record,
+        repository_record_scope,
+    };
+
+    fn test_record() -> super::FileRecord {
+        super::FileRecord {
+            file_id: "file.bin".to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: 8,
+            chunk_size: 4,
+            repository_scope: Some(
+                RepositoryScope::new(
+                    RepositoryProvider::GitHub,
+                    "owner",
+                    "repo",
+                    Some("main"),
+                )
+                .unwrap(),
+            ),
+            chunks: vec![FileChunkRecord {
+                hash: "b".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        }
+    }
+
+    #[test]
+    fn record_belongs_to_repository_matching() {
+        let record = test_record();
+        let repository =
+            RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
+        assert!(record_belongs_to_repository(&record, &repository));
+    }
+
+    #[test]
+    fn record_belongs_to_repository_mismatched_owner() {
+        let record = test_record();
+        let repository =
+            RepositoryRef::new(ProviderKind::GitHub, "other-owner", "repo").unwrap();
+        assert!(!record_belongs_to_repository(&record, &repository));
+    }
+
+    #[test]
+    fn record_belongs_to_repository_mismatched_name() {
+        let record = test_record();
+        let repository =
+            RepositoryRef::new(ProviderKind::GitHub, "owner", "other-repo").unwrap();
+        assert!(!record_belongs_to_repository(&record, &repository));
+    }
+
+    #[test]
+    fn record_belongs_to_repository_mismatched_provider() {
+        let record = test_record();
+        let repository =
+            RepositoryRef::new(ProviderKind::GitLab, "owner", "repo").unwrap();
+        assert!(!record_belongs_to_repository(&record, &repository));
+    }
+
+    #[test]
+    fn record_belongs_to_repository_no_scope() {
+        let record = super::FileRecord {
+            repository_scope: None,
+            ..test_record()
+        };
+        let repository =
+            RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
+        assert!(!record_belongs_to_repository(&record, &repository));
+    }
+
+    #[test]
+    fn renamed_file_record_updates_scope() {
+        let record = test_record();
+        let new_repository =
+            RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
+        let renamed = renamed_file_record(&record, &new_repository).unwrap();
+        let scope = renamed.repository_scope.unwrap();
+        assert_eq!(scope.owner(), "new-owner");
+        assert_eq!(scope.name(), "new-repo");
+        assert_eq!(scope.revision(), Some("main"));
+    }
+
+    #[test]
+    fn renamed_file_record_no_scope_returns_clone() {
+        let record = super::FileRecord {
+            repository_scope: None,
+            ..test_record()
+        };
+        let new_repository =
+            RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
+        let renamed = renamed_file_record(&record, &new_repository).unwrap();
+        assert_eq!(renamed.file_id, record.file_id);
+        assert_eq!(renamed.repository_scope, None);
+    }
+
+    #[test]
+    fn record_identity_key_includes_scope() {
+        let record = test_record();
+        let key = record_identity_key(&record);
+        assert!(key.contains("file.bin"));
+        assert!(key.contains(&"a".repeat(64)));
+        assert!(key.contains("owner/repo"));
+    }
+
+    #[test]
+    fn record_identity_key_scopeless_uses_unscoped() {
+        let record = super::FileRecord {
+            repository_scope: None,
+            ..test_record()
+        };
+        let key = record_identity_key(&record);
+        assert!(key.contains("unscoped"));
+    }
+
+    #[test]
+    fn repository_record_scope_maps_correctly() {
+        let repository =
+            RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
+        let scope = repository_record_scope(&repository);
+        assert_eq!(
+            scope.provider(),
+            RepositoryProvider::GitHub
+        );
+    }
+
+    #[test]
+    fn collect_deleted_no_duplicate_identity_keys() {
+        let record = test_record();
+        let mut seen = HashSet::new();
+        let mut file_versions = 0u64;
+        let mut chunk_hashes = HashSet::new();
+        let mut held_object_keys = HashSet::new();
+
+        // First call should succeed
+        let result = super::collect_deleted_repository_record_references(
+            &shardline_server_core::ServerObjectStore::local(
+                tempfile::tempdir().unwrap().path().join("chunks"),
+            )
+            .unwrap(),
+            &record,
+            &mut seen,
+            &mut file_versions,
+            &mut chunk_hashes,
+            &mut held_object_keys,
+        );
+        assert!(result.is_ok());
+        assert_eq!(file_versions, 1);
+        assert!(chunk_hashes.contains(&"b".repeat(64)));
+
+        // Second call with same identity should be no-op
+        let result = super::collect_deleted_repository_record_references(
+            &shardline_server_core::ServerObjectStore::local(
+                tempfile::tempdir().unwrap().path().join("chunks"),
+            )
+            .unwrap(),
+            &record,
+            &mut seen,
+            &mut file_versions,
+            &mut chunk_hashes,
+            &mut held_object_keys,
+        );
+        assert!(result.is_ok());
+        assert_eq!(file_versions, 1);
+    }
+}

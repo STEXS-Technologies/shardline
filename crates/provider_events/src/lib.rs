@@ -7,7 +7,8 @@
         clippy::indexing_slicing,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::items_after_test_module
     )
 )]
 
@@ -133,6 +134,83 @@ pub enum ProviderEventsError {
     /// Stored file record parsing failed.
     #[error("stored file record parsing failed")]
     ParseStoredFileRecord(#[from] ParseStoredFileRecordError),
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::ProviderEventsError;
+    use shardline_index::RetentionHoldError;
+
+    #[test]
+    fn provider_events_error_display_all_variants() {
+        let cases: &[(ProviderEventsError, &str)] = &[
+            (ProviderEventsError::Overflow, "overflow"),
+            (ProviderEventsError::InvalidContentHash, "hash"),
+            (ProviderEventsError::InvalidProviderWebhookPayload, "payload"),
+            (ProviderEventsError::ConflictingRenameTargetRecord, "conflicting"),
+            (ProviderEventsError::Json(serde_json::from_str::<serde_json::Value>("invalid json...").unwrap_err()), "json"),
+            (ProviderEventsError::NumericConversion(u64::try_from(-1i32).unwrap_err()), "bounds"),
+            (ProviderEventsError::RetentionHold(RetentionHoldError::EmptyReason), "hold"),
+            (ProviderEventsError::WebhookDelivery(shardline_index::WebhookDeliveryError::EmptyDeliveryId), "delivery"),
+            (ProviderEventsError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound), "object"),
+        ];
+        for (error, substring) in cases {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "empty display for {error:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_events_error_xet_adapter_display() {
+        let error = ProviderEventsError::XetAdapter(
+            shardline_xet_adapter::XetAdapterError::NotFound
+        );
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn provider_events_error_index_store_display() {
+        let error = ProviderEventsError::IndexStore(
+            shardline_index::LocalIndexStoreError::InvalidLegacyImportState
+        );
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn provider_events_error_memory_index_store_display() {
+        let error = ProviderEventsError::MemoryIndexStore(
+            shardline_index::MemoryIndexStoreError::LockPoisoned
+        );
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn provider_events_error_memory_record_store_display() {
+        let error = ProviderEventsError::MemoryRecordStore(
+            shardline_index::MemoryRecordStoreError::LockPoisoned
+        );
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn provider_events_error_parse_stored_file_record_display() {
+        let error = ProviderEventsError::ParseStoredFileRecord(
+            shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+                observed_bytes: 999,
+                maximum_bytes: 100,
+            }
+        );
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+    }
 }
 
 fn duplicate_webhook_outcome(event: &RepositoryWebhookEvent) -> ProviderWebhookOutcome {

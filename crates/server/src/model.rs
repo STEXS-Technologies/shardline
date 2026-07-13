@@ -176,3 +176,226 @@ pub struct ProviderWebhookResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_seconds: Option<u64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use shardline_protocol::{RepositoryProvider, TokenScope};
+
+    use super::*;
+
+    fn health_response() -> HealthResponse {
+        HealthResponse {
+            status: "ok".to_owned(),
+        }
+    }
+
+    fn ready_response() -> ReadyResponse {
+        ReadyResponse {
+            status: "ok".to_owned(),
+            server_role: "all".to_owned(),
+            server_frontends: vec!["xet".to_owned()],
+            metadata_backend: "local".to_owned(),
+            object_backend: "local".to_owned(),
+            cache_backend: "memory".to_owned(),
+        }
+    }
+
+    #[test]
+    fn health_response_serde_round_trip() {
+        let original = health_response();
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: HealthResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+        assert!(json.contains("ok"));
+    }
+
+    #[test]
+    fn health_response_debug() {
+        let response = health_response();
+        let debug = format!("{response:?}");
+        assert!(debug.contains("HealthResponse"));
+        assert!(debug.contains("ok"));
+    }
+
+    #[test]
+    fn ready_response_serde_round_trip() {
+        let original = ready_response();
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ReadyResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn ready_response_debug() {
+        let response = ready_response();
+        let debug = format!("{response:?}");
+        assert!(debug.contains("ReadyResponse"));
+    }
+
+    #[test]
+    fn upload_chunk_result_serde_round_trip() {
+        let original = UploadChunkResult {
+            hash: "abcdef123456".to_owned(),
+            offset: 0,
+            length: 4096,
+            inserted: true,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: UploadChunkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn upload_file_response_serde_round_trip() {
+        let original = UploadFileResponse {
+            file_id: "test-file".to_owned(),
+            content_hash: "content-hash-abc".to_owned(),
+            total_bytes: 8192,
+            chunk_size: 4096,
+            inserted_chunks: 2,
+            reused_chunks: 0,
+            stored_bytes: 8192,
+            chunks: vec![UploadChunkResult {
+                hash: "chunk1".to_owned(),
+                offset: 0,
+                length: 4096,
+                inserted: true,
+            }],
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: UploadFileResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn server_stats_response_serde_round_trip() {
+        let original = ServerStatsResponse {
+            chunks: 10,
+            chunk_bytes: 40960,
+            files: 5,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ServerStatsResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn provider_token_issue_request_serde_round_trip() {
+        let original = ProviderTokenIssueRequest {
+            subject: "user".to_owned(),
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            revision: Some("main".to_owned()),
+            scope: TokenScope::Read,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ProviderTokenIssueRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn provider_token_issue_response_serde_round_trip() {
+        let original = ProviderTokenIssueResponse {
+            token: "bearer-token".to_owned(),
+            issuer: "shardline".to_owned(),
+            subject: "user".to_owned(),
+            provider: RepositoryProvider::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            revision: Some("main".to_owned()),
+            scope: TokenScope::Write,
+            expires_at_unix_seconds: 1_700_000_000,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ProviderTokenIssueResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn xet_cas_token_response_serde_round_trip() {
+        let original = XetCasTokenResponse {
+            cas_url: "http://cas.example.com".to_owned(),
+            exp: 1_700_000_000,
+            access_token: "access-token-value".to_owned(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: XetCasTokenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+        // camelCase serialization
+        assert!(json.contains("casUrl"));
+        assert!(json.contains("accessToken"));
+    }
+
+    #[test]
+    fn git_lfs_authenticate_response_serde_round_trip() {
+        let mut header = BTreeMap::new();
+        header.insert("X-Custom".to_owned(), "value".to_owned());
+        let original = GitLfsAuthenticateResponse {
+            href: "http://lfs.example.com".to_owned(),
+            header,
+            expires_in: 3600,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: GitLfsAuthenticateResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn oci_registry_token_response_serde_round_trip() {
+        let original = OciRegistryTokenResponse {
+            token: "bearer-token".to_owned(),
+            access_token: "access-token".to_owned(),
+            expires_in: 300,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OciRegistryTokenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn provider_webhook_response_serde_round_trip() {
+        let original = ProviderWebhookResponse {
+            provider: RepositoryProvider::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            delivery_id: "delivery-123".to_owned(),
+            event_kind: "revision_pushed".to_owned(),
+            new_owner: None,
+            new_repo: None,
+            revision: Some("abc123".to_owned()),
+            affected_file_versions: 5,
+            affected_chunks: 20,
+            applied_holds: 3,
+            retention_seconds: Some(86_400),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ProviderWebhookResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn provider_webhook_response_omits_optional_empty_fields() {
+        let original = ProviderWebhookResponse {
+            provider: RepositoryProvider::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            delivery_id: "delivery-123".to_owned(),
+            event_kind: "push".to_owned(),
+            new_owner: None,
+            new_repo: None,
+            revision: None,
+            affected_file_versions: 0,
+            affected_chunks: 0,
+            applied_holds: 0,
+            retention_seconds: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        // Fields with skip_serializing_if should be absent
+        assert!(!json.contains("\"new_owner\""), "unexpected new_owner: {json}");
+        assert!(!json.contains("\"new_repo\""), "unexpected new_repo: {json}");
+        assert!(!json.contains("\"revision\""), "unexpected revision: {json}");
+        assert!(!json.contains("\"retention_seconds\""), "unexpected retention_seconds: {json}");
+    }
+}

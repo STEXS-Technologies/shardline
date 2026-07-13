@@ -1179,6 +1179,274 @@ mod tests {
         assert_eq!(report.inspected_provider_repository_states, 0);
     }
 
+    // ── FsckIssueDetail Display ────────────────────────────────────────
+
+    #[test]
+    fn fsck_issue_detail_display_all_variants() {
+        let cases: &[(FsckIssueDetail, &str)] = &[
+            (
+                FsckIssueDetail::MissingVersionRecord {
+                    version_locator: "loc".to_owned(),
+                },
+                "version record",
+            ),
+            (FsckIssueDetail::OversizedRecordMetadata, "ceiling"),
+            (FsckIssueDetail::RecordJsonInvalid, "json"),
+            (
+                FsckIssueDetail::InvalidFileId {
+                    file_id: "bad".to_owned(),
+                },
+                "bad",
+            ),
+            (
+                FsckIssueDetail::InvalidContentHash {
+                    content_hash: "badhash".to_owned(),
+                },
+                "badhash",
+            ),
+            (
+                FsckIssueDetail::RecordPathMismatch {
+                    expected_locator: "expected".to_owned(),
+                },
+                "expected",
+            ),
+            (FsckIssueDetail::RecordFileIdPathMismatch, "path"),
+            (FsckIssueDetail::RecordContentHashPathMismatch, "hash"),
+            (
+                FsckIssueDetail::InvalidChunkHash {
+                    chunk_hash: "chunk-hash".to_owned(),
+                },
+                "chunk-hash",
+            ),
+            (
+                FsckIssueDetail::InvalidXorbHash {
+                    xorb_hash: "xorb-hash".to_owned(),
+                },
+                "xorb-hash",
+            ),
+            (
+                FsckIssueDetail::ReferencedByRecord {
+                    record_location: "loc".to_owned(),
+                },
+                "loc",
+            ),
+            (
+                FsckIssueDetail::ReferencedByNativeXetRecord {
+                    record_location: "native-loc".to_owned(),
+                },
+                "native-loc",
+            ),
+            (
+                FsckIssueDetail::ReferencedByNativeXetXorb {
+                    xorb_location: "xorb-loc".to_owned(),
+                },
+                "xorb-loc",
+            ),
+            (
+                FsckIssueDetail::HashMismatch {
+                    expected_hash: "abc".to_owned(),
+                    observed_hash: "def".to_owned(),
+                },
+                "abc",
+            ),
+            (
+                FsckIssueDetail::LengthMismatch {
+                    expected_length: 10,
+                    observed_length: 5,
+                },
+                "10",
+            ),
+            (
+                FsckIssueDetail::XorbRangeExceededChunkCount {
+                    range_start: 0,
+                    range_end: 5,
+                    chunk_count: 3,
+                },
+                "5",
+            ),
+            (
+                FsckIssueDetail::MismatchedVersionRecord {
+                    version_locator: "vloc".to_owned(),
+                },
+                "vloc",
+            ),
+            (
+                FsckIssueDetail::MappedChunkHash {
+                    chunk_hash: "mapped-hash".to_owned(),
+                },
+                "mapped-hash",
+            ),
+            (
+                FsckIssueDetail::MappedChunkHashAbsentFromRetainedShard {
+                    chunk_hash: "absent-hash".to_owned(),
+                },
+                "absent-hash",
+            ),
+            (FsckIssueDetail::ReconstructionListedUnreadableRow, "row"),
+            (FsckIssueDetail::ReconstructionContainedNoTerms, "terms"),
+            (
+                FsckIssueDetail::MissingReconstructionXorb {
+                    xorb_hash: "missing-xorb".to_owned(),
+                },
+                "missing-xorb",
+            ),
+        ];
+        for (detail, substring) in cases {
+            let msg = detail.to_string();
+            assert!(!msg.is_empty(), "empty display for {detail:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {detail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fsck_issue_detail_invalid_retained_shard_display() {
+        let detail = FsckIssueDetail::InvalidRetainedShard(
+            shardline_server_core::InvalidSerializedShardError::ParserRejectedMetadata,
+        );
+        let msg = detail.to_string();
+        assert!(!msg.is_empty(), "empty display for {detail:?}");
+    }
+
+    #[test]
+    fn fsck_reconstruction_plan_detail_display_all_variants() {
+        let cases: &[(FsckReconstructionPlanDetail, &str)] = &[
+            (FsckReconstructionPlanDetail::ChunkHashInvalid, "hash"),
+            (FsckReconstructionPlanDetail::EmptyChunk, "empty"),
+            (FsckReconstructionPlanDetail::NonContiguousChunkOffsets, "contiguous"),
+            (FsckReconstructionPlanDetail::InvalidChunkRange, "range"),
+            (FsckReconstructionPlanDetail::InvalidPackedRange, "range"),
+            (FsckReconstructionPlanDetail::LengthOverflow, "overflow"),
+            (FsckReconstructionPlanDetail::TotalBytesMismatch, "total"),
+        ];
+        for (detail, substring) in cases {
+            let msg = detail.to_string();
+            assert!(!msg.is_empty(), "empty display for {detail:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {detail:?}"
+            );
+        }
+    }
+
+    // ── FsckReconstructionPlanDetail Display ──────────────────────────
+
+    #[test]
+    fn fsck_reconstruction_plan_detail_invalid_reconstruction_plan_display() {
+        let detail = FsckIssueDetail::InvalidReconstructionPlan(
+            FsckReconstructionPlanDetail::ChunkHashInvalid,
+        );
+        let msg = detail.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    // ── FsckError display ──────────────────────────────────────────────
+
+    #[test]
+    fn fsck_error_display_all_variants() {
+        let cases: &[(FsckError, &str)] = &[
+            (FsckError::Io(std::io::Error::other("test")), "storage"),
+            (FsckError::Json(serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err()), "json"),
+            (FsckError::NumericConversion(u64::try_from(-1i32).unwrap_err()), "bounds"),
+            (FsckError::Overflow, "overflow"),
+            (FsckError::StoredFileMetadataTooLarge { observed_bytes: 999, maximum_bytes: 100 }, "ceiling"),
+        ];
+        for (error, substring) in cases {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "empty display for {error:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fsck_error_from_xorb_parse_error_display() {
+        let error: FsckError = shardline_xet_adapter::XorbParseError::HashMismatch.into();
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    // ── run_fsck_with_stores: missing dedupe shard object ────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_missing_dedupe_shard_object_detected() {
+        use shardline_index::{DedupeShardMapping, MemoryIndexStore};
+        use shardline_protocol::ShardlineHash;
+        use shardline_storage::ObjectKey;
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Insert a dedupe shard mapping pointing to a shard that does not exist in object storage
+        let chunk_hash = ShardlineHash::from_bytes([42; 32]);
+        let shard_key = ObjectKey::parse("shards/aa/missing.shard").unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
+        index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean(), "expected issues for missing shard object");
+        assert_eq!(report.inspected_dedupe_shard_mappings, 1);
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingDedupeShardObject),
+            "expected MissingDedupeShardObject issue, got: {:#?}",
+            report.issues
+        );
+    }
+
+    // ── run_fsck_with_stores: empty reconstruction ───────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_empty_reconstruction_detected() {
+        use shardline_index::{FileId, FileReconstruction, MemoryIndexStore};
+        use shardline_protocol::ShardlineHash;
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Insert a reconstruction with empty terms
+        let hash = ShardlineHash::from_bytes([99; 32]);
+        let file_id = FileId::new(hash);
+        let reconstruction = FileReconstruction::new(vec![]);
+        index_store.insert_reconstruction(&file_id, &reconstruction).unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean(), "expected issues for empty reconstruction");
+        assert_eq!(report.inspected_reconstructions, 1);
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::EmptyReconstruction),
+            "expected EmptyReconstruction issue, got: {:#?}",
+            report.issues
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn run_fsck_with_missing_reconstruction_detected() {
         use shardline_index::{

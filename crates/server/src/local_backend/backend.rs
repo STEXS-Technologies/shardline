@@ -221,3 +221,102 @@ pub(crate) fn content_hash(
     }
     hasher.finalize().to_hex().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_index::FileChunkRecord;
+
+    use super::{chunk_hash, content_hash};
+
+    #[test]
+    fn chunk_hash_is_deterministic() {
+        let data = b"hello world";
+        let hash1 = chunk_hash(data);
+        let hash2 = chunk_hash(data);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn chunk_hash_differs_for_different_inputs() {
+        let hash1 = chunk_hash(b"hello");
+        let hash2 = chunk_hash(b"world");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn chunk_hash_returns_fixed_length() {
+        let hash = chunk_hash(b"test data");
+        assert_eq!(hash.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn chunk_hash_empty_input() {
+        let hash = chunk_hash(b"");
+        // Should still produce a valid hash
+        assert_eq!(hash.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn content_hash_is_deterministic() {
+        let chunks = [FileChunkRecord {
+            hash: "abc".to_owned(),
+            offset: 0,
+            length: 10,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 10,
+        }];
+        let hash1 = content_hash(10, 10, &chunks);
+        let hash2 = content_hash(10, 10, &chunks);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn content_hash_differs_for_different_chunks() {
+        let chunks_a = [FileChunkRecord {
+            hash: "abc".to_owned(),
+            offset: 0,
+            length: 10,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 10,
+        }];
+        let chunks_b = [FileChunkRecord {
+            hash: "def".to_owned(),
+            offset: 0,
+            length: 10,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 10,
+        }];
+        assert_ne!(content_hash(10, 10, &chunks_a), content_hash(10, 10, &chunks_b));
+    }
+
+    #[test]
+    fn content_hash_empty_chunks() {
+        let hash = content_hash(0, 0, &[]);
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64); // blake3 hex is 64 chars
+    }
+
+    #[test]
+    fn content_hash_includes_total_bytes_and_chunk_size() {
+        let chunks = [FileChunkRecord {
+            hash: "abc".to_owned(),
+            offset: 0,
+            length: 10,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 10,
+        }];
+        // Different total_bytes should produce different hashes
+        assert_ne!(
+            content_hash(10, 10, &chunks),
+            content_hash(20, 10, &chunks)
+        );
+    }
+}

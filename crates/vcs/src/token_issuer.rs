@@ -420,4 +420,25 @@ mod tests {
             Err(ProviderTokenIssuanceError::LifetimeOverflow)
         ));
     }
+
+    #[test]
+    fn provider_token_issuance_error_display_all_variants() {
+        let cases: &[(ProviderTokenIssuanceError, &str)] = &[
+            (ProviderTokenIssuanceError::LifetimeOverflow, "overflow"),
+            (ProviderTokenIssuanceError::Codec(
+                shardline_protocol::TokenCodecError::Expired,
+            ), "codec"),
+            (ProviderTokenIssuanceError::Claims(
+                shardline_protocol::TokenClaimsError::EmptyIssuer,
+            ), "claims"),
+        ];
+        for (error, substring) in cases {
+            let msg = error.to_string();
+            assert!(!msg.is_empty(), "empty display for {error:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
+        }
+    }
 }

@@ -539,3 +539,352 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── map_xorb_visit_error_fsck ─────────────────────────────────────────
+
+    #[test]
+    fn map_xorb_visit_error_parse_wraps_parse_error() {
+        let err =
+            XorbVisitError::<FsckError>::Parse(shardline_xet_adapter::XorbParseError::HashMismatch);
+        let result = map_xorb_visit_error_fsck(err);
+        assert!(matches!(result, FsckError::Overflow));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_visitor_passthrough() {
+        let err = XorbVisitError::<FsckError>::Visitor(FsckError::Overflow);
+        let result = map_xorb_visit_error_fsck(err);
+        assert!(matches!(result, FsckError::Overflow));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_visitor_passthrough_roundtrip() {
+        let err = XorbVisitError::<FsckError>::Visitor(FsckError::Io(std::io::Error::other(
+            "test",
+        )));
+        let result = map_xorb_visit_error_fsck(err);
+        assert!(matches!(result, FsckError::Io(_)));
+    }
+
+    // ── scan_record_tree ──────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_empty_store_latest_returns_ok() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree(Latest) failed: {result:?}");
+        assert_eq!(report.latest_records, 0);
+        // On an empty store, there are also no pending version-record checks,
+        // so the report stays clean.
+        assert!(report.is_clean());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_empty_store_version_returns_ok() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Version,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree(Version) failed: {result:?}");
+        assert_eq!(report.version_records, 0);
+        assert!(report.is_clean());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_reports_orphan_missing_version() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a valid record with no chunks and the matching content hash.
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+
+        // Write only the latest record (no matching version record).
+        record_store.write_latest_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+
+        // Expect a MissingVersionRecord issue because we only wrote the latest.
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            "expected MissingVersionRecord issue, got: {report:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_with_matching_version_is_clean() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a valid record with no chunks and the matching content hash.
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+
+        // Write both the latest and version records so the version check passes.
+        record_store.write_latest_record(&record).await.unwrap();
+        record_store.write_version_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+
+        // With both records present there should be no issues.
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_version_with_valid_record_is_clean() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a valid record with no chunks and the matching content hash.
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+
+        record_store.write_version_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Version,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.version_records, 1);
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_mismatched_version_record_reported() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // To trigger MismatchedVersionRecord the version record must exist at the
+        // locator that the latest record's check expects, but its content must
+        // differ.  Since the version locator includes content_hash, give both
+        // records the *same* content_hash but differ other fields.
+        let shared_hash = "ab".repeat(32); // 64-char valid hex hash
+
+        let latest_record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash: shared_hash.clone(),
+            total_bytes: 100,
+            chunk_size: 4096,
+            repository_scope: None,
+            chunks: vec![shardline_index::FileChunkRecord {
+                hash: "cd".repeat(32),
+                offset: 0,
+                length: 100,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 100,
+            }],
+        };
+
+        // Version record at the same locator (same file_id + content_hash) but
+        // with different content (different total_bytes/chunks so the full
+        // struct comparison fails).
+        let version_record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash: shared_hash,
+            total_bytes: 200,
+            chunk_size: 4096,
+            repository_scope: None,
+            chunks: Vec::new(),
+        };
+
+        record_store.write_latest_record(&latest_record).await.unwrap();
+        record_store
+            .write_version_record(&version_record)
+            .await
+            .unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+
+        // The version record exists at the expected locator but content differs.
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MismatchedVersionRecord),
+            "expected MismatchedVersionRecord issue, got: {report:?}"
+        );
+    }
+}

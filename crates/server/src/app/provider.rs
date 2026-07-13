@@ -361,3 +361,294 @@ pub(super) fn provider_webhook_response(
         retention_seconds: outcome.retention_seconds,
     }
 }
+
+#[cfg(test)]
+mod provider_tests {
+    use shardline_index::ProviderRepositoryState;
+    use shardline_protocol::RepositoryProvider;
+    use shardline_vcs::{BuiltInProviderError, ProviderKind};
+
+    use super::*;
+    use crate::{
+        ServerError,
+        provider::ProviderServiceError,
+        provider_events::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind},
+    };
+
+    #[test]
+    fn normalize_provider_name_github() {
+        assert_eq!(normalize_provider_name("github"), "github");
+        assert_eq!(normalize_provider_name("githubs"), "github");
+    }
+
+    #[test]
+    fn normalize_provider_name_gitea() {
+        assert_eq!(normalize_provider_name("gitea"), "gitea");
+        assert_eq!(normalize_provider_name("giteas"), "gitea");
+    }
+
+    #[test]
+    fn normalize_provider_name_gitlab() {
+        assert_eq!(normalize_provider_name("gitlab"), "gitlab");
+        assert_eq!(normalize_provider_name("gitlabs"), "gitlab");
+    }
+
+    #[test]
+    fn normalize_provider_name_passthrough_unknown() {
+        assert_eq!(normalize_provider_name("custom"), "custom");
+    }
+
+    #[test]
+    fn reconcile_timestamp_with_signal_after_reconciled() {
+        // When signal_at is after reconciled_at, returns now
+        let result = reconciled_timestamp(Some(100), Some(50), 200);
+        assert_eq!(result, Some(200));
+    }
+
+    #[test]
+    fn reconcile_timestamp_with_reconciled_after_signal() {
+        // When reconciled_at is already after signal_at, keep reconciled_at
+        let result = reconciled_timestamp(Some(50), Some(100), 200);
+        assert_eq!(result, Some(100));
+    }
+
+    #[test]
+    fn reconcile_timestamp_with_equal_values() {
+        let result = reconciled_timestamp(Some(100), Some(100), 200);
+        assert_eq!(result, Some(100));
+    }
+
+    #[test]
+    fn reconcile_timestamp_without_signal() {
+        // When signal_at is None, return reconciled_at unchanged
+        let result = reconciled_timestamp(None, Some(50), 200);
+        assert_eq!(result, Some(50));
+    }
+
+    #[test]
+    fn reconcile_timestamp_without_either() {
+        let result = reconciled_timestamp(None, None, 200);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn reconcile_timestamp_without_reconciled() {
+        let result = reconciled_timestamp(Some(100), None, 200);
+        assert_eq!(result, Some(200));
+    }
+
+    #[test]
+    fn latest_lifecycle_signal_at_with_both() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            Some(10),  // access_changed_at
+            Some(20),  // revision_pushed_at
+            None,
+        );
+        assert_eq!(latest_lifecycle_signal_at(&state), Some(20));
+    }
+
+    #[test]
+    fn latest_lifecycle_signal_at_with_only_access_changed() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            Some(10),
+            None,
+            None,
+        );
+        assert_eq!(latest_lifecycle_signal_at(&state), Some(10));
+    }
+
+    #[test]
+    fn latest_lifecycle_signal_at_with_only_revision_pushed() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            None,
+            Some(20),
+            None,
+        );
+        assert_eq!(latest_lifecycle_signal_at(&state), Some(20));
+    }
+
+    #[test]
+    fn latest_lifecycle_signal_at_with_neither() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(latest_lifecycle_signal_at(&state), None);
+    }
+
+    #[test]
+    fn bounded_subject_accepts_valid_value() {
+        let result = bounded_subject(Some("valid-subject")).unwrap();
+        assert_eq!(result, Some("valid-subject"));
+    }
+
+    #[test]
+    fn bounded_subject_rejects_empty() {
+        let result = bounded_subject(Some("")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn bounded_subject_rejects_whitespace_only() {
+        let result = bounded_subject(Some("   ")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn bounded_subject_returns_none_for_none_input() {
+        let result: Option<&str> = bounded_subject(None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn map_provider_issue_error_missing_api_key() {
+        let result = map_provider_issue_error(ProviderServiceError::MissingApiKey);
+        assert!(matches!(result, ServerError::MissingProviderApiKey));
+    }
+
+    #[test]
+    fn map_provider_issue_error_invalid_api_key() {
+        let result = map_provider_issue_error(ProviderServiceError::InvalidApiKey);
+        assert!(matches!(result, ServerError::InvalidProviderApiKey));
+    }
+
+    #[test]
+    fn map_provider_issue_error_unknown_provider() {
+        let result = map_provider_issue_error(ProviderServiceError::UnknownProvider);
+        assert!(matches!(result, ServerError::UnknownProvider));
+    }
+
+    #[test]
+    fn map_provider_issue_error_denied() {
+        let result = map_provider_issue_error(ProviderServiceError::Denied);
+        assert!(matches!(result, ServerError::ProviderDenied));
+    }
+
+    #[test]
+    fn map_provider_issue_error_missing_webhook_auth() {
+        let built_in = BuiltInProviderError::MissingWebhookAuthentication;
+        let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
+        assert!(matches!(
+            result,
+            ServerError::MissingProviderWebhookAuthentication
+        ));
+    }
+
+    #[test]
+    fn map_provider_issue_error_invalid_webhook_auth() {
+        let built_in = BuiltInProviderError::InvalidWebhookAuthentication;
+        let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
+        assert!(matches!(
+            result,
+            ServerError::InvalidProviderWebhookAuthentication
+        ));
+    }
+
+    #[test]
+    fn map_provider_issue_error_invalid_webhook_payload() {
+        let built_in = BuiltInProviderError::InvalidWebhookPayload;
+        let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
+        assert!(matches!(
+            result,
+            ServerError::InvalidProviderWebhookPayload
+        ));
+    }
+
+    #[test]
+    fn map_provider_issue_error_generic_fallthrough() {
+        let result = map_provider_issue_error(ProviderServiceError::EmptyApiKey);
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn provider_webhook_response_revision_pushed() {
+        let outcome = ProviderWebhookOutcome {
+            provider: ProviderKind::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            delivery_id: "del-123".to_owned(),
+            event_kind: ProviderWebhookOutcomeKind::RevisionPushed {
+                revision: "abc123".to_owned(),
+            },
+            affected_file_versions: 5,
+            affected_chunks: 20,
+            applied_holds: 3,
+            retention_seconds: Some(86400),
+        };
+        let response = provider_webhook_response(outcome);
+        assert_eq!(response.event_kind, "revision_pushed");
+        assert_eq!(response.revision.as_deref(), Some("abc123"));
+        assert_eq!(response.affected_file_versions, 5);
+    }
+
+    #[test]
+    fn provider_webhook_response_repository_deleted() {
+        let outcome = ProviderWebhookOutcome {
+            provider: ProviderKind::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            delivery_id: "del-456".to_owned(),
+            event_kind: ProviderWebhookOutcomeKind::RepositoryDeleted,
+            affected_file_versions: 0,
+            affected_chunks: 0,
+            applied_holds: 0,
+            retention_seconds: None,
+        };
+        let response = provider_webhook_response(outcome);
+        assert_eq!(response.event_kind, "repository_deleted");
+        assert!(response.revision.is_none());
+        assert!(response.new_owner.is_none());
+    }
+
+    #[test]
+    fn provider_webhook_response_repository_renamed() {
+        let outcome = ProviderWebhookOutcome {
+            provider: ProviderKind::GitHub,
+            owner: "old-org".to_owned(),
+            repo: "old-repo".to_owned(),
+            delivery_id: "del-789".to_owned(),
+            event_kind: ProviderWebhookOutcomeKind::RepositoryRenamed {
+                new_owner: "new-org".to_owned(),
+                new_repo: "new-repo".to_owned(),
+            },
+            affected_file_versions: 2,
+            affected_chunks: 8,
+            applied_holds: 1,
+            retention_seconds: Some(3600),
+        };
+        let response = provider_webhook_response(outcome);
+        assert_eq!(response.event_kind, "repository_renamed");
+        assert_eq!(response.new_owner.as_deref(), Some("new-org"));
+        assert_eq!(response.new_repo.as_deref(), Some("new-repo"));
+    }
+
+    #[test]
+    fn provider_webhook_response_access_changed() {
+        let outcome = ProviderWebhookOutcome {
+            provider: ProviderKind::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            delivery_id: "del-012".to_owned(),
+            event_kind: ProviderWebhookOutcomeKind::AccessChanged,
+            affected_file_versions: 0,
+            affected_chunks: 0,
+            applied_holds: 0,
+            retention_seconds: None,
+        };
+        let response = provider_webhook_response(outcome);
+        assert_eq!(response.event_kind, "access_changed");
+    }
+}
