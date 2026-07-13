@@ -337,6 +337,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use shardline_storage::ObjectKey;
+
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -456,6 +458,29 @@ mod tests {
         assert!(json.contains("\"key\":\"objects/abc\""));
         assert!(json.contains("\"length\":1024"));
         assert!(json.contains("\"checksum\":\"deadbeef\""));
+    }
+
+    #[test]
+    fn backup_manifest_object_entry_from_metadata_with_checksum() {
+        let key = ObjectKey::parse("xorbs/default/ab/abcdef.shard").unwrap();
+        let hash = shardline_protocol::ShardlineHash::from_bytes([0xab; 32]);
+        let metadata = ObjectMetadata::new(key, 4096, Some(hash));
+        let entry = BackupManifestObjectEntry::from_metadata(&metadata);
+
+        assert_eq!(entry.key, "xorbs/default/ab/abcdef.shard");
+        assert_eq!(entry.length, 4096);
+        assert_eq!(entry.checksum, Some("ab".repeat(32)));
+    }
+
+    #[test]
+    fn backup_manifest_object_entry_from_metadata_without_checksum() {
+        let key = ObjectKey::parse("some/object.bin").unwrap();
+        let metadata = ObjectMetadata::new(key, 0, None);
+        let entry = BackupManifestObjectEntry::from_metadata(&metadata);
+
+        assert_eq!(entry.key, "some/object.bin");
+        assert_eq!(entry.length, 0);
+        assert!(entry.checksum.is_none());
     }
 
     #[test]

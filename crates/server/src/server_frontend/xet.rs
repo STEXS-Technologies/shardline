@@ -92,3 +92,146 @@ pub(super) fn append_referenced_term_bytes(
     })
     .map_err(map_xorb_visit_error_server)
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_storage::ObjectKey;
+
+    use super::*;
+    use crate::xet_adapter::{XorbParseError, XorbVisitError};
+
+    // -----------------------------------------------------------------------
+    // map_xorb_visit_error_server
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn map_xorb_visit_error_parse_hash_mismatch() {
+        let err = XorbVisitError::Parse(XorbParseError::HashMismatch);
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::XorbHashMismatch));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_parse_other_error() {
+        // Non-HashMismatch parse errors map to InvalidSerializedXorb
+        let io_err = std::io::Error::other("test io");
+        let err = XorbVisitError::Parse(XorbParseError::Io(io_err));
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::InvalidSerializedXorb));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_visitor_passthrough() {
+        let err = XorbVisitError::Visitor(ServerError::NotFound);
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::NotFound));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_visitor_other_error() {
+        let err = XorbVisitError::Visitor(ServerError::Overflow);
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::Overflow));
+    }
+
+    // -----------------------------------------------------------------------
+    // push_optional_chunk_container_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_optional_chunk_key_valid_hash() {
+        let hash = "ab".repeat(32);
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, &hash);
+        assert!(result.is_ok());
+        assert_eq!(keys.len(), 1);
+        let expected_key = xorb_object_key(&hash).unwrap();
+        assert_eq!(keys[0], expected_key);
+    }
+
+    #[test]
+    fn push_optional_chunk_key_deduplicates() {
+        let hash = "cd".repeat(32);
+        let mut keys = Vec::new();
+        push_optional_chunk_container_key(&mut keys, &hash).unwrap();
+        push_optional_chunk_container_key(&mut keys, &hash).unwrap();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn push_optional_chunk_key_rejects_invalid_hash() {
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, "not-a-hex-hash");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn push_optional_chunk_key_rejects_uppercase_hash() {
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, &"AA".repeat(32));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn push_optional_chunk_key_rejects_short_hash() {
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, "abc");
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // referenced_term_object_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn referenced_term_object_key_valid_hash() {
+        let hash = "ef".repeat(32);
+        let result = referenced_term_object_key(&hash);
+        assert!(result.is_ok());
+        let expected = xorb_object_key(&hash).unwrap();
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn referenced_term_object_key_invalid_hash() {
+        let result = referenced_term_object_key("invalid");
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // owns_protocol_object
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn owns_protocol_object_with_xorb_key() {
+        let hash = "01".repeat(32);
+        let key = xorb_object_key(&hash).unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn owns_protocol_object_with_non_xorb_key() {
+        let key = ObjectKey::parse("shards/ab/some.shard").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn owns_protocol_object_with_chunk_key() {
+        let key = ObjectKey::parse("ab/abcdef1234567890").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn owns_protocol_object_with_random_key() {
+        let key = ObjectKey::parse("some/arbitrary/path").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+}
