@@ -21,6 +21,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+shardline-test-support = { workspace = true, features = ["docker"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 
 [lints]
