@@ -1980,4 +1980,134 @@ mod tests {
             chunks: Vec::new(),
         }
     }
+
+    // ── Edge-case tests ────────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_read_record_bytes_missing_locator() {
+        let store = MemoryRecordStore::new();
+        let record = scoped_file_record().unwrap();
+        let locator = store.version_record_locator(&record);
+
+        let result = store.read_record_bytes(&locator).await;
+        assert!(matches!(
+            result,
+            Err(MemoryRecordStoreError::RecordNotFound)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_modified_since_epoch_missing_locator() {
+        let store = MemoryRecordStore::new();
+        let record = scoped_file_record().unwrap();
+        let locator = store.version_record_locator(&record);
+
+        let result = store.modified_since_epoch(&locator).await;
+        assert!(matches!(
+            result,
+            Err(MemoryRecordStoreError::RecordNotFound)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_delete_non_existent_locator() {
+        let store = MemoryRecordStore::new();
+        let record = scoped_file_record().unwrap();
+        let locator = store.version_record_locator(&record);
+
+        let result = store.delete_record_locator(&locator).await;
+        assert!(matches!(
+            result,
+            Err(MemoryRecordStoreError::RecordNotFound)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_list_repository_latest_locators_no_match() {
+        let store = MemoryRecordStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main")).unwrap();
+        let record = file_record_with_scope(scope, "x");
+        store.write_latest_record(&record).await.unwrap();
+
+        // Different repository scope => no match.
+        let repository =
+            RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
+        let locators = store
+            .list_repository_latest_record_locators(&repository)
+            .await
+            .unwrap();
+        assert!(locators.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_list_repository_version_locators_no_match() {
+        let store = MemoryRecordStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None).unwrap();
+        let record = file_record_with_scope(scope, "y");
+        store.insert_version_record(&record).unwrap();
+
+        let repository =
+            RepositoryRecordScope::new(RepositoryProvider::GitLab, "other", "project");
+        let locators = store
+            .list_repository_version_record_locators(&repository)
+            .await
+            .unwrap();
+        assert!(locators.is_empty());
+    }
+
+    #[test]
+    fn memory_index_store_contains_object_different_object() {
+        let store = MemoryIndexStore::new();
+        let hash1 = ShardlineHash::from_bytes([20; 32]);
+        let hash2 = ShardlineHash::from_bytes([21; 32]);
+        let object1 = StoredObjectId::new(hash1);
+        let object2 = StoredObjectId::new(hash2);
+
+        store.insert_object(&object1).unwrap();
+        assert!(store.contains_object(&object1).unwrap());
+        assert!(!store.contains_object(&object2).unwrap());
+    }
+
+    #[test]
+    fn memory_index_store_insert_object_duplicate() {
+        let store = MemoryIndexStore::new();
+        let hash = ShardlineHash::from_bytes([22; 32]);
+        let object = StoredObjectId::new(hash);
+
+        store.insert_object(&object).unwrap();
+        // Duplicate insert should succeed (idempotent).
+        store.insert_object(&object).unwrap();
+        assert!(store.contains_object(&object).unwrap());
+    }
+
+    #[test]
+    fn memory_index_store_delete_dedupe_shard_mapping_not_found() {
+        let store = MemoryIndexStore::new();
+        let hash = ShardlineHash::from_bytes([23; 32]);
+        assert!(!store.delete_dedupe_shard_mapping(&hash).unwrap());
+    }
+
+    #[test]
+    fn memory_index_store_delete_quarantine_candidate_not_found() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("xorbs/absent/key").unwrap();
+        assert!(!store.delete_quarantine_candidate(&key).unwrap());
+    }
+
+    #[test]
+    fn memory_index_store_delete_retention_hold_not_found() {
+        let store = MemoryIndexStore::new();
+        let key = ObjectKey::parse("xorbs/absent/hold").unwrap();
+        assert!(!store.delete_retention_hold(&key).unwrap());
+    }
+
+    #[test]
+    fn memory_index_store_delete_provider_repository_state_not_found() {
+        let store = MemoryIndexStore::new();
+        assert!(!store
+            .delete_provider_repository_state(RepositoryProvider::GitHub, "nonexistent", "repo")
+            .unwrap());
+    }
 }

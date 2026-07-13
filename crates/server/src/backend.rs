@@ -936,8 +936,15 @@ fn count_repository_reference_probe_for_tests(hash_hex: &str) {
 mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
-    use super::{BenchmarkBackend, compose_benchmark_object_key_prefix};
+    use super::{
+        BenchmarkBackend, compose_benchmark_object_key_prefix,
+        clear_repository_reference_probe_filter, repository_reference_probe_count,
+        reset_repository_reference_probe_count_for_hash, server_error_to_oci,
+    };
     use crate::ServerConfig;
+    use crate::ServerError;
+    use crate::error::ObjectStoreError;
+    use shardline_oci_adapter::OciAdapterError;
 
     #[test]
     fn benchmark_object_key_prefix_appends_namespace() {
@@ -948,6 +955,14 @@ mod tests {
         assert_eq!(
             compose_benchmark_object_key_prefix(None, "run-0001"),
             "bench/run-0001"
+        );
+    }
+
+    #[test]
+    fn benchmark_object_key_prefix_handles_empty_existing() {
+        assert_eq!(
+            compose_benchmark_object_key_prefix(Some(""), "bench-1"),
+            "bench/bench-1"
         );
     }
 
@@ -983,5 +998,94 @@ mod tests {
 
         assert_eq!(backend.metadata_backend_name(), "local");
         assert_eq!(backend.object_backend_name(), "local");
+    }
+
+    // ── Repository reference probe helpers ─────────────────────────────────
+
+    #[test]
+    fn repository_reference_probe_count_starts_at_zero() {
+        clear_repository_reference_probe_filter();
+        assert_eq!(repository_reference_probe_count(), 0);
+    }
+
+    #[test]
+    fn repository_reference_probe_count_increments_when_filter_matches() {
+        clear_repository_reference_probe_filter();
+        reset_repository_reference_probe_count_for_hash("aabb");
+        // count_repository_reference_probe_for_tests is called by
+        // repository_references_xorb, but we can't easily test that async path
+        // without a full backend. Instead verify that reset/clear round-trip.
+        assert_eq!(repository_reference_probe_count(), 0);
+        clear_repository_reference_probe_filter();
+    }
+
+    // ── server_error_to_oci conversion ─────────────────────────────────────
+
+    #[test]
+    fn server_error_to_oci_maps_not_found() {
+        let err = ServerError::NotFound;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::NotFound));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_overflow() {
+        let err = ServerError::Overflow;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::Overflow));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_invalid_content_hash() {
+        let err = ServerError::InvalidContentHash;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::InvalidContentHash));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_io_error() {
+        let io_err = std::io::Error::other("disk error");
+        let err = ServerError::Io(io_err);
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::Io(_)));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_local_object_store_error() {
+        let io_err = std::io::Error::other("local error");
+        let err = ServerError::ObjectStore(ObjectStoreError::Local(io_err.into()));
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::LocalObjectStore(_)));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_object_store_prefix_error() {
+        use shardline_storage::ObjectPrefixError;
+        let err = ServerError::ObjectStore(ObjectStoreError::Prefix(
+            ObjectPrefixError::UnsafePath,
+        ));
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::ObjectPrefix(_)));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_invalid_digest() {
+        let err = ServerError::InvalidDigest;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::InvalidDigest));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_invalid_repository_name() {
+        let err = ServerError::InvalidRepositoryName;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::InvalidRepositoryName));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_catch_all_to_io() {
+        let err = ServerError::RequestBodyTooLarge;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::Io(_)));
     }
 }

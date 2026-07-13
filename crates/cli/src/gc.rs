@@ -246,4 +246,36 @@ mod tests {
         // The Debug format includes the variant name, not the enum name
         assert!(debug.contains("Json("));
     }
+
+    #[test]
+    fn gc_runtime_error_config_display() {
+        use std::net::AddrParseError;
+        let addr_err: AddrParseError = "bad address".parse::<std::net::SocketAddr>().unwrap_err();
+        let err = super::GcRuntimeError::Config(
+            shardline_server::ServerConfigError::BindAddress(addr_err),
+        );
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Config("));
+    }
+
+    #[test]
+    fn gc_runtime_error_server_display() {
+        let err = super::GcRuntimeError::Server(shardline_server::ServerError::NotFound);
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Server("));
+    }
+
+    #[test]
+    fn gc_runtime_error_io_display() {
+        let io_err = std::io::Error::other("gc io error");
+        let err = super::GcRuntimeError::Io(io_err);
+        let display = err.to_string();
+        assert!(!display.is_empty());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Io("));
+    }
 }
