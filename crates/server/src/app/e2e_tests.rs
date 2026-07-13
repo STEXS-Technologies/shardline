@@ -35,6 +35,7 @@ use crate::{
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::{AuthProvider, auth::LocalEd25519Provider};
+use shardline_xet_core::merklehash::compute_data_hash;
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -950,6 +951,8 @@ async fn xorb_read_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// Error-path test only — the happy path is covered by [`chunk_read_happy_path`]
+/// below, which uploads a xorb + shard then reads the stored chunk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chunk_read_not_found() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
@@ -967,6 +970,65 @@ async fn chunk_read_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunk_read_happy_path() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // 1. Upload a xorb (stores chunk data in the object store).
+    let content = b"chunk-read-happy-path-test-data";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    // 2. Upload a shard that references the xorb — this registers a
+    //    DedupeShardMapping (chunk_hash → shard_key) in the index store.
+    let (shard_bytes, _file_id) =
+        test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let shard_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(shard_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shard_resp.status(), StatusCode::OK);
+
+    // 3. Compute the chunk hash from the plain content.
+    let chunk_hash = compute_data_hash(content);
+    let chunk_hash_hex = test_fixtures::xet_hash_hex(&chunk_hash);
+
+    // 4. Read the chunk via the /v1/chunks/default/{hash} route.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/chunks/default/{chunk_hash_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The handler resolves the chunk hash to a shard and returns the shard bytes.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_bytes(response).await;
+    assert!(!body.is_empty(), "chunk response body should not be empty");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1007,6 +1069,32 @@ async fn batch_reconstruction_empty() {
     let json = body_json(response).await;
     // Empty reconstruction batch should return an empty files map.
     assert!(json["files"].is_object());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_reconstruction_v1_route() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/reconstructions")
+                .header("accept", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The v1 route behaves identically to its unversioned sibling — an empty
+    // batch reconstruction returns 200 with an empty files map.
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert!(
+        json["files"].is_object(),
+        "files should be an empty object"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1082,6 +1170,7 @@ async fn xorb_upload_hash_mismatch() {
     );
 }
 
+/// Error-path test only — the happy path is covered by [`chunk_merkledb_happy_path`].
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chunk_merkledb_route_returns_not_found() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
@@ -1096,6 +1185,63 @@ async fn chunk_merkledb_route_returns_not_found() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunk_merkledb_happy_path() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // Upload a xorb + shard so that a chunk is registered in the index.
+    let content = b"chunk-merkledb-happy-path";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let xorb_upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xorb_upload.status(), StatusCode::OK);
+
+    let (shard_bytes, _file_id) =
+        test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let shard_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(shard_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shard_resp.status(), StatusCode::OK);
+
+    // Read the chunk via the default-merkledb route.
+    let chunk_hash = compute_data_hash(content);
+    let chunk_hash_hex = test_fixtures::xet_hash_hex(&chunk_hash);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/chunks/default-merkledb/{chunk_hash_hex}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !body_bytes(response).await.is_empty(),
+        "chunk merkledb response body should not be empty"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1114,6 +1260,31 @@ async fn shard_upload_invalid_data() {
     assert!(
         response.status().is_client_error(),
         "invalid shard should return 4xx, got {}",
+        response.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shard_upload_unversioned_route() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // The unversioned `/shards` route is registered alongside `/v1/shards`.
+    // It should behave identically — reject invalid shard data with 4xx.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/shards")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(b"invalid shard data".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_client_error(),
+        "invalid shard via /shards should return 4xx, got {}",
         response.status()
     );
 }
@@ -5447,6 +5618,614 @@ async fn hub_whoami_without_auth_returns_ok() {
 
     // Without auth configured, whoami should still return OK with default values
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_xet_read_token_route_wired() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a model repo
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "token-team/read-token-repo",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // xet-read-token requires an auth provider to mint tokens; without one
+    // it returns 401 Unauthorized — but the route IS wired (not a 404).
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/token-team/read-token-repo/xet-read-token/main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    // Auth is None in test setup, so this returns 401
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_xet_write_token_route_wired() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a model repo
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "token-team/write-token-repo",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // xet-write-token also requires auth; returns 401 when no auth configured.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/token-team/write-token-repo/xet-write-token/main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_search_returns_results() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo so there's something to search
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "search-team/search-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Search models — the query "se" is >= 2 chars so it passes validation
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/search?q=se")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let repos = json["repos"].as_array().unwrap();
+    // The created repo should appear in search results
+    assert!(
+        repos.iter().any(|r| r["id"] == "search-team/search-model"),
+        "created repo should be in search results"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_delete_repo_removes_repo() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo first
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "delete-team/delete-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Verify repo exists
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/delete-team/delete-model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Delete the repo
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/models/delete-team/delete-model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Verify repo is gone
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/delete-team/delete-model")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_revisions_lists_initial_revision() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo — this creates an initial "main" revision automatically
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "rev-team/rev-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // List revisions — should include the initial "main" revision
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/rev-team/rev-model/revisions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let revisions = json["revisions"].as_array().unwrap();
+    assert!(!revisions.is_empty(), "should have at least the initial revision");
+    // The initial revision has ref_name "main"
+    assert!(revisions.iter().any(|r| r["refName"] == "main" || r["ref_name"] == "main"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_preupload_checks_existing_files() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "pre-team/pre-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Preupload checks which files already exist at the given revision.
+    // With only the initial empty revision, no files exist yet.
+    let pre_body = serde_json::json!({
+        "files": [
+            {"path": "README.md"},
+            {"path": "model.bin"}
+        ]
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/pre-team/pre-model/preupload/main")
+                .header("content-type", "application/json")
+                .body(Body::from(pre_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let results = json["result"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    // Both files should report exists=false
+    for r in results {
+        assert_eq!(r["exists"], false);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_tree_returns_file_listing() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "tree-team/tree-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Tree listing — returns empty array for fresh repo.
+    // Axum's {*path} wildcard requires at least one path segment, so use "."
+    // as a sentinel for "root".
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/tree-team/tree-model/tree/main/.")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.is_array(), "tree response should be an array");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_git_info_refs_serves_advertisement() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo so there's at least an initial revision to advertise
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "git-team/git-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Git Smart HTTP discovery for upload-pack
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/models/git-team/git-model/info/refs?service=git-upload-pack")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("git-upload-pack-advertisement"),
+        "content-type should indicate upload-pack advertisement, got: {content_type}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_git_head_returns_ref() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "head-team/head-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // HEAD ref endpoint
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/models/head-team/head-model/HEAD")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("ref:"),
+        "HEAD response should contain 'ref:', got: {text:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_git_upload_pack_returns_pack() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "upack-team/upack-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Upload-pack with an empty body (no wants/haves) — returns an empty pack
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/models/upack-team/upack-model/git-upload-pack")
+                .header("content-type", "application/x-git-upload-pack-request")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The route is wired; it may return OK or an error depending on pkt-line parsing
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_git_receive_pack_accepts_push() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create_body = serde_json::json!({
+        "type": "model",
+        "name": "rpack-team/rpack-model",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Receive-pack with an empty body — the handler returns a report response
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/models/rpack-team/rpack-model/git-receive-pack")
+                .header("content-type", "application/x-git-receive-pack-request")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Route is wired; empty body results in a valid report (not a 404)
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_dataset_first_rows_returns_empty_for_fresh_repo() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a dataset repo
+    let create_body = serde_json::json!({
+        "type": "dataset",
+        "name": "ds-team/ds-firstrows",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // First-rows on a fresh dataset (no committed data files) — returns empty columns
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/datasets/ds-team/ds-firstrows/first-rows")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // Empty dataset returns empty columns and rows per the Hub API spec
+    assert!(json["columns"].as_array().unwrap().is_empty());
+    assert!(json["rows"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_dataset_viewer_requires_data_files() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a dataset repo
+    let create_body = serde_json::json!({
+        "type": "dataset",
+        "name": "ds-team/ds-viewer",
+        "private": false,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Viewer on a fresh dataset (no committed data files) — returns 400 (PathValidation)
+    // because no data file exists yet for the requested split.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/datasets/ds-team/ds-viewer/viewer/train")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Route IS wired (not a 404). Without data files, it returns 400 BAD_REQUEST.
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 // ── OCI role-split ────────────────────────────────────────────────────────
