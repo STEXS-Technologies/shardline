@@ -293,3 +293,414 @@ pub fn print_local_gc_cli_summary(
     }
     print_local_gc_summary(report);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use shardline_server::{
+        BackupManifestReport, ConfigCheckReport, DatabaseMigrationCommand, DatabaseMigrationReport,
+        DatabaseMigrationStatusEntry, FsckIssueDetail, FsckIssueKind, LifecycleRepairReport,
+        IndexRebuildIssueDetail, LocalFsckIssue, LocalFsckReport, LocalGcReport,
+        LocalIndexRebuildIssue, LocalIndexRebuildIssueKind, LocalIndexRebuildReport,
+        StorageMigrationReport,
+    };
+
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // print_config_check_summary — smoke test (no panic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_check_summary_runs() {
+        let report = ConfigCheckReport {
+            status: "ok".to_owned(),
+            server_role: "all".to_owned(),
+            server_frontends: vec!["xet".to_owned()],
+            metadata_backend: "local".to_owned(),
+            object_backend: "local".to_owned(),
+            cache_backend: "memory".to_owned(),
+            auth_enabled: true,
+            provider_tokens_enabled: false,
+        };
+        print_config_check_summary(&report);
+    }
+
+    // -----------------------------------------------------------------------
+    // print_database_migration_summary — smoke test (no panic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn database_migration_summary_runs() {
+        let report = DatabaseMigrationReport {
+            backend: "postgres".to_owned(),
+            command: DatabaseMigrationCommand::Status,
+            applied_count: 3,
+            reverted_count: 1,
+            applied_total_count: 7,
+            pending_count: 2,
+            migrations: vec![
+                DatabaseMigrationStatusEntry {
+                    version: "v1".to_owned(),
+                    name: "m1".to_owned(),
+                    applied: true,
+                    applied_at_utc: Some("2026-01-01T00:00:00Z".to_owned()),
+                },
+                DatabaseMigrationStatusEntry {
+                    version: "v2".to_owned(),
+                    name: "m2".to_owned(),
+                    applied: false,
+                    applied_at_utc: None,
+                },
+            ],
+        };
+        print_database_migration_summary(&report);
+    }
+
+    #[test]
+    fn database_migration_no_migrations() {
+        let report = DatabaseMigrationReport {
+            backend: "postgres".to_owned(),
+            command: DatabaseMigrationCommand::Status,
+            applied_count: 0,
+            reverted_count: 0,
+            applied_total_count: 0,
+            pending_count: 0,
+            migrations: vec![],
+        };
+        print_database_migration_summary(&report);
+    }
+
+    // -----------------------------------------------------------------------
+    // print_fsck_summary / cli / issues
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fsck_summary_runs() {
+        let report = LocalFsckReport {
+            latest_records: 100,
+            version_records: 200,
+            inspected_chunk_references: 1500,
+            inspected_dedupe_shard_mappings: 50,
+            inspected_reconstructions: 25,
+            inspected_webhook_deliveries: 10,
+            inspected_provider_repository_states: 5,
+            issues: vec![],
+        };
+        print_fsck_summary(&report);
+    }
+
+    #[test]
+    fn fsck_cli_summary_runs() {
+        let report = LocalFsckReport {
+            latest_records: 1,
+            version_records: 2,
+            inspected_chunk_references: 3,
+            inspected_dedupe_shard_mappings: 4,
+            inspected_reconstructions: 5,
+            inspected_webhook_deliveries: 6,
+            inspected_provider_repository_states: 7,
+            issues: vec![],
+        };
+        print_fsck_cli_summary(&report, Path::new("/root"));
+    }
+
+    #[test]
+    fn fsck_summary_reports_issue_count() {
+        let report = LocalFsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: vec![
+                LocalFsckIssue {
+                    kind: FsckIssueKind::MissingChunk,
+                    location: "chunks/a".to_owned(),
+                    detail: FsckIssueDetail::MissingVersionRecord {
+                        version_locator: "r/a".to_owned(),
+                    },
+                },
+                LocalFsckIssue {
+                    kind: FsckIssueKind::ChunkHashMismatch,
+                    location: "chunks/b".to_owned(),
+                    detail: FsckIssueDetail::RecordJsonInvalid,
+                },
+            ],
+        };
+        assert_eq!(report.issue_count(), 2);
+        print_fsck_summary(&report);
+        // issue_count() is internally derived from issues.len()
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn fsck_issues_runs() {
+        let report = LocalFsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: vec![LocalFsckIssue {
+                kind: FsckIssueKind::MissingChunk,
+                location: "chunks/abc".to_owned(),
+                detail: FsckIssueDetail::MissingVersionRecord {
+                    version_locator: "records/abc".to_owned(),
+                },
+            }],
+        };
+        print_fsck_issues(&report);
+    }
+
+    #[test]
+    fn fsck_empty_issues_is_clean() {
+        let report = LocalFsckReport {
+            issues: vec![],
+            ..empty_fsck_report()
+        };
+        assert!(report.is_clean());
+        assert_eq!(report.issue_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // print_index_rebuild_summary / cli / issues
+    // -----------------------------------------------------------------------
+
+    fn empty_index_rebuild_report() -> LocalIndexRebuildReport {
+        LocalIndexRebuildReport {
+            scanned_version_records: 0,
+            scanned_retained_shards: 0,
+            rebuilt_latest_records: 0,
+            unchanged_latest_records: 0,
+            removed_stale_latest_records: 0,
+            scanned_reconstructions: 0,
+            unchanged_reconstructions: 0,
+            removed_stale_reconstructions: 0,
+            rebuilt_dedupe_shard_mappings: 0,
+            unchanged_dedupe_shard_mappings: 0,
+            removed_stale_dedupe_shard_mappings: 0,
+            issues: vec![],
+        }
+    }
+
+    #[test]
+    fn index_rebuild_summary_runs() {
+        print_index_rebuild_summary(&empty_index_rebuild_report());
+    }
+
+    #[test]
+    fn index_rebuild_cli_summary_runs() {
+        print_index_rebuild_cli_summary(&empty_index_rebuild_report(), Path::new("/root"));
+    }
+
+    #[test]
+    fn index_rebuild_issues_runs() {
+        let report = LocalIndexRebuildReport {
+            issues: vec![LocalIndexRebuildIssue {
+                kind: LocalIndexRebuildIssueKind::InvalidVersionRecordJson,
+                location: "records/abc".to_owned(),
+                detail: IndexRebuildIssueDetail::RecordJsonInvalid,
+            }],
+            ..empty_index_rebuild_report()
+        };
+        print_index_rebuild_issues(&report);
+    }
+
+    #[test]
+    fn index_rebuild_issue_count_and_clean() {
+        let report = LocalIndexRebuildReport {
+            issues: vec![LocalIndexRebuildIssue {
+                kind: LocalIndexRebuildIssueKind::InvalidVersionRecordJson,
+                location: "r".to_owned(),
+                detail: IndexRebuildIssueDetail::RecordJsonInvalid,
+            }],
+            ..empty_index_rebuild_report()
+        };
+        assert_eq!(report.issue_count(), 1);
+        assert!(!report.is_clean());
+
+        let clean = empty_index_rebuild_report();
+        assert_eq!(clean.issue_count(), 0);
+        assert!(clean.is_clean());
+    }
+
+    // -----------------------------------------------------------------------
+    // print_lifecycle_repair_summary / prefixed / cli
+    // -----------------------------------------------------------------------
+
+    fn empty_lifecycle_repair_report() -> LifecycleRepairReport {
+        LifecycleRepairReport {
+            scanned_records: 0,
+            referenced_objects: 0,
+            scanned_quarantine_candidates: 0,
+            removed_missing_quarantine_candidates: 0,
+            removed_reachable_quarantine_candidates: 0,
+            removed_held_quarantine_candidates: 0,
+            scanned_retention_holds: 0,
+            removed_expired_retention_holds: 0,
+            removed_missing_retention_holds: 0,
+            scanned_webhook_deliveries: 0,
+            removed_stale_webhook_deliveries: 0,
+            removed_future_webhook_deliveries: 0,
+        }
+    }
+
+    #[test]
+    fn lifecycle_repair_summary_runs() {
+        print_lifecycle_repair_summary(&empty_lifecycle_repair_report());
+    }
+
+    #[test]
+    fn lifecycle_repair_summary_prefixed_runs() {
+        let report = empty_lifecycle_repair_report();
+        print_lifecycle_repair_summary_prefixed(&report, "repair");
+        // empty prefix — no dot separator
+        print_lifecycle_repair_summary_prefixed(&report, "");
+    }
+
+    #[test]
+    fn lifecycle_repair_cli_summary_runs() {
+        print_lifecycle_repair_cli_summary(
+            &empty_lifecycle_repair_report(),
+            Path::new("/root"),
+            2592000,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // print_backup_manifest_summary / cli
+    // -----------------------------------------------------------------------
+
+    fn empty_backup_report() -> BackupManifestReport {
+        BackupManifestReport {
+            manifest_version: 1,
+            metadata_backend: "local".to_owned(),
+            object_backend: "fs".to_owned(),
+            object_count: 0,
+            object_bytes: 0,
+            latest_records: 0,
+            version_records: 0,
+            reconstruction_rows: 0,
+            dedupe_shard_mappings: 0,
+            quarantine_candidates: 0,
+            retention_holds: 0,
+            webhook_deliveries: 0,
+            provider_repository_states: 0,
+        }
+    }
+
+    #[test]
+    fn backup_manifest_summary_runs() {
+        print_backup_manifest_summary(&empty_backup_report());
+    }
+
+    #[test]
+    fn backup_manifest_cli_summary_runs() {
+        print_backup_manifest_cli_summary(
+            &empty_backup_report(),
+            Path::new("/root"),
+            Path::new("/out.json"),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // print_storage_migration_summary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn storage_migration_summary_runs() {
+        let report = StorageMigrationReport {
+            source_backend: "local".to_owned(),
+            destination_backend: "s3".to_owned(),
+            prefix: "chunks/".to_owned(),
+            dry_run: true,
+            scanned_objects: 1000,
+            scanned_bytes: 500_000_000,
+            inserted_objects: 800,
+            already_present_objects: 200,
+            copied_bytes: 400_000_000,
+        };
+        print_storage_migration_summary(&report);
+    }
+
+    // -----------------------------------------------------------------------
+    // print_local_gc_summary / cli
+    // -----------------------------------------------------------------------
+
+    fn empty_gc_report() -> LocalGcReport {
+        LocalGcReport {
+            scanned_records: 0,
+            referenced_chunks: 0,
+            orphan_chunks: 0,
+            orphan_chunk_bytes: 0,
+            active_quarantine_candidates: 0,
+            new_quarantine_candidates: 0,
+            retained_quarantine_candidates: 0,
+            released_quarantine_candidates: 0,
+            deleted_chunks: 0,
+            deleted_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn local_gc_summary_runs() {
+        print_local_gc_summary(&empty_gc_report());
+    }
+
+    #[test]
+    fn local_gc_cli_summary_runs() {
+        // mark=true — retention_seconds printed
+        print_local_gc_cli_summary(
+            &empty_gc_report(),
+            "mark",
+            Path::new("/root"),
+            7200,
+            true,
+            Some(Path::new("/ret.json")),
+            None,
+        );
+        // mark=false — retention_seconds not printed, orphan_inventory printed
+        print_local_gc_cli_summary(
+            &empty_gc_report(),
+            "sweep",
+            Path::new("/root"),
+            3600,
+            false,
+            None,
+            Some(Path::new("/orphans.json")),
+        );
+        // Both optional paths present
+        print_local_gc_cli_summary(
+            &empty_gc_report(),
+            "mark-and-sweep",
+            Path::new("/root"),
+            3600,
+            true,
+            Some(Path::new("/ret.json")),
+            Some(Path::new("/orphans.json")),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: empty default report for fsck
+    // -----------------------------------------------------------------------
+
+    fn empty_fsck_report() -> LocalFsckReport {
+        LocalFsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: vec![],
+        }
+    }
+}

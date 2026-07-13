@@ -1663,6 +1663,8 @@ async fn webhook_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderMap;
+    use shardline_index::hub::{HubRepo, HubRepoType};
     use std::net::IpAddr;
 
     #[test]
@@ -1926,5 +1928,654 @@ mod tests {
         // Second delete is also fine (no-op, no rows affected)
         store.delete_repo("org/model").unwrap();
         assert!(store.get_repo("org/model").unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // repo_type_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_type_path_model() {
+        assert_eq!(repo_type_path(HubRepoType::Model), "models");
+    }
+
+    #[test]
+    fn repo_type_path_dataset() {
+        assert_eq!(repo_type_path(HubRepoType::Dataset), "datasets");
+    }
+
+    #[test]
+    fn repo_type_path_space() {
+        assert_eq!(repo_type_path(HubRepoType::Space), "spaces");
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_log_url
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_log_url_normal() {
+        let url = "https://example.com/webhook";
+        assert_eq!(sanitize_log_url(url), url);
+    }
+
+    #[test]
+    fn sanitize_log_url_replaces_control_chars() {
+        let url = "https://example.com/new\nline";
+        assert_eq!(sanitize_log_url(url), "https://example.com/new?line");
+    }
+
+    #[test]
+    fn sanitize_log_url_truncates_long() {
+        let base = "https://example.com/";
+        let long = format!("{}{}", base, "a".repeat(300));
+        let result = sanitize_log_url(&long);
+        assert!(result.len() <= 204); // 200 chars + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn sanitize_log_url_replaces_tab() {
+        let url = "https://example.com/\tpath";
+        assert_eq!(sanitize_log_url(url), "https://example.com/?path");
+    }
+
+    #[test]
+    fn sanitize_log_url_short_no_truncation() {
+        let url = "http://a.b";
+        assert_eq!(sanitize_log_url(url), url);
+        assert!(!url.ends_with("..."));
+    }
+
+    // -----------------------------------------------------------------------
+    // repo_response_from_hub
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_response_from_hub_model() {
+        use shardline_index::hub::HubRepoType;
+        let hub_repo = HubRepo {
+            repo_id: "org/my-model".to_owned(),
+            repo_type: HubRepoType::Model,
+            private: false,
+            default_branch: "main".to_owned(),
+            created_at_unix_seconds: 1_700_000_000,
+            updated_at_unix_seconds: 1_700_000_001,
+        };
+        let resp = repo_response_from_hub(&hub_repo);
+        assert_eq!(resp.id, "org/my-model");
+        assert_eq!(resp.repo_type, RepoType::Model);
+        assert!(!resp.private);
+        assert_eq!(resp.url, "/models/org/my-model");
+        assert_eq!(resp.default_branch.as_deref(), Some("main"));
+        let lm = resp.last_modified.as_deref().expect("last_modified should be Some");
+        // Should be a valid RFC 3339 timestamp around 2023-11-14
+        assert!(lm.contains("2023-11-14T22"), "expected 2023-11-14T22... got {lm}");
+    }
+
+    #[test]
+    fn repo_response_from_hub_dataset() {
+        use shardline_index::hub::HubRepoType;
+        let hub_repo = HubRepo {
+            repo_id: "org/data".to_owned(),
+            repo_type: HubRepoType::Dataset,
+            private: true,
+            default_branch: "main".to_owned(),
+            created_at_unix_seconds: 0,
+            updated_at_unix_seconds: 0,
+        };
+        let resp = repo_response_from_hub(&hub_repo);
+        assert_eq!(resp.repo_type, RepoType::Dataset);
+        assert!(resp.private);
+        assert_eq!(resp.url, "/datasets/org/data");
+    }
+
+    #[test]
+    fn repo_response_from_hub_space() {
+        use shardline_index::hub::HubRepoType;
+        let hub_repo = HubRepo {
+            repo_id: "org/space1".to_owned(),
+            repo_type: HubRepoType::Space,
+            private: false,
+            default_branch: "main".to_owned(),
+            created_at_unix_seconds: 0,
+            updated_at_unix_seconds: 0,
+        };
+        let resp = repo_response_from_hub(&hub_repo);
+        assert_eq!(resp.repo_type, RepoType::Space);
+        assert_eq!(resp.url, "/spaces/org/space1");
+    }
+
+    // -----------------------------------------------------------------------
+    // webhook_response_from_hub
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn webhook_response_from_hub_basic() {
+        use shardline_index::hub::HubWebhook;
+        let hook = HubWebhook {
+            id: "wh_123".to_owned(),
+            repo_id: "org/repo".to_owned(),
+            url: "https://example.com/hook".to_owned(),
+            events: vec!["push".to_owned()],
+            secret: Some("s3cret".to_owned()),
+            active: true,
+            created_at_unix_seconds: 42,
+        };
+        let resp = webhook_response_from_hub(&hook);
+        assert_eq!(resp.id, "wh_123");
+        assert_eq!(resp.url, "https://example.com/hook");
+        assert_eq!(resp.events, vec!["push"]);
+        assert!(resp.active);
+        assert_eq!(resp.created_at, 42);
+    }
+
+    #[test]
+    fn webhook_response_from_hub_inactive() {
+        use shardline_index::hub::HubWebhook;
+        let hook = HubWebhook {
+            id: "wh_2".to_owned(),
+            repo_id: "org/repo".to_owned(),
+            url: "http://hook.example".to_owned(),
+            events: vec!["push".to_owned(), "delete".to_owned()],
+            secret: None,
+            active: false,
+            created_at_unix_seconds: 99,
+        };
+        let resp = webhook_response_from_hub(&hook);
+        assert!(!resp.active);
+        assert_eq!(resp.events.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_yaml_frontmatter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_yaml_frontmatter_valid_simple() {
+        let content = b"---\nkey: value\n---\n# README\nHello";
+        let result = parse_yaml_frontmatter(content);
+        assert!(result.is_some());
+        let obj = result.unwrap();
+        assert_eq!(obj.get("key").and_then(|v| v.as_str()), Some("value"));
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_with_quoted_value() {
+        let content = b"---\ntitle: 'My Model'\n---\nbody";
+        let result = parse_yaml_frontmatter(content);
+        assert!(result.is_some());
+        let obj = result.unwrap();
+        assert_eq!(
+            obj.get("title").and_then(|v| v.as_str()),
+            Some("My Model")
+        );
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_no_frontmatter() {
+        let content = b"Just a README\nno frontmatter";
+        assert!(parse_yaml_frontmatter(content).is_none());
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_empty_yaml() {
+        let content = b"---\n---\nbody";
+        assert!(parse_yaml_frontmatter(content).is_none());
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_only_comments() {
+        let content = b"---\n# just a comment\n---\nbody";
+        assert!(parse_yaml_frontmatter(content).is_none());
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_numeric_value() {
+        let content = b"---\nlikes: 42\n---\nbody";
+        let result = parse_yaml_frontmatter(content).unwrap();
+        assert_eq!(result.get("likes").and_then(|v| v.as_u64()), Some(42));
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_boolean_value() {
+        let content = b"---\nprivate: true\n---\nbody";
+        let result = parse_yaml_frontmatter(content).unwrap();
+        assert_eq!(result.get("private").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_double_quoted_value() {
+        let content = b"---\nname: \"hello world\"\n---\nbody";
+        let result = parse_yaml_frontmatter(content).unwrap();
+        assert_eq!(
+            result.get("name").and_then(|v| v.as_str()),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_not_utf8() {
+        let content = b"\xff\xfe\x00\x01";
+        assert!(parse_yaml_frontmatter(content).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // tree_entries_at_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tree_entries_at_path_root_lists_files_and_dirs() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![
+            HubFileEntry {
+                path: "README.md".into(),
+                size: 100,
+                sha: "a".into(),
+                is_lfs: false,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "src/main.rs".into(),
+                size: 200,
+                sha: "b".into(),
+                is_lfs: false,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "src/lib.rs".into(),
+                size: 300,
+                sha: "c".into(),
+                is_lfs: true,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "data/big.bin".into(),
+                size: 5_000_000,
+                sha: "d".into(),
+                is_lfs: true,
+                inline_content: None,
+            },
+        ];
+        let entries = tree_entries_at_path(&files, "");
+        assert_eq!(entries.len(), 3, "expected 3 entries: README.md, src/, data/");
+        // Directories come before files (sorted by type then path)
+        assert_eq!(entries[0].entry_type, "directory");
+        assert_eq!(entries[0].path, "data");
+        assert_eq!(entries[1].entry_type, "directory");
+        assert_eq!(entries[1].path, "src");
+        assert_eq!(entries[2].entry_type, "file");
+        assert_eq!(entries[2].path, "README.md");
+        assert_eq!(entries[2].size, Some(100));
+        assert!(entries[2].lfs.is_none());
+    }
+
+    #[test]
+    fn tree_entries_at_path_nested() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![
+            HubFileEntry {
+                path: "src/main.rs".into(),
+                size: 200,
+                sha: "b".into(),
+                is_lfs: false,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "src/lib.rs".into(),
+                size: 300,
+                sha: "c".into(),
+                is_lfs: true,
+                inline_content: None,
+            },
+        ];
+        let entries = tree_entries_at_path(&files, "src");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entry_type, "file");
+        assert_eq!(entries[0].path, "lib.rs");
+        assert!(entries[0].lfs.is_some());
+        assert_eq!(entries[1].entry_type, "file");
+        assert_eq!(entries[1].path, "main.rs");
+    }
+
+    #[test]
+    fn tree_entries_at_path_empty_dir() {
+        let entries = tree_entries_at_path(&[], "");
+        assert!(entries.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // tree_entries_recursive
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tree_entries_recursive_root() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![
+            HubFileEntry {
+                path: "README.md".into(),
+                size: 100,
+                sha: "a".into(),
+                is_lfs: false,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "src/main.rs".into(),
+                size: 200,
+                sha: "b".into(),
+                is_lfs: false,
+                inline_content: None,
+            },
+        ];
+        let entries = tree_entries_recursive(&files, "");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "README.md");
+        assert_eq!(entries[1].path, "src/main.rs");
+    }
+
+    #[test]
+    fn tree_entries_recursive_nested() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![
+            HubFileEntry {
+                path: "src/main.rs".into(),
+                size: 200,
+                sha: "b".into(),
+                is_lfs: false,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "src/lib.rs".into(),
+                size: 300,
+                sha: "c".into(),
+                is_lfs: true,
+                inline_content: None,
+            },
+        ];
+        let entries = tree_entries_recursive(&files, "src");
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn tree_entries_recursive_lfs_shows_lfs_info() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "model.bin".into(),
+            size: 5_000_000,
+            sha: "abcd".into(),
+            is_lfs: true,
+            inline_content: None,
+        }];
+        let entries = tree_entries_recursive(&files, "");
+        assert_eq!(entries.len(), 1);
+        let lfs = entries[0].lfs.as_ref().expect("expected LFS info");
+        assert_eq!(lfs.oid, "abcd");
+        assert_eq!(lfs.size, 5_000_000);
+    }
+
+    #[test]
+    fn tree_entries_recursive_empty() {
+        assert!(tree_entries_recursive(&[], "").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // find_dataset_file
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_dataset_file_default_train() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "data/train/data.jsonl".into(),
+            size: 100,
+            sha: "abc".into(),
+            is_lfs: false,
+            inline_content: None,
+        }];
+        let result = find_dataset_file(&files, "default", "train");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().path, "data/train/data.jsonl");
+    }
+
+    #[test]
+    fn find_dataset_file_config_split() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "myconfig/test/data.parquet".into(),
+            size: 200,
+            sha: "def".into(),
+            is_lfs: false,
+            inline_content: None,
+        }];
+        let result = find_dataset_file(&files, "myconfig", "test");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().path, "myconfig/test/data.parquet");
+    }
+
+    #[test]
+    fn find_dataset_file_split_only() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "train/data.csv".into(),
+            size: 300,
+            sha: "ghi".into(),
+            is_lfs: false,
+            inline_content: None,
+        }];
+        let result = find_dataset_file(&files, "default", "train");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().path, "train/data.csv");
+    }
+
+    #[test]
+    fn find_dataset_file_root() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "data.parquet".into(),
+            size: 400,
+            sha: "jkl".into(),
+            is_lfs: false,
+            inline_content: None,
+        }];
+        let result = find_dataset_file(&files, "default", "train");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().path, "data.parquet");
+    }
+
+    #[test]
+    fn find_dataset_file_not_found() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "other.txt".into(),
+            size: 10,
+            sha: "x".into(),
+            is_lfs: false,
+            inline_content: None,
+        }];
+        assert!(find_dataset_file(&files, "default", "train").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_jsonl_rows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_jsonl_rows_simple() {
+        let text = "{\"a\":1,\"b\":2}\n{\"a\":3,\"b\":4}";
+        let rows = parse_jsonl_rows(text, 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].columns.get("a"),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            rows[1].columns.get("b"),
+            Some(&serde_json::json!(4))
+        );
+    }
+
+    #[test]
+    fn parse_jsonl_rows_with_offset_and_limit() {
+        let text = "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n{\"n\":5}";
+        let rows = parse_jsonl_rows(text, 2, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].columns.get("n"), Some(&serde_json::json!(3)));
+        assert_eq!(rows[1].columns.get("n"), Some(&serde_json::json!(4)));
+    }
+
+    #[test]
+    fn parse_jsonl_rows_empty_lines() {
+        let text = "{\"a\":1}\n\n{\"a\":2}\n";
+        let rows = parse_jsonl_rows(text, 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn parse_jsonl_rows_invalid_json() {
+        let text = "{\"a\":1}\nnot_json\n{\"a\":2}";
+        let result = parse_jsonl_rows(text, 0, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_jsonl_rows_empty_input() {
+        let rows = parse_jsonl_rows("", 0, 10).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn parse_jsonl_rows_limit_bounds() {
+        let text = "{\"x\":1}\n{\"x\":2}\n{\"x\":3}";
+        let rows = parse_jsonl_rows(text, 0, 0).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_csv_rows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_csv_rows_simple() {
+        let text = "name,age\nAlice,30\nBob,25";
+        let rows = parse_csv_rows(text, 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].columns.get("name"),
+            Some(&serde_json::json!("Alice"))
+        );
+        assert_eq!(
+            rows[1].columns.get("age"),
+            Some(&serde_json::json!(25))
+        );
+    }
+
+    #[test]
+    fn parse_csv_rows_with_offset_and_limit() {
+        let text = "n\n1\n2\n3\n4\n5";
+        let rows = parse_csv_rows(text, 2, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].columns.get("n"), Some(&serde_json::json!(3)));
+        assert_eq!(rows[1].columns.get("n"), Some(&serde_json::json!(4)));
+    }
+
+    #[test]
+    fn parse_csv_rows_quoted_fields() {
+        let text = r#"name,description
+Alice,"hello, world"
+Bob,"say ""hi"""#;
+        let rows = parse_csv_rows(text, 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].columns.get("description"),
+            Some(&serde_json::json!("hello, world"))
+        );
+    }
+
+    #[test]
+    fn parse_csv_rows_empty_input() {
+        let result = parse_csv_rows("", 0, 10);
+        assert!(result.is_err()); // no header
+    }
+
+    #[test]
+    fn parse_csv_rows_header_only() {
+        let rows = parse_csv_rows("a,b,c", 0, 10).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn parse_csv_rows_skip_empty() {
+        let text = "a\n1\n\n2\n";
+        let rows = parse_csv_rows(text, 0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_rows_from_content (routing function)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_rows_from_content_jsonl() {
+        let content = b"{\"x\":1}";
+        let rows = parse_rows_from_content(content, "data.jsonl", 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn parse_rows_from_content_csv() {
+        let content = b"a,b\n1,2";
+        let rows = parse_rows_from_content(content, "data.csv", 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn parse_rows_from_content_unsupported_format() {
+        let content = b"some data";
+        let result = parse_rows_from_content(content, "data.txt", 0, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_rows_from_content_invalid_utf8() {
+        let content = b"\xff\xfe\x00";
+        let result = parse_rows_from_content(content, "data.csv", 0, 10);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // is_cgnat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_cgnat_true_for_100_64_range() {
+        assert!(is_cgnat("100.64.0.0".parse().unwrap()));
+        assert!(is_cgnat("100.127.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_cgnat_false_outside_range() {
+        assert!(!is_cgnat("100.63.255.255".parse().unwrap()));
+        assert!(!is_cgnat("100.128.0.1".parse().unwrap()));
+        assert!(!is_cgnat("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_cgnat_false_for_loopback() {
+        assert!(!is_cgnat("127.0.0.1".parse().unwrap()));
+    }
+
+    // -----------------------------------------------------------------------
+    // authorize (route-level helper)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn route_authorize_without_auth_is_permissive() {
+        let state = HubState {
+            store: make_delete_test_store().1,
+            auth: None,
+            http_client: None,
+        };
+        let headers = HeaderMap::new();
+        assert!(authorize(&state, &headers, TokenScope::Write).is_ok());
     }
 }

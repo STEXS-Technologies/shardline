@@ -211,4 +211,56 @@ mod tests {
             }
         }
     }
+
+    // --- Additional edge cases ---
+
+    #[test]
+    fn exactly_at_inline_boundary_should_be_inline() {
+        // size == MAX_INLINE_SIZE (1 MiB) → Inline
+        let result = resolve_download_variant(1_048_576, true);
+        assert!(matches!(result, DownloadResult::Inline { .. }));
+    }
+
+    #[test]
+    fn one_byte_over_inline_boundary_lfs_should_redirect() {
+        // size == MAX_INLINE_SIZE + 1 and is_lfs → LfsRedirect
+        let result = resolve_download_variant(1_048_577, true);
+        assert!(matches!(result, DownloadResult::LfsRedirect { .. }));
+    }
+
+    #[test]
+    fn lfs_redirect_contains_oid_and_size() {
+        let result = DownloadResult::LfsRedirect {
+            oid: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            size: 2_000_000,
+        };
+        match &result {
+            DownloadResult::LfsRedirect { oid, size } => {
+                assert_eq!(oid.len(), 64);
+                assert_eq!(*size, 2_000_000);
+            }
+            #[allow(clippy::panic)]
+            _ => panic!("expected LfsRedirect"),
+        }
+    }
+
+    #[test]
+    fn download_result_debug_roundtrip() {
+        let inline = DownloadResult::Inline {
+            size: 10,
+            sha: "sha".into(),
+            content: Some(vec![1, 2, 3]),
+        };
+        let debug_str = format!("{inline:?}");
+        assert!(debug_str.contains("Inline"));
+        assert!(debug_str.contains("sha"));
+
+        let redirect = DownloadResult::LfsRedirect {
+            oid: "oid".into(),
+            size: 20,
+        };
+        let debug_str = format!("{redirect:?}");
+        assert!(debug_str.contains("LfsRedirect"));
+        assert!(debug_str.contains("oid"));
+    }
 }
