@@ -33,6 +33,11 @@ pub(crate) fn scope_namespace(
     core_ps::scope_namespace(repository_scope)
 }
 
+/// Builds a shared-namespace object key for a SHA-256 digest.
+///
+/// # Errors
+///
+/// Returns [`ServerError::InvalidContentHash`] when the digest hex is malformed.
 pub fn shared_sha256_object_key(
     digest_hex: &str,
 ) -> Result<shardline_storage::ObjectKey, ServerError> {

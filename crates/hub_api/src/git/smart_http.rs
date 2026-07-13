@@ -598,7 +598,6 @@ fn build_lfs_pointer_blob(oid: &str, size: u64) -> GitObject {
 
 /// Generates a `.gitattributes` blob that tells Git to treat LFS files
 /// as LFS-tracked. Returns `None` if no files are LFS-tracked.
-#[allow(clippy::expect_used)]
 fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
     let lfs_files: Vec<&HubFileEntry> = files.iter().filter(|f| f.is_lfs).collect();
     if lfs_files.is_empty() {
@@ -617,7 +616,7 @@ fn build_gitattributes_blob(files: &[HubFileEntry]) -> Option<GitObject> {
             "{} filter=lfs diff=lfs merge=lfs -text",
             file.path
         )
-        .expect("write to String never fails");
+        .ok();
     }
 
     Some(GitObject::blob(content.into_bytes()))

@@ -27,7 +27,7 @@ mod tests;
 
 use std::sync::LazyLock;
 
-use prometheus::{Registry, TextEncoder};
+use prometheus::{Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 
 use backend::StorageBackendMetrics;
 use fsck::FsckMetrics;
@@ -39,6 +39,26 @@ use storage::StorageMetrics;
 use system::SystemMetrics;
 use transfer::TransferMetrics;
 use xet::XetMetrics;
+
+// ── Infallible metric constructors ────────────────────────────────────────
+
+/// Creates an `IntCounter`, aborting if the name is invalid.
+#[must_use]
+fn must_counter(name: &str, help: &str) -> IntCounter {
+    IntCounter::new(name, help).unwrap_or_else(|_| std::process::abort())
+}
+
+/// Creates an `IntGauge`, aborting if the name is invalid.
+#[must_use]
+fn must_gauge(name: &str, help: &str) -> IntGauge {
+    IntGauge::new(name, help).unwrap_or_else(|_| std::process::abort())
+}
+
+/// Creates a `Histogram` from options, aborting if the metric name is invalid.
+#[must_use]
+fn must_histogram(opts: HistogramOpts) -> Histogram {
+    Histogram::with_opts(opts).unwrap_or_else(|_| std::process::abort())
+}
 
 /// Central metrics registry for the entire Shardline CAS backend.
 pub struct CasMetrics {

@@ -261,8 +261,7 @@ fn manifest_references_digest(body: &[u8], target_digest: &str) -> bool {
     refs.contains(&target_digest)
 }
 
-#[allow(clippy::single_char_lifetime_names, clippy::wildcard_enum_match_arm)]
-fn collect_digest_refs<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+fn collect_digest_refs<'value>(value: &'value serde_json::Value, out: &mut Vec<&'value str>) {
     match value {
         serde_json::Value::Object(map) => {
             if let Some(serde_json::Value::String(digest)) = map.get("digest") {
@@ -278,7 +277,7 @@ fn collect_digest_refs<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>)
                 collect_digest_refs(v, out);
             }
         }
-        _ => {}
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::String(_) => {}
     }
 }
 

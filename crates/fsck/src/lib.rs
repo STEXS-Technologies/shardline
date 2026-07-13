@@ -1148,6 +1148,76 @@ mod tests {
         let fsck_err: FsckError = err.into();
         assert!(matches!(fsck_err, FsckError::Overflow));
     }
+
+    // ── run_fsck_with_stores integration ─────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_empty_stores_returns_clean_report() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = shardline_index::LocalIndexStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "empty stores should produce clean report");
+        assert_eq!(report.latest_records, 0);
+        assert_eq!(report.version_records, 0);
+        assert_eq!(report.inspected_dedupe_shard_mappings, 0);
+        assert_eq!(report.inspected_reconstructions, 0);
+        assert_eq!(report.inspected_webhook_deliveries, 0);
+        assert_eq!(report.inspected_provider_repository_states, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_missing_reconstruction_detected() {
+        use shardline_index::{
+            FileId, FileReconstruction, ReconstructionTerm, StoredObjectId,
+        };
+        use shardline_protocol::ChunkRange;
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Insert a reconstruction that references a missing xorb
+        let hash = shardline_protocol::ShardlineHash::from_bytes([1; 32]);
+        let file_id = FileId::new(hash);
+        let xorb_hash = shardline_protocol::ShardlineHash::from_bytes([2; 32]);
+        let object_id = StoredObjectId::new(xorb_hash);
+        let chunk_range = ChunkRange::new(0, 1).unwrap();
+        let term = ReconstructionTerm::new(object_id, chunk_range, 100);
+        let reconstruction = FileReconstruction::new(vec![term]);
+        index_store.insert_reconstruction(&file_id, &reconstruction).unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert!(report
+            .issues
+            .iter()
+            .any(|i| i.kind == FsckIssueKind::MissingReconstructionXorb));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -390,9 +390,9 @@ pub(crate) async fn lfs_patch_object(
         std::fs::create_dir_all(&tmp_dir).ok();
         let tmp_path = tmp_dir.join(&oid_for_closure);
         {
-        #[allow(clippy::suspicious_open_options)]
         let mut file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&tmp_path)?;

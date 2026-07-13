@@ -191,7 +191,6 @@ fn write_object(out: &mut Vec<u8>, obj: &GitObject) -> Result<(), PackError> {
 ///
 /// This is a helper for generating test/demo commits.
 #[must_use]
-#[allow(clippy::expect_used)]
 pub fn create_commit_object(
     tree_sha1: &[u8; 20],
     parent_sha1: Option<&[u8; 20]>,
@@ -206,15 +205,12 @@ pub fn create_commit_object(
     let mut commit = format!("tree {}\n", hex::encode(tree_sha1));
     if let Some(parent) = parent_sha1 {
         use std::fmt::Write;
-        writeln!(&mut commit, "parent {}", hex::encode(parent))
-            .expect("write to String never fails");
+        writeln!(&mut commit, "parent {}", hex::encode(parent)).ok();
     }
     {
         use std::fmt::Write;
-        writeln!(&mut commit, "author {author} {timestamp} +0000")
-            .expect("write to String never fails");
-        writeln!(&mut commit, "committer {author} {timestamp} +0000")
-            .expect("write to String never fails");
+        writeln!(&mut commit, "author {author} {timestamp} +0000").ok();
+        writeln!(&mut commit, "committer {author} {timestamp} +0000").ok();
     }
     commit.push('\n');
     commit.push_str(message);

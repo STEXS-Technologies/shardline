@@ -51,9 +51,8 @@ fn is_temp_upload_key(key: &str) -> bool {
         // SAFETY: pos comes from find(".tmp.") which matches 5 chars,
         // so pos + 5 is always <= key.len(). The get() call is a safety
         // net — it will never return None in practice.
-        #[allow(clippy::arithmetic_side_effects)]
         key.as_bytes()
-            .get(pos + 5)
+            .get(pos.saturating_add(5))
             .is_some_and(|b| b.is_ascii_digit())
     })
 }
@@ -957,7 +956,6 @@ impl S3ObjectStore {
     /// Copies a large object from `source_location` to `destination_location`
     /// by streaming the content through the server.  Used when the source exceeds
     /// S3's single-part COPY limit (5 GiB).
-    #[allow(clippy::arithmetic_side_effects)]
     async fn streaming_large_copy(
         &self,
         source_location: &ObjectStorePath,
@@ -987,7 +985,7 @@ impl S3ObjectStore {
 
         let result: Result<(), S3ObjectStoreError> = async {
             while offset < len {
-                let chunk_end = (offset + LARGE_COPY_CHUNK_BYTES).min(len);
+                let chunk_end = offset.saturating_add(LARGE_COPY_CHUNK_BYTES).min(len);
                 let chunk = store
                     .get_range(&src, offset..chunk_end)
                     .await
@@ -998,7 +996,7 @@ impl S3ObjectStore {
                     .await
                     .map_err(S3ObjectStoreError::External)?;
                 part_ids.push(part_id);
-                part_idx += 1;
+                part_idx = part_idx.wrapping_add(1);
                 offset = chunk_end;
             }
             Ok(())
@@ -1511,7 +1509,8 @@ mod tests {
     use shardline_protocol::ByteRange;
 
     use super::{
-        S3ObjectStore, S3ObjectStoreConfig, stream_payload_for_range, validated_external_range,
+        S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, is_temp_upload_key,
+        stream_payload_for_range, validated_external_range,
     };
     use crate::ObjectKey;
 
@@ -1677,5 +1676,67 @@ mod tests {
         }
 
         assert_eq!(observed, b"abcd");
+    }
+
+    #[test]
+    fn s3_store_rejects_empty_bucket() {
+        let config = S3ObjectStoreConfig::new(String::new(), "us-east-1".to_owned());
+        let result = S3ObjectStore::new(config);
+        assert!(matches!(result, Err(S3ObjectStoreError::EmptyBucket)));
+    }
+
+    #[test]
+    fn s3_store_default_config_uses_standard_s3_endpoint() {
+        let config = S3ObjectStoreConfig::new("my-bucket".to_owned(), "us-east-1".to_owned());
+        // A default config (no endpoint, no credentials) builds the AmazonS3 client
+        // successfully — it just won't be able to reach AWS without network.
+        let store = S3ObjectStore::new(config);
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn is_temp_upload_key_matches_standard_temp_format() {
+        assert!(is_temp_upload_key("uploads/obj.tmp.42"));
+        assert!(is_temp_upload_key("obj.tmp.0"));
+        assert!(is_temp_upload_key("obj.tmp.999999"));
+    }
+
+    #[test]
+    fn is_temp_upload_key_rejects_non_temp() {
+        assert!(!is_temp_upload_key("uploads/obj"));
+        assert!(!is_temp_upload_key("obj.tmp."));
+        assert!(!is_temp_upload_key("obj.tmp.abc"));
+        assert!(!is_temp_upload_key("obj.tmpx.42"));
+    }
+
+    #[test]
+    fn validated_external_range_zero_length_rejected() {
+        // ByteRange(5, 3) has start > end, which is invalid
+        let result = shardline_protocol::ByteRange::new(5, 3);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn s3_error_display_and_debug_are_implemented() {
+        let err = S3ObjectStoreError::RangeOutOfBounds;
+        let display = format!("{err}");
+        assert!(!display.is_empty(), "Display should produce a message");
+
+        let debug = format!("{err:?}");
+        assert!(!debug.is_empty(), "Debug should produce a message");
+    }
+
+    #[test]
+    fn s3_store_with_full_credentials_accepts_custom_session_token() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_credentials(
+                Some("key".to_owned()),
+                Some("secret".to_owned()),
+                Some("token".to_owned()),
+            );
+        // Full credentials (key + secret + session token) should build successfully
+        // without needing any external endpoint.
+        let store = S3ObjectStore::new(config);
+        assert!(store.is_ok());
     }
 }

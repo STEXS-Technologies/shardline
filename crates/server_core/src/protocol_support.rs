@@ -15,6 +15,12 @@ pub trait ProtocolValidation {
     fn invalid_upload_session() -> Self;
 }
 
+/// Parses a `sha256:<hex>` digest string, validating the hex portion.
+///
+/// # Errors
+///
+/// Returns `E::invalid_digest()` when the value is not prefixed with `sha256:`
+/// or the hex portion fails content-hash validation.
 pub fn parse_sha256_digest<E: ProtocolValidation>(value: &str) -> Result<String, E> {
     let Some(hash_hex) = value.strip_prefix("sha256:") else {
         return Err(E::invalid_digest());
@@ -42,15 +48,32 @@ pub fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> String {
     )
 }
 
+/// Parses an object key from a string path.
+///
+/// # Errors
+///
+/// Returns `E::invalid_content_hash()` when the string is not a valid
+/// [`ObjectKey`] (empty, unsafe path, or too long).
 pub fn object_key<E: ProtocolValidation>(value: &str) -> Result<ObjectKey, E> {
     ObjectKey::parse(value).map_err(|_error| E::invalid_content_hash())
 }
 
+/// Builds a shared-namespace object key for a SHA-256 digest.
+///
+/// # Errors
+///
+/// Returns `E::invalid_content_hash()` when the digest hex is malformed.
 pub fn shared_sha256_object_key<E: ProtocolValidation>(digest_hex: &str) -> Result<ObjectKey, E> {
     validate_content_hash(digest_hex).map_err(|_error| E::invalid_content_hash())?;
     object_key(&format!("protocols/shared/sha256/{digest_hex}"))
 }
 
+/// Validates an OCI repository name according to the OCI distribution spec.
+///
+/// # Errors
+///
+/// Returns `E::invalid_repository_name()` when the name is empty, contains
+/// path separators or traversal sequences, or has non-compliant segments.
 pub fn validate_oci_repository_name<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     if value.is_empty() || value.starts_with('/') || value.ends_with('/') || value.contains('\\') {
         return Err(E::invalid_repository_name());
@@ -73,6 +96,14 @@ pub fn validate_oci_repository_name<E: ProtocolValidation>(value: &str) -> Resul
     Ok(())
 }
 
+/// Validates that an OCI repository name falls within a bound repository scope.
+///
+/// When no scope is configured the check is a no-op.
+///
+/// # Errors
+///
+/// Returns `E::not_found()` when the name does not match or extend the
+/// repository scope's `owner/name` prefix.
 pub fn validate_oci_repository_scope<E: ProtocolValidation>(
     value: &str,
     repository_scope: Option<&RepositoryScope>,
@@ -97,6 +128,12 @@ pub fn validate_oci_repository_scope<E: ProtocolValidation>(
     Err(E::not_found())
 }
 
+/// Validates an OCI tag reference according to the OCI distribution spec.
+///
+/// # Errors
+///
+/// Returns `E::invalid_manifest_reference()` when the tag is empty, exceeds
+/// 128 bytes, or contains invalid characters.
 pub fn validate_oci_tag<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     let mut bytes = value.bytes();
     let Some(first) = bytes.next() else {
@@ -114,6 +151,14 @@ pub fn validate_oci_tag<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     Ok(())
 }
 
+/// Validates an upload session identifier.
+///
+/// Must be non-empty, at most 64 bytes, and contain only ASCII hex digits
+/// or hyphens.
+///
+/// # Errors
+///
+/// Returns `E::invalid_upload_session()` when the identifier is malformed.
 pub fn validate_upload_session_id<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     if value.is_empty()
         || value.len() > MAX_UPLOAD_SESSION_ID_BYTES

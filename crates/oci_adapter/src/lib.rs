@@ -21,7 +21,7 @@
 use std::{
     ffi::OsStr,
     fs::{File, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -39,9 +39,8 @@ use shardline_storage::anchored_fs::{
     remove_if_present, write_anchored_temporary_file,
 };
 use shardline_storage::{ObjectIntegrity, ObjectKey, ObjectPrefix, PutOutcome};
-#[cfg(not(unix))]
-use std::io::Write;
 use tokio::fs;
+#[cfg(not(unix))]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::spawn_blocking;
@@ -491,7 +490,8 @@ pub async fn read_upload_session(
     ttl_seconds: NonZeroU64,
 ) -> Result<OciUploadSession, OciAdapterError> {
     validate_upload_session_id(session_id)?;
-    let bytes = fs::read(upload_metadata_path(root, session_id))
+    let metadata_path = upload_metadata_path(root, session_id);
+    let bytes = read_upload_file_async(root, &metadata_path)
         .await
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -506,10 +506,9 @@ pub async fn read_upload_session(
         delete_upload_session(root, session_id).await?;
         return Err(OciAdapterError::NotFound);
     }
+    let body_path = upload_body_path(root, session_id);
     let missing_local_body = !session.use_s3_multipart
-        && fs::metadata(upload_body_path(root, session_id))
-            .await
-            .is_err();
+        && upload_file_exists_async(root, &body_path).await.is_err();
     if missing_local_body {
         delete_upload_session(root, session_id).await?;
         return Err(OciAdapterError::NotFound);
@@ -527,17 +526,43 @@ pub async fn append_upload_bytes(
 ) -> Result<u64, OciAdapterError> {
     validate_upload_session_id(session_id)?;
     let path = upload_body_path(root, session_id);
+    append_upload_bytes_impl(root, path, bytes).await
+}
+
+fn map_not_found(error: std::io::Error) -> OciAdapterError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        OciAdapterError::NotFound
+    } else {
+        OciAdapterError::Io(error)
+    }
+}
+
+#[cfg(unix)]
+async fn append_upload_bytes_impl(
+    root: &Path,
+    path: PathBuf,
+    bytes: &[u8],
+) -> Result<u64, OciAdapterError> {
+    let root = root.to_path_buf();
+    let bytes = bytes.to_vec();
+    spawn_blocking(move || append_file_anchored(&root, &path, &bytes))
+        .await
+        .map_err(OciAdapterError::BlockingTask)?
+        .map_err(map_not_found)
+}
+
+#[cfg(not(unix))]
+async fn append_upload_bytes_impl(
+    root: &Path,
+    path: PathBuf,
+    bytes: &[u8],
+) -> Result<u64, OciAdapterError> {
+    let _ = root;
     let mut file = fs::OpenOptions::new()
         .append(true)
         .open(&path)
         .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                OciAdapterError::NotFound
-            } else {
-                OciAdapterError::Io(error)
-            }
-        })?;
+        .map_err(map_not_found)?;
     file.write_all(bytes).await?;
     let metadata = file.metadata().await?;
     Ok(metadata.len())
@@ -548,7 +573,8 @@ pub async fn append_upload_bytes(
 /// Returns an error when the upload length cannot be determined.
 pub async fn upload_length(root: &Path, session_id: &str) -> Result<u64, OciAdapterError> {
     validate_upload_session_id(session_id)?;
-    let metadata = fs::metadata(upload_body_path(root, session_id))
+    let path = upload_body_path(root, session_id);
+    upload_file_len_async(root, &path)
         .await
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -556,8 +582,7 @@ pub async fn upload_length(root: &Path, session_id: &str) -> Result<u64, OciAdap
             } else {
                 OciAdapterError::Io(error)
             }
-        })?;
-    Ok(metadata.len())
+        })
 }
 
 /// # Errors
@@ -580,6 +605,48 @@ pub async fn upload_body_integrity(
 ) -> Result<(String, ObjectIntegrity), OciAdapterError> {
     validate_upload_session_id(session_id)?;
     let path = upload_body_path(root, session_id);
+    upload_body_integrity_impl(root, path).await
+}
+
+#[cfg(unix)]
+async fn upload_body_integrity_impl(
+    root: &Path,
+    path: PathBuf,
+) -> Result<(String, ObjectIntegrity), OciAdapterError> {
+    let root = root.to_path_buf();
+    spawn_blocking(move || {
+        let mut file = open_anchored_file(&root, &path)?;
+        let mut sha256 = Sha256::new();
+        let mut blake3 = Blake3Hasher::new();
+        let mut buffer = [0_u8; 256 * 1024];
+        let mut total_length = 0_u64;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let slice = buffer.get(..read).ok_or(OciAdapterError::Overflow)?;
+            sha256.update(slice);
+            blake3.update(slice);
+            total_length = total_length
+                .checked_add(u64::try_from(read).map_err(|_error| OciAdapterError::Overflow)?)
+                .ok_or(OciAdapterError::Overflow)?;
+        }
+        let sha256_hex = hex::encode(sha256.finalize());
+        let blake3_hash =
+            shardline_protocol::ShardlineHash::from_bytes(*blake3.finalize().as_bytes());
+        Ok::<_, OciAdapterError>((sha256_hex, ObjectIntegrity::new(blake3_hash, total_length)))
+    })
+    .await
+    .map_err(OciAdapterError::BlockingTask)?
+}
+
+#[cfg(not(unix))]
+async fn upload_body_integrity_impl(
+    root: &Path,
+    path: PathBuf,
+) -> Result<(String, ObjectIntegrity), OciAdapterError> {
+    let _ = root;
     spawn_blocking(move || {
         let mut file = File::open(&path)?;
         let mut sha256 = Sha256::new();
@@ -610,6 +677,12 @@ pub async fn upload_body_integrity(
 /// # Errors
 ///
 /// Returns an error when the upload session cannot be deleted.
+/// Deletes the three session files (body, tail, metadata) under the upload root.
+///
+/// On Unix, each file is deleted using anchored (symlink-resistant) path resolution
+/// via `delete_file_anchored` which uses `O_NOFOLLOW` directory traversal and
+/// verifies the parent directory hasn't been replaced post-deletion.
+/// On non-Unix, falls back to `tokio::fs::remove_file`.
 pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), OciAdapterError> {
     validate_upload_session_id(session_id)?;
     let paths = [
@@ -619,7 +692,8 @@ pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), 
     ];
     let mut first_error = None;
     for path in &paths {
-        match fs::remove_file(path).await {
+        let result = delete_upload_file(root, path).await;
+        match result {
             Ok(()) => {}
             Err(ref error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -630,6 +704,23 @@ pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), 
         }
     }
     first_error.map_or_else(|| Ok(()), Err)
+}
+
+/// Deletes one file under the OCI upload root using anchored I/O on Unix.
+#[cfg(unix)]
+async fn delete_upload_file(root: &Path, path: &Path) -> std::io::Result<()> {
+    let root = root.to_path_buf();
+    let path = path.to_path_buf();
+    spawn_blocking(move || delete_file_anchored(&root, &path))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// Non-Unix fallback for file deletion (no symlink protection).
+#[cfg(not(unix))]
+async fn delete_upload_file(root: &Path, path: &Path) -> std::io::Result<()> {
+    let _ = root;
+    fs::remove_file(path).await
 }
 
 /// # Errors
@@ -1070,6 +1161,148 @@ async fn write_upload_tail(
         }
     }
     fs::write(path, bytes).await.map_err(OciAdapterError::Io)
+}
+
+/// Opens a file under `root` using fd-relative paths that cannot follow symlinks.
+///
+/// Returns the opened file. The caller must not use the returned path outside of
+/// `/proc/self/fd/` — see [`AnchoredTarget::final_path`].
+#[cfg(unix)]
+fn open_anchored_file(root: &Path, path: &Path) -> std::io::Result<File> {
+    let anchored = open_anchored_target(
+        root,
+        path,
+        AnchoredPathOptions::new(None, None),
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
+    )?;
+    let file = OpenOptions::new()
+        .read(true)
+        .open(anchored.final_path())?;
+    Ok(file)
+}
+
+/// Reads a file under `root` using anchored (symlink-resistant) path resolution.
+#[cfg(unix)]
+fn read_file_anchored(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
+    let anchored = open_anchored_target(
+        root,
+        path,
+        AnchoredPathOptions::new(None, None),
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
+    )?;
+    std::fs::read(anchored.final_path())
+}
+
+/// Deletes a file under `root` using anchored (symlink-resistant) path resolution.
+///
+/// After deletion, verifies that the parent directory has not been replaced
+/// (catches TOCTOU rename+swap attacks).
+#[cfg(unix)]
+fn delete_file_anchored(root: &Path, path: &Path) -> std::io::Result<()> {
+    let anchored = open_anchored_target(
+        root,
+        path,
+        AnchoredPathOptions::new(None, None),
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
+    )?;
+    let final_path = anchored.final_path();
+    match std::fs::remove_file(&final_path) {
+        Ok(()) => {
+            ensure_parent_path_matches_anchor(
+                &anchored,
+                "upload directory path changed during anchored delete",
+            )?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Appends bytes to a file under `root` using anchored (symlink-resistant) path resolution.
+///
+/// Returns the new file length after the append.
+#[cfg(unix)]
+fn append_file_anchored(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<u64> {
+    let anchored = open_anchored_target(
+        root,
+        path,
+        AnchoredPathOptions::new(None, None),
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
+    )?;
+    let mut file = OpenOptions::new().append(true).open(anchored.final_path())?;
+    file.write_all(bytes)?;
+    let metadata = file.metadata()?;
+    Ok(metadata.len())
+}
+
+/// Opens a file under `root` for append using anchored (symlink-resistant) path resolution.
+///
+/// Reads a file under the OCI upload root using anchored (symlink-resistant) I/O.
+#[cfg(unix)]
+async fn read_upload_file_async(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
+    let root = root.to_path_buf();
+    let path = path.to_path_buf();
+    spawn_blocking(move || read_file_anchored(&root, &path)).await
+        .map_err(std::io::Error::other)?
+}
+
+/// Returns the file length for a file under the OCI upload root using anchored I/O.
+#[cfg(unix)]
+async fn upload_file_len_async(root: &Path, path: &Path) -> std::io::Result<u64> {
+    let root = root.to_path_buf();
+    let path = path.to_path_buf();
+    spawn_blocking(move || {
+        let anchored = open_anchored_target(
+            &root,
+            &path,
+            AnchoredPathOptions::new(None, None),
+            || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
+        )?;
+        let file = File::open(anchored.final_path())?;
+        let metadata = file.metadata()?;
+        Ok(metadata.len())
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+ 
+/// Checks if a file under the OCI upload root exists using anchored I/O.
+#[cfg(unix)]
+async fn upload_file_exists_async(root: &Path, path: &Path) -> std::io::Result<()> {
+    let root = root.to_path_buf();
+    let path = path.to_path_buf();
+    spawn_blocking(move || {
+        let anchored = open_anchored_target(
+            &root,
+            &path,
+            AnchoredPathOptions::new(None, None),
+            || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
+        )?;
+        match File::open(anchored.final_path()) {
+            Ok(_file) => Ok(()),
+            Err(error) => Err(error),
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)?
+ }
+ 
+#[cfg(not(unix))]
+async fn read_upload_file_async(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
+    let _ = root;
+    fs::read(path).await
+}
+
+#[cfg(not(unix))]
+async fn upload_file_len_async(root: &Path, path: &Path) -> std::io::Result<u64> {
+    let _ = root;
+    fs::metadata(path).await.map(|m| m.len())
+}
+
+#[cfg(not(unix))]
+async fn upload_file_exists_async(root: &Path, path: &Path) -> std::io::Result<()> {
+    let _ = root;
+    fs::metadata(path).await.map(|_| ())
 }
 
 fn unix_now_seconds_checked() -> Result<u64, OciAdapterError> {

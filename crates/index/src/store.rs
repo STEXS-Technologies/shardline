@@ -12,7 +12,11 @@ use crate::{
 
 macro_rules! visit_items {
     ($visit:ident, $list:ident, $item:ty) => {
-        #[allow(clippy::missing_errors_doc)]
+        /// Visits every item of this type in the store.
+        ///
+        /// # Errors
+        ///
+        /// Returns any error produced by the visitor or the underlying adapter.
         fn $visit<Visitor, VisitorError>(&self, mut visitor: Visitor) -> Result<(), VisitorError>
         where
             Self::Error: Into<VisitorError>,
@@ -28,7 +32,11 @@ macro_rules! visit_items {
 
 macro_rules! visit_items_async {
     ($visit:ident, $list:ident, $item:ty) => {
-        #[allow(clippy::missing_errors_doc)]
+        /// Visits every item of this type in the store asynchronously.
+        ///
+        /// # Errors
+        ///
+        /// Returns any error produced by the visitor or the underlying adapter.
         fn $visit<'operation, Visitor, VisitorError>(
             &'operation self,
             mut visitor: Visitor,

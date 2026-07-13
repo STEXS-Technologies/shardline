@@ -1,27 +1,23 @@
 use prometheus::{IntGauge, Registry};
 
+use crate::must_gauge;
+
 pub struct SystemMetrics {
     pub active_connections: IntGauge,
     pub server_uptime: IntGauge,
 }
 
 impl SystemMetrics {
-    /// # Panics
-    ///
-    /// Panics if prometheus metric registration fails (should not happen with static names).
     #[must_use]
-    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let active_connections = IntGauge::new(
+        let active_connections = must_gauge(
             "shardline_active_connections",
             "Current active HTTP connections",
-        )
-        .expect("prometheus metric names are static constants");
-        let server_uptime = IntGauge::new(
+        );
+        let server_uptime = must_gauge(
             "shardline_server_uptime_seconds",
             "Server uptime in seconds",
-        )
-        .expect("prometheus metric names are static constants");
+        );
 
         registry.register(Box::new(active_connections.clone())).ok();
         registry.register(Box::new(server_uptime.clone())).ok();
