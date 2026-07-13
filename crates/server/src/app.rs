@@ -522,7 +522,6 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
     }
 }
 
-#[allow(clippy::unwrap_used)]
 pub(super) async fn security_headers_middleware(
     request: axum::extract::Request,
     next: Next,
@@ -531,21 +530,27 @@ pub(super) async fn security_headers_middleware(
     let (mut parts, body) = response.into_parts();
     let headers = &mut parts.headers;
     if !headers.contains_key(header::X_CONTENT_TYPE_OPTIONS) {
-        headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            header::HeaderValue::from_static("nosniff"),
+        );
     }
     if !headers.contains_key(header::X_FRAME_OPTIONS) {
-        headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());
+        headers.insert(
+            header::X_FRAME_OPTIONS,
+            header::HeaderValue::from_static("DENY"),
+        );
     }
     if !headers.contains_key(header::STRICT_TRANSPORT_SECURITY) {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
-            "max-age=31536000".parse().unwrap(),
+            header::HeaderValue::from_static("max-age=31536000"),
         );
     }
     if !headers.contains_key(header::REFERRER_POLICY) {
         headers.insert(
             header::REFERRER_POLICY,
-            "strict-origin-when-cross-origin".parse().unwrap(),
+            header::HeaderValue::from_static("strict-origin-when-cross-origin"),
         );
     }
     axum::response::Response::from_parts(parts, body)
