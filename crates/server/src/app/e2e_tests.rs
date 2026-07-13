@@ -5540,3 +5540,448 @@ async fn oci_transfer_role_serves_blob_upload_but_not_manifest() {
         "Transfer role should reject manifest operations"
     );
 }
+
+// ============================================================================
+// Additional Protocol Edge-Case Tests
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// OCI: Blob delete for non-existent blob
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_delete_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let nonexistent_digest = "a".repeat(64);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/v2/{OCI_TEST_REPO}/blobs/sha256:{nonexistent_digest}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "deleting non-existent blob should return 404"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OCI: Manifest delete for non-existent manifest
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_manifest_delete_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v2/{OCI_TEST_REPO}/manifests/nonexistent-tag"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "deleting non-existent manifest should return 404"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OCI: Upload session expiration and auto-cleanup
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oci_blob_upload_session_expires_cleaned_up() {
+    let (app, tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    // Step 1: Create an upload session
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/uploads/"))
+                .header(header::CONTENT_LENGTH, "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::ACCEPTED, "session creation");
+    let location = create
+        .headers()
+        .get(header::LOCATION)
+        .expect("LOCATION header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let session_id = location.rsplit('/').next().expect("session id");
+
+    // Step 2: Manipulate the session metadata file to simulate expiry.
+    // The metadata is stored at: <tmp>/oci-uploads/<session_id>.json
+    let metadata_path = tmp.path().join("oci-uploads").join(format!("{session_id}.json"));
+    assert!(metadata_path.exists(), "session metadata should exist");
+    let mut session: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+    // Set timestamps to 0 (epoch = 1970, definitely expired).
+    session["created_at_unix_seconds"] = serde_json::json!(0u64);
+    session["last_touched_unix_seconds"] = serde_json::json!(0u64);
+    std::fs::write(&metadata_path, serde_json::to_vec(&session).unwrap()).unwrap();
+
+    // Step 3: PATCH the session — the handler should detect expiry, clean up,
+    // and return 404.
+    let patch = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(&location)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header("Content-Range", "0-4")
+                .body(Body::from(b"hello".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        patch.status(),
+        StatusCode::NOT_FOUND,
+        "expired session should be auto-cleaned: {}",
+        String::from_utf8_lossy(&body_bytes(patch).await)
+    );
+
+    // Step 4: Confirm the metadata file has been deleted
+    assert!(
+        !metadata_path.exists(),
+        "session metadata should be deleted after expiry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LFS: Batch request with invalid OID format
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_invalid_oid_format() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    // Batch request with a short OID (non-64-char hex)
+    let request = serde_json::json!({
+        "operation": "download",
+        "objects": [{"oid": "short-oid", "size": 100}]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Invalid OID format should return 422 (UNPROCESSABLE_ENTITY)
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "batch with invalid OID should return 422"
+    );
+    let json = body_json(response).await;
+    assert_eq!(json["message"], "invalid oid");
+}
+
+// ---------------------------------------------------------------------------
+// Bazel: Empty content CAS operations
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_empty_content_cas_operations() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let content = b"";
+    let hash = test_hash(content); // SHA-256 of empty string
+    // Expected hash for empty content: e3b0c44298fc1c149afbf4c8996fb924...
+    // (but test_hash computes it dynamically)
+
+    // PUT empty content to CAS
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        put.status(),
+        StatusCode::NO_CONTENT,
+        "PUT empty content to CAS"
+    );
+
+    // HEAD empty content
+    let head_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head_resp.status(), StatusCode::OK);
+    let cl: u64 = head_resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .expect("content-length")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(cl, 0, "empty content should have zero content-length");
+
+    // GET empty content
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = body_bytes(get).await;
+    assert!(body.is_empty(), "empty content should return empty body");
+}
+
+// ---------------------------------------------------------------------------
+// Auth: Request with malformed Authorization header
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_with_malformed_authorization_header() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+
+    // Missing "Bearer" prefix
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, "NotBearer token123")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(r#"{"operation":"download","objects":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "malformed auth header (no Bearer prefix) should return 401"
+    );
+
+    // Empty token after "Bearer "
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, "Bearer ")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(r#"{"operation":"download","objects":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "empty Bearer token should return 401"
+    );
+
+    // Too-long Bearer token (above MAX_BEARER_TOKEN_BYTES)
+    let long_token = "x".repeat(8193);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {long_token}"))
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(r#"{"operation":"download","objects":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "overly long Bearer token should return 401"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Auth: Request with expired token
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_with_expired_token() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+
+    // Mint a token that expires at unix epoch (already long past)
+    let provider = LocalEd25519Provider::new(TEST_SIGNING_KEY).unwrap();
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Read, repo, 0).unwrap();
+    let token = provider.mint_token(&claims).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(r#"{"operation":"download","objects":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Expired token should return 401
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "expired token should return 401"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Auth: Insufficient scope (Read token on Write endpoint)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_with_insufficient_scope_read_on_write() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::BazelHttp]).await;
+
+    // A Read-scope token should be rejected on a write endpoint (PUT)
+    let token = test_token(TokenScope::Read);
+    let hash = "a".repeat(64);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(b"data".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "Read-scope token on Write endpoint should return 403"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Generic: Request to non-existent route → 404
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_existent_route_returns_404() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/this/route/does/not/exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Generic: Health endpoint returns 200 even without any protocol frontend
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_endpoint_always_mounted() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["status"], "ok");
+}
+
+// ---------------------------------------------------------------------------
+// Generic: Metrics endpoint returns 200 (also tested above; repeat with OCI
+// to verify it's always mounted)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_endpoint_returns_200_with_oci() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Oci]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(response).await).unwrap();
+    assert!(
+        body.contains("shardline_up 1"),
+        "metrics should contain shardline_up gauge"
+    );
+}

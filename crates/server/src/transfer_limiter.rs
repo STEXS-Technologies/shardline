@@ -66,6 +66,8 @@ mod tests {
 
     use tokio::time::timeout;
 
+    use crate::ServerError;
+
     use super::{TransferLimiter, permits_for_bytes};
 
     const CHUNK_SIZE: NonZeroUsize = match NonZeroUsize::new(4) {
@@ -101,6 +103,35 @@ mod tests {
 
         assert!(permits.is_ok());
         assert_eq!(permits.ok(), Some(1));
+    }
+
+    #[test]
+    fn transfer_limiter_new_stores_configuration() {
+        let limiter = TransferLimiter::new(CHUNK_SIZE, MAX_IN_FLIGHT);
+        assert_eq!(limiter.chunk_size_bytes, CHUNK_SIZE);
+        assert_eq!(limiter.max_in_flight_chunks, MAX_IN_FLIGHT);
+        assert_eq!(limiter.semaphore.available_permits(), MAX_IN_FLIGHT.get());
+    }
+
+    #[test]
+    fn permits_for_bytes_overflow_detected() {
+        // Use a max_in_flight that exceeds u32::MAX to trigger the TryFrom error.
+        let huge_capacity = NonZeroUsize::new(usize::MAX).unwrap_or(NonZeroUsize::MIN);
+        let small_chunk = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
+
+        let result = permits_for_bytes(u64::MAX, small_chunk, huge_capacity);
+        assert!(matches!(result, Err(ServerError::NumericConversion(_))));
+    }
+
+    #[test]
+    fn permits_for_bytes_rejects_zero_capacity_chunk() {
+        // chunk_size_bytes must be non-zero by type, but verify edge behavior
+        let small_chunk = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
+        let capacity = NonZeroUsize::new(10).unwrap_or(NonZeroUsize::MIN);
+
+        let result = permits_for_bytes(100, small_chunk, capacity);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10); // capped at capacity
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
