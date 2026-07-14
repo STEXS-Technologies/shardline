@@ -935,7 +935,7 @@ pub use shardline_server_core::ShardMetadataLimits;
 /// Authentication provider selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthProviderKind {
-    /// Local Ed25519 key-based signing (default).
+    /// Local shared-key HMAC-SHA256 signing (default).
     Local,
     /// OpenID Connect issuer validation.
     Oidc,
