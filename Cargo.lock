@@ -3151,6 +3151,7 @@ dependencies = [
 name = "shardline-fsck"
 version = "1.0.0"
 dependencies = [
+ "rusqlite",
  "serde_json",
  "shardline-index",
  "shardline-metrics",
@@ -3159,6 +3160,7 @@ dependencies = [
  "shardline-storage",
  "shardline-test-support",
  "shardline-xet-adapter",
+ "shardline-xet-core",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3443,6 +3445,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "chrono",
  "futures-util",
  "hex",
  "libc",

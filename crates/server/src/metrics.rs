@@ -392,6 +392,28 @@ mod tests {
         let _svc = MetricsService { inner };
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metrics_service_poll_ready_and_call_tracks_connections() {
+        use tower::ServiceExt;
+        let svc = MetricsService {
+            inner: tower::util::service_fn(|_req: axum::http::Request<Body>| async {
+                Ok::<_, std::convert::Infallible>(axum::http::Response::new(Body::empty()))
+            }),
+        };
+        let before = metrics().system.active_connections.get();
+        // Use oneshot to drive poll_ready + call
+        let _response = svc
+            .oneshot(
+                axum::http::Request::builder()
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        let after = metrics().system.active_connections.get();
+        // Connections opened and then closed, so active should be same
+        assert_eq!(after, before);
+    }
+
     // ── No-panic for the remaining counters ───────────────────────────────
 
     #[test]
@@ -409,6 +431,78 @@ mod tests {
     #[test]
     fn record_token_exchange_no_panic() {
         record_token_exchange();
+    }
+
+    #[test]
+    fn record_hub_api_request_unknown_status_defaults_to_zero() {
+        record_hub_api_request("test", "GET", "unknown");
+        // Should not panic; metrics should still record
+    }
+
+    #[test]
+    fn record_object_inserted_increments_bytes_counter() {
+        let before_bytes = metrics().storage.objects_bytes_total.get();
+        record_object_inserted(42);
+        let after_bytes = metrics().storage.objects_bytes_total.get();
+        assert!(
+            after_bytes >= before_bytes + 42,
+            "objects_bytes_total should increase by at least 42 (before: {before_bytes}, after: {after_bytes})"
+        );
+    }
+
+    #[test]
+    fn record_chunk_inserted_increments_bytes_counter() {
+        let before_bytes = metrics().storage.chunks_bytes_total.get();
+        record_chunk_inserted(128);
+        let after_bytes = metrics().storage.chunks_bytes_total.get();
+        assert!(
+            after_bytes >= before_bytes + 128,
+            "chunks_bytes_total should increase by at least 128 (before: {before_bytes}, after: {after_bytes})"
+        );
+    }
+
+    #[test]
+    fn record_xorb_stored_increments_bytes_counter() {
+        let before_bytes = metrics().storage.xorbs_bytes_total.get();
+        record_xorb_stored(256);
+        let after_bytes = metrics().storage.xorbs_bytes_total.get();
+        assert!(
+            after_bytes >= before_bytes + 256,
+            "xorbs_bytes_total should increase by at least 256 (before: {before_bytes}, after: {after_bytes})"
+        );
+    }
+
+    #[test]
+    fn record_dedup_saves_increments_bytes_counter() {
+        let before_bytes = metrics().storage.dedup_saves_bytes_total.get();
+        record_dedup_saves(512);
+        let after_bytes = metrics().storage.dedup_saves_bytes_total.get();
+        assert!(
+            after_bytes >= before_bytes + 512,
+            "dedup_saves_bytes_total should increase by at least 512 (before: {before_bytes}, after: {after_bytes})"
+        );
+    }
+
+    #[test]
+    fn record_local_io_increments_local_io_counter() {
+        let before = metrics().backend.local_io_operations.get();
+        record_local_io("read", true, 0.01);
+        let after = metrics().backend.local_io_operations.get();
+        assert!(
+            after > before,
+            "local_io_operations should increase (before: {before}, after: {after})"
+        );
+    }
+
+    #[test]
+    fn record_webhook_event_increments_webhook_counter() {
+        let before = metrics().provider.webhook_events.get();
+        record_webhook_event("github", "push", 0.25);
+        let after = metrics().provider.webhook_events.get();
+        assert!(
+            after > before,
+            "webhook_events should increase (before: {before}, after: {after})"
+        );
     }
 }
 

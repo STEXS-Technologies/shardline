@@ -30,6 +30,8 @@ pub async fn run_fsck(root: Option<&Path>) -> Result<LocalFsckReport, FsckRuntim
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// FsckRuntimeError display and debug.
@@ -73,5 +75,29 @@ mod tests {
         assert!(!msg.is_empty());
         let debug = format!("{err:?}");
         assert!(debug.contains("Server("));
+    }
+
+    #[tokio::test]
+    async fn run_fsck_rejects_missing_root() {
+        let result = run_fsck(Some(Path::new("/nonexistent-shardline-test-root"))).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_fsck_rejects_symlinked_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("real-root");
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(unix)]
+        let link = {
+            let link = sandbox.path().join("root-link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            link
+        };
+        #[cfg(not(unix))]
+        let link = target.clone();
+        let result = run_fsck(Some(&link)).await;
+        #[cfg(unix)]
+        assert!(result.is_err());
     }
 }

@@ -41,9 +41,11 @@ pub async fn run_backup_manifest(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use shardline_server::BackupManifestReport;
 
-    use super::BackupRuntimeError;
+    use super::{run_backup_manifest, BackupRuntimeError};
 
     #[test]
     fn backup_manifest_report_new_defaults() {
@@ -152,5 +154,13 @@ mod tests {
         let err = BackupRuntimeError::Server(server_err);
         let msg = err.to_string();
         assert!(!msg.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_backup_manifest_rejects_missing_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("manifest.json");
+        let result = run_backup_manifest(Some(Path::new("/nonexistent-shardline-test-root")), &output).await;
+        assert!(result.is_err());
     }
 }

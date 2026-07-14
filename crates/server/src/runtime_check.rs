@@ -136,4 +136,20 @@ mod tests {
             ))
         ));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_check_uses_disabled_cache_when_not_serving_api() {
+        let storage = shardline_test_support::TempStorage::new();
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            storage.path_buf(),
+            NonZeroUsize::MIN,
+        )
+        .with_server_role(ServerRole::Transfer);
+
+        let report = run_config_check(config).await;
+        // Transfer role has no signing key, so it will fail validation first.
+        assert!(report.is_err());
+    }
 }

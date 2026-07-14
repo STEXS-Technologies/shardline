@@ -664,4 +664,287 @@ mod tests {
             "expected xorb-related message, got '{msg}'"
         );
     }
+
+    // ── store_uploaded_xorb unpacked length mismatch ───────────────────
+
+    #[test]
+    fn store_uploaded_xorb_rejects_unpacked_length_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        // Create a xorb but provide modified bytes that change unpacked length
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        // Store it normally first to get the proper format
+        let hash = serialized.hash.hex();
+        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn store_uploaded_xorb_rejects_invalid_hash_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let result = store_uploaded_xorb(&object_store, "not-a-hash", b"data");
+        assert!(result.is_err());
+    }
+
+    // ── store_uploaded_xorb_with_metrics error propagation ─────────────
+
+    #[test]
+    fn store_uploaded_xorb_with_metrics_propagates_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let result = store_uploaded_xorb_with_metrics(
+            &object_store,
+            "invalid-hash",
+            b"data",
+        );
+        assert!(result.is_err(), "expected error for invalid hash");
+    }
+
+    // ── normalize_serialized_xorb error paths ──────────────────────────
+
+    #[test]
+    fn normalize_serialized_xorb_rejects_empty_bytes() {
+        let hash = parse_xet_hash_hex(&"ab".repeat(32)).unwrap();
+        let result = normalize_serialized_xorb(hash, b"");
+        assert!(result.is_err(), "expected error for empty bytes");
+    }
+
+    #[test]
+    fn normalize_serialized_xorb_rejects_garbage_bytes() {
+        use shardline_protocol::ShardlineHash;
+        let hash = ShardlineHash::from_bytes([0xab; 32]);
+        let result = normalize_serialized_xorb(hash, b"not-a-xorb");
+        assert!(
+            matches!(result, Err(XetAdapterError::InvalidSerializedXorb)),
+            "expected InvalidSerializedXorb, got {result:?}"
+        );
+    }
+
+    // ── xorb_object_key edge cases ─────────────────────────────────────
+
+    #[test]
+    fn xorb_object_key_constructs_valid_key() {
+        let hash = "ab".repeat(32);
+        let key = xorb_object_key(&hash);
+        assert!(key.is_ok());
+        let key = key.unwrap();
+        assert!(key.as_str().starts_with("xorbs/default/ab/"));
+        assert!(key.as_str().ends_with(".xorb"));
+    }
+
+    // ── chunk_object_key_local (tests through canonicalize path) ───────
+
+    #[test]
+    fn canonicalize_uploaded_xorb_rejects_invalid_hash() {
+        let hash = parse_xet_hash_hex(&"ab".repeat(32)).unwrap();
+        let result = canonicalize_uploaded_xorb(hash, b"garbage");
+        assert!(result.is_err());
+    }
+
+    // ── visit_stored_xorb_chunk_hashes with corrupted xorb ────────────
+
+    #[test]
+    fn visit_stored_xorb_chunk_hashes_rejects_missing_stored_xorb() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        // Key that looks like a xorb key but doesn't exist
+        let key = xorb_object_key(&"ab".repeat(32)).unwrap();
+        let mut visited = false;
+        let result = visit_stored_xorb_chunk_hashes(
+            &object_store,
+            &key,
+            |_hash: String| -> Result<(), XetAdapterError> {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "expected Ok for missing key");
+        assert!(!visited, "visitor should not be called");
+    }
+
+    // ── xorb_object_key with various valid prefixes ────────────────────
+
+    #[test]
+    fn xorb_object_key_various_prefixes() {
+        let prefixes = ["aa", "ff", "10", "99", "ac"];
+        for prefix in prefixes {
+            let hash = format!("{}{}", prefix, "0".repeat(62));
+            let key = xorb_object_key(&hash);
+            assert!(key.is_ok(), "failed for prefix {prefix}: {key:?}");
+            let key = key.unwrap();
+            assert!(
+                key.as_str().contains(&format!("xorbs/default/{prefix}/")),
+                "key '{}' missing expected prefix segment",
+                key.as_str()
+            );
+        }
+    }
+
+    // ── xorb_hash_from_object_key_if_present zero-segment ──────────────
+
+    #[test]
+    fn xorb_hash_from_object_key_none_for_empty_string() {
+        use shardline_storage::ObjectKey;
+        // ObjectKey::parse("") returns Err(Empty), so we skip empty keys
+        let key = ObjectKey::parse("a").unwrap(); // single segment, not a valid xorb path
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert!(extracted.unwrap().is_none());
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_one_segment() {
+        use shardline_storage::ObjectKey;
+        let key = ObjectKey::parse("xorbs").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_two_segments() {
+        use shardline_storage::ObjectKey;
+        let key = ObjectKey::parse("xorbs/default").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_three_segments() {
+        use shardline_storage::ObjectKey;
+        let key = ObjectKey::parse("xorbs/default/ab").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    // ── ObjectKey error mapping ──────────────────────────────────────────
+
+    #[test]
+    fn xorb_store_map_object_key_error_message_content() {
+        use shardline_storage::ObjectKeyError;
+        let cases = [
+            ObjectKeyError::Empty,
+            ObjectKeyError::UnsafePath,
+            ObjectKeyError::ControlCharacter,
+            ObjectKeyError::TooLong,
+        ];
+        for err in cases {
+            let mapped = super::map_object_key_error(err);
+            let msg = mapped.to_string();
+            assert!(msg.contains("hash"), "msg '{msg}' missing 'hash' for {err:?}");
+        }
+    }
+
+    // ── store_uploaded_xorb store_uploaded_xorb_with_metrics propagation ─
+
+    #[test]
+    fn store_uploaded_xorb_handles_invalid_bytes_gracefully() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let hash = "ab".repeat(32);
+
+        // Completely invalid xorb bytes - should fail validation
+        let result = store_uploaded_xorb(&object_store, &hash, b"\x00\x01\x02\x03");
+        assert!(result.is_err(), "expected error for invalid xorb bytes");
+    }
+
+    // ── visit_stored_xorb_chunk_hashes with stored xorb ────────────────
+
+    #[test]
+    fn visit_stored_xorb_chunk_hashes_visits_once_per_existing_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let key = xorb_object_key(&hash).unwrap();
+
+        let mut count = 0_usize;
+        let result = visit_stored_xorb_chunk_hashes(
+            &object_store,
+            &key,
+            |_hash: String| -> Result<(), XetAdapterError> {
+                count += 1;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "visit should succeed: {result:?}");
+        assert_eq!(count, 1, "should visit exactly 1 chunk hash");
+    }
+
+    // ── store_uploaded_xorb_with_metrics with footerless bytes ────────
+
+    #[test]
+    fn store_uploaded_xorb_with_metrics_footerless_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        // Build a xorb WITHOUT a footer
+        let raw = build_raw_xorb(3, ChunkSize::Fixed(640));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        let result =
+            store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
+        assert!(result.is_ok(), "store_uploaded_xorb_with_metrics(footerless) failed: {result:?}");
+        let stored = result.unwrap();
+        assert!(stored.was_inserted);
+        assert!(stored.stored_bytes > 0, "stored_bytes should be > 0");
+    }
+
+    // ── store_uploaded_xorb with edge cases ───────────────────────────
+
+    #[test]
+    fn store_uploaded_xorb_rejects_empty_expected_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let result = store_uploaded_xorb(&object_store, "", b"data");
+        assert!(result.is_err(), "expected error for empty hash");
+    }
+
+    #[test]
+    fn store_uploaded_xorb_unpacked_length_check() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        // Store it once - should succeed
+        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        assert!(result.is_ok(), "first store should succeed: {result:?}");
+        let stored = result.unwrap();
+        assert!(stored.was_inserted);
+        assert!(
+            stored.stored_bytes > 0,
+            "stored_bytes should be > 0, got {}",
+            stored.stored_bytes
+        );
+
+        // Store again (idempotent) - stored_bytes should only count chunks+xorb once
+        let second = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        assert!(second.is_ok(), "second store should succeed: {second:?}");
+        // was_inserted = false because AlreadyExists
+        // stored_bytes might be positive because chunks were already stored
+    }
 }

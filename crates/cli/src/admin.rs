@@ -310,28 +310,22 @@ mod tests {
 
     use super::{mint_admin_token, mint_admin_token_from_sources};
 
+    fn make_test_repository() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap()
+    }
+
     #[test]
     fn mint_admin_token_rejects_oversized_signing_key_file() {
-        let temp = tempfile::NamedTempFile::new();
-        assert!(temp.is_ok());
-        let Ok(mut temp) = temp else {
-            return;
-        };
+        let mut temp = tempfile::NamedTempFile::new().unwrap();
         let write_result = temp.as_file_mut().write_all(&vec![0_u8; 1_048_577]);
         assert!(write_result.is_ok());
-        let repository =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
 
         let minted = mint_admin_token(
             temp.path(),
             "issuer",
             "subject",
             TokenScope::Read,
-            repository,
+            make_test_repository(),
             60,
         );
 
@@ -346,61 +340,35 @@ mod tests {
 
     #[test]
     fn mint_admin_token_reads_key_file_and_signs_token() {
-        let temp = tempfile::NamedTempFile::new();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
+        let temp = tempfile::NamedTempFile::new().unwrap();
         let wrote = write(temp.path(), b"a]32-byte-signing-key-for-testing!");
         assert!(wrote.is_ok());
-        let repository =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
 
         let token = mint_admin_token(
             temp.path(),
             "local",
             "operator-1",
             TokenScope::Write,
-            repository,
+            make_test_repository(),
             60,
         );
 
         assert!(token.is_ok());
-        let Ok(token) = token else {
-            return;
-        };
+        let token = token.unwrap();
         assert!(token.contains('.'));
     }
 
     #[test]
     fn mint_admin_token_rejects_signing_key_growth_after_validation_without_retaining_appended_bytes()
      {
-        let temp = tempfile::NamedTempFile::new();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
+        let temp = tempfile::NamedTempFile::new().unwrap();
         let initial = b"a]32-byte-signing-key-for-testing!";
         let wrote = write(temp.path(), initial);
         assert!(wrote.is_ok());
-        let repository =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
 
         let path = temp.path().to_path_buf();
         super::set_before_signing_key_read_hook_for_tests(path.clone(), move || {
-            let opened = OpenOptions::new().append(true).open(&path);
-            assert!(opened.is_ok());
-            let Ok(mut file) = opened else {
-                return;
-            };
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
             let appended = file.write_all(b"-rotated");
             assert!(appended.is_ok());
         });
@@ -410,7 +378,7 @@ mod tests {
             "issuer",
             "subject",
             TokenScope::Read,
-            repository,
+            make_test_repository(),
             60,
         );
 
@@ -429,11 +397,7 @@ mod tests {
     fn mint_admin_token_accepts_projected_secret_symlinked_signing_key_file() {
         use std::os::unix::fs::symlink;
 
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let data_dir = sandbox.path().join("..data");
         let created = std::fs::create_dir(&data_dir);
         assert!(created.is_ok());
@@ -443,14 +407,8 @@ mod tests {
         assert!(wrote.is_ok());
         let linked = symlink(std::path::Path::new("..data").join("real.key"), &link);
         assert!(linked.is_ok());
-        let repository =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
 
-        let minted = mint_admin_token(&link, "issuer", "subject", TokenScope::Read, repository, 60);
+        let minted = mint_admin_token(&link, "issuer", "subject", TokenScope::Read, make_test_repository(), 60);
 
         assert!(minted.is_ok());
     }
@@ -460,29 +418,15 @@ mod tests {
     fn mint_admin_token_rejects_symlinked_signing_key_file_outside_directory() {
         use std::os::unix::fs::symlink;
 
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
-        let outside = tempfile::NamedTempFile::new();
-        assert!(outside.is_ok());
-        let Ok(outside) = outside else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
         let wrote = write(outside.path(), b"a]32-byte-signing-key-for-testing!");
         assert!(wrote.is_ok());
         let link = sandbox.path().join("linked.key");
         let linked = symlink(outside.path(), &link);
         assert!(linked.is_ok());
-        let repository =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
 
-        let minted = mint_admin_token(&link, "issuer", "subject", TokenScope::Read, repository, 60);
+        let minted = mint_admin_token(&link, "issuer", "subject", TokenScope::Read, make_test_repository(), 60);
 
         assert!(matches!(
             minted,
@@ -492,20 +436,13 @@ mod tests {
 
     #[test]
     fn mint_admin_token_rejects_missing_signing_key_source() {
-        let repository =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
-
         let token = mint_admin_token_from_sources(
             None,
             None,
             "local",
             "operator-1",
             TokenScope::Write,
-            repository,
+            make_test_repository(),
             60,
         );
 
@@ -517,26 +454,241 @@ mod tests {
 
     #[test]
     fn mint_admin_token_rejects_multiple_signing_key_sources() {
-        let repository =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"));
-        assert!(repository.is_ok());
-        let Ok(repository) = repository else {
-            return;
-        };
-
         let token = mint_admin_token_from_sources(
             Some(Path::new("/tmp/key")),
             Some("SHARDLINE_TOKEN_SIGNING_KEY"),
             "local",
             "operator-1",
             TokenScope::Write,
-            repository,
+            make_test_repository(),
             60,
         );
 
         assert!(matches!(
             token,
             Err(super::AdminTokenError::SigningKeySourceConflict)
+        ));
+    }
+
+    #[test]
+    fn mint_admin_token_from_sources_with_key_env_rejects_missing_var() {
+        let token = mint_admin_token_from_sources(
+            None,
+            Some("SHARDLINE_TEST_NONEXISTENT_ENV_KEY"),
+            "local",
+            "operator-1",
+            TokenScope::Write,
+            make_test_repository(),
+            60,
+        );
+        assert!(matches!(
+            token,
+            Err(super::AdminTokenError::MissingSigningKeyEnv { .. })
+        ));
+    }
+
+    #[test]
+    fn mint_admin_token_from_sources_accepts_key_file() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let wrote = write(temp.path(), b"a]32-byte-signing-key-for-testing!");
+        assert!(wrote.is_ok());
+
+        let token = mint_admin_token_from_sources(
+            Some(temp.path()),
+            None,
+            "local",
+            "operator-1",
+            TokenScope::Write,
+            make_test_repository(),
+            60,
+        );
+
+        assert!(token.is_ok());
+        let token = token.unwrap();
+        assert!(token.contains('.'));
+    }
+
+    #[test]
+    fn mint_admin_token_ttl_overflow_rejected() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let wrote = write(temp.path(), b"a]32-byte-signing-key-for-testing!");
+        assert!(wrote.is_ok());
+
+        // Use a very large TTL to trigger overflow
+        let token = mint_admin_token(
+            temp.path(),
+            "issuer",
+            "subject",
+            TokenScope::Read,
+            make_test_repository(),
+            u64::MAX,
+        );
+
+        assert!(matches!(
+            token,
+            Err(super::AdminTokenError::TtlOverflow)
+        ));
+    }
+
+    #[test]
+    fn signing_key_too_large_rejects_above_limit() {
+        let err = super::ensure_signing_key_size_within_limit(2_000_000);
+        assert!(matches!(
+            err,
+            Err(super::AdminTokenError::SigningKeyTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn signing_key_size_within_limit_accepts_valid() {
+        let result = super::ensure_signing_key_size_within_limit(1024);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn signing_key_size_at_limit_is_accepted() {
+        let result = super::ensure_signing_key_size_within_limit(1_048_576);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn resolve_signing_key_path_rejects_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = super::resolve_signing_key_path(temp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_signing_key_path_rejects_missing_file() {
+        let result = super::resolve_signing_key_path(Path::new("/nonexistent-key-file-for-test"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn admin_token_error_debug_and_display() {
+        let err = super::AdminTokenError::MissingSigningKeySource;
+        assert!(err.to_string().contains("--key-file"));
+        assert!(format!("{err:?}").contains("MissingSigningKeySource"));
+
+        let err2 = super::AdminTokenError::SigningKeySourceConflict;
+        assert!(err2.to_string().contains("not both"));
+
+        let err3 = super::AdminTokenError::TtlOverflow;
+        assert!(err3.to_string().contains("ttl") || err3.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn admin_token_error_claims_display() {
+        let claims_err = shardline_protocol::TokenClaimsError::EmptySubject;
+        let err = super::AdminTokenError::Claims(claims_err);
+        let msg = err.to_string();
+        assert!(msg.contains("token claims"));
+    }
+
+    #[test]
+    fn admin_token_error_empty_signing_key_env_display() {
+        let err = super::AdminTokenError::EmptySigningKeyEnv {
+            name: "TEST_KEY".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("TEST_KEY"));
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn admin_token_error_missing_signing_key_env_display() {
+        let err = super::AdminTokenError::MissingSigningKeyEnv {
+            name: "MISSING_KEY".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("MISSING_KEY"));
+        assert!(msg.contains("not set"));
+    }
+
+    #[test]
+    fn admin_token_error_signing_key_length_mismatch_display() {
+        let err = super::AdminTokenError::SigningKeyLengthMismatch {
+            expected_bytes: 100,
+            observed_bytes: 50,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("changed"));
+    }
+
+    #[test]
+    fn admin_token_error_signing_key_too_large_display() {
+        let err = super::AdminTokenError::SigningKeyTooLarge {
+            observed_bytes: 2_000_000,
+            maximum_bytes: 1_048_576,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("exceeded"));
+    }
+
+    #[test]
+    fn read_signing_key_bytes_from_env_rejects_missing_var() {
+        let result = super::read_signing_key_bytes_from_env("SHARDLINE_TEST_NONEXISTENT_KEY_XXXX");
+        assert!(matches!(
+            result,
+            Err(super::AdminTokenError::MissingSigningKeyEnv { .. })
+        ));
+    }
+
+    #[test]
+    fn read_signing_key_bytes_from_env_error_messages() {
+        let err = super::AdminTokenError::EmptySigningKeyEnv {
+            name: "TEST_KEY".to_owned(),
+        };
+        assert!(err.to_string().contains("empty"));
+
+        let err = super::AdminTokenError::MissingSigningKeyEnv {
+            name: "MISSING_KEY".to_owned(),
+        };
+        assert!(err.to_string().contains("not set"));
+    }
+
+    #[test]
+    fn ensure_signing_key_size_within_limit_rejects_oversized() {
+        assert!(super::ensure_signing_key_size_within_limit(2_000_000).is_err());
+        assert!(super::ensure_signing_key_size_within_limit(1024).is_ok());
+        assert!(super::ensure_signing_key_size_within_limit(1_048_576).is_ok());
+    }
+
+    #[test]
+    fn resolve_signing_key_path_root_path_has_no_parent() {
+        // Path with no parent (root "/") hits the "no parent" error path
+        let result = super::resolve_signing_key_path(Path::new("/"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mint_admin_token_rejects_shrinking_signing_key_after_validation() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let initial = b"some signing key that is long enough to be truncated";
+        assert!(initial.len() > 10);
+        let wrote = write(temp.path(), initial);
+        assert!(wrote.is_ok());
+
+        let path = temp.path().to_path_buf();
+        super::set_before_signing_key_read_hook_for_tests(path.clone(), move || {
+            // Truncate the file to make it shorter than expected_length
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(10).unwrap();
+            drop(file);
+        });
+
+        let token = mint_admin_token(
+            temp.path(),
+            "issuer",
+            "subject",
+            TokenScope::Read,
+            make_test_repository(),
+            60,
+        );
+
+        assert!(matches!(
+            token,
+            Err(super::AdminTokenError::SigningKeyLengthMismatch { .. })
         ));
     }
 }

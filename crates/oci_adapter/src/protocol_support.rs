@@ -145,11 +145,8 @@ mod tests {
 
     #[test]
     fn oci_repository_scope_validator_accepts_bound_roots_and_nested_namespaces() {
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None)
+            .expect("valid scope params should succeed");
 
         assert!(validate_oci_repository_scope("team/assets", Some(&scope)).is_ok());
         assert!(validate_oci_repository_scope("team/assets/cache", Some(&scope)).is_ok());
@@ -167,11 +164,8 @@ mod tests {
     fn shared_sha256_key_uses_stable_shared_namespace() {
         let key = shared_sha256_object_key(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        )
+        .expect("valid hex digest should produce a key");
         assert_eq!(
             key.as_str(),
             "protocols/shared/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

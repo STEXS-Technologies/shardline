@@ -2016,4 +2016,451 @@ mod tests {
         let errors = parsed["errors"].as_array().unwrap();
         assert_eq!(errors[0]["code"], "DIGEST_INVALID");
     }
+
+    // ---- Additional From implementation tests ----
+
+    #[test]
+    fn from_xet_adapter_error_io() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::Io(
+            std::io::Error::other("io"),
+        ).into();
+        assert!(matches!(err, ServerError::Io(_)));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_numeric_conversion() {
+        let huge = 1_000_000_000_000u64;
+        let try_err = i32::try_from(huge).unwrap_err();
+        let err: ServerError = crate::xet_adapter::XetAdapterError::NumericConversion(try_err).into();
+        assert!(matches!(err, ServerError::NumericConversion(_)));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_hash_parse() {
+        use shardline_protocol::HashParseError;
+        let err: ServerError = crate::xet_adapter::XetAdapterError::HashParse(
+            HashParseError::InvalidLength,
+        ).into();
+        assert!(matches!(err, ServerError::HashParse(_)));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_local_object_store() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::LocalObjectStore(
+            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local")),
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Local(_))));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_s3_object_store() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::S3ObjectStore(
+            shardline_storage::S3ObjectStoreError::IncompleteCredentials,
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_index_store() {
+        let io_err = std::io::Error::other("idx");
+        let err: ServerError = crate::xet_adapter::XetAdapterError::IndexStore(
+            shardline_index::LocalIndexStoreError::Io(io_err),
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::Local(_))));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_memory_index() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::MemoryIndexStore(
+            shardline_index::MemoryIndexStoreError::LockPoisoned,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::MemoryIndex(_))));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_memory_record() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::MemoryRecordStore(
+            shardline_index::MemoryRecordStoreError::LockPoisoned,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::MemoryRecord(_))));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_postgres_metadata() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::PostgresMetadata(
+            shardline_index::PostgresMetadataStoreError::Json(
+                serde_json::from_str::<()>("x").unwrap_err(),
+            ),
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_file_record_invariant() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::FileRecordInvariant(
+            shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::FileRecordInvariant(_))));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_invalid_content_hash() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::InvalidContentHash.into();
+        assert!(matches!(err, ServerError::InvalidContentHash));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_invalid_xorb_prefix() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::InvalidXorbPrefix.into();
+        assert!(matches!(err, ServerError::InvalidXorbPrefix));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_xorb_hash_mismatch() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::XorbHashMismatch.into();
+        assert!(matches!(err, ServerError::XorbHashMismatch));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_invalid_serialized_xorb() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::InvalidSerializedXorb.into();
+        assert!(matches!(err, ServerError::InvalidSerializedXorb));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_invalid_serialized_shard() {
+        use shardline_server_core::InvalidSerializedShardError;
+        let err: ServerError = crate::xet_adapter::XetAdapterError::InvalidSerializedShard(
+            InvalidSerializedShardError::RetainedShardChunkHashesNotStrictlyOrdered,
+        ).into();
+        assert!(matches!(err, ServerError::InvalidSerializedShard(_)));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_missing_referenced_xorb() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::MissingReferencedXorb.into();
+        assert!(matches!(err, ServerError::MissingReferencedXorb));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_too_many_shard_terms() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::TooManyShardTerms.into();
+        assert!(matches!(err, ServerError::TooManyShardTerms));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_not_found() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::NotFound.into();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_overflow() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::Overflow.into();
+        assert!(matches!(err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_xet_adapter_error_range_not_satisfiable() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::RangeNotSatisfiable.into();
+        assert!(matches!(err, ServerError::RangeNotSatisfiable));
+    }
+
+    #[test]
+    fn from_provider_events_error_overflow() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::Overflow.into();
+        assert!(matches!(err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_provider_events_error_invalid_content_hash() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::InvalidContentHash.into();
+        assert!(matches!(err, ServerError::InvalidContentHash));
+    }
+
+    #[test]
+    fn from_provider_events_error_invalid_webhook_payload() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::InvalidProviderWebhookPayload.into();
+        assert!(matches!(err, ServerError::InvalidProviderWebhookPayload));
+    }
+
+    #[test]
+    fn from_provider_events_error_conflicting_rename() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::ConflictingRenameTargetRecord.into();
+        assert!(matches!(err, ServerError::Index(IndexError::ConflictingRenameTargetRecord)));
+    }
+
+    #[test]
+    fn from_provider_events_error_json() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::Json(
+            serde_json::from_str::<()>("invalid").unwrap_err(),
+        ).into();
+        assert!(matches!(err, ServerError::Json(_)));
+    }
+
+    #[test]
+    fn from_provider_events_error_numeric_conversion() {
+        use shardline_provider_events::ProviderEventsError;
+        let huge = 1_000_000_000_000u64;
+        let try_err = i32::try_from(huge).unwrap_err();
+        let err: ServerError = ProviderEventsError::NumericConversion(try_err).into();
+        assert!(matches!(err, ServerError::NumericConversion(_)));
+    }
+
+    #[test]
+    fn from_provider_events_error_retention_hold() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::RetentionHold(
+            shardline_index::RetentionHoldError::InvertedTimeline,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::RetentionHold(_))));
+    }
+
+    #[test]
+    fn from_provider_events_error_webhook_delivery() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::WebhookDelivery(
+            shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::WebhookDelivery(_))));
+    }
+
+    #[test]
+    fn from_provider_events_error_index_store() {
+        use shardline_provider_events::ProviderEventsError;
+        let io_err = std::io::Error::other("idx");
+        let err: ServerError = ProviderEventsError::IndexStore(
+            shardline_index::LocalIndexStoreError::Io(io_err),
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::Local(_))));
+    }
+
+    #[test]
+    fn from_provider_events_error_memory_index() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::MemoryIndexStore(
+            shardline_index::MemoryIndexStoreError::LockPoisoned,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::MemoryIndex(_))));
+    }
+
+    #[test]
+    fn from_provider_events_error_memory_record() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::MemoryRecordStore(
+            shardline_index::MemoryRecordStoreError::LockPoisoned,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::MemoryRecord(_))));
+    }
+
+    #[test]
+    fn from_provider_events_error_postgres_metadata() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::PostgresMetadata(
+            shardline_index::PostgresMetadataStoreError::Json(
+                serde_json::from_str::<()>("x").unwrap_err(),
+            ),
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn from_provider_events_error_parse_stored_file_record() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::ParseStoredFileRecord(
+            shardline_server_core::ParseStoredFileRecordError::Json(
+                serde_json::from_str::<()>("x").unwrap_err(),
+            ),
+        ).into();
+        assert!(matches!(err, ServerError::Io(_)));
+    }
+
+    #[test]
+    fn from_gc_error_io() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::Io(std::io::Error::other("gc io")).into();
+        assert!(matches!(err, ServerError::Io(_)));
+    }
+
+    #[test]
+    fn from_gc_error_json() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::Json(
+            serde_json::from_str::<()>("x").unwrap_err(),
+        ).into();
+        assert!(matches!(err, ServerError::Json(_)));
+    }
+
+    #[test]
+    fn from_gc_error_numeric_conversion() {
+        use shardline_gc::GcError;
+        let huge = 1_000_000_000_000u64;
+        let try_err = i32::try_from(huge).unwrap_err();
+        let err: ServerError = GcError::NumericConversion(try_err).into();
+        assert!(matches!(err, ServerError::NumericConversion(_)));
+    }
+
+    #[test]
+    fn from_gc_error_local_object_store() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::LocalObjectStore(
+            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local")),
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Local(_))));
+    }
+
+    #[test]
+    fn from_gc_error_s3_object_store() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::S3ObjectStore(
+            shardline_storage::S3ObjectStoreError::IncompleteCredentials,
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn from_gc_error_object_prefix() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::ObjectPrefix(
+            shardline_storage::ObjectPrefixError::UnsafePath,
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Prefix(_))));
+    }
+
+    #[test]
+    fn from_gc_error_index_store() {
+        use shardline_gc::GcError;
+        let io_err = std::io::Error::other("idx");
+        let err: ServerError = GcError::IndexStore(
+            shardline_index::LocalIndexStoreError::Io(io_err),
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::Local(_))));
+    }
+
+    #[test]
+    fn from_gc_error_memory_index() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::MemoryIndexStore(
+            shardline_index::MemoryIndexStoreError::LockPoisoned,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::MemoryIndex(_))));
+    }
+
+    #[test]
+    fn from_gc_error_memory_record() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::MemoryRecordStore(
+            shardline_index::MemoryRecordStoreError::LockPoisoned,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::MemoryRecord(_))));
+    }
+
+    #[test]
+    fn from_gc_error_postgres_metadata() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::PostgresMetadata(
+            shardline_index::PostgresMetadataStoreError::Json(
+                serde_json::from_str::<()>("x").unwrap_err(),
+            ),
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn from_gc_error_retention_hold() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::RetentionHold(
+            shardline_index::RetentionHoldError::InvertedTimeline,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::RetentionHold(_))));
+    }
+
+    #[test]
+    fn from_gc_error_quarantine_candidate() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::QuarantineCandidate(
+            shardline_index::QuarantineCandidateError::InvertedTimeline,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::QuarantineCandidate(_))));
+    }
+
+    #[test]
+    fn from_gc_error_webhook_delivery() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::WebhookDelivery(
+            shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::WebhookDelivery(_))));
+    }
+
+    #[test]
+    fn from_gc_error_file_record_invariant() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::FileRecordInvariant(
+            shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets,
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::FileRecordInvariant(_))));
+    }
+
+    #[test]
+    fn from_gc_error_invalid_lifecycle_metadata() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::InvalidLifecycleMetadata(
+            shardline_server_core::InvalidLifecycleMetadataError::QuarantineCandidateDeleteBeforeFirstSeen {
+                object_key: "test".into(),
+                delete_after_unix_seconds: 10,
+                first_seen_unreachable_at_unix_seconds: 20,
+            },
+        ).into();
+        assert!(matches!(err, ServerError::Index(IndexError::InvalidLifecycleMetadata(_))));
+    }
+
+    #[test]
+    fn from_gc_error_invalid_content_hash() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::InvalidContentHash.into();
+        assert!(matches!(err, ServerError::InvalidContentHash));
+    }
+
+    #[test]
+    fn from_gc_error_overflow() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::Overflow.into();
+        assert!(matches!(err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_invalid_reconstruction_response_error() {
+        let err: ServerError = shardline_server_core::InvalidReconstructionResponseError::TermCountExceededRecordChunkCount.into();
+        assert!(matches!(err, ServerError::Index(IndexError::InvalidReconstructionResponse(_))));
+    }
+
+    #[test]
+    fn from_parse_stored_file_record_error_json() {
+        let err: ServerError = shardline_server_core::ParseStoredFileRecordError::Json(
+            serde_json::from_str::<()>("x").unwrap_err(),
+        ).into();
+        assert!(matches!(err, ServerError::Json(_)));
+    }
+
+    #[test]
+    fn oci_error_from_server_error_with_missing_auth_attaches_default_challenge() {
+        use axum::http::HeaderValue;
+        let oci = OciError(ServerError::MissingAuthorization);
+        let response = oci.into_response();
+        let www_auth = response.headers().get(axum::http::header::WWW_AUTHENTICATE);
+        assert_eq!(www_auth, Some(&HeaderValue::from_static("Bearer realm=\"shardline\"")));
+    }
+
+    #[test]
+    fn oci_error_not_found_has_no_www_auth() {
+        let oci = OciError(ServerError::NotFound);
+        let response = oci.into_response();
+        assert!(response.headers().get(axum::http::header::WWW_AUTHENTICATE).is_none());
+    }
 }

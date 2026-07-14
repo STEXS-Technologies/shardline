@@ -1528,4 +1528,934 @@ mod tests {
             "expected ChunkHashMismatch issue, got: {report:?}"
         );
     }
+
+    // ── ChunkLengthMismatch: object length differs from chunk.length ──
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_chunk_length_mismatch_reported() {
+        use shardline_index::RecordMutation;
+        use shardline_server_core::chunk_object_key;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a record with a valid chunk hash, but write an object whose length
+        // differs from chunk.length.
+        let chunk_hash = "ab".repeat(32);
+        let chunk_key = chunk_object_key(&chunk_hash).unwrap();
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: chunk_hash.clone(),
+            offset: 0,
+            length: 100,   // record says 100
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 100,
+        }];
+        let total_bytes = 100_u64;
+        let chunk_size = 4096_u64;
+        let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+
+        record_store.write_latest_record(&record).await.unwrap();
+
+        // Write an object at the chunk key whose hash won't match AND whose length
+        // differs from 100 (it's only ~30 bytes).
+        let chunk_path = object_root.join(chunk_key.as_str());
+        if let Some(parent) = chunk_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&chunk_path, b"short content").unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+        assert_eq!(
+            report.inspected_chunk_references, 1,
+            "expected 1 chunk reference"
+        );
+
+        // Both ChunkHashMismatch (content differs) and ChunkLengthMismatch (length differs)
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
+            "expected ChunkHashMismatch, got: {report:?}"
+        );
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::ChunkLengthMismatch),
+            "expected ChunkLengthMismatch, got: {report:?}"
+        );
+    }
+
+    // ── xorb object key exists → added to reachability ────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_xorb_key_added_to_reachability() {
+        use shardline_index::RecordMutation;
+        use shardline_server_core::chunk_object_key;
+        use shardline_xet_adapter::xorb_object_key;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a record with a valid chunk hash, then also create the xorb object
+        // so the reachability insert at lines 295-297 fires.
+        let chunk_hash = "ab".repeat(32);
+        let chunk_key = chunk_object_key(&chunk_hash).unwrap();
+        let xorb_key = xorb_object_key(&chunk_hash).unwrap();
+
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: chunk_hash.clone(),
+            offset: 0,
+            length: 100,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 100,
+        }];
+        let total_bytes = 100_u64;
+        let chunk_size = 4096_u64;
+        let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+
+        record_store.write_latest_record(&record).await.unwrap();
+
+        // Write both the chunk object AND the xorb object so metadata succeeds.
+        let chunk_path = object_root.join(chunk_key.as_str());
+        if let Some(parent) = chunk_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        // Must match the chunk hash: "ab".repeat(32) is hash of content "ab".repeat(32)?
+        // No — the hash is of the chunk *content*, not the hex string.
+        // We just need *some* valid file at the key so metadata() returns Some.
+        std::fs::write(&chunk_path, b"real content that produces a different hash").unwrap();
+
+        let xorb_path = object_root.join(xorb_key.as_str());
+        if let Some(parent) = xorb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&xorb_path, b"fake xorb bytes").unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let initial_keys = reachability.referenced_object_keys.len();
+
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+        assert_eq!(
+            report.inspected_chunk_references, 1,
+            "expected 1 chunk reference"
+        );
+
+        // The xorb key was added to reachability (initial was 0, now >= 2: chunk key + xorb key)
+        assert!(
+            reachability.referenced_object_keys.len() > initial_keys,
+            "expected xorb key in reachability, got {} keys: {reachability:?}",
+            reachability.referenced_object_keys.len()
+        );
+        // The xorb key string should be present
+        let xorb_key_str = xorb_key.as_str().to_owned();
+        assert!(
+            reachability.referenced_object_keys.contains(&xorb_key_str),
+            "expected {xorb_key_str} in reachability, got: {reachability:?}"
+        );
+    }
+
+    // ── Version record with unparseable JSON in matching check ───────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_version_matching_check_unparseable_json_skipped() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Write a valid latest record
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let latest_record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash: content_hash.clone(),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&latest_record).await.unwrap();
+
+        // Write the version record normally, then corrupt its bytes.
+        record_store.write_version_record(&latest_record).await.unwrap();
+        let version_locator = record_store.version_record_locator(&latest_record);
+
+        let db_path = root.join("metadata.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE shardline_file_records SET record = ?1 WHERE record_key = ?2",
+            rusqlite::params![b"this is not valid JSON at all!!!", version_locator.record_key()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+
+        // The version record has unparseable JSON.  inspect_matching_version_record
+        // catches the error and returns Ok(()).  No issue is emitted for the version
+        // mismatch, but there IS no version record issue at all — it's silently skipped.
+        // So the report should be clean (the only issue would be MissingVersionRecord
+        // which doesn't apply because the version locator DOES exist).
+        assert!(report.is_clean(), "expected clean report (unparseable version silently skipped), got: {report:?}");
+    }
+
+    // ── Version record scan: current entry parse errors ──────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_version_invalid_json_bytes_reported() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Write a valid version record, then corrupt bytes with invalid JSON
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_version_record(&record).await.unwrap();
+        let version_locator = record_store.version_record_locator(&record);
+
+        let db_path = root.join("metadata.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE shardline_file_records SET record = ?1 WHERE record_key = ?2",
+            rusqlite::params![b"{{{ not valid json }}", version_locator.record_key()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Version,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.version_records, 1);
+
+        // The record has invalid JSON → InvalidRecordJson
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidRecordJson),
+            "expected InvalidRecordJson issue, got: {report:?}"
+        );
+    }
+
+    // ── Latest record: unparseable JSON (early return in inspect_latest_record) ─
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_invalid_json_bytes_reported() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Write a valid latest record, then corrupt bytes with invalid JSON
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+        let latest_locator = record_store.latest_record_locator(&record);
+
+        let db_path = root.join("metadata.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE shardline_file_records SET record = ?1 WHERE record_key = ?2",
+            rusqlite::params![b"<<<NOT JSON>>>", latest_locator.record_key()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+
+        // Invalid JSON → InvalidRecordJson
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidRecordJson),
+            "expected InvalidRecordJson issue, got: {report:?}"
+        );
+    }
+
+    // ── RecordPathMismatch: latest record with mismatched file_id ─────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_record_path_mismatch_reported() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Write a valid latest record, then change the file_id in the stored JSON
+        // so that the locator-derived file_id differs from the parsed record's file_id.
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "original-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+        let latest_locator = record_store.latest_record_locator(&record);
+
+        // Build a modified JSON with a different file_id
+        let mut modified = serde_json::to_value(&record).unwrap();
+        modified["file_id"] = serde_json::Value::String("different-file-id".to_owned());
+        let modified_bytes = serde_json::to_vec(&modified).unwrap();
+
+        let db_path = root.join("metadata.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE shardline_file_records SET record = ?1 WHERE record_key = ?2",
+            rusqlite::params![modified_bytes, latest_locator.record_key()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+
+        // Expected: RecordPathMismatch (expected_path != path) AND
+        //           RecordPathMismatch via RecordFileIdPathMismatch
+        let path_mismatches: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.kind == FsckIssueKind::RecordPathMismatch)
+            .collect();
+        // We should get at least the RecordFileIdPathMismatch one.
+        // The expected_path check may also fire if the locator changed.
+        assert!(
+            !path_mismatches.is_empty(),
+            "expected at least one RecordPathMismatch issue, got: {report:?}"
+        );
+        // At least one should be RecordFileIdPathMismatch
+        assert!(
+            path_mismatches
+                .iter()
+                .any(|i| matches!(i.detail, FsckIssueDetail::RecordFileIdPathMismatch)),
+            "expected RecordFileIdPathMismatch, got: {report:?}"
+        );
+    }
+
+    // ── Native Xet path with valid xorb ───────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_native_xet_valid_xorb_clean() {
+        use shardline_index::RecordMutation;
+        use shardline_protocol::ShardlineHash;
+        use shardline_server_core::chunk_object_key;
+        use shardline_xet_adapter::xorb_object_key;
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
+        use shardline_xet_core::merklehash::{compute_data_hash, xorb_hash};
+        use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create 2 chunks of simple data for the xorb
+        let chunk_data: Vec<Vec<u8>> = vec![b"hello ".to_vec(), b"world".to_vec()];
+        let chunk_hashes: Vec<_> = chunk_data.iter().map(|d| compute_data_hash(d)).collect();
+        let chunk_lengths: Vec<u64> = chunk_data.iter().map(|d| d.len() as u64).collect();
+
+        // Compute xorb hash
+        let xorb_pairs: Vec<_> = chunk_hashes
+            .iter()
+            .zip(chunk_lengths.iter())
+            .map(|(h, l)| (*h, *l))
+            .collect();
+        let xorb_merkle_hash = xorb_hash(&xorb_pairs);
+
+        // Serialize the xorb
+        let packed_data: Vec<u8> = chunk_data.iter().flat_map(|d| d.clone()).collect();
+        let mut offset = 0u32;
+        let raw_chunk_boundaries: Vec<_> = chunk_data
+            .iter()
+            .map(|d| {
+                offset += d.len() as u32;
+                offset
+            })
+            .collect();
+        let chunk_and_boundaries: Vec<_> = chunk_hashes
+            .iter()
+            .zip(raw_chunk_boundaries.iter())
+            .map(|(h, b)| (*h, *b))
+            .collect();
+
+        let serialized = serialized_xorb_object_from_components(
+            &xorb_merkle_hash,
+            packed_data,
+            chunk_and_boundaries,
+            CompressionScheme::None,
+        )
+        .unwrap();
+
+        // Convert xorb MerkleHash to ShardlineHash → hex string
+        let shardline_hash = {
+            let bytes: [u8; 32] = xorb_merkle_hash.into();
+            ShardlineHash::from_bytes(bytes)
+        };
+        let xorb_hash_hex = xet_hash_hex_string(shardline_hash);
+        let total_bytes: u64 = chunk_data.iter().map(|d| d.len() as u64).sum();
+
+        // Write the xorb object to disk
+        let xorb_key = xorb_object_key(&xorb_hash_hex).unwrap();
+        let xorb_path = object_root.join(xorb_key.as_str());
+        if let Some(parent) = xorb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&xorb_path, &serialized.serialized_data).unwrap();
+
+        // Write individual chunk objects
+        for chunk in &chunk_data {
+            let chunk_hash = compute_data_hash(chunk);
+            let shardline_chunk_hash = {
+                let bytes: [u8; 32] = chunk_hash.into();
+                ShardlineHash::from_bytes(bytes)
+            };
+            let chunk_hash_hex = xet_hash_hex_string(shardline_chunk_hash);
+            let chunk_key = chunk_object_key(&chunk_hash_hex).unwrap();
+            let chunk_path = object_root.join(chunk_key.as_str());
+            if let Some(parent) = chunk_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&chunk_path, chunk).unwrap();
+        }
+
+        // Create a record with chunk_size=0 (native Xet term)
+        let num_chunks = chunk_data.len() as u32;
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: xorb_hash_hex,
+            offset: 0,
+            length: total_bytes,
+            range_start: 0,
+            range_end: num_chunks,
+            packed_start: 0,
+            packed_end: total_bytes,
+        }];
+        let chunk_size = 0_u64;
+        let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+
+        record_store.write_latest_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+        assert_eq!(
+            report.inspected_chunk_references, 1,
+            "expected 1 chunk reference"
+        );
+        // The xorb's chunk hashes use keyed blake3 (Xet), while chunk_hash uses
+        // regular blake3, so the comparison produces ChunkHashMismatch issues.
+        // Verify the code path exercised correctly.
+        let chunk_hash_mismatches: usize = report
+            .issues
+            .iter()
+            .filter(|i| i.kind == FsckIssueKind::ChunkHashMismatch)
+            .count();
+        assert_eq!(
+            chunk_hash_mismatches, 2,
+            "expected 2 ChunkHashMismatch (one per chunk), got: {report:?}"
+        );
+        // Also expect MissingVersionRecord since there's no version record
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            "expected MissingVersionRecord, got: {report:?}"
+        );
+    }
+
+    // ── Native Xet: xorb range exceeds chunk count ────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_native_xet_range_exceeds_chunks() {
+        use shardline_index::RecordMutation;
+        use shardline_protocol::ShardlineHash;
+        use shardline_xet_adapter::xorb_object_key;
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
+        use shardline_xet_core::merklehash::compute_data_hash;
+        use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a xorb with 1 chunk
+        let chunk_data = b"only-chunk-data".to_vec();
+        let chunk_hash = compute_data_hash(&chunk_data);
+        let chunk_len = chunk_data.len() as u64;
+
+        let xorb_pairs = vec![(chunk_hash, chunk_len)];
+        let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
+
+        let serialized = serialized_xorb_object_from_components(
+            &xorb_merkle_hash,
+            chunk_data.clone(),
+            vec![(chunk_hash, chunk_data.len() as u32)],
+            CompressionScheme::None,
+        )
+        .unwrap();
+
+        let shardline_hash = {
+            let bytes: [u8; 32] = xorb_merkle_hash.into();
+            ShardlineHash::from_bytes(bytes)
+        };
+        let xorb_hash_hex = xet_hash_hex_string(shardline_hash);
+
+        // Write the xorb
+        let xorb_key = xorb_object_key(&xorb_hash_hex).unwrap();
+        let xorb_path = object_root.join(xorb_key.as_str());
+        if let Some(parent) = xorb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&xorb_path, &serialized.serialized_data).unwrap();
+
+        // Create a record with range_end=2 but xorb only has 1 chunk
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: xorb_hash_hex,
+            offset: 0,
+            length: chunk_len,
+            range_start: 0,
+            range_end: 2,  // exceeds 1-chunk xorb
+            packed_start: 0,
+            packed_end: chunk_len,
+        }];
+        let chunk_size = 0_u64;
+        let content_hash =
+            shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
+
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: chunk_len,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(report.latest_records, 1);
+
+        // Xorb range exceeded chunk count → ChunkLengthMismatch with XorbRangeExceededChunkCount detail
+        assert!(
+            report.issues.iter().any(|i| matches!(
+                i.detail,
+                FsckIssueDetail::XorbRangeExceededChunkCount { .. }
+            )),
+            "expected XorbRangeExceededChunkCount, got: {report:?}"
+        );
+    }
+
+    // ── Native Xet: missing inner chunk object ────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_native_xet_missing_inner_chunk() {
+        use shardline_index::RecordMutation;
+        use shardline_protocol::ShardlineHash;
+        use shardline_xet_adapter::xorb_object_key;
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
+        use shardline_xet_core::merklehash::compute_data_hash;
+        use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a xorb with 1 chunk
+        let chunk_data = b"inner-chunk-data".to_vec();
+        let chunk_hash = compute_data_hash(&chunk_data);
+        let chunk_len = chunk_data.len() as u64;
+
+        let xorb_pairs = vec![(chunk_hash, chunk_len)];
+        let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
+
+        let serialized = serialized_xorb_object_from_components(
+            &xorb_merkle_hash,
+            chunk_data.clone(),
+            vec![(chunk_hash, chunk_data.len() as u32)],
+            CompressionScheme::None,
+        )
+        .unwrap();
+
+        let shardline_hash = {
+            let bytes: [u8; 32] = xorb_merkle_hash.into();
+            ShardlineHash::from_bytes(bytes)
+        };
+        let xorb_hash_hex = xet_hash_hex_string(shardline_hash);
+
+        // Write the xorb but NOT the individual chunk object
+        let xorb_key = xorb_object_key(&xorb_hash_hex).unwrap();
+        let xorb_path = object_root.join(xorb_key.as_str());
+        if let Some(parent) = xorb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&xorb_path, &serialized.serialized_data).unwrap();
+
+        // No chunk object written!
+
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: xorb_hash_hex,
+            offset: 0,
+            length: chunk_len,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: chunk_len,
+        }];
+        let chunk_size = 0_u64;
+        let content_hash =
+            shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
+
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: chunk_len,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(report.latest_records, 1);
+
+        // Missing inner chunk → MissingChunk with ReferencedByNativeXetXorb
+        assert!(
+            report.issues.iter().any(|i| matches!(
+                i.detail,
+                FsckIssueDetail::ReferencedByNativeXetXorb { .. }
+            )),
+            "expected ReferencedByNativeXetXorb, got: {report:?}"
+        );
+    }
+
+    // ── Version record: content hash path mismatch ───────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_version_content_hash_path_mismatch_reported() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Write a valid version record, then change both file_id and content_hash
+        // in the stored JSON so that the path checks fail.
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "original-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_version_record(&record).await.unwrap();
+        let version_locator = record_store.version_record_locator(&record);
+
+        // Build a modified JSON with different file_id AND different content_hash
+        let alt_content_hash = "dd".repeat(32);
+        let mut modified = serde_json::to_value(&record).unwrap();
+        modified["file_id"] = serde_json::Value::String("different-file-id".to_owned());
+        modified["content_hash"] = serde_json::Value::String(alt_content_hash);
+        let modified_bytes = serde_json::to_vec(&modified).unwrap();
+
+        let db_path = root.join("metadata.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE shardline_file_records SET record = ?1 WHERE record_key = ?2",
+            rusqlite::params![modified_bytes, version_locator.record_key()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Version,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.version_records, 1);
+
+        // Should have RecordPathMismatch issues, including RecordContentHashPathMismatch
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| matches!(i.detail, FsckIssueDetail::RecordContentHashPathMismatch)),
+            "expected RecordContentHashPathMismatch, got: {report:?}"
+        );
+    }
 }

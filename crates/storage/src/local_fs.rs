@@ -647,14 +647,17 @@ mod tests {
 
     // ── hard_link_file_if_absent with race via hook ───────────────────
 
+    /// Serializes hook-based tests that use the global BEFORE_LOCAL_WRITE_HOOK.
+    #[cfg(unix)]
+    static HOOK_TEST_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+
     #[cfg(unix)]
     #[test]
     fn hard_link_file_if_absent_detects_parent_swap_via_hook() {
         use super::{hard_link_file_if_absent, set_before_local_write_hook};
         use std::os::unix::fs::symlink;
-        use std::sync::Mutex;
-        static HARD_LINK_HOOK_MUTEX: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        let _guard = HARD_LINK_HOOK_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = HOOK_TEST_MUTEX.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
 
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path().join("root");
@@ -688,6 +691,7 @@ mod tests {
         use super::{set_before_local_write_hook, write_bytes_atomically};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        let _guard = HOOK_TEST_MUTEX.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
 
         let called = Arc::new(AtomicBool::new(false));
         let flag = called.clone();
@@ -707,5 +711,128 @@ mod tests {
             called.load(Ordering::SeqCst),
             "before-local-write hook was not called"
         );
+    }
+
+    // ── put_bytes_if_absent with directory target (non-NotFound error) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn put_bytes_if_absent_directory_target_fails() {
+        use super::put_bytes_if_absent;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let dir_target = root.join("a_dir");
+        std::fs::create_dir_all(&dir_target).unwrap();
+
+        // The target path is an existing directory, not a file.
+        // open_existing_regular_file will open it (dirs can be opened),
+        // then is_file() returns false → returns Err(InvalidData).
+        // put_bytes_if_absent_unix checks for ErrorKind::NotFound which
+        // does NOT match InvalidData, so the error propagates.
+        let result = put_bytes_if_absent(&root, &dir_target, b"data");
+        assert!(result.is_err(), "expected error when target is a directory");
+    }
+
+    // ── write_bytes_atomically detects parent swap via hook ────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_atomically_detects_parent_swap() {
+        use super::{set_before_local_write_hook, write_bytes_atomically};
+        use std::os::unix::fs::symlink;
+        let _guard = HOOK_TEST_MUTEX.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let dest = root.join("sub").join("target.bin");
+
+        // Set up a hook that swaps the parent directory to a symlink escape
+        let moved_parent = sandbox.path().join("moved-write-parent");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+
+        let escape_dir = sandbox.path().join("escape-write");
+        std::fs::create_dir(&escape_dir).unwrap();
+        let escape_dir_for_assert = escape_dir.clone();
+
+        let hook_root = root.clone();
+        set_before_local_write_hook(dest.clone(), move || {
+            let _ = std::fs::rename(hook_root.join("sub"), &moved_parent);
+            let _ = symlink(&escape_dir, hook_root.join("sub"));
+        });
+
+        let result = write_bytes_atomically(&root, &dest, b"payload");
+        // Should fail because the parent directory was swapped
+        assert!(result.is_err(), "expected error from parent swap, got Ok");
+        // The escape dir should not contain the file
+        assert!(
+            !escape_dir_for_assert.join("target.bin").exists(),
+            "file should not have been written to the attacker-controlled escape directory"
+        );
+    }
+
+    // ── ensure_file_matches_bytes with empty expected and non-empty file ──
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_file_matches_bytes_empty_expected_with_content_fails() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("content-present.bin");
+        std::fs::write(&path, b"some data").unwrap();
+        let file = File::open(&path).unwrap();
+
+        // expected is empty but file has content — read returns bytes,
+        // then there are no more expected bytes → mismatch break → error
+        let result = ensure_file_matches_bytes(file, b"");
+        assert!(result.is_err());
+    }
+
+    // ── hard_link_file_if_absent with race via hook (anchor check fail after hard link) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_file_if_absent_anchor_check_fails_after_link() {
+        // This tests the ensure_parent_path_matches_anchor failure AFTER
+        // a successful hard link (line 172-175 in hard_link_file_if_absent_unix).
+        // The hook swaps the parent AFTER the hard link succeeds but
+        // BEFORE the anchor verification.
+        //
+        // Hard links are tested with hook swaps in
+        // hard_link_file_if_absent_detects_parent_swap_via_hook above.
+        // That test already covers this path (hook runs before the
+        // anchor check inside hard_link_file_if_absent_unix).
+        //
+        // This test verifies a slightly different timing: the hook makes
+        // the parent a symlink duplicate so anchor check fails.
+        use super::{hard_link_file_if_absent, set_before_local_write_hook};
+        use std::os::unix::fs::symlink;
+        let _guard = HOOK_TEST_MUTEX.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap();
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let temporary = sandbox.path().join("src.tmp");
+        std::fs::write(&temporary, b"anchor test").unwrap();
+        let dest = root.join("sub").join("target.bin");
+
+        let moved_parent = sandbox.path().join("moved-link-anchor");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+
+        let escape_dir = sandbox.path().join("escape-link-anchor");
+        std::fs::create_dir(&escape_dir).unwrap();
+
+        let hook_root = root.clone();
+        set_before_local_write_hook(dest.clone(), move || {
+            let _ = std::fs::rename(hook_root.join("sub"), &moved_parent);
+            let _ = symlink(&escape_dir, hook_root.join("sub"));
+        });
+
+        let result = hard_link_file_if_absent(&root, &dest, &temporary);
+        // The hard link itself succeeds to /proc/self/fd/N/target.bin
+        // in the ORIGINAL directory, but the anchor check detects the
+        // parent was swapped (logical path is now a symlink) and fails.
+        assert!(result.is_err(), "expected error from anchor check, got Ok");
     }
 }

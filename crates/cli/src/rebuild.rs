@@ -33,6 +33,8 @@ pub async fn run_index_rebuild(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use shardline_server::ServerError;
 
     use super::*;
@@ -67,5 +69,29 @@ mod tests {
         let err = RebuildRuntimeError::Server(ServerError::Io(io_inner));
         let msg = err.to_string();
         assert!(msg.contains("index missing") || !msg.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_index_rebuild_rejects_missing_root() {
+        let result = run_index_rebuild(Some(Path::new("/nonexistent-shardline-test-root"))).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_index_rebuild_rejects_symlinked_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("real-root");
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(unix)]
+        let link = {
+            let link = sandbox.path().join("root-link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            link
+        };
+        #[cfg(not(unix))]
+        let link = target.clone();
+        let result = run_index_rebuild(Some(&link)).await;
+        #[cfg(unix)]
+        assert!(result.is_err());
     }
 }
