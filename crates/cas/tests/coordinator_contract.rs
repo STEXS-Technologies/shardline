@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -631,6 +633,409 @@ fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_co
         coordinator.object_store().delete_if_present(&key),
         Ok(DeleteOutcome::Deleted)
     ));
+}
+
+// ── MemoryObjectStore error paths ─────────────────────────────────────
+
+#[test]
+fn memory_object_store_put_if_absent_rejects_wrong_body_length() {
+    let store = MemoryObjectStore::default();
+    let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
+    let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
+
+    // Body has 5 bytes but integrity declares 4 → IntegrityMismatch
+    let result = store.put_if_absent(
+        &key,
+        ObjectBody::from_slice(&[10, 20, 30, 40, 50]),
+        &integrity,
+    );
+    assert_eq!(result, Err(MemoryObjectError::IntegrityMismatch));
+}
+
+#[test]
+fn memory_object_store_put_if_absent_rejects_existing_different_content() {
+    let store = MemoryObjectStore::default();
+    let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
+    let hash = ShardlineHash::from_bytes([2; 32]);
+
+    let first = store.put_if_absent(
+        &key,
+        ObjectBody::from_slice(&[10, 20, 30, 40]),
+        &ObjectIntegrity::new(hash, 4),
+    );
+    assert_eq!(first, Ok(PutOutcome::Inserted));
+
+    // Same key, different content → IntegrityMismatch
+    let second = store.put_if_absent(
+        &key,
+        ObjectBody::from_slice(&[50, 60, 70, 80]),
+        &ObjectIntegrity::new(hash, 4),
+    );
+    assert_eq!(second, Err(MemoryObjectError::IntegrityMismatch));
+}
+
+#[test]
+fn memory_object_store_read_range_returns_missing_for_unknown_key() {
+    let store = MemoryObjectStore::default();
+    let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
+    let range = ByteRange::new(0, 0).unwrap();
+
+    assert_eq!(
+        store.read_range(&key, range),
+        Err(MemoryObjectError::Missing)
+    );
+}
+
+#[test]
+fn memory_object_store_read_range_returns_missing_for_unrepresentable_length() {
+    let store = MemoryObjectStore::default();
+    let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
+    store
+        .put_if_absent(
+            &key,
+            ObjectBody::from_slice(&[10, 20, 30, 40]),
+            &ObjectIntegrity::new(ShardlineHash::from_bytes([3; 32]), 4),
+        )
+        .unwrap();
+
+    // ByteRange(0, u64::MAX) has len() = None because u64::MAX + 1 overflows
+    let range = ByteRange::new(0, u64::MAX).unwrap();
+    assert_eq!(range.len(), None);
+
+    assert_eq!(
+        store.read_range(&key, range),
+        Err(MemoryObjectError::Missing)
+    );
+}
+
+#[test]
+fn memory_object_store_metadata_returns_none_for_missing_key() {
+    let store = MemoryObjectStore::default();
+    let key = ObjectKey::parse("xorbs/default/05/hash.xorb").unwrap();
+
+    assert_eq!(store.metadata(&key), Ok(None));
+}
+
+// ── DedupeStore trait methods ─────────────────────────────────────────
+
+#[test]
+fn dedupe_shard_mapping_persists_and_retrieves_mapping() {
+    let index = MemoryIndexStore::default();
+    let chunk_hash = ShardlineHash::from_bytes([4; 32]);
+    let shard_key = ObjectKey::parse("shards/aa/example.shard").unwrap();
+    let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
+
+    index
+        .dedupe_shards
+        .borrow_mut()
+        .insert(chunk_hash, mapping.clone());
+
+    assert_eq!(
+        index.dedupe_shard_mapping(&chunk_hash),
+        Ok(Some(mapping))
+    );
+}
+
+#[test]
+fn dedupe_shard_mapping_returns_none_for_missing_hash() {
+    let index = MemoryIndexStore::default();
+    let chunk_hash = ShardlineHash::from_bytes([5; 32]);
+
+    assert_eq!(index.dedupe_shard_mapping(&chunk_hash), Ok(None));
+}
+
+#[test]
+fn list_dedupe_shard_mappings_empty_initially() {
+    let index = MemoryIndexStore::default();
+    assert_eq!(index.list_dedupe_shard_mappings(), Ok(vec![]));
+}
+
+#[test]
+fn list_dedupe_shard_mappings_returns_inserted_mappings() {
+    let index = MemoryIndexStore::default();
+    let hash_a = ShardlineHash::from_bytes([1; 32]);
+    let hash_b = ShardlineHash::from_bytes([2; 32]);
+    let key_a = ObjectKey::parse("shards/aa/a.shard").unwrap();
+    let key_b = ObjectKey::parse("shards/bb/b.shard").unwrap();
+    let map_a = DedupeShardMapping::new(hash_a, key_a);
+    let map_b = DedupeShardMapping::new(hash_b, key_b);
+
+    index.dedupe_shards.borrow_mut().insert(hash_a, map_a.clone());
+    index.dedupe_shards.borrow_mut().insert(hash_b, map_b.clone());
+
+    let mut all = index.list_dedupe_shard_mappings().unwrap();
+    all.sort_by(|left, right| {
+        xet_hash_hex_string(left.chunk_hash())
+            .cmp(&xet_hash_hex_string(right.chunk_hash()))
+    });
+    assert_eq!(all, vec![map_a, map_b]);
+}
+
+#[test]
+fn delete_dedupe_shard_mapping_removes_existing() {
+    let index = MemoryIndexStore::default();
+    let chunk_hash = ShardlineHash::from_bytes([6; 32]);
+    let key = ObjectKey::parse("shards/aa/del.shard").unwrap();
+    index
+        .dedupe_shards
+        .borrow_mut()
+        .insert(chunk_hash, DedupeShardMapping::new(chunk_hash, key));
+
+    assert_eq!(index.delete_dedupe_shard_mapping(&chunk_hash), Ok(true));
+    assert_eq!(index.dedupe_shard_mapping(&chunk_hash), Ok(None));
+}
+
+#[test]
+fn delete_dedupe_shard_mapping_returns_false_for_missing() {
+    let index = MemoryIndexStore::default();
+    let chunk_hash = ShardlineHash::from_bytes([7; 32]);
+
+    assert_eq!(
+        index.delete_dedupe_shard_mapping(&chunk_hash),
+        Ok(false)
+    );
+}
+
+// ── LifecycleStore webhook methods ────────────────────────────────────
+
+#[test]
+fn record_webhook_delivery_inserts_new_delivery() {
+    let index = MemoryIndexStore::default();
+    let delivery = WebhookDelivery::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        "delivery-1".to_owned(),
+        1000,
+    )
+    .unwrap();
+
+    assert_eq!(index.record_webhook_delivery(&delivery), Ok(true));
+}
+
+#[test]
+fn record_webhook_delivery_returns_false_on_duplicate() {
+    let index = MemoryIndexStore::default();
+    let delivery = WebhookDelivery::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        "delivery-1".to_owned(),
+        1000,
+    )
+    .unwrap();
+
+    index.record_webhook_delivery(&delivery).unwrap();
+    assert_eq!(index.record_webhook_delivery(&delivery), Ok(false));
+}
+
+#[test]
+fn list_webhook_deliveries_empty_initially() {
+    let index = MemoryIndexStore::default();
+    assert_eq!(index.list_webhook_deliveries(), Ok(vec![]));
+}
+
+#[test]
+fn list_webhook_deliveries_returns_recorded_deliveries_sorted() {
+    let index = MemoryIndexStore::default();
+    let gitlab_delivery = WebhookDelivery::new(
+        RepositoryProvider::GitLab,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        "delivery-2".to_owned(),
+        2000,
+    )
+    .unwrap();
+    let github_delivery = WebhookDelivery::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        "delivery-1".to_owned(),
+        1000,
+    )
+    .unwrap();
+
+    index.record_webhook_delivery(&gitlab_delivery).unwrap();
+    index.record_webhook_delivery(&github_delivery).unwrap();
+
+    let deliveries = index.list_webhook_deliveries().unwrap();
+    assert_eq!(deliveries.len(), 2);
+    // Sorted by provider (GitHub before GitLab in Debug formatting)
+    assert_eq!(deliveries[0], github_delivery);
+    assert_eq!(deliveries[1], gitlab_delivery);
+}
+
+#[test]
+fn delete_webhook_delivery_removes_existing() {
+    let index = MemoryIndexStore::default();
+    let delivery = WebhookDelivery::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        "delivery-1".to_owned(),
+        1000,
+    )
+    .unwrap();
+
+    index.record_webhook_delivery(&delivery).unwrap();
+    assert_eq!(index.delete_webhook_delivery(&delivery), Ok(true));
+    assert_eq!(index.list_webhook_deliveries(), Ok(vec![]));
+}
+
+#[test]
+fn delete_webhook_delivery_returns_false_for_missing() {
+    let index = MemoryIndexStore::default();
+    let delivery = WebhookDelivery::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        "delivery-1".to_owned(),
+        1000,
+    )
+    .unwrap();
+
+    assert_eq!(index.delete_webhook_delivery(&delivery), Ok(false));
+}
+
+// ── LifecycleStore provider repository state methods ─────────────────
+
+#[test]
+fn upsert_provider_repository_state_inserts_and_can_be_retrieved() {
+    let index = MemoryIndexStore::default();
+    let state = ProviderRepositoryState::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        Some(1000),
+        Some(2000),
+        Some("rev".to_owned()),
+    );
+
+    index.upsert_provider_repository_state(&state).unwrap();
+    assert_eq!(
+        index.provider_repository_state(RepositoryProvider::GitHub, "owner", "repo"),
+        Ok(Some(state))
+    );
+}
+
+#[test]
+fn provider_repository_state_returns_none_for_missing() {
+    let index = MemoryIndexStore::default();
+    assert_eq!(
+        index.provider_repository_state(RepositoryProvider::GitHub, "missing", "repo"),
+        Ok(None)
+    );
+}
+
+#[test]
+fn list_provider_repository_states_empty_initially() {
+    let index = MemoryIndexStore::default();
+    assert_eq!(index.list_provider_repository_states(), Ok(vec![]));
+}
+
+#[test]
+fn list_provider_repository_states_returns_all_states_sorted() {
+    let index = MemoryIndexStore::default();
+    let gitlab_state = ProviderRepositoryState::new(
+        RepositoryProvider::GitLab,
+        "owner-b".to_owned(),
+        "repo-b".to_owned(),
+        Some(300),
+        Some(400),
+        Some("rev".to_owned()),
+    );
+    let github_state = ProviderRepositoryState::new(
+        RepositoryProvider::GitHub,
+        "owner-a".to_owned(),
+        "repo-a".to_owned(),
+        Some(100),
+        Some(200),
+        None,
+    );
+
+    index.upsert_provider_repository_state(&gitlab_state).unwrap();
+    index.upsert_provider_repository_state(&github_state).unwrap();
+
+    let states = index.list_provider_repository_states().unwrap();
+    assert_eq!(states.len(), 2);
+    // Sorted by provider key (GitHub < GitLab), then owner, then repo
+    assert_eq!(states[0], github_state);
+    assert_eq!(states[1], gitlab_state);
+}
+
+#[test]
+fn delete_provider_repository_state_removes_existing() {
+    let index = MemoryIndexStore::default();
+    let state = ProviderRepositoryState::new(
+        RepositoryProvider::GitHub,
+        "owner".to_owned(),
+        "repo".to_owned(),
+        Some(100),
+        Some(200),
+        None,
+    );
+
+    index.upsert_provider_repository_state(&state).unwrap();
+    assert_eq!(
+        index.delete_provider_repository_state(RepositoryProvider::GitHub, "owner", "repo"),
+        Ok(true)
+    );
+    assert_eq!(
+        index.provider_repository_state(RepositoryProvider::GitHub, "owner", "repo"),
+        Ok(None)
+    );
+}
+
+#[test]
+fn delete_provider_repository_state_returns_false_for_missing() {
+    let index = MemoryIndexStore::default();
+    assert_eq!(
+        index.delete_provider_repository_state(RepositoryProvider::GitHub, "missing", "repo"),
+        Ok(false)
+    );
+}
+
+// ── CasLimits constructors and accessors ──────────────────────────────
+
+#[test]
+fn cas_limits_new_constructs_with_provided_bounds() {
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
+    assert_eq!(limits.max_xorb_bytes(), NonZeroU64::MIN);
+    assert_eq!(limits.max_shard_bytes(), NonZeroU64::MAX);
+}
+
+#[test]
+fn cas_limits_accessors_return_configured_values() {
+    let xorb = NonZeroU64::new(4096).unwrap();
+    let shard = NonZeroU64::new(8192).unwrap();
+    let limits = CasLimits::new(xorb, shard);
+    assert_eq!(limits.max_xorb_bytes(), xorb);
+    assert_eq!(limits.max_shard_bytes(), shard);
+}
+
+#[test]
+fn cas_limits_default_bounds_use_provided_constants() {
+    // NonZeroU64::MIN is the smallest positive value (1)
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
+    assert_eq!(limits.max_xorb_bytes().get(), 1);
+    assert_eq!(limits.max_shard_bytes().get(), 1);
+}
+
+// ── CasCoordinator constructors and accessors ─────────────────────────
+
+#[test]
+fn cas_coordinator_constructs_and_exposes_adapters_and_limits() {
+    let index = MemoryIndexStore::default();
+    let object_store = MemoryObjectStore::default();
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
+    let coordinator = CasCoordinator::new(index, object_store, limits);
+
+    // index() returns the stored index adapter
+    let _index_ref: &MemoryIndexStore = coordinator.index();
+    // object_store() returns the stored object store adapter
+    let _store_ref: &MemoryObjectStore = coordinator.object_store();
+    // limits() returns the configured limits
+    assert_eq!(coordinator.limits(), limits);
 }
 
 fn blake3_hash(bytes: &[u8]) -> ShardlineHash {
