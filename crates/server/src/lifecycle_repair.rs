@@ -643,6 +643,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classify_webhook_delivery_all_zero_boundaries() {
+        // All zero: not future (0 <= 0) and not stale (0 <= 0) → DeleteStale
+        assert_eq!(
+            classify_webhook_delivery_repair_action(0, 0, 0),
+            WebhookDeliveryRepairAction::DeleteStale
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_release_at_epoch_is_expired() {
+        // release_after = 0 (epoch), now = 0 → 0 <= 0 → expired
+        assert_eq!(
+            classify_retention_hold_repair_action(Some(0), 0, true, 0),
+            RetentionHoldRepairAction::DeleteExpired
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_release_at_epoch_object_missing() {
+        // release_after = 0, now = 0 → expired (takes priority over missing)
+        assert_eq!(
+            classify_retention_hold_repair_action(Some(0), 0, false, 0),
+            RetentionHoldRepairAction::DeleteExpired
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_all_false_is_delete_missing() {
+        assert_eq!(
+            classify_quarantine_repair_action(false, false, false),
+            QuarantineRepairAction::DeleteMissing
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_all_true_is_delete_missing_precedence() {
+        // object_exists=false takes precedence, even if reachable and held
+        assert_eq!(
+            classify_quarantine_repair_action(false, true, true),
+            QuarantineRepairAction::DeleteMissing
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_reachable_and_held_is_delete_reachable() {
+        // is_reachable checked before is_held → DeleteReachable
+        assert_eq!(
+            classify_quarantine_repair_action(true, true, true),
+            QuarantineRepairAction::DeleteReachable
+        );
+    }
+
     // ── LifecycleRepairOptions ─────────────────────────────────────────────
 
     #[test]

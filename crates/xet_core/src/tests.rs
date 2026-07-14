@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
 use proptest::prelude::*;
 
@@ -16,8 +16,9 @@ use crate::metadata_shard::{
     },
     file_structs::{
         FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt, FileVerificationEntry,
-        MDB_FILE_FLAG_METADATA_EXT_MASK, MDB_FILE_FLAG_VERIFICATION_MASK,
-        MDB_FILE_FLAG_WITH_METADATA_EXT, MDB_FILE_FLAG_WITH_VERIFICATION, MDBFileInfo,
+        MDBFileInfo, MDBFileInfoView, MDB_FILE_FLAG_METADATA_EXT_MASK,
+        MDB_FILE_FLAG_VERIFICATION_MASK, MDB_FILE_FLAG_WITH_METADATA_EXT,
+        MDB_FILE_FLAG_WITH_VERIFICATION,
     },
     shard_format::{MDBShardFileFooter, MDBShardFileHeader, MDBShardInfo},
     xorb_structs::{MDBXorbInfo, MDBXorbInfoView, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
@@ -28,7 +29,7 @@ use crate::xorb_object::{
     raw_xorb_data::XorbInfo,
     xorb_chunk_format::{
         XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk, deserialize_chunk_header,
-        parse_chunk_header, serialize_chunk,
+        deserialize_chunks_to_writer, parse_chunk_header, serialize_chunk,
     },
     xorb_format_test_utils::{ChunkSize, build_raw_xorb, build_xorb_object},
     xorb_object_format::{
@@ -2306,4 +2307,597 @@ proptest! {
         let deserialized = XorbChunkSequenceEntry::deserialize(&mut Cursor::new(&buf)).unwrap();
         prop_assert_eq!(&entry, &deserialized);
     }
+}
+
+// ============================================================================
+// serialization_utils tests — ALL functions
+// ============================================================================
+
+#[test]
+fn serialization_write_read_u8_roundtrip() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u8(&mut buf, 0xAB).unwrap();
+    assert_eq!(buf.len(), 1);
+    let val = crate::utils::serialization_utils::read_u8(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, 0xAB);
+}
+
+#[test]
+fn serialization_write_read_u8_default() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u8(&mut buf, 0).unwrap();
+    let val = crate::utils::serialization_utils::read_u8(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, 0);
+}
+
+#[test]
+fn serialization_write_read_u32_roundtrip() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u32(&mut buf, 0xDEAD_BEEF).unwrap();
+    assert_eq!(buf.len(), 4);
+    let val = crate::utils::serialization_utils::read_u32(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, 0xDEAD_BEEF);
+}
+
+#[test]
+fn serialization_write_read_u32_zero() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u32(&mut buf, 0).unwrap();
+    let val = crate::utils::serialization_utils::read_u32(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, 0);
+}
+
+#[test]
+fn serialization_write_read_u32_max() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u32(&mut buf, u32::MAX).unwrap();
+    let val = crate::utils::serialization_utils::read_u32(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, u32::MAX);
+}
+
+#[test]
+fn serialization_write_read_u64_roundtrip() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u64(&mut buf, 0xCAFE_BABE_DEAD_BEEF).unwrap();
+    assert_eq!(buf.len(), 8);
+    let val = crate::utils::serialization_utils::read_u64(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, 0xCAFE_BABE_DEAD_BEEF);
+}
+
+#[test]
+fn serialization_write_read_u64_zero() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u64(&mut buf, 0).unwrap();
+    let val = crate::utils::serialization_utils::read_u64(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, 0);
+}
+
+#[test]
+fn serialization_write_read_u64_max() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u64(&mut buf, u64::MAX).unwrap();
+    let val = crate::utils::serialization_utils::read_u64(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, u64::MAX);
+}
+
+#[test]
+fn serialization_write_read_hash_roundtrip() {
+    let hash = compute_data_hash(b"serialization test data");
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_hash(&mut buf, &hash).unwrap();
+    assert_eq!(buf.len(), 32);
+    let val = crate::utils::serialization_utils::read_hash(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, hash);
+}
+
+#[test]
+fn serialization_write_read_hash_default() {
+    let hash = DataHash::default();
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_hash(&mut buf, &hash).unwrap();
+    let val = crate::utils::serialization_utils::read_hash(&mut std::io::Cursor::new(&buf)).unwrap();
+    assert_eq!(val, hash);
+}
+
+#[test]
+fn serialization_write_read_bytes_roundtrip() {
+    let original = b"serialization utils bytes test";
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_bytes(&mut buf, original).unwrap();
+    assert_eq!(buf, original);
+    let mut out = vec![0u8; original.len()];
+    crate::utils::serialization_utils::read_bytes(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    assert_eq!(&out, original);
+}
+
+#[test]
+fn serialization_write_read_bytes_empty() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_bytes(&mut buf, b"").unwrap();
+    assert!(buf.is_empty());
+    let mut out = [0u8; 0];
+    crate::utils::serialization_utils::read_bytes(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+}
+
+#[test]
+fn serialization_write_read_u32s_roundtrip() {
+    let original = vec![1u32, 100, 1000, u32::MAX, 0];
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u32s(&mut buf, &original).unwrap();
+    assert_eq!(buf.len(), original.len() * 4);
+    let mut out = vec![0u32; original.len()];
+    crate::utils::serialization_utils::read_u32s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    assert_eq!(out, original);
+}
+
+#[test]
+fn serialization_write_read_u32s_empty() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u32s(&mut buf, &[]).unwrap();
+    assert!(buf.is_empty());
+    let mut out: Vec<u32> = Vec::new();
+    crate::utils::serialization_utils::read_u32s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    assert!(out.is_empty());
+}
+
+#[test]
+fn serialization_write_read_u64s_roundtrip() {
+    let original = vec![1u64, u64::MAX, 0, 0xDEAD_BEEF_CAFE];
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u64s(&mut buf, &original).unwrap();
+    assert_eq!(buf.len(), original.len() * 8);
+    let mut out = vec![0u64; original.len()];
+    crate::utils::serialization_utils::read_u64s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    assert_eq!(out, original);
+}
+
+#[test]
+fn serialization_write_read_u64s_empty() {
+    let mut buf = Vec::new();
+    crate::utils::serialization_utils::write_u64s(&mut buf, &[]).unwrap();
+    assert!(buf.is_empty());
+    let mut out: Vec<u64> = Vec::new();
+    crate::utils::serialization_utils::read_u64s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    assert!(out.is_empty());
+}
+
+// ============================================================================
+// XorbChunkHeader validate error paths
+// ============================================================================
+
+#[test]
+fn xorb_chunk_header_validate_version_too_high() {
+    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
+    buf[0] = 1; // version > CURRENT_VERSION (0)
+    // Valid compressed length
+    buf[1..4].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    buf[4] = CompressionScheme::None as u8;
+    // Valid uncompressed length
+    buf[5..8].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    let result = parse_chunk_header(buf);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, CoreError::MalformedData(_)));
+    assert!(err.to_string().contains("version too high"));
+}
+
+#[test]
+fn xorb_chunk_header_validate_compressed_length_too_large() {
+    use crate::xorb_object::constants::MAX_CHUNK_SIZE;
+    use std::sync::atomic::Ordering;
+    // Temporarily set a lower max so the 3-byte encoding can exceed it
+    let saved = MAX_CHUNK_SIZE.load(Ordering::Relaxed);
+    MAX_CHUNK_SIZE.store(4, Ordering::Relaxed);
+    // Value 100 > 4*2 = 8, should trigger the error
+    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
+    buf[1..4].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    buf[4] = CompressionScheme::None as u8;
+    buf[5..8].copy_from_slice(&10u32.to_le_bytes()[0..3]);
+    let result = parse_chunk_header(buf);
+    MAX_CHUNK_SIZE.store(saved, Ordering::Relaxed);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, CoreError::MalformedData(_)));
+    assert!(err.to_string().contains("compressed length too large"));
+}
+
+#[test]
+fn xorb_chunk_header_validate_uncompressed_length_too_large() {
+    use crate::xorb_object::constants::MAX_CHUNK_SIZE;
+    use std::sync::atomic::Ordering;
+    // Temporarily set a lower max so the 3-byte encoding can exceed it
+    let saved = MAX_CHUNK_SIZE.load(Ordering::Relaxed);
+    MAX_CHUNK_SIZE.store(50, Ordering::Relaxed);
+    // Value 100 > 50, should trigger the error
+    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
+    buf[1..4].copy_from_slice(&10u32.to_le_bytes()[0..3]);
+    buf[4] = CompressionScheme::None as u8;
+    buf[5..8].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    let result = parse_chunk_header(buf);
+    MAX_CHUNK_SIZE.store(saved, Ordering::Relaxed);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, CoreError::MalformedData(_)));
+    assert!(err.to_string().contains("uncompressed length too large"));
+}
+
+#[test]
+fn xorb_chunk_header_validate_invalid_compression_scheme() {
+    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
+    buf[4] = 255; // invalid compression scheme
+    buf[1..4].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    buf[5..8].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    let result = parse_chunk_header(buf);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// deserialize_chunks_to_writer tests
+// ============================================================================
+
+#[test]
+fn deserialize_chunks_to_writer_empty_input() {
+    let mut reader = std::io::Cursor::new(Vec::new());
+    let mut writer = Vec::new();
+    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
+    assert_eq!(compressed, 0);
+    assert_eq!(indices, vec![0]);
+}
+
+#[test]
+fn deserialize_chunks_to_writer_single_chunk() {
+    let data = b"single chunk test data";
+    let mut src = std::io::Cursor::new(Vec::new());
+    serialize_chunk(data, &mut src, CompressionScheme::None).unwrap();
+    let serialized = src.into_inner();
+
+    let mut reader = std::io::Cursor::new(&serialized);
+    let mut writer = Vec::new();
+    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
+    assert!(compressed > 0);
+    assert_eq!(writer, data);
+    assert_eq!(indices, vec![0, data.len() as u32]);
+}
+
+#[test]
+fn deserialize_chunks_to_writer_multiple_chunks() {
+    let chunk1 = b"first chunk data here";
+    let chunk2 = b"second chunk data here";
+    let mut src = std::io::Cursor::new(Vec::new());
+    serialize_chunk(chunk1, &mut src, CompressionScheme::LZ4).unwrap();
+    serialize_chunk(chunk2, &mut src, CompressionScheme::LZ4).unwrap();
+    let serialized = src.into_inner();
+
+    let mut reader = std::io::Cursor::new(&serialized);
+    let mut writer = Vec::new();
+    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
+    assert!(compressed > 0);
+    let expected = [chunk1.as_slice(), chunk2.as_slice()].concat();
+    assert_eq!(writer, expected);
+    assert_eq!(indices, vec![0, chunk1.len() as u32, (chunk1.len() + chunk2.len()) as u32]);
+}
+
+// ============================================================================
+// CompressionScheme decompress_from_reader tests
+// ============================================================================
+
+#[test]
+fn compression_scheme_decompress_from_reader_none() {
+    let data = b"decompress from reader test - none";
+    let mut reader = std::io::Cursor::new(data);
+    let mut writer = Vec::new();
+    let bytes = CompressionScheme::None
+        .decompress_from_reader(&mut reader, &mut writer)
+        .unwrap();
+    assert_eq!(bytes, data.len() as u64);
+    assert_eq!(writer, data);
+}
+
+#[test]
+fn compression_scheme_decompress_from_reader_lz4() {
+    let data = b"decompress from reader test - lz4";
+    let compressed = lz4_compress_from_slice(data).unwrap();
+    let mut reader = std::io::Cursor::new(&compressed);
+    let mut writer = Vec::new();
+    let bytes = CompressionScheme::LZ4
+        .decompress_from_reader(&mut reader, &mut writer)
+        .unwrap();
+    assert_eq!(bytes, data.len() as u64);
+    assert_eq!(writer, data);
+}
+
+#[test]
+fn compression_scheme_decompress_from_reader_empty() {
+    let compressed = lz4_compress_from_slice(b"").unwrap();
+    let mut reader = std::io::Cursor::new(&compressed);
+    let mut writer = Vec::new();
+    let bytes = CompressionScheme::LZ4
+        .decompress_from_reader(&mut reader, &mut writer)
+        .unwrap();
+    assert_eq!(bytes, 0);
+    assert!(writer.is_empty());
+}
+
+#[test]
+fn compression_scheme_decompress_from_reader_auto_errors() {
+    let mut reader = std::io::Cursor::new(b"anything");
+    let mut writer = Vec::new();
+    let result = CompressionScheme::Auto
+        .decompress_from_reader(&mut reader, &mut writer);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// XorbObject validate_xorb_object_info error paths
+// ============================================================================
+
+#[test]
+fn xorb_object_validate_info_num_chunks_mismatch_with_boundaries() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"valid_hash");
+    info.num_chunks = 2;
+    info.chunk_hashes = vec![compute_data_hash(b"c1"), compute_data_hash(b"c2")];
+    info.chunk_boundary_offsets = vec![100]; // only 1, but num_chunks=2
+    info.unpacked_chunk_offsets = vec![50, 150];
+    let obj = XorbObject::from_info(info);
+    assert!(obj.get_contents_length().is_err());
+}
+
+#[test]
+fn xorb_object_validate_info_num_chunks_mismatch_with_hashes() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"valid_hash");
+    info.num_chunks = 2;
+    info.chunk_hashes = vec![compute_data_hash(b"c1")]; // only 1
+    info.chunk_boundary_offsets = vec![100, 200];
+    info.unpacked_chunk_offsets = vec![50, 100];
+    let mut buf = Vec::new();
+    assert!(info.serialize(&mut buf).is_err());
+}
+
+#[test]
+fn xorb_object_validate_info_missing_xorb_hash() {
+    let mut info = XorbObjectInfoV1::default();
+    info.num_chunks = 1;
+    info.chunk_hashes = vec![compute_data_hash(b"c1")];
+    info.chunk_boundary_offsets = vec![100];
+    info.unpacked_chunk_offsets = vec![50];
+    // xorb_hash stays default (all zeros)
+    let obj = XorbObject::from_info(info);
+    assert!(obj.get_contents_length().is_err());
+}
+
+#[test]
+fn xorb_object_get_contents_length_uses_last_boundary() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"content_len");
+    info.num_chunks = 3;
+    info.chunk_hashes = vec![
+        compute_data_hash(b"c1"),
+        compute_data_hash(b"c2"),
+        compute_data_hash(b"c3"),
+    ];
+    info.chunk_boundary_offsets = vec![50, 120, 200];
+    info.unpacked_chunk_offsets = vec![30, 80, 150];
+    info.fill_in_boundary_offsets();
+    let obj = XorbObject::from_info(info);
+    assert_eq!(obj.get_contents_length().unwrap(), 200);
+}
+
+// ============================================================================
+// MDBShardInfo read_all_file_info_sections / read_all_xorb_blocks_full tests
+// ============================================================================
+
+#[test]
+fn mdb_shard_info_read_all_file_info_sections_empty() {
+    // Just a bookend
+    let bookend = FileDataSequenceHeader::bookend();
+    let mut buf = Vec::new();
+    bookend.serialize(&mut buf).unwrap();
+    let info = MDBShardInfo::default();
+    let mut cursor = std::io::Cursor::new(buf);
+    let files = info.read_all_file_info_sections(&mut cursor).unwrap();
+    assert!(files.is_empty());
+}
+
+#[test]
+fn mdb_shard_info_read_all_file_info_sections_multiple() {
+    let file1 = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(),
+            100u32,
+            0u32,
+            50u32,
+        )],
+        verification: vec![],
+        metadata_ext: None,
+    };
+    let file2 = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f2"), 0u32, false, false),
+        segments: vec![],
+        verification: vec![],
+        metadata_ext: None,
+    };
+    let mut buf = Vec::new();
+    file1.serialize(&mut buf).unwrap();
+    file2.serialize(&mut buf).unwrap();
+    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+
+    let info = MDBShardInfo::default();
+    let mut cursor = std::io::Cursor::new(buf);
+    let files = info.read_all_file_info_sections(&mut cursor).unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].segments[0].unpacked_segment_bytes, 100);
+}
+
+#[test]
+fn mdb_shard_info_read_all_xorb_blocks_full_empty() {
+    let bookend = XorbChunkSequenceHeader::bookend();
+    let mut buf = Vec::new();
+    bookend.serialize(&mut buf).unwrap();
+    let info = MDBShardInfo::default();
+    let mut cursor = std::io::Cursor::new(buf);
+    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor).unwrap();
+    assert!(xorb_infos.is_empty());
+}
+
+#[test]
+fn mdb_shard_info_read_all_xorb_blocks_full_multiple() {
+    let xorb1 = MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x1"), 1u32, 100u32),
+        chunks: vec![XorbChunkSequenceEntry::new(
+            compute_data_hash(b"c1"),
+            100u32,
+            0u32,
+        )],
+    };
+    let xorb2 = MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x2"), 0u32, 0u32),
+        chunks: vec![],
+    };
+    let mut buf = Vec::new();
+    xorb1.serialize(&mut buf).unwrap();
+    xorb2.serialize(&mut buf).unwrap();
+    XorbChunkSequenceHeader::bookend().serialize(&mut buf).unwrap();
+
+    let info = MDBShardInfo::default();
+    let mut cursor = std::io::Cursor::new(buf);
+    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor).unwrap();
+    assert_eq!(xorb_infos.len(), 2);
+    assert_eq!(xorb_infos[0].chunks.len(), 1);
+}
+
+// ============================================================================
+// MDBFileInfoView accessor tests
+// ============================================================================
+
+#[test]
+fn mdb_file_info_view_file_flags_and_contains() {
+    // For a header with both flags and num_entries=1:
+    // n_structs = 1 (header) + 1 (segments) + 1 (verification) + 1 (metadata_ext) = 4
+    use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, true);
+    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+    let ver = FileVerificationEntry::new(compute_data_hash(b"v"));
+    let met = FileMetadataExt::new(compute_data_hash(b"m"));
+
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    entry.serialize(&mut buf).unwrap();
+    ver.serialize(&mut buf).unwrap();
+    met.serialize(&mut buf).unwrap();
+    // Pad to full expected size
+    let expected_size = 4 * MDB_FILE_INFO_ENTRY_SIZE;
+    buf.resize(expected_size, 0);
+
+    let view = MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    assert_eq!(view.file_flags(), header.file_flags);
+    assert!(view.contains_verification());
+    assert!(view.contains_metadata_ext());
+
+    // Test without any flags
+    let header2 = FileDataSequenceHeader::new(compute_data_hash(b"g"), 0u32, false, false);
+    let mut buf2 = Vec::new();
+    header2.serialize(&mut buf2).unwrap();
+    let view2 = MDBFileInfoView::new(bytes::Bytes::from(buf2)).unwrap();
+    assert!(!view2.contains_verification());
+    assert!(!view2.contains_metadata_ext());
+}
+
+#[test]
+fn mdb_file_info_view_byte_size_with_verification() {
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, true, false);
+    let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32);
+    let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32);
+    let v1 = FileVerificationEntry::new(compute_data_hash(b"v1"));
+    let v2 = FileVerificationEntry::new(compute_data_hash(b"v2"));
+
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    e1.serialize(&mut buf).unwrap();
+    e2.serialize(&mut buf).unwrap();
+    v1.serialize(&mut buf).unwrap();
+    v2.serialize(&mut buf).unwrap();
+
+    use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
+    let view = MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    assert_eq!(
+        view.byte_size(true),
+        (1 + 2 + 2) * MDB_FILE_INFO_ENTRY_SIZE
+    );
+    assert_eq!(
+        view.byte_size(false),
+        (1 + 2) * MDB_FILE_INFO_ENTRY_SIZE
+    );
+}
+
+// ============================================================================
+// HashedWrite tests
+// ============================================================================
+
+#[test]
+fn hashed_write_computes_hash() {
+    use crate::merklehash::HashedWrite;
+    let data = b"hashed write test data";
+    let mut writer = HashedWrite::new(Vec::new());
+    writer.write_all(data).unwrap();
+    let hash = writer.hash();
+    let expected = compute_data_hash(data);
+    assert_eq!(hash, expected);
+}
+
+#[test]
+fn hashed_write_into_inner() {
+    use crate::merklehash::HashedWrite;
+    let data = b"data for into_inner";
+    let mut writer = HashedWrite::new(Vec::new());
+    writer.write_all(data).unwrap();
+    let inner = writer.into_inner();
+    assert_eq!(inner, data);
+}
+
+#[test]
+fn hashed_write_empty_input() {
+    use crate::merklehash::HashedWrite;
+    let mut writer = HashedWrite::new(Vec::new());
+    let hash = writer.hash();
+    let expected = compute_data_hash(b"");
+    assert_eq!(hash, expected);
+}
+
+#[test]
+fn hashed_write_flush() {
+    use crate::merklehash::HashedWrite;
+    let mut writer = HashedWrite::new(Vec::new());
+    writer.write_all(b"flush test").unwrap();
+    writer.flush().unwrap();
+}
+
+// ============================================================================
+// XorbObject serialize_given_info with various sizes
+// ============================================================================
+
+#[test]
+fn xorb_object_serialize_given_info_zero_chunks() {
+    let info = XorbObjectInfoV1::default();
+    let mut buf = Vec::new();
+    let (obj, written) = XorbObject::serialize_given_info(&mut buf, info).unwrap();
+    assert!(written > 0);
+    assert_eq!(obj.info.num_chunks, 0);
+}
+
+// ============================================================================
+// try_read_chunk_header edge cases
+// ============================================================================
+
+#[test]
+fn try_read_chunk_header_empty_reader_returns_none() {
+    let mut reader = std::io::Cursor::new(Vec::new());
+    // We can't call try_read_chunk_header directly (it's private),
+    // but deserialize_chunks_to_writer should handle this case
+    let mut writer = Vec::new();
+    let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
+    assert_eq!(compressed, 0);
+    assert_eq!(indices, vec![0]);
 }
