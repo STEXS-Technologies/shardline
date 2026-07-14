@@ -8,7 +8,10 @@
         clippy::indexing_slicing,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::panic,
+        clippy::match_wild_err_arm,
+        clippy::ignored_unit_patterns
     )
 )]
 
