@@ -35,13 +35,13 @@ pub struct ServerAuth {
 
 impl ServerAuth {
     /// Creates a bearer-token verifier from a signing key using the local
-    /// Ed25519 provider.
+    /// HMAC-SHA256 provider.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the signing key is invalid.
     pub fn new(signing_key: &[u8]) -> Result<Self, ServerError> {
-        let provider = shardline_server_core::auth::LocalEd25519Provider::new(signing_key)?;
+        let provider = shardline_server_core::auth::LocalHmacProvider::new(signing_key)?;
         Ok(Self {
             provider: std::sync::Arc::new(provider),
         })

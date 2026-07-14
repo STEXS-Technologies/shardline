@@ -2,17 +2,17 @@ use shardline_protocol::{TokenClaims, TokenSigner};
 
 use crate::{AuthError, AuthProvider};
 
-/// Ed25519 key-based token provider.
+/// Shared-key token provider using HMAC-SHA256.
 ///
 /// This is the default adapter. It signs and verifies tokens using a shared
 /// HMAC-SHA256 signing key via [`TokenSigner`].
 #[derive(Clone)]
-pub struct LocalEd25519Provider {
+pub struct LocalHmacProvider {
     signer: TokenSigner,
 }
 
-impl LocalEd25519Provider {
-    /// Creates a local Ed25519 provider from raw signing key bytes.
+impl LocalHmacProvider {
+    /// Creates a local HMAC-SHA256 provider from raw signing key bytes.
     ///
     /// # Errors
     ///
@@ -24,7 +24,7 @@ impl LocalEd25519Provider {
     }
 }
 
-impl AuthProvider for LocalEd25519Provider {
+impl AuthProvider for LocalHmacProvider {
     fn verify_token(&self, token: &str) -> Result<TokenClaims, AuthError> {
         self.signer.verify_now(token).map_err(AuthError::from)
     }
@@ -36,9 +36,9 @@ impl AuthProvider for LocalEd25519Provider {
     }
 }
 
-impl std::fmt::Debug for LocalEd25519Provider {
+impl std::fmt::Debug for LocalHmacProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalEd25519Provider")
+        f.debug_struct("LocalHmacProvider")
             .field("signer", &"<redacted>")
             .finish()
     }
@@ -69,16 +69,16 @@ mod tests {
         .unwrap()
     }
 
-    // ── LocalEd25519Provider::new ────────────────────────────────────────
+    // ── LocalHmacProvider::new ────────────────────────────────────────
 
     #[test]
     fn new_with_valid_key_succeeds() {
-        assert!(LocalEd25519Provider::new(VALID_KEY).is_ok());
+        assert!(LocalHmacProvider::new(VALID_KEY).is_ok());
     }
 
     #[test]
     fn new_with_empty_key_errors() {
-        let result = LocalEd25519Provider::new(b"");
+        let result = LocalHmacProvider::new(b"");
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AuthError::ProviderError(_)));
     }
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn verify_token_valid_roundtrip() {
-        let provider = LocalEd25519Provider::new(VALID_KEY).unwrap();
+        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
         let claims = test_claims();
         let token = provider.mint_token(&claims).unwrap();
 
@@ -101,8 +101,8 @@ mod tests {
         let key1 = b"test-signing-key-32-bytes-long!!";
         let key2 = b"another-signing-key-32-bytes-ok!";
 
-        let provider1 = LocalEd25519Provider::new(key1).unwrap();
-        let provider2 = LocalEd25519Provider::new(key2).unwrap();
+        let provider1 = LocalHmacProvider::new(key1).unwrap();
+        let provider2 = LocalHmacProvider::new(key2).unwrap();
 
         let claims = test_claims();
         let token = provider1.mint_token(&claims).unwrap();
@@ -114,14 +114,14 @@ mod tests {
 
     #[test]
     fn verify_token_empty_string() {
-        let provider = LocalEd25519Provider::new(VALID_KEY).unwrap();
+        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
         let result = provider.verify_token("");
         assert!(result.is_err());
     }
 
     #[test]
     fn verify_token_expired() {
-        let provider = LocalEd25519Provider::new(VALID_KEY).unwrap();
+        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
         let repo = RepositoryScope::new(
             RepositoryProvider::Generic,
             "test-owner",
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn mint_token_produces_verifiable_token() {
-        let provider = LocalEd25519Provider::new(VALID_KEY).unwrap();
+        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
         let claims = test_claims();
 
         let token = provider.mint_token(&claims).unwrap();
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn debug_does_not_leak_signing_key() {
-        let provider = LocalEd25519Provider::new(VALID_KEY).unwrap();
+        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
         let debug_str = format!("{provider:?}");
         // The key bytes must never appear in debug output
         assert!(!debug_str.contains("test-signing-key"));

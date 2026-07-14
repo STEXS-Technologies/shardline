@@ -34,7 +34,7 @@ use crate::{
     xet_adapter::{XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE},
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server_core::{AuthProvider, auth::LocalEd25519Provider};
+use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_xet_core::merklehash::compute_data_hash;
 
 // ---------------------------------------------------------------------------
@@ -734,7 +734,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
 /// Mints a signed test token with the given scope using the shared test
 /// signing key.
 fn test_token(scope: TokenScope) -> String {
-    let provider = LocalEd25519Provider::new(TEST_SIGNING_KEY).unwrap();
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let repo =
         RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
     let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
@@ -744,7 +744,7 @@ fn test_token(scope: TokenScope) -> String {
 /// Mints a signed test token with the given scope and custom repository
 /// owner/name.
 fn _test_token_with_scope_and_repo(scope: TokenScope, owner: &str, name: &str) -> String {
-    let provider = LocalEd25519Provider::new(TEST_SIGNING_KEY).unwrap();
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let repo =
         RepositoryScope::new(RepositoryProvider::Generic, owner, name, Some("main")).unwrap();
     let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
@@ -6634,7 +6634,7 @@ async fn request_with_expired_token() {
     let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
 
     // Mint a token that expires at unix epoch (already long past)
-    let provider = LocalEd25519Provider::new(TEST_SIGNING_KEY).unwrap();
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let repo =
         RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
     let claims = TokenClaims::new("shardline", "test", TokenScope::Read, repo, 0).unwrap();
