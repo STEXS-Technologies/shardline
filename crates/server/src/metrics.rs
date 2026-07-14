@@ -504,6 +504,96 @@ mod tests {
             "webhook_events should increase (before: {before}, after: {after})"
         );
     }
+
+    // ── Remaining record_* functions ──────────────────────────────────────
+
+    #[test]
+    fn record_range_request_does_not_panic() {
+        record_range_request();
+    }
+
+    #[test]
+    fn record_gc_run_does_not_panic() {
+        record_gc_run(1.5, 100, 4096);
+    }
+
+    #[test]
+    fn record_fsck_run_does_not_panic() {
+        record_fsck_run(0.5, 3);
+    }
+
+    #[test]
+    fn record_s3_request_does_not_panic() {
+        record_s3_request("GetObject", true, 0.1);
+    }
+
+    #[test]
+    fn record_s3_error_does_not_panic() {
+        record_s3_error("NoSuchKey");
+    }
+
+    #[test]
+    fn record_hub_api_request_with_unknown_status_does_not_panic() {
+        record_hub_api_request("/api/v1/test", "PATCH", "unknown");
+    }
+
+    #[test]
+    fn record_local_io_read_success_does_not_panic() {
+        record_local_io("read", true, 0.01);
+    }
+
+    #[test]
+    fn record_local_io_write_failure_does_not_panic() {
+        record_local_io("write", false, 0.05);
+    }
+
+    #[test]
+    fn record_upload_protocol_variants() {
+        record_upload("xet", 1024, 0.5, true);
+        record_upload("lfs", 2048, 1.0, false);
+    }
+
+    #[test]
+    fn record_download_protocol_variants() {
+        record_download("xet", 4096, 2.0, true);
+        record_download("oci", 8192, 3.0, false);
+    }
+
+    #[test]
+    fn record_xet_reconstruction_does_not_panic() {
+        record_xet_reconstruction(0.25, 10);
+    }
+
+    #[test]
+    fn record_reconstruction_with_ok_and_err() {
+        record_reconstruction(true, 0.1, 5);
+        record_reconstruction(false, 0.2, 0);
+    }
+
+    #[test]
+    fn record_hub_api_request_different_methods() {
+        record_hub_api_request("/repos/test/assets", "GET", "200");
+        record_hub_api_request("/repos/test/assets/contents/path", "PUT", "201");
+        record_hub_api_request("/repos/test/assets/contents/path", "DELETE", "204");
+    }
+
+    #[test]
+    fn record_hub_api_commit_different_types() {
+        record_hub_api_commit("upsert");
+        record_hub_api_commit("delete");
+        record_hub_api_commit("unknown-operation");
+    }
+
+    #[test]
+    fn record_token_exchange_does_not_panic() {
+        record_token_exchange();
+    }
+
+    #[test]
+    fn record_s3_request_with_false_ok_status() {
+        record_s3_request("PutObject", false, 0.3);
+        record_s3_request("ListObjects", true, 0.05);
+    }
 }
 
 // ── Axum middleware & routes ─────────────────────────────────────────────

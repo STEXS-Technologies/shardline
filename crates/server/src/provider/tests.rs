@@ -684,6 +684,224 @@ fn github_provider() -> Result<BuiltInProvider, ProviderServiceError> {
     )))
 }
 
+// ── visibility ──────────────────────────────────────────────────────────
+
+#[test]
+fn visibility_private() {
+    assert_eq!(
+        super::visibility("private"),
+        RepositoryVisibility::Private
+    );
+}
+
+#[test]
+fn visibility_internal() {
+    assert_eq!(
+        super::visibility("internal"),
+        RepositoryVisibility::Internal
+    );
+}
+
+#[test]
+fn visibility_public() {
+    assert_eq!(
+        super::visibility("public"),
+        RepositoryVisibility::Public
+    );
+}
+
+#[test]
+fn visibility_unknown_defaults_to_public() {
+    assert_eq!(
+        super::visibility("unknown-value"),
+        RepositoryVisibility::Public
+    );
+}
+
+#[test]
+fn visibility_empty_defaults_to_public() {
+    assert_eq!(
+        super::visibility(""),
+        RepositoryVisibility::Public
+    );
+}
+
+// ── parse_provider_kind ────────────────────────────────────────────────
+
+#[test]
+fn parse_provider_kind_github() {
+    let result = super::parse_provider_kind("github");
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), ProviderKind::GitHub);
+}
+
+#[test]
+fn parse_provider_kind_gitea() {
+    let result = super::parse_provider_kind("gitea");
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), ProviderKind::Gitea);
+}
+
+#[test]
+fn parse_provider_kind_gitlab() {
+    let result = super::parse_provider_kind("gitlab");
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), ProviderKind::GitLab);
+}
+
+#[test]
+fn parse_provider_kind_codeberg() {
+    let result = super::parse_provider_kind("codeberg");
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), ProviderKind::Codeberg);
+}
+
+#[test]
+fn parse_provider_kind_generic() {
+    let result = super::parse_provider_kind("generic");
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), ProviderKind::Generic);
+}
+
+#[test]
+fn parse_provider_kind_unknown() {
+    let result = super::parse_provider_kind("unknown");
+    assert!(matches!(result, Err(ProviderServiceError::UnknownProvider)));
+}
+
+#[test]
+fn parse_provider_kind_empty_string() {
+    let result = super::parse_provider_kind("");
+    assert!(matches!(result, Err(ProviderServiceError::UnknownProvider)));
+}
+
+// ── webhook_request ─────────────────────────────────────────────────────
+
+#[test]
+fn webhook_request_returns_ok_with_valid_headers() {
+    use axum::http::HeaderValue;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-github-event", HeaderValue::from_static("push"));
+    headers.insert("x-github-delivery", HeaderValue::from_static("abc-123"));
+    headers.insert("x-hub-signature-256", HeaderValue::from_static("sha256=abc"));
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::GitHub, &headers, body);
+    assert!(result.is_ok());
+    let request = result.unwrap();
+    assert_eq!(request.event_name(), "push");
+    assert_eq!(request.delivery_id(), "abc-123");
+    assert!(request.signature().is_some());
+}
+
+#[test]
+fn webhook_request_missing_headers_uses_defaults() {
+    let headers = HeaderMap::new();
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::GitHub, &headers, body);
+    assert!(result.is_ok());
+    let request = result.unwrap();
+    // Missing event header defaults to empty string
+    assert_eq!(request.event_name(), "");
+    assert_eq!(request.delivery_id(), "");
+    assert!(request.signature().is_none());
+}
+
+#[test]
+fn webhook_request_rejects_oversized_event_header() {
+    let mut headers = HeaderMap::new();
+    let oversized = "x".repeat(600);
+    headers.insert("x-github-event", HeaderValue::from_str(&oversized).unwrap());
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::GitHub, &headers, body);
+    assert!(matches!(result, Err(ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookPayload))));
+}
+
+#[test]
+fn webhook_request_rejects_oversized_signature_header() {
+    let mut headers = HeaderMap::new();
+    let oversized = "x".repeat(5000);
+    headers.insert("x-hub-signature-256", HeaderValue::from_str(&oversized).unwrap());
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::GitHub, &headers, body);
+    assert!(matches!(result, Err(ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookAuthentication))));
+}
+
+// ── ProviderServiceError Display tests ─────────────────────────────────
+
+#[test]
+fn provider_service_error_display_empty_api_key() {
+    let err = ProviderServiceError::EmptyApiKey;
+    assert_eq!(err.to_string(), "provider bootstrap key must not be empty");
+}
+
+#[test]
+fn provider_service_error_display_api_key_too_large() {
+    let err = ProviderServiceError::ApiKeyTooLarge;
+    assert_eq!(err.to_string(), "provider bootstrap key exceeded the supported metadata size");
+}
+
+#[test]
+fn provider_service_error_display_missing_api_key() {
+    let err = ProviderServiceError::MissingApiKey;
+    assert_eq!(err.to_string(), "provider bootstrap key is missing");
+}
+
+#[test]
+fn provider_service_error_display_invalid_api_key() {
+    let err = ProviderServiceError::InvalidApiKey;
+    assert_eq!(err.to_string(), "provider bootstrap key is invalid");
+}
+
+#[test]
+fn provider_service_error_display_config_too_large() {
+    let err = ProviderServiceError::ConfigTooLarge { observed_bytes: 100, maximum_bytes: 50 };
+    let display = err.to_string();
+    assert!(display.contains("provider configuration exceeded the bounded parser ceiling"));
+}
+
+#[test]
+fn provider_service_error_display_config_length_mismatch() {
+    let err = ProviderServiceError::ConfigLengthMismatch;
+    assert_eq!(err.to_string(), "provider configuration length did not match the validated length");
+}
+
+#[test]
+fn provider_service_error_display_duplicate_provider() {
+    let err = ProviderServiceError::DuplicateProvider;
+    assert_eq!(err.to_string(), "provider is configured more than once");
+}
+
+#[test]
+fn provider_service_error_display_missing_webhook_secret() {
+    let err = ProviderServiceError::MissingWebhookSecret;
+    assert_eq!(err.to_string(), "provider webhook secret must be configured");
+}
+
+#[test]
+fn provider_service_error_display_empty_webhook_secret() {
+    let err = ProviderServiceError::EmptyWebhookSecret;
+    assert_eq!(err.to_string(), "provider webhook secret must not be empty");
+}
+
+#[test]
+fn provider_service_error_display_unknown_provider() {
+    let err = ProviderServiceError::UnknownProvider;
+    assert_eq!(err.to_string(), "provider is not configured");
+}
+
+#[test]
+fn provider_service_error_display_denied() {
+    let err = ProviderServiceError::Denied;
+    assert_eq!(err.to_string(), "provider denied requested repository access");
+}
+
+#[test]
+fn provider_service_error_display_debug_empty_api_key() {
+    let err = ProviderServiceError::EmptyApiKey;
+    let debug = format!("{err:?}");
+    assert!(debug.contains("EmptyApiKey"));
+}
+
 fn github_webhook_signature(body: &[u8]) -> Option<String> {
     let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret");
     assert!(mac.is_ok());
@@ -695,4 +913,79 @@ fn github_webhook_signature(body: &[u8]) -> Option<String> {
         "sha256={}",
         hex::encode(mac.finalize().into_bytes())
     ))
+}
+
+// ── optional_bounded_header_value ────────────────────────────────────────
+
+#[test]
+fn optional_bounded_header_value_returns_none_when_header_missing() {
+    let headers = HeaderMap::new();
+    let result = super::optional_bounded_header_value(
+        &headers,
+        "x-nonexistent",
+        100,
+        ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookPayload),
+    );
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none());
+}
+
+#[test]
+fn optional_bounded_header_value_returns_value_when_within_bounds() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-my-header", HeaderValue::from_static("hello"));
+    let result = super::optional_bounded_header_value(
+        &headers,
+        "x-my-header",
+        100,
+        ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookPayload),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some("hello"));
+}
+
+#[test]
+fn optional_bounded_header_value_rejects_oversized_header() {
+    let mut headers = HeaderMap::new();
+    let oversized = "x".repeat(200);
+    let value = HeaderValue::from_str(&oversized).unwrap();
+    headers.insert("x-oversized", value);
+    let result = super::optional_bounded_header_value(
+        &headers,
+        "x-oversized",
+        100,
+        ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookAuthentication),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn optional_bounded_header_value_with_valid_ascii_header_returns_ok() {
+    let mut headers = HeaderMap::new();
+    let value = HeaderValue::from_static("simple-ascii-value");
+    headers.insert("x-ascii-header", value);
+    let result = super::optional_bounded_header_value(
+        &headers,
+        "x-ascii-header",
+        100,
+        ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookAuthentication),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some("simple-ascii-value"));
+}
+
+#[test]
+fn optional_bounded_header_value_exact_boundary_is_ok() {
+    let mut headers = HeaderMap::new();
+    let exact = "a".repeat(50);
+    let value = HeaderValue::from_str(&exact).unwrap();
+    headers.insert("x-exact", value);
+    let result = super::optional_bounded_header_value(
+        &headers,
+        "x-exact",
+        50,
+        ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookPayload),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some(exact.as_str()));
 }

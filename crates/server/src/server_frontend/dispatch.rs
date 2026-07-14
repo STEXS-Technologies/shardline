@@ -175,4 +175,91 @@ mod tests {
         let result = referenced_term_object_key(&frontends, &hash);
         assert!(matches!(result, Err(ServerError::InvalidContentHash)));
     }
+
+    // -----------------------------------------------------------------------
+    // visit_protocol_object_member_chunks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn visit_protocol_object_member_chunks_with_non_xet_frontends_returns_ok() {
+        let hash = "ef".repeat(32);
+        let key = ObjectKey::parse(&format!("xorbs/default/{h}/{h}", h = &hash[..2])).unwrap();
+        // Use a blackhole store (never returns metadata)
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let frontends = vec![ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp, ServerFrontend::Hub];
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(
+            &frontends,
+            &store,
+            &key,
+            |_hash| {
+                visited = true;
+                Ok(())
+            },
+        );
+        // Non-Xet frontends should return Ok without calling the visitor
+        assert!(result.is_ok());
+        assert!(!visited);
+    }
+
+    #[test]
+    fn visit_protocol_object_member_chunks_with_empty_frontends_returns_ok() {
+        let key = ObjectKey::parse("some/object").unwrap();
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let frontends: Vec<ServerFrontend> = Vec::new();
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(
+            &frontends,
+            &store,
+            &key,
+            |_hash| {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!visited);
+    }
+
+    // -----------------------------------------------------------------------
+    // append_referenced_term_bytes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_referenced_term_bytes_with_non_xet_frontends_returns_error() {
+        use shardline_index::FileChunkRecord;
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let term = FileChunkRecord {
+            hash: "ab".repeat(32),
+            offset: 0,
+            length: 1024,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 1024,
+        };
+        let frontends = vec![ServerFrontend::Lfs];
+        let mut output = Vec::new();
+        let result = append_referenced_term_bytes(&frontends, &store, &term, &mut output);
+        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
+    }
+
+    #[test]
+    fn append_referenced_term_bytes_with_empty_frontends_returns_error() {
+        use shardline_index::FileChunkRecord;
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let term = FileChunkRecord {
+            hash: "ab".repeat(32),
+            offset: 0,
+            length: 1024,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 1024,
+        };
+        let frontends: Vec<ServerFrontend> = Vec::new();
+        let mut output = Vec::new();
+        let result = append_referenced_term_bytes(&frontends, &store, &term, &mut output);
+        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
+    }
 }
