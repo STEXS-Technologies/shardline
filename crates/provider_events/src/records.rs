@@ -223,6 +223,21 @@ mod tests {
     }
 
     #[test]
+    fn record_belongs_to_repository_check_all_fields() {
+        // Verify that all three conditions (provider, owner, name) must match
+        let record = test_record();
+        // Owner differs
+        let wrong_owner = RepositoryRef::new(ProviderKind::GitHub, "wrong", "repo").unwrap();
+        assert!(!record_belongs_to_repository(&record, &wrong_owner));
+        // Name differs
+        let wrong_name = RepositoryRef::new(ProviderKind::GitHub, "owner", "wrong").unwrap();
+        assert!(!record_belongs_to_repository(&record, &wrong_name));
+        // Provider differs
+        let wrong_provider = RepositoryRef::new(ProviderKind::GitLab, "owner", "repo").unwrap();
+        assert!(!record_belongs_to_repository(&record, &wrong_provider));
+    }
+
+    #[test]
     fn record_belongs_to_repository_no_scope() {
         let record = super::FileRecord {
             repository_scope: None,

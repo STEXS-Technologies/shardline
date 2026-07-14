@@ -535,4 +535,107 @@ mod tests {
             "storage migration wrote corrupt source bytes into the destination under the original key"
         );
     }
+
+    #[test]
+    fn storage_migration_dry_run_does_not_write() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+
+        let body = b"dry-run-payload";
+        let key = crate::chunk_store::chunk_object_key_for_computed_hash(
+            crate::local_backend::chunk_hash(body),
+        )
+        .map(|(_hash, key)| key)
+        .unwrap();
+        let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
+        let integrity = ObjectIntegrity::new(crate::local_backend::chunk_hash(body), body.len() as u64);
+        source_store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
+
+        let options = StorageMigrationOptions::new(
+            StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
+            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
+        )
+        .with_dry_run(true);
+        let report = run_storage_migration(&options).unwrap();
+        assert_eq!(report.scanned_objects, 1);
+        assert_eq!(report.scanned_bytes, body.len() as u64);
+        assert_eq!(report.inserted_objects, 0);
+        assert_eq!(report.copied_bytes, 0);
+        assert!(report.dry_run);
+
+        // Verify destination is untouched
+        let dest_path = destination.path().join("chunks").join(key.as_str());
+        assert!(!dest_path.exists());
+    }
+
+    #[test]
+    fn storage_migration_local_to_local_with_different_prefixes() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+
+        let body = b"prefix-test-data";
+        let key = crate::chunk_store::chunk_object_key_for_computed_hash(
+            crate::local_backend::chunk_hash(body),
+        )
+        .map(|(_hash, key)| key)
+        .unwrap();
+
+        let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
+        let integrity = ObjectIntegrity::new(crate::local_backend::chunk_hash(body), body.len() as u64);
+        source_store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
+
+        // Use a prefix that won't match
+        let options = StorageMigrationOptions::new(
+            StorageMigrationEndpoint::LocalStateRoot(source.path().to_path_buf()),
+            StorageMigrationEndpoint::LocalStateRoot(destination.path().to_path_buf()),
+        )
+        .with_prefix("nonexistent-prefix/".to_owned());
+        let report = run_storage_migration(&options).unwrap();
+        assert_eq!(report.scanned_objects, 0);
+        assert_eq!(report.inserted_objects, 0);
+    }
+
+    #[test]
+    fn validate_source_object_matches_content_addressed_key_xorb_path() {
+        // Create a valid xorb key pattern: xorbs/default/{prefix}/{hash}.xorb
+        let hash_hex = "aa".repeat(32);
+        let key_str = format!("xorbs/default/{}/{}.xorb", &hash_hex[..2], hash_hex);
+        let key = ObjectKey::parse(&key_str).unwrap();
+
+        // Verify the key is recognized as a xorb key
+        let parsed =
+            crate::xet_adapter::xorb_hash_from_object_key_if_present(&key).unwrap();
+        assert!(parsed.is_some(), "key should parse xorb hash: {key_str}");
+
+        // Call with bytes that are not a valid serialized xorb
+        let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
+            &key,
+            b"not-a-valid-xorb",
+        );
+        assert!(result.is_err(), "expected err for invalid xorb bytes, got ok");
+    }
+
+    #[test]
+    fn validate_source_xorb_non_xorb_key_does_not_validate_as_xorb() {
+        // A key without the xorb format should skip the xorb check
+        let key = ObjectKey::parse("some/random/key.bin").unwrap();
+        let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
+            &key,
+            b"any-data",
+        );
+        assert!(result.is_ok(), "non-xorb key should pass validation");
+        // Also test that a valid xorb key pattern but with invalid xorb data fails
+        let hash_hex = "bb".repeat(32);
+        let key_str = format!("xorbs/default/{}/{}.xorb", &hash_hex[..2], hash_hex);
+        let key = ObjectKey::parse(&key_str).unwrap();
+        let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
+            &key,
+            b"\0\0\0\0",
+        );
+        assert!(result.is_err(), "invalid xorb bytes should fail validation");
+    }
 }
