@@ -3203,6 +3203,7 @@ dependencies = [
  "shardline-server-core",
  "shardline-storage",
  "shardline-xet-adapter",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

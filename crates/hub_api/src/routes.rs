@@ -2710,4 +2710,104 @@ Bob,"say ""hi"""#;
         let debug = format!("{state:?}");
         assert!(debug.contains("auth"));
     }
+
+    // -----------------------------------------------------------------------
+    // parse_csv_line — remaining edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_csv_line_quoted_field_with_trailing_comma() {
+        // After closing quote, comma should be skipped
+        let result = parse_csv_line(r#""a","#);
+        assert_eq!(result, vec!["a", ""]);
+    }
+
+    #[test]
+    fn parse_csv_line_only_commas() {
+        let result = parse_csv_line(",,");
+        assert_eq!(result, vec!["", "", ""]);
+    }
+
+    #[test]
+    fn parse_csv_line_unterminated_quote_only() {
+        let result = parse_csv_line("\"");
+        assert_eq!(result, vec![""]);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_yaml_frontmatter — additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_yaml_frontmatter_no_closing_delimiter() {
+        let content = b"---\nkey: value\n";
+        assert!(parse_yaml_frontmatter(content).is_none());
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_closing_on_same_line() {
+        // Closing --- on its own line (no trailing newline) is valid.
+        let content = b"---\nkey: value\n---";
+        let result = parse_yaml_frontmatter(content);
+        assert!(result.is_some(), "closing --- on its own line is valid");
+        assert_eq!(result.unwrap().get("key").and_then(|v| v.as_str()), Some("value"));
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_line_without_colon_skipped() {
+        let content = b"---\nkey: value\nno_colon_line\nother: val\n---\n";
+        let result = parse_yaml_frontmatter(content).unwrap();
+        assert_eq!(result.get("key").and_then(|v| v.as_str()), Some("value"));
+        assert_eq!(result.get("other").and_then(|v| v.as_str()), Some("val"));
+        assert!(result.get("no_colon_line").is_none());
+    }
+
+    #[test]
+    fn parse_yaml_frontmatter_json_number_and_bool_values() {
+        let content = b"---\ncount: 42\nactive: true\n---\n";
+        let result = parse_yaml_frontmatter(content).unwrap();
+        assert_eq!(result.get("count").and_then(|v| v.as_u64()), Some(42));
+        assert_eq!(result.get("active").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // tree_entries_at_path — LFS file at root level
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tree_entries_at_path_lfs_file_at_root() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "model.bin".into(),
+            size: 5_000_000,
+            sha: "oid123".into(),
+            is_lfs: true,
+            inline_content: None,
+        }];
+        let entries = tree_entries_at_path(&files, "");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry_type, "file");
+        assert!(entries[0].lfs.is_some());
+        let lfs = entries[0].lfs.as_ref().unwrap();
+        assert_eq!(lfs.oid, "oid123");
+        assert_eq!(lfs.size, 5_000_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // tree_entries_recursive — empty prefix edge case
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tree_entries_recursive_non_matching_prefix() {
+        use shardline_index::hub::HubFileEntry;
+        let files = vec![HubFileEntry {
+            path: "other/file.txt".into(),
+            size: 10,
+            sha: "x".into(),
+            is_lfs: false,
+            inline_content: None,
+        }];
+        let entries = tree_entries_recursive(&files, "nonexistent");
+        assert!(entries.is_empty());
+    }
 }

@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn debug_format_includes_variant_names() {
-        let cases = [
+        let mut cases: Vec<(HubApiError, &str)> = vec![
             (HubApiError::NotFound, "NotFound"),
             (HubApiError::Unauthorized, "Unauthorized"),
             (HubApiError::Forbidden, "Forbidden"),
@@ -325,6 +325,14 @@ mod tests {
             (HubApiError::Conflict("z".into()), "Conflict"),
             (HubApiError::SigningKeyError("k".into()), "SigningKeyError"),
         ];
+        // Add variants using From conversions
+        cases.push((std::io::Error::other("io").into(), "Io"));
+        cases.push((serde_json::from_str::<()>("bad").unwrap_err().into(), "Json"));
+        cases.push((
+            crate::git::pktline::PktLineError::PayloadTooLarge { size: 100, max: 50 }.into(),
+            "PktLine",
+        ));
+        cases.push((crate::git::pack::PackError::TooManyObjects.into(), "Pack"));
         for (error, expected_variant) in &cases {
             let debug = format!("{error:?}");
             assert!(
