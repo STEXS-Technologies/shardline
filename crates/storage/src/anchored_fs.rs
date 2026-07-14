@@ -637,6 +637,22 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn open_directory_chain_rejects_symlink_in_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link");
+        symlink(&target, &link).unwrap();
+        let path = link.join("subdir");
+
+        let result = open_directory_chain(&path, true, None, invalid_path_error);
+        assert!(result.is_err());
+    }
+
     // ── open_or_create_child_directory ────────────────────────────────────
 
     #[test]
@@ -934,6 +950,15 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn rename_at_nonexistent_source() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
+
+        let result = rename_at(&parent, OsStr::new("nonexistent.txt"), OsStr::new("new.txt"));
+        assert!(result.is_err());
+    }
+
     // ── remove_at ────────────────────────────────────────────────────────
 
     #[test]
@@ -952,6 +977,16 @@ mod tests {
         let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
         let result = remove_at(&parent, OsStr::new("nope.txt"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_at_null_byte_in_name() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
+
+        let bad_name = OsStr::from_bytes(b"bad\x00file");
+        let result = remove_at(&parent, bad_name);
         assert!(result.is_err());
     }
 

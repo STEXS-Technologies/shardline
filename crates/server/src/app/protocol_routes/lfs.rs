@@ -515,7 +515,8 @@ mod tests {
 
     use super::{
         acquire_lfs_patch_lock, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
-        lfs_patch_object, lfs_put_object, lfs_verify_object, parse_content_range,
+        lfs_patch_object, lfs_put_object, lfs_validation_response, lfs_verify_object,
+        parse_content_range,
     };
 
     // ---------------------------------------------------------------------------
@@ -657,6 +658,32 @@ mod tests {
     fn parse_content_range_accepts_end_equals_start() {
         // Single-byte chunk at offset 5.
         assert_eq!(parse_content_range("bytes 5-5/200"), Ok((5, 5, 200)));
+    }
+
+    // ── lfs_validation_response ────────────────────────────────────────────
+
+    #[test]
+    fn lfs_validation_response_returns_unprocessable_entity() {
+        let response = lfs_validation_response("test error");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lfs_validation_response_includes_json_body() {
+        let response = lfs_validation_response("invalid oid");
+        let body = response.into_body();
+        let bytes = axum::body::to_bytes(body, 1024).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["message"], "invalid oid");
+    }
+
+    #[test]
+    fn lfs_validation_response_sets_lfs_content_type() {
+        let response = lfs_validation_response("too many objects");
+        assert_eq!(
+            response.headers()["content-type"],
+            crate::LFS_CONTENT_TYPE
+        );
     }
 
     // =========================================================================

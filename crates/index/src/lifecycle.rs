@@ -505,4 +505,198 @@ mod tests {
         );
         assert_eq!(delivery, Err(WebhookDeliveryError::EmptyRepositoryName));
     }
+
+    // ── Error display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn quarantine_candidate_error_display() {
+        assert_eq!(
+            QuarantineCandidateError::InvertedTimeline.to_string(),
+            "quarantine delete-after time must not precede first-unreachable time"
+        );
+    }
+
+    #[test]
+    fn retention_hold_error_empty_reason_display() {
+        assert_eq!(
+            RetentionHoldError::EmptyReason.to_string(),
+            "retention hold reason must not be empty"
+        );
+    }
+
+    #[test]
+    fn retention_hold_error_inverted_timeline_display() {
+        assert_eq!(
+            RetentionHoldError::InvertedTimeline.to_string(),
+            "retention hold release time must not precede held time"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_error_empty_repository_owner_display() {
+        assert_eq!(
+            WebhookDeliveryError::EmptyRepositoryOwner.to_string(),
+            "webhook delivery repository owner must not be empty"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_error_empty_repository_name_display() {
+        assert_eq!(
+            WebhookDeliveryError::EmptyRepositoryName.to_string(),
+            "webhook delivery repository name must not be empty"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_error_empty_delivery_id_display() {
+        assert_eq!(
+            WebhookDeliveryError::EmptyDeliveryId.to_string(),
+            "webhook delivery id must not be empty"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_error_invalid_component_display() {
+        assert_eq!(
+            WebhookDeliveryError::InvalidComponent.to_string(),
+            "webhook delivery component contained invalid control characters"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_error_too_long_display() {
+        assert_eq!(
+            WebhookDeliveryError::TooLong.to_string(),
+            "webhook delivery component exceeded supported length"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_error_invalid_provider_display() {
+        assert_eq!(
+            WebhookDeliveryError::InvalidProvider.to_string(),
+            "webhook delivery provider was invalid"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_rejects_blank_owner() {
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            " ".to_owned(),
+            "assets".to_owned(),
+            "delivery-1".to_owned(),
+            10,
+        );
+        assert_eq!(
+            delivery,
+            Err(WebhookDeliveryError::EmptyRepositoryOwner)
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_rejects_too_long_component() {
+        let long = "a".repeat(600);
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            long,
+            "assets".to_owned(),
+            "delivery-1".to_owned(),
+            10,
+        );
+        assert_eq!(delivery, Err(WebhookDeliveryError::TooLong));
+    }
+
+    #[test]
+    fn webhook_delivery_rejects_control_characters_in_owner() {
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team\x00name".to_owned(),
+            "assets".to_owned(),
+            "delivery-1".to_owned(),
+            10,
+        );
+        assert_eq!(delivery, Err(WebhookDeliveryError::InvalidComponent));
+    }
+
+    #[test]
+    fn webhook_delivery_rejects_control_characters_in_repo() {
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets\nrepo".to_owned(),
+            "delivery-1".to_owned(),
+            10,
+        );
+        assert_eq!(delivery, Err(WebhookDeliveryError::InvalidComponent));
+    }
+
+    #[test]
+    fn webhook_delivery_keeps_fields() {
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            "delivery-1".to_owned(),
+            42,
+        )
+        .unwrap();
+        assert_eq!(delivery.provider(), RepositoryProvider::GitHub);
+        assert_eq!(delivery.owner(), "team");
+        assert_eq!(delivery.repo(), "assets");
+        assert_eq!(delivery.delivery_id(), "delivery-1");
+        assert_eq!(delivery.processed_at_unix_seconds(), 42);
+    }
+
+    // ── ProviderRepositoryState edge cases ─────────────────────────────────
+
+    #[test]
+    fn provider_repository_state_with_reconciliation_all_none() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            Some(10),
+            Some(20),
+            Some("refs/heads/main".to_owned()),
+        );
+        let reconciled = state.with_reconciliation(None, None, None);
+        assert!(reconciled
+            .last_cache_invalidated_at_unix_seconds()
+            .is_none());
+        assert!(reconciled
+            .last_authorization_rechecked_at_unix_seconds()
+            .is_none());
+        assert!(reconciled.last_drift_checked_at_unix_seconds().is_none());
+    }
+
+    #[test]
+    fn provider_repository_state_new_all_none() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            None,
+            None,
+            None,
+        );
+        assert!(state.last_access_changed_at_unix_seconds().is_none());
+        assert!(state.last_revision_pushed_at_unix_seconds().is_none());
+        assert!(state.last_pushed_revision().is_none());
+    }
+
+    #[test]
+    fn retention_hold_without_release_is_active_indefinitely() {
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
+        let hold = RetentionHold::new(
+            key,
+            "infinite hold".to_owned(),
+            10,
+            None,
+        )
+        .unwrap();
+        assert!(hold.is_active_at(0));
+        assert!(hold.is_active_at(u64::MAX));
+    }
 }

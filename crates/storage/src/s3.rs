@@ -1991,6 +1991,151 @@ mod tests {
         assert!(store.is_ok());
     }
 
+    // ── validated_external_range edge cases ────────────────────────────
+
+    #[test]
+    fn validated_external_range_single_byte() {
+        let range = ByteRange::new(5, 5);
+        assert!(range.is_ok());
+        let Ok(range) = range else {
+            return;
+        };
+
+        let external = validated_external_range(range);
+
+        assert!(external.is_ok());
+        assert_eq!(external.ok(), Some(5..6));
+    }
+
+    #[test]
+    fn validated_external_range_large_range() {
+        // A large valid range
+        let range = ByteRange::new(0, u64::MAX - 1).expect("valid large range");
+        let external = validated_external_range(range);
+        // Should succeed
+        assert!(external.is_ok());
+        assert_eq!(external.ok(), Some(0..u64::MAX));
+    }
+
+    // ── S3MultipartUploadWriter via InMemory ──────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_multipart_upload_writer_write_and_abort() {
+        use object_store::ObjectStoreExt;
+        use object_store::WriteMultipart;
+
+        let store = InMemory::new();
+        let location = ObjectStorePath::from("test/multi-part-obj");
+
+        let upload = store
+            .put_multipart(&location)
+            .await
+            .expect("should create multipart upload");
+        let writer =
+            WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
+        let mut multipart = super::S3MultipartUploadWriter { writer };
+
+        // Write some bytes
+        multipart.write(b"hello multipart");
+        // Wait with zero permits — should be fine since nothing is in flight
+        let wait = multipart.wait_for_capacity(0).await;
+        assert!(wait.is_ok());
+
+        // Abort before finish — should succeed
+        let abort = multipart.abort().await;
+        assert!(abort.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_multipart_upload_writer_abort_unstarted() {
+        use object_store::ObjectStoreExt;
+        use object_store::WriteMultipart;
+
+        let store = InMemory::new();
+        let location = ObjectStorePath::from("test/abort-unstarted");
+
+        let upload = store
+            .put_multipart(&location)
+            .await
+            .expect("should create multipart upload");
+        let writer =
+            WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
+        let multipart = super::S3MultipartUploadWriter { writer };
+
+        // Abort immediately without writing anything
+        let abort = multipart.abort().await;
+        assert!(abort.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_multipart_upload_writer_wait_with_zero_permits() {
+        use object_store::ObjectStoreExt;
+        use object_store::WriteMultipart;
+
+        let store = InMemory::new();
+        let location = ObjectStorePath::from("test/zero-permits");
+
+        let upload = store
+            .put_multipart(&location)
+            .await
+            .expect("should create multipart upload");
+        let writer =
+            WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
+        let mut multipart = super::S3MultipartUploadWriter { writer };
+
+        // wait_for_capacity with 0 permits is valid when no parts are queued
+        let wait = multipart.wait_for_capacity(0).await;
+        assert!(wait.is_ok());
+    }
+
+    // ── S3ObjectStoreConfig builder methods ────────────────────────────────
+
+    #[test]
+    fn s3_config_with_virtual_hosted_style_true() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_virtual_hosted_style_request(true);
+        let store = S3ObjectStore::new(config);
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn s3_config_with_virtual_hosted_style_false() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_virtual_hosted_style_request(false);
+        let store = S3ObjectStore::new(config);
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn s3_config_with_key_prefix_none_is_noop() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_key_prefix(None);
+        assert_eq!(config.key_prefix(), None);
+    }
+
+    #[test]
+    fn s3_config_with_key_prefix_trimmed() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_key_prefix(Some("/tenant-b/"));
+        assert_eq!(config.key_prefix(), Some("tenant-b"));
+    }
+
+    // ── streaming_large_copy config validation ─────────────────────────────
+
+    #[test]
+    fn streaming_large_copy_rejects_empty_bucket_config() {
+        let config = S3ObjectStoreConfig::new(String::new(), "r".to_owned());
+        let result = S3ObjectStore::new(config);
+        assert!(matches!(result, Err(S3ObjectStoreError::EmptyBucket)));
+    }
+
+    #[test]
+    fn streaming_large_copy_rejects_empty_region_config() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), String::new());
+        let result = S3ObjectStore::new(config);
+        assert!(matches!(result, Err(S3ObjectStoreError::EmptyRegion)));
+    }
+
     // ── Incomplete credentials rejection ──────────────────────────────────
 
     #[test]

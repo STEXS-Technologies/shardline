@@ -203,4 +203,99 @@ mod tests {
         assert_eq!(scope_key.repo(), "repo");
         assert_eq!(scope_key.revision(), Some("v1"));
     }
+
+    // ── latest with all provider combinations ────────────────────────────
+
+    #[test]
+    fn cache_key_latest_with_each_provider() {
+        let providers = [
+            (RepositoryProvider::GitHub, "github"),
+            (RepositoryProvider::GitLab, "gitlab"),
+            (RepositoryProvider::Gitea, "gitea"),
+            (RepositoryProvider::Codeberg, "codeberg"),
+            (RepositoryProvider::Generic, "generic"),
+        ];
+        for (provider, expected_token) in &providers {
+            let scope = RepositoryScope::new(*provider, "owner", "repo", Some("branch"));
+            assert!(scope.is_ok(), "scope creation failed for {expected_token}");
+            let Ok(scope) = scope else {
+                continue;
+            };
+            let key = ReconstructionCacheKey::latest("file.bin", Some(&scope));
+            let scope_key = key.repository_scope().unwrap();
+            assert_eq!(scope_key.provider(), *expected_token);
+            assert_eq!(scope_key.owner(), "owner");
+            assert_eq!(scope_key.repo(), "repo");
+            assert_eq!(scope_key.revision(), Some("branch"));
+            assert_eq!(key.file_id(), "file.bin");
+            assert_eq!(key.content_hash(), None);
+        }
+    }
+
+    // ── version with all provider combinations ───────────────────────────
+
+    #[test]
+    fn cache_key_version_with_each_provider() {
+        let providers = [
+            (RepositoryProvider::GitHub, "github"),
+            (RepositoryProvider::GitLab, "gitlab"),
+            (RepositoryProvider::Gitea, "gitea"),
+            (RepositoryProvider::Codeberg, "codeberg"),
+            (RepositoryProvider::Generic, "generic"),
+        ];
+        for (provider, expected_token) in &providers {
+            let scope = RepositoryScope::new(*provider, "org", "project", None);
+            assert!(scope.is_ok(), "scope creation failed for {expected_token}");
+            let Ok(scope) = scope else {
+                continue;
+            };
+            let key = ReconstructionCacheKey::version("ver.bin", "hash123", Some(&scope));
+            let scope_key = key.repository_scope().unwrap();
+            assert_eq!(scope_key.provider(), *expected_token);
+            assert_eq!(scope_key.owner(), "org");
+            assert_eq!(scope_key.repo(), "project");
+            assert_eq!(scope_key.revision(), None);
+            assert_eq!(key.file_id(), "ver.bin");
+            assert_eq!(key.content_hash(), Some("hash123"));
+        }
+    }
+
+    // ── empty values in constructors ─────────────────────────────────────
+
+    #[test]
+    fn cache_key_latest_with_empty_file_id() {
+        let key = ReconstructionCacheKey::latest("", None);
+        assert_eq!(key.file_id(), "");
+        assert_eq!(key.content_hash(), None);
+        assert!(key.repository_scope().is_none());
+    }
+
+    #[test]
+    fn cache_key_version_with_empty_content_hash() {
+        let key = ReconstructionCacheKey::version("f", "", None);
+        assert_eq!(key.file_id(), "f");
+        assert_eq!(key.content_hash(), Some(""));
+        assert!(key.repository_scope().is_none());
+    }
+
+    #[test]
+    fn cache_key_version_with_each_provider_no_revision() {
+        let providers = [
+            RepositoryProvider::GitHub,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Gitea,
+            RepositoryProvider::Codeberg,
+            RepositoryProvider::Generic,
+        ];
+        for provider in &providers {
+            let scope = RepositoryScope::new(*provider, "ns", "name", None);
+            assert!(scope.is_ok(), "scope creation failed for {provider:?}");
+            let Ok(scope) = scope else {
+                continue;
+            };
+            let key = ReconstructionCacheKey::version("v.bin", "abc", Some(&scope));
+            let scope_key = key.repository_scope().unwrap();
+            assert_eq!(scope_key.revision(), None, "revision should be None for {provider:?}");
+        }
+    }
 }

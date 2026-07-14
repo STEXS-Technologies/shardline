@@ -244,3 +244,37 @@ impl LocalBackend {
         Ok(metadata.length())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::chunk_store::chunk_object_key;
+
+    #[test]
+    fn chunk_object_key_accepts_valid_hash() {
+        let hash = "a".repeat(64);
+        let key = chunk_object_key(&hash);
+        assert!(key.is_ok());
+        let key = key.unwrap();
+        assert!(key.as_str().contains(&hash));
+    }
+
+    #[test]
+    fn chunk_object_key_rejects_short_hash() {
+        let hash = "abc123";
+        let key = chunk_object_key(hash);
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn chunk_object_key_rejects_non_hex_hash() {
+        let hash = "z".repeat(64);
+        let key = chunk_object_key(&hash);
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn chunk_object_key_rejects_empty_hash() {
+        let key = chunk_object_key("");
+        assert!(key.is_err());
+    }
+}

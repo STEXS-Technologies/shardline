@@ -2110,4 +2110,194 @@ mod tests {
             .delete_provider_repository_state(RepositoryProvider::GitHub, "nonexistent", "repo")
             .unwrap());
     }
+
+    // ── visit methods with no records ──────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_visit_latest_records_empty() {
+        let store = MemoryRecordStore::new();
+        let mut visited = Vec::new();
+        store
+            .visit_latest_records(|stored| {
+                visited.push(stored);
+                Ok::<(), MemoryRecordStoreError>(())
+            })
+            .await
+            .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_visit_version_records_empty() {
+        let store = MemoryRecordStore::new();
+        let mut visited = Vec::new();
+        store
+            .visit_version_records(|stored| {
+                visited.push(stored);
+                Ok::<(), MemoryRecordStoreError>(())
+            })
+            .await
+            .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_visit_latest_record_locators_empty() {
+        let store = MemoryRecordStore::new();
+        let mut visited = Vec::new();
+        store
+            .visit_latest_record_locators(|loc| {
+                visited.push(loc);
+                Ok::<(), MemoryRecordStoreError>(())
+            })
+            .await
+            .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_visit_version_record_locators_empty() {
+        let store = MemoryRecordStore::new();
+        let mut visited = Vec::new();
+        store
+            .visit_version_record_locators(|loc| {
+                visited.push(loc);
+                Ok::<(), MemoryRecordStoreError>(())
+            })
+            .await
+            .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    // ── Empty lifecycle list methods ───────────────────────────────────────
+
+    #[test]
+    fn memory_index_store_list_webhook_deliveries_empty() {
+        let store = MemoryIndexStore::new();
+        let deliveries = store.list_webhook_deliveries().unwrap();
+        assert!(deliveries.is_empty());
+    }
+
+    #[test]
+    fn memory_index_store_list_retention_holds_empty() {
+        let store = MemoryIndexStore::new();
+        let holds = store.list_retention_holds().unwrap();
+        assert!(holds.is_empty());
+    }
+
+    #[test]
+    fn memory_index_store_list_quarantine_candidates_empty() {
+        let store = MemoryIndexStore::new();
+        let candidates = store.list_quarantine_candidates().unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn memory_index_store_list_provider_repository_states_empty() {
+        let store = MemoryIndexStore::new();
+        let states = store.list_provider_repository_states().unwrap();
+        assert!(states.is_empty());
+    }
+
+    // ── Empty visit lifecycle methods ──────────────────────────────────────
+
+    #[test]
+    fn memory_index_store_visit_webhook_deliveries_empty() {
+        let store = MemoryIndexStore::new();
+        let mut visited = Vec::new();
+        LifecycleStore::visit_webhook_deliveries(&store, |d| {
+            visited.push(d);
+            Ok::<(), MemoryIndexStoreError>(())
+        })
+        .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn memory_index_store_visit_retention_holds_empty() {
+        let store = MemoryIndexStore::new();
+        let mut visited = Vec::new();
+        LifecycleStore::visit_retention_holds(&store, |h| {
+            visited.push(h);
+            Ok::<(), MemoryIndexStoreError>(())
+        })
+        .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn memory_index_store_visit_quarantine_candidates_empty() {
+        let store = MemoryIndexStore::new();
+        let mut visited = Vec::new();
+        LifecycleStore::visit_quarantine_candidates(&store, |c| {
+            visited.push(c);
+            Ok::<(), MemoryIndexStoreError>(())
+        })
+        .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn memory_index_store_visit_provider_repository_states_empty() {
+        let store = MemoryIndexStore::new();
+        let mut visited = Vec::new();
+        LifecycleStore::visit_provider_repository_states(&store, |s| {
+            visited.push(s);
+            Ok::<(), MemoryIndexStoreError>(())
+        })
+        .unwrap();
+        assert!(visited.is_empty());
+    }
+
+    // ── MemoryIndexStoreError Display / Debug / Clone / Copy ───────────────
+
+    #[test]
+    fn memory_index_store_error_display() {
+        let err = MemoryIndexStoreError::LockPoisoned;
+        assert_eq!(format!("{err}"), "memory index store lock was poisoned");
+    }
+
+    #[test]
+    fn memory_index_store_error_debug() {
+        let err = MemoryIndexStoreError::LockPoisoned;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("LockPoisoned"));
+    }
+
+    #[test]
+    fn memory_index_store_error_clone_copy() {
+        let err = MemoryIndexStoreError::LockPoisoned;
+        let cloned = err;
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn memory_record_store_error_display_lock_poisoned() {
+        let err = MemoryRecordStoreError::LockPoisoned;
+        assert_eq!(format!("{err}"), "memory record store lock was poisoned");
+    }
+
+    #[test]
+    fn memory_record_store_error_display_record_not_found() {
+        let err = MemoryRecordStoreError::RecordNotFound;
+        assert_eq!(
+            format!("{err}"),
+            "memory record locator was not found"
+        );
+    }
+
+    #[test]
+    fn memory_record_store_error_display_json_error() {
+        let json_err = serde_json::from_slice::<()>(b"invalid json").unwrap_err();
+        let err = MemoryRecordStoreError::Json(json_err);
+        let msg = format!("{err}");
+        assert!(msg.contains("memory record serialization failed"));
+    }
+
+    #[test]
+    fn memory_record_store_error_debug() {
+        let err = MemoryRecordStoreError::RecordNotFound;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("RecordNotFound"));
+    }
 }
