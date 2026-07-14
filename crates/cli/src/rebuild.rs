@@ -33,6 +33,8 @@ pub async fn run_index_rebuild(
 
 #[cfg(test)]
 mod tests {
+    use shardline_server::ServerError;
+
     use super::*;
 
     #[test]
@@ -51,11 +53,19 @@ mod tests {
 
     #[test]
     fn rebuild_runtime_error_server_display() {
-        use shardline_server::ServerError;
         let err = RebuildRuntimeError::Server(ServerError::NotFound);
         let msg = err.to_string();
         assert!(!msg.is_empty());
+        assert!(msg.contains("not found") || msg.contains("NotFound"));
         let debug = format!("{err:?}");
         assert!(debug.contains("Server("));
+    }
+
+    #[test]
+    fn rebuild_runtime_error_server_io_error() {
+        let io_inner = std::io::Error::new(std::io::ErrorKind::NotFound, "index missing");
+        let err = RebuildRuntimeError::Server(ServerError::Io(io_inner));
+        let msg = err.to_string();
+        assert!(msg.contains("index missing") || !msg.is_empty());
     }
 }

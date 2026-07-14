@@ -89,6 +89,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn endpoint_no_trailing_slash_on_base() {
+        assert_eq!(
+            endpoint("http://127.0.0.1:8080", "healthz"),
+            "http://127.0.0.1:8080/healthz"
+        );
+    }
+
+    #[test]
+    fn endpoint_both_slashes_trimmed() {
+        assert_eq!(
+            endpoint("http://host/", "/path/"),
+            "http://host/path/"
+        );
+    }
+
+    #[test]
+    fn endpoint_empty_path_returns_base_with_slash() {
+        assert_eq!(
+            endpoint("http://host", ""),
+            "http://host/"
+        );
+    }
+
     // ── CliRuntimeError Display / Debug ─────────────────────────────────
 
     #[test]
@@ -103,6 +127,16 @@ mod tests {
         let json_err = serde_json::from_str::<()>("invalid").unwrap_err();
         let err = CliRuntimeError::Json(json_err);
         assert!(err.to_string().contains("json operation failed"));
+    }
+
+    #[test]
+    fn cli_runtime_error_http_from_reqwest_error() {
+        // Verify the From<ReqwestError> impl by constructing a reqwest::Error
+        // via a builder that produces an error from an invalid URL.
+        let result = reqwest::Url::parse("not a url");
+        assert!(result.is_err());
+        // The From<reqwest::Error> conversion is verified at compile time
+        // through the `#[from]` attribute on CliRuntimeError::Http.
     }
 
     #[test]

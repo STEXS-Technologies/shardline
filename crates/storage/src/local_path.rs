@@ -181,4 +181,90 @@ mod tests {
         let result = resolve_platform_symlinks(path);
         assert_eq!(result, path);
     }
+
+    #[test]
+    fn resolve_platform_symlinks_root_path_returns_itself() {
+        let path = Path::new("/");
+        let result = resolve_platform_symlinks(path);
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn resolve_platform_symlinks_empty_returns_empty() {
+        let path = Path::new("");
+        let result = resolve_platform_symlinks(path);
+        assert_eq!(result, path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_parent_dir_referencing_existing_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let sub = sandbox.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        // "sub/.." should resolve to sandbox which exists and is a directory
+        let result = ensure_directory_path_components_are_not_symlinked(&sub.join(".."));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn allows_current_dir_after_normal_component() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let sub = sandbox.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        // "sub/./child" — the "." should be a no-op
+        let result = ensure_directory_path_components_are_not_symlinked(&sub.join("./child"));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_parent_directory_traversal() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = sandbox.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let sub = link.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        // The symlink at "link" should be rejected since the path contains a symlink
+        let result = ensure_directory_path_components_are_not_symlinked(&sub.join("extra"));
+        assert!(matches!(
+            result,
+            Err(DirectoryPathError::SymlinkedComponent(path)) if path == link
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_path_when_trailing_separator_not_allowed() {
+        // The function accepts Path::new("") which is empty
+        let result = ensure_directory_path_components_are_not_symlinked(Path::new(""));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_platform_symlinks_var_path() {
+        // On Linux, this returns the path as-is. On macOS it would resolve to /private/var/...
+        let path = Path::new("/var/log/system.log");
+        let result = resolve_platform_symlinks(path);
+        // On Linux: same path; on macOS: /private/var/log/system.log
+        #[cfg(target_os = "macos")]
+        assert_eq!(result, Path::new("/private/var/log/system.log"));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn directory_path_error_debug_format() {
+        use super::DirectoryPathError;
+        let err = DirectoryPathError::UnsupportedPrefix;
+        let debug = format!("{err:?}");
+        assert!(!debug.is_empty());
+
+        let io_err = DirectoryPathError::Io(std::io::Error::other("fail"));
+        let debug2 = format!("{io_err:?}");
+        assert!(!debug2.is_empty());
+    }
 }

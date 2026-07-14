@@ -677,4 +677,160 @@ mod tests {
         }
         assert!(result.is_some());
     }
+
+    // ── resolve_secret_file_path edge cases ──────────────────────────────
+
+    #[test]
+    fn open_secret_file_nonexistent_path_is_err() {
+        let result = open_secret_file(Path::new("/tmp/__nonexistent_secret_test_file__"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_secret_file_directory_is_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = open_secret_file(tmp.path());
+        // A directory is not a regular file
+        assert!(result.is_err());
+    }
+
+    // ── configure_s3_object_store_config credential loading errors ───────
+
+    #[test]
+    fn configure_s3_object_store_config_virtual_hosted_parse_err() {
+        use super::{PendingS3ObjectStoreConfig, ServerConfigError, configure_s3_object_store_config};
+
+        let inputs = PendingS3ObjectStoreConfig {
+            region: "us-east-1".to_owned(),
+            endpoint: None,
+            key_prefix: None,
+            allow_http: Ok(None),
+            virtual_hosted_style_request: Err(ServerConfigError::InvalidS3VirtualHostedStyleRequest),
+        };
+        let bucket: Result<String, _> = Ok("bucket".to_owned());
+
+        let result = configure_s3_object_store_config(bucket, inputs, || {
+            Ok((None, None, None))
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn configure_s3_object_store_config_credential_loading_returns_err() {
+        use super::{PendingS3ObjectStoreConfig, configure_s3_object_store_config};
+
+        let inputs = PendingS3ObjectStoreConfig {
+            region: "us-east-1".to_owned(),
+            endpoint: None,
+            key_prefix: None,
+            allow_http: Ok(None),
+            virtual_hosted_style_request: Ok(None),
+        };
+        let bucket: Result<String, _> = Ok("bucket".to_owned());
+
+        let result = configure_s3_object_store_config(bucket, inputs, || {
+            Err(super::super::ServerConfigError::MissingS3Bucket)
+        });
+        assert!(result.is_err());
+    }
+
+    // ── optional_s3_secret_from_sources file loading ──────────────────────
+
+    #[test]
+    fn optional_s3_secret_from_file_valid() {
+        use super::optional_s3_secret_from_sources;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, b"file-secret-value").unwrap();
+        tmp.flush().unwrap();
+
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            None,
+            "TEST_FILE_ENV",
+            Some(tmp.path().display().to_string()),
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some("file-secret-value".to_owned()));
+    }
+
+    #[test]
+    fn optional_s3_secret_from_file_not_found() {
+        use super::optional_s3_secret_from_sources;
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            None,
+            "TEST_FILE_ENV",
+            Some("/nonexistent/path/credential".to_owned()),
+        );
+        assert!(result.is_err());
+    }
+
+    // ── configure_provider_runtime_from_paths with valid paths ────────────
+
+    #[test]
+    fn configure_provider_runtime_from_paths_with_valid_signing_key() {
+        use super::configure_provider_runtime_from_paths;
+        let mut config = test_config();
+        config = config
+            .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+            .unwrap();
+
+        let mut api_key_file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut api_key_file, b"my-api-key").unwrap();
+        api_key_file.flush().unwrap();
+        let mut config_file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut config_file, b"config: {}").unwrap();
+        config_file.flush().unwrap();
+
+        let result = configure_provider_runtime_from_paths(
+            config,
+            Some(config_file.path().to_path_buf()),
+            Some(api_key_file.path().to_path_buf()),
+            "issuer".to_owned(),
+            Ok(std::num::NonZeroU64::new(300).unwrap_or(std::num::NonZeroU64::MIN)),
+        );
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.provider_api_key(), Some(b"my-api-key" as &[u8]));
+    }
+
+    #[test]
+    fn configure_provider_runtime_rejects_ttl_parse_error() {
+        use super::configure_provider_runtime_from_paths;
+        // The TTL error is only checked when both config paths are provided.
+        // When both are None, the function returns Ok early without checking TTL.
+        // So we need to provide both paths to trigger the TTL error.
+        let mut config = test_config();
+        config = config
+            .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+            .unwrap();
+        let result = configure_provider_runtime_from_paths(
+            config,
+            Some(std::path::PathBuf::from("/config")),
+            Some(std::path::PathBuf::from("/api_key")),
+            "issuer".to_owned(),
+            Err(super::super::ServerConfigError::ProviderTokenTtl),
+        );
+        assert!(result.is_err());
+    }
+
+    // ── read_secret_file_bytes file reading errors ───────────────────────
+
+    #[test]
+    fn read_secret_file_bytes_nonexistent_path() {
+        let result = read_secret_file_bytes(
+            Path::new("/nonexistent/secret.file"),
+            4096,
+            ServerConfigError::MetricsToken,
+            |obs, max| ServerConfigError::MetricsTokenTooLarge {
+                observed_bytes: obs,
+                maximum_bytes: max,
+            },
+            |exp, obs| ServerConfigError::MetricsTokenLengthMismatch {
+                expected_bytes: exp,
+                observed_bytes: obs,
+            },
+        );
+        assert!(result.is_err());
+    }
 }

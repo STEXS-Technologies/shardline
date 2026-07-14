@@ -231,9 +231,21 @@ mod tests {
     #[test]
     fn write_optional_artifact_none_path_returns_ok() {
         // When path is None, write_optional_artifact returns Ok(()) without writing
-        let result = serde_json::to_vec_pretty(&"test");
+        let result = super::write_optional_artifact(None::<&std::path::Path>, &"test");
         assert!(result.is_ok());
-        // The function itself is tested structurally: None path -> early return Ok
+    }
+
+    #[test]
+    fn write_optional_artifact_writes_to_some_path() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("artifact.json");
+        let data = serde_json::json!({"key": "value", "count": 42});
+        let result = super::write_optional_artifact(Some(&path), &data);
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"key\""));
+        assert!(content.contains("\"count\""));
+        assert!(content.contains("42"));
     }
 
     #[test]

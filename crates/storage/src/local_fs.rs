@@ -553,6 +553,133 @@ mod tests {
         assert!(ensure_file_matches_bytes(file, b"abcdef").is_err());
     }
 
+    // ── open_existing_regular_file ────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_regular_file_rejects_directory() {
+        use super::{open_existing_regular_file};
+        use std::io::ErrorKind;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let dir_path = sandbox.path().join("a_directory");
+        std::fs::create_dir(&dir_path).unwrap();
+
+        let result = open_existing_regular_file(&dir_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_regular_file_rejects_nonexistent() {
+        use super::open_existing_regular_file;
+        use std::io::ErrorKind;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let missing = sandbox.path().join("does_not_exist.bin");
+
+        let result = open_existing_regular_file(&missing);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
+    }
+
+    // ── ensure_file_matches_bytes read error ──────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_file_matches_bytes_errors_on_io_failure() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        // Open a directory as a file — reading will fail
+        let sandbox = tempfile::tempdir().unwrap();
+        let dir_path = sandbox.path().join("dir");
+        std::fs::create_dir(&dir_path).unwrap();
+        let file = File::open(&dir_path).unwrap();
+
+        let result = ensure_file_matches_bytes(file, b"anything");
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_file_matches_bytes_empty_file_with_empty_expected_ok() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+        let file = File::open(&path).unwrap();
+
+        assert!(ensure_file_matches_bytes(file, b"").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_file_matches_bytes_empty_file_with_nonempty_expected_fails() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("empty2.bin");
+        std::fs::write(&path, b"").unwrap();
+        let file = File::open(&path).unwrap();
+
+        let result = ensure_file_matches_bytes(file, b"non-empty");
+        assert!(result.is_err());
+    }
+
+    // ── invalid_local_path_error returns the correct error ────────────
+
+    #[test]
+    fn invalid_local_path_error_returns_invalid_data() {
+        let err = super::invalid_local_path_error();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("root"),
+            "error message should mention root: {}",
+            err
+        );
+    }
+
+    // ── hard_link_file_if_absent with race via hook ───────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_file_if_absent_detects_parent_swap_via_hook() {
+        use super::{hard_link_file_if_absent, set_before_local_write_hook};
+        use std::os::unix::fs::symlink;
+        use std::sync::Mutex;
+        static HARD_LINK_HOOK_MUTEX: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = HARD_LINK_HOOK_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let temporary = sandbox.path().join("src.tmp");
+        std::fs::write(&temporary, b"race test").unwrap();
+        let dest = root.join("sub").join("target.bin");
+
+        // Set up a hook that swaps the parent directory before final link verification
+        let moved_parent = sandbox.path().join("moved-parent");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+
+        let escape_dir = sandbox.path().join("escape");
+        std::fs::create_dir(&escape_dir).unwrap();
+
+        let hook_root = root.clone();
+        set_before_local_write_hook(dest.clone(), move || {
+            let _ = std::fs::rename(hook_root.join("sub"), &moved_parent);
+            let _ = symlink(&escape_dir, hook_root.join("sub"));
+        });
+
+        let result = hard_link_file_if_absent(&root, &dest, &temporary);
+        // Should fail because the parent directory was swapped
+        assert!(result.is_err(), "expected error from parent swap, got Ok");
+    }
+
     // ── test hook mechanism ───────────────────────────────────────────
 
     #[cfg(unix)]

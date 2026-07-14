@@ -408,4 +408,86 @@ mod tests {
         let result = super::object_byte_stream(store, key, 0).await;
         assert!(matches!(result, Err(crate::ServerError::NotFound)));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_store_byte_stream_zero_length_empty_object() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/empty").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"").await.unwrap();
+
+        let result = local_object_byte_stream(object_store, object_key, 0).await;
+        // Zero-length object → empty stream
+        assert!(result.is_ok());
+        let mut stream = result.unwrap();
+        use futures_util::StreamExt;
+        let next = stream.next().await;
+        assert!(next.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_store_byte_stream_rejects_zero_length_with_nonempty_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/nonempty-claimed-zero").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"data").await.unwrap();
+
+        let result = local_object_byte_stream(object_store, object_key, 0).await;
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(
+                crate::error::ObjectStoreError::StoredLengthMismatch
+            ))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_object_byte_range_stream_rejects_range_exceeding_length() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/range-too-large").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"abcd").await.unwrap();
+
+        // range.end_inclusive = 10, total_length = 4 → RangeNotSatisfiable
+        let range = ByteRange::new(0, 10).unwrap();
+        let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
+        assert!(matches!(result, Err(crate::ServerError::RangeNotSatisfiable)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_nonzero_length_with_local_store() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/stream-nonzero").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"stream-me").await.unwrap();
+
+        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let result = super::object_byte_stream(store, object_key, 9).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_range_stream_with_local_store_returns_error_for_blackhole() {
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let object_key = ObjectKey::parse("ab/any-key").unwrap();
+        let range = ByteRange::new(0, 4).unwrap();
+        let result = super::object_byte_range_stream(store, object_key, 10, range).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
 }

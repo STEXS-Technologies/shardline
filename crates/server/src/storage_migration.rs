@@ -403,6 +403,90 @@ mod tests {
         }
     }
 
+    // ── validate_source_object_matches_content_addressed_key ─────────────
+
+    #[test]
+    fn validate_source_ok_for_non_content_addressed_key() {
+        // A key that does not match any content-addressed pattern should pass
+        let key = ObjectKey::parse("some/arbitrary/key.bin").unwrap();
+        let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
+            &key, b"any bytes",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_source_rejects_chunk_key_hash_mismatch() {
+        use crate::chunk_store::chunk_hash_from_chunk_object_key_if_present;
+        use crate::chunk_store::chunk_object_key;
+        use crate::local_backend::chunk_hash;
+
+        // Create a chunk key where the hash in the key doesn't match the body
+        let body = b"test payload";
+        let correct_hash = chunk_hash(body);
+        let correct_hex = hex::encode(correct_hash.as_bytes());
+        let key = chunk_object_key(&correct_hex).unwrap();
+        // Verify key parses to extract hash
+        let parsed = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
+        assert!(parsed.is_some(), "key should have a parseable chunk hash: {key:?}");
+
+        // Call with wrong bytes (should trigger hash mismatch)
+        let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
+            &key, b"wrong-bytes",
+        );
+        assert!(result.is_err(), "expected err for hash mismatch, got ok");
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::ServerError::ObjectStore(_)));
+    }
+
+    #[test]
+    fn validate_source_rejects_shard_key_hash_mismatch() {
+        use crate::xet_adapter::shard_hash_from_object_key_if_present;
+
+        // Create a shard object key in the shards namespace with .shard suffix
+        let hash_hex = "aa".repeat(32);
+        let key_str = format!("shards/{}/{}.shard", &hash_hex[..2], hash_hex);
+        let key = ObjectKey::parse(&key_str).unwrap();
+        let parsed = shard_hash_from_object_key_if_present(&key).unwrap();
+        assert!(parsed.is_some(), "key should parse shard hash: {key_str}");
+
+        let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
+            &key, b"wrong-bytes",
+        );
+        assert!(result.is_err(), "expected err for shard hash mismatch, got ok");
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::ServerError::ObjectStore(_)));
+    }
+
+    // ── endpoint_store ────────────────────────────────────────────────────
+
+    #[test]
+    fn endpoint_store_s3_accepts_valid_config() {
+        use shardline_storage::S3ObjectStoreConfig;
+        let config = S3ObjectStoreConfig::new("bucket".into(), "region".into());
+        let endpoint = StorageMigrationEndpoint::S3(config);
+        let store = endpoint_store(&endpoint);
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn storage_migration_report_serialize_with_counts() {
+        use shardline_storage::S3ObjectStoreConfig;
+        let source = StorageMigrationEndpoint::S3(S3ObjectStoreConfig::new("src".into(), "us-east-1".into()));
+        let dest = StorageMigrationEndpoint::S3(S3ObjectStoreConfig::new("dst".into(), "us-east-1".into()));
+        let opts = StorageMigrationOptions::new(source, dest).with_prefix("test/".into());
+        let mut report = StorageMigrationReport::new(&opts);
+        report.scanned_objects = 10;
+        report.inserted_objects = 5;
+        report.already_present_objects = 5;
+        report.copied_bytes = 1000;
+        report.scanned_bytes = 2000;
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains(r#""scanned_objects":10"#));
+        assert!(json.contains(r#""inserted_objects":5"#));
+        assert!(json.contains(r#""copied_bytes":1000"#));
+    }
+
     #[test]
     fn storage_migration_rejects_corrupt_source_chunk_key() {
         let source = tempfile::tempdir();

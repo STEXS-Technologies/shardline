@@ -2355,4 +2355,110 @@ mod tests {
         let error = super::CliParseError::from(clap_err);
         assert!(format!("{error}").contains("missing --flag"));
     }
+
+    // ── From impls for CLI enums ──────────────────────────────────────────
+
+    #[test]
+    fn cli_server_role_to_server_role() {
+        use shardline_server::ServerRole;
+        assert_eq!(
+            ServerRole::from(super::CliServerRole::All),
+            ServerRole::All
+        );
+        assert_eq!(
+            ServerRole::from(super::CliServerRole::Api),
+            ServerRole::Api
+        );
+        assert_eq!(
+            ServerRole::from(super::CliServerRole::Transfer),
+            ServerRole::Transfer
+        );
+    }
+
+    #[test]
+    fn cli_server_frontend_to_server_frontend() {
+        use shardline_server::ServerFrontend;
+        assert_eq!(
+            ServerFrontend::from(super::CliServerFrontend::Xet),
+            ServerFrontend::Xet
+        );
+        assert_eq!(
+            ServerFrontend::from(super::CliServerFrontend::Lfs),
+            ServerFrontend::Lfs
+        );
+        assert_eq!(
+            ServerFrontend::from(super::CliServerFrontend::BazelHttp),
+            ServerFrontend::BazelHttp
+        );
+        assert_eq!(
+            ServerFrontend::from(super::CliServerFrontend::Oci),
+            ServerFrontend::Oci
+        );
+        assert_eq!(
+            ServerFrontend::from(super::CliServerFrontend::Hub),
+            ServerFrontend::Hub
+        );
+    }
+
+    #[test]
+    fn cli_token_scope_to_token_scope() {
+        use shardline_protocol::TokenScope;
+        assert_eq!(
+            TokenScope::from(super::CliTokenScope::Read),
+            TokenScope::Read
+        );
+        assert_eq!(
+            TokenScope::from(super::CliTokenScope::Write),
+            TokenScope::Write
+        );
+    }
+
+    #[test]
+    fn cli_repository_provider_to_repository_provider() {
+        use shardline_protocol::RepositoryProvider;
+        assert_eq!(
+            RepositoryProvider::from(super::CliRepositoryProvider::GitHub),
+            RepositoryProvider::GitHub
+        );
+        assert_eq!(
+            RepositoryProvider::from(super::CliRepositoryProvider::Gitea),
+            RepositoryProvider::Gitea
+        );
+        assert_eq!(
+            RepositoryProvider::from(super::CliRepositoryProvider::GitLab),
+            RepositoryProvider::GitLab
+        );
+        assert_eq!(
+            RepositoryProvider::from(super::CliRepositoryProvider::Codeberg),
+            RepositoryProvider::Codeberg
+        );
+        assert_eq!(
+            RepositoryProvider::from(super::CliRepositoryProvider::Generic),
+            RepositoryProvider::Generic
+        );
+    }
+
+    #[test]
+    fn cli_object_storage_adapter_to_object_storage_adapter() {
+        use shardline_server::ObjectStorageAdapter;
+        assert_eq!(
+            ObjectStorageAdapter::from(super::CliObjectStorageAdapter::Local),
+            ObjectStorageAdapter::Local
+        );
+        assert_eq!(
+            ObjectStorageAdapter::from(super::CliObjectStorageAdapter::S3),
+            ObjectStorageAdapter::S3
+        );
+    }
+
+    // ── CompletionShell ─────────────────────────────────────────────────────
+
+    #[test]
+    fn completion_shell_value_enum_variants() {
+        assert_eq!(super::CompletionShell::Bash as u8, 0);
+        assert_eq!(super::CompletionShell::Elvish as u8, 1);
+        assert_eq!(super::CompletionShell::Fish as u8, 2);
+        assert_eq!(super::CompletionShell::PowerShell as u8, 3);
+        assert_eq!(super::CompletionShell::Zsh as u8, 4);
+    }
 }

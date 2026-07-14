@@ -1277,4 +1277,149 @@ mod tests {
             let _ = result;
         }
     }
+
+    // ── validate_text_field ────────────────────────────────────────────────
+
+    #[test]
+    fn validate_text_field_accepts_valid_value() {
+        let result = super::validate_text_field("test", "valid-value");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_text_field_rejects_empty_value() {
+        let result = super::validate_text_field("unit-prefix", "");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::EmptyValue { field: "unit-prefix" })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_whitespace_only() {
+        let result = super::validate_text_field("calendar", "   ");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::EmptyValue { field: "calendar" })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_control_characters() {
+        let result = super::validate_text_field("user", "user\nname");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "user" })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_tab_character() {
+        let result = super::validate_text_field("group", "my\tgroup");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "group" })
+        ));
+    }
+
+    // ── GcScheduleInstallReport::print_summary ──────────────────────────
+
+    #[test]
+    fn install_report_print_summary() {
+        let report = super::GcScheduleInstallReport {
+            service_path: PathBuf::from("/etc/systemd/system/shardline-gc.service"),
+            timer_path: PathBuf::from("/etc/systemd/system/shardline-gc.timer"),
+            binary_path: PathBuf::from("/usr/local/bin/shardline"),
+            env_file: PathBuf::from("/etc/shardline/shardline.env"),
+            working_directory: PathBuf::from("/var/lib/shardline"),
+            calendar: "daily".to_owned(),
+            retention_seconds: 86400,
+        };
+        report.print_summary();
+        assert_eq!(report.retention_seconds, 86400);
+        assert_eq!(report.calendar, "daily");
+    }
+
+    // ── GcScheduleUninstallReport::print_summary ────────────────────────
+
+    #[test]
+    fn uninstall_report_print_summary() {
+        let report = super::GcScheduleUninstallReport {
+            service_path: PathBuf::from("/etc/systemd/system/test.service"),
+            timer_path: PathBuf::from("/etc/systemd/system/test.timer"),
+            removed_service: true,
+            removed_timer: false,
+        };
+        report.print_summary();
+        assert!(report.removed_service);
+        assert!(!report.removed_timer);
+    }
+
+    #[test]
+    fn uninstall_report_both_removed() {
+        let report = super::GcScheduleUninstallReport {
+            service_path: PathBuf::from("/etc/systemd/system/a.service"),
+            timer_path: PathBuf::from("/etc/systemd/system/a.timer"),
+            removed_service: true,
+            removed_timer: true,
+        };
+        report.print_summary();
+        assert!(report.removed_service);
+        assert!(report.removed_timer);
+    }
+
+    // ── GcScheduleInstallOptions Default ────────────────────────────────
+
+    #[test]
+    fn install_options_defaults() {
+        let opts = super::GcScheduleInstallOptions::default();
+        assert_eq!(opts.unit_prefix, "shardline-gc");
+        assert_eq!(opts.retention_seconds, 86_400);
+        assert_eq!(opts.calendar, "*-*-* 03:17:00");
+        assert!(!opts.dry_run);
+    }
+
+    // ── strip_wrapping_quotes (linux only) ───────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_double_quotes() {
+        assert_eq!(super::strip_wrapping_quotes("\"value\""), "value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_single_quotes() {
+        assert_eq!(super::strip_wrapping_quotes("'value'"), "value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_no_quotes() {
+        assert_eq!(super::strip_wrapping_quotes("value"), "value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_empty_string() {
+        assert_eq!(super::strip_wrapping_quotes(""), "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_single_char() {
+        assert_eq!(super::strip_wrapping_quotes("a"), "a");
+    }
+
+    // ── remove_if_present (the local_output wrapper) ─────────────────────
+
+    #[test]
+    fn remove_if_present_absent_file_returns_ok_false() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("nonexistent");
+        // remove_if_present delegates to remove_output_file_if_present
+        let result = super::remove_if_present(&path);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
 }

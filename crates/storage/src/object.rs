@@ -188,4 +188,55 @@ mod tests {
         assert_eq!(DeleteOutcome::Deleted, DeleteOutcome::Deleted);
         assert_eq!(DeleteOutcome::NotFound, DeleteOutcome::NotFound);
     }
+
+    #[test]
+    fn object_body_from_vec_creates_shared_bytes() {
+        let vec = vec![10, 20, 30, 40];
+        let body = ObjectBody::from_vec(vec.clone());
+        assert_eq!(body.as_slice(), &vec[..]);
+        let into = body.into_bytes();
+        assert_eq!(into.as_ref(), &vec[..]);
+    }
+
+    #[test]
+    fn object_body_from_slice_into_bytes_copies() {
+        let slice: &[u8] = &[1, 2, 3];
+        let body = ObjectBody::from_slice(slice);
+        let bytes = body.into_bytes();
+        assert_eq!(bytes.as_ref(), slice);
+    }
+
+    #[test]
+    fn object_metadata_with_none_checksum() {
+        let key = ObjectKey::parse("xorbs/default/no-checksum.xorb").unwrap();
+        let metadata = ObjectMetadata::new(key.clone(), 128, None);
+        assert_eq!(metadata.key(), &key);
+        assert_eq!(metadata.length(), 128);
+        assert!(metadata.checksum().is_none());
+    }
+
+    #[test]
+    fn object_integrity_zero_length() {
+        let hash = ShardlineHash::from_bytes([0; 32]);
+        let integrity = ObjectIntegrity::new(hash, 0);
+        assert_eq!(integrity.length(), 0);
+        assert_eq!(integrity.hash(), hash);
+    }
+
+    #[test]
+    fn object_body_shared_into_bytes_returns_same() {
+        let shared = Bytes::from_static(b"shared-data");
+        let body = ObjectBody::from_bytes(shared.clone());
+        let result = body.into_bytes();
+        assert_eq!(result, shared);
+    }
+
+    #[test]
+    fn object_metadata_debug_format() {
+        let key = ObjectKey::parse("test/key.xorb").unwrap();
+        let metadata = ObjectMetadata::new(key, 42, None);
+        let debug = format!("{metadata:?}");
+        assert!(debug.contains("key"));
+        assert!(debug.contains("42"));
+    }
 }

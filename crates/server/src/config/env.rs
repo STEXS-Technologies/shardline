@@ -459,4 +459,75 @@ mod tests {
         let result = parse_server_frontends_env("unknown");
         assert!(matches!(result, Err(super::ServerConfigError::InvalidServerFrontend)));
     }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_file_read_too_large() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        // MAX_TOKEN_SIGNING_KEY_BYTES is 1_048_576; write data exceeding this
+        let large_data = vec![0u8; 2_000_000];
+        tmp.write_all(&large_data).unwrap();
+        tmp.flush().unwrap();
+        let result = optional_token_signing_key_from_sources(
+            None,
+            Some(tmp.path().display().to_string()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_empty_direct_produces_empty_bytes() {
+        let result =
+            optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
+        assert_eq!(result, Some(b"".to_vec()));
+    }
+
+    #[test]
+    fn parse_server_frontends_env_multiple_with_dedup() {
+        let result = parse_server_frontends_env("xet,lfs,oci,lfs");
+        assert!(result.is_ok());
+        let frontends = result.unwrap();
+        assert_eq!(frontends.len(), 3);
+        assert!(frontends.contains(&crate::ServerFrontend::Xet));
+        assert!(frontends.contains(&crate::ServerFrontend::Lfs));
+        assert!(frontends.contains(&crate::ServerFrontend::Oci));
+    }
+
+    #[test]
+    fn parse_server_frontends_env_all_known() {
+        let result = parse_server_frontends_env("xet,lfs,bazel-http,oci,hub");
+        assert!(result.is_ok());
+        let frontends = result.unwrap();
+        assert_eq!(frontends.len(), 5);
+    }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_direct_empty_string_is_some() {
+        let result =
+            optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // ── load_non_zero_usize_env (tested via parse_server_frontends_env indirectly) ───
+    // Direct unit testing would need env var manipulation which is not thread-safe.
+
+    #[test]
+    fn optional_token_signing_key_from_sources_both_empty_conflict() {
+        // "empty" direct value with a non-empty file path → conflict
+        let result = optional_token_signing_key_from_sources(
+            Some(String::new()),
+            Some("/some/file".to_owned()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_file_not_found() {
+        let result = optional_token_signing_key_from_sources(
+            None,
+            Some("/nonexistent/token/file".to_owned()),
+        );
+        assert!(result.is_err());
+    }
 }

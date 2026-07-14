@@ -494,7 +494,7 @@ mod tests {
 
     use super::{
         PendingS3Config, StorageMigrationRuntimeError, build_s3_config, local_endpoint,
-        optional_s3_secret_from_sources,
+        optional_s3_secret_from_sources, read_s3_credential_file,
     };
     use shardline_protocol::parse_bool;
 
@@ -986,5 +986,98 @@ mod tests {
             result,
             Err(StorageMigrationRuntimeError::S3CredentialSourceConflict { .. })
         ));
+    }
+
+    #[test]
+    fn local_endpoint_destination_missing_root() {
+        let result = super::local_endpoint(None, "destination");
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::MissingLocalRoot {
+                flag: "--to-root",
+                side: "destination",
+            })
+        ));
+    }
+
+    #[test]
+    fn runtime_error_config_debug_contains_variant() {
+        let inner = shardline_server::ServerConfigError::MissingServerFrontends;
+        let err = StorageMigrationRuntimeError::Config(inner);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Config("));
+    }
+
+    #[test]
+    fn runtime_error_missing_s3_env_debug() {
+        let err =
+            StorageMigrationRuntimeError::MissingS3Env("SHARDLINE_MIGRATE_TO_S3_BUCKET".to_owned());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("MissingS3Env"));
+    }
+
+    #[test]
+    fn runtime_error_invalid_local_root_source_side_matches() {
+        use std::io::{Error, ErrorKind};
+        let err = StorageMigrationRuntimeError::InvalidLocalRoot {
+            side: "source",
+            path: PathBuf::from("/bad"),
+            source: Error::new(ErrorKind::PermissionDenied, "bad"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("source"));
+        assert!(msg.contains("/bad"));
+    }
+
+    #[test]
+    fn read_s3_credential_file_rejects_oversized_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("too-large.cred");
+        let data = vec![b'a'; 5000]; // exceeds MAX_S3_CREDENTIAL_BYTES (4096)
+        fs::write(&path, &data).unwrap();
+
+        let result = read_s3_credential_file(&path, "ACCESS_KEY_ID_FILE".to_owned());
+
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::S3CredentialTooLarge {
+                name,
+                observed_bytes: 5000,
+                maximum_bytes: 4096,
+            }) if name == "ACCESS_KEY_ID_FILE"
+        ));
+    }
+
+    #[test]
+    fn read_s3_credential_file_accepts_valid_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("valid.cred");
+        fs::write(&path, b"my-access-key").unwrap();
+
+        let result = read_s3_credential_file(&path, "ACCESS_KEY_ID_FILE".to_owned());
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "my-access-key");
+    }
+
+    #[test]
+    fn build_s3_config_with_all_options_constructs_config() {
+        let configured = build_s3_config(
+            Ok("my-bucket".to_owned()),
+            PendingS3Config {
+                region: "eu-west-1".to_owned(),
+                endpoint: Some("https://s3.custom.com".to_owned()),
+                key_prefix: Some("prefix/".to_owned()),
+                allow_http: Ok(Some(true)),
+                virtual_hosted_style_request: Ok(Some(true)),
+            },
+            || Ok((Some("ak".to_owned()), Some("sk".to_owned()), None)),
+        );
+
+        assert!(configured.is_ok());
+        // Debug output should not leak credentials
+        let debug = format!("{configured:?}");
+        assert!(!debug.contains("ak"));
+        assert!(!debug.contains("sk"));
     }
 }

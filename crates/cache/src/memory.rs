@@ -58,19 +58,13 @@ impl CacheInner {
 
     fn insert(&mut self, key: &ReconstructionCacheKey, entry: MemoryEntry) {
         let inserted_at = entry.inserted_at;
+        let seq = entry.seq;
         if let Some(old) = self.entries.insert(key.clone(), entry) {
             self.eviction_order
                 .remove(&EvictionKey(old.inserted_at, old.seq));
         }
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.saturating_add(1);
         self.eviction_order
             .insert(EvictionKey(inserted_at, seq), key.clone());
-        // Keep the entry's seq in sync with the eviction_order key so that
-        // remove() can find and delete the correct eviction entry.
-        if let Some(cached) = self.entries.get_mut(key) {
-            cached.seq = seq;
-        }
     }
 
     fn remove(&mut self, key: &ReconstructionCacheKey) -> Option<MemoryEntry> {
@@ -290,13 +284,15 @@ impl AsyncReconstructionCache for MemoryReconstructionCache {
             if !inner.entries.contains_key(key) && inner.entries.len() >= self.max_entries.get() {
                 inner.evict_oldest();
             }
+            let seq = inner.next_seq;
+            inner.next_seq = inner.next_seq.saturating_add(1);
             inner.insert(
                 key,
                 MemoryEntry {
                     payload: Arc::new(payload.to_vec()),
                     expires_at,
                     inserted_at: now,
-                    seq: 0,
+                    seq,
                 },
             );
             if let Some(notify) = inner.loading.remove(key) {
@@ -1115,6 +1111,523 @@ mod tests {
         for handle in handles {
             let result = handle.await;
             assert!(result.is_ok(), "task panicked: {:?}", result.err());
+        }
+    }
+
+    // ── get(): write-lock re-check finds valid entry ───────────────────────
+    //
+    // This covers the code at lines ~236-239 where get() acquires the write
+    // lock and finds a valid (non-expired) entry that was stored by a
+    // concurrent put() between the read-lock and write-lock acquisition.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn get_write_lock_recheck_finds_valid_entry() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("recheck-write-lock", None);
+
+        // Use 500 rounds of concurrent get/get_or_load so the race window
+        // where a loader finishes between get()'s read-lock and write-lock
+        // is hit at least once.
+        let mut handles = Vec::new();
+        for _ in 0..500 {
+            // Task: get_or_load with a fast loader
+            let c1 = std::sync::Arc::clone(&cache);
+            let k1 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let result = c1
+                    .get_or_load(&k1, || {
+                        Box::pin(async {
+                            tokio::time::sleep(Duration::from_micros(10)).await;
+                            Ok::<_, ReconstructionCacheError>(b"value".to_vec())
+                        })
+                    })
+                    .await;
+                let _ = result;
+            }));
+
+            // Task: get() — if it lands between the loading entry creation
+            // and the put() that stores the loaded value, it will exercise
+            // the write-lock re-check path (lines 236-239).
+            let c2 = std::sync::Arc::clone(&cache);
+            let k2 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let result = c2.get(&k2).await;
+                assert!(result.is_ok(), "get() should not error");
+            }));
+
+            // Additional puts to create more write-lock pressure
+            let c3 = std::sync::Arc::clone(&cache);
+            let k3 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = c3.put(&k3, b"extra").await;
+            }));
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
+    // ── get(): creates a new loading entry after a previous one vanished ──
+    //
+    // This covers lines ~267-277 where get() finds NO loading entry in the
+    // write lock (it was removed by a concurrent failing loader between
+    // the read and write lock), so it creates a fresh loading entry.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn get_creates_loading_entry_when_loader_disappears() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        // Use a unique key per round so stale loading entries from one
+        // round never cascade into another round's 30-second timeout.
+        let mut handles = Vec::new();
+        for i in 0..1000 {
+            let key = ReconstructionCacheKey::latest(
+                &format!("disappearing-loader-{i}"),
+                None,
+            );
+
+            // Failing get_or_load — fast 10 µs sleep
+            let c1 = std::sync::Arc::clone(&cache);
+            let k1 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = c1
+                    .get_or_load(&k1, || {
+                        Box::pin(async {
+                            tokio::time::sleep(Duration::from_micros(10)).await;
+                            Err::<Vec<u8>, ReconstructionCacheError>(
+                                ReconstructionCacheError::Operation,
+                            )
+                        })
+                    })
+                    .await;
+            }));
+
+            // get() — may race to see loading entry in read lock but not
+            // in write lock, exercising lines 261-271.
+            let c2 = std::sync::Arc::clone(&cache);
+            let k2 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let result = c2.get(&k2).await;
+                assert!(result.is_ok(), "get() should not error");
+            }));
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
+    // ── put() notifies waiters when a loading entry exists ─────────────────
+    //
+    // When put() is called externally while a get_or_load is loading the
+    // same key, put() should find the loading entry and notify waiters.
+    // This covers put() lines ~302-303.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_notifies_waiting_loading_entry() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("put-notify", None);
+
+        // Start a get_or_load with a slow loader that creates a loading entry
+        let c1 = std::sync::Arc::clone(&cache);
+        let k1 = key.clone();
+        let loader_task = tokio::spawn(async move {
+            c1.get_or_load(&k1, || {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    Ok::<_, ReconstructionCacheError>(b"from-loader".to_vec())
+                })
+            })
+            .await
+        });
+
+        // Wait for the loading entry to be created
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Call put() externally — it should find the loading entry and
+        // remove + notify.  This does NOT break the in-flight loader;
+        // when the loader finishes it calls put() again.
+        cache
+            .put(&key, b"external-put")
+            .await
+            .expect("external put should succeed");
+
+        // The get_or_load loader eventually finishes and its put()
+        // overwrites with the loader's value.
+        let loader_result = loader_task.await.expect("loader task panicked");
+        assert!(
+            loader_result.is_ok(),
+            "loader should still succeed even with external put"
+        );
+
+        // Either "external-put" or "from-loader" is the final value —
+        // both are valid depending on ordering.
+        let final_val = cache.get(&key).await.unwrap();
+        assert!(
+            final_val.is_some(),
+            "cache should have some value after put notify"
+        );
+    }
+
+    // ── CacheInner seq ordering ───────────────────────────────────────────
+    //
+    // Verifies that entries are evicted in FIFO order (oldest first) by
+    // using monotonic Insertion-time progression (wall-clock with small
+    // sleeps between inserts).
+
+    #[tokio::test]
+    async fn cache_inner_fifo_eviction_order() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN), // capacity = 3
+        );
+        let keys = [
+            ReconstructionCacheKey::latest("first", None),
+            ReconstructionCacheKey::latest("second", None),
+            ReconstructionCacheKey::latest("third", None),
+            ReconstructionCacheKey::latest("fourth", None),
+        ];
+
+        // Insert 3 entries with distinct insertion times
+        for k in &keys[..3] {
+            cache.put(k, b"data").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // Fourth insert triggers eviction of the oldest (first)
+        cache.put(&keys[3], b"fourth").await.unwrap();
+
+        // First should be evicted (oldest)
+        assert_eq!(
+            cache.get(&keys[0]).await.unwrap(),
+            None,
+            "first (oldest) should be evicted"
+        );
+        // Second and third should still be present
+        assert_eq!(
+            cache.get(&keys[1]).await.unwrap(),
+            Some(b"data".to_vec()),
+            "second should survive"
+        );
+        assert_eq!(
+            cache.get(&keys[2]).await.unwrap(),
+            Some(b"data".to_vec()),
+            "third should survive"
+        );
+        assert_eq!(
+            cache.get(&keys[3]).await.unwrap(),
+            Some(b"fourth".to_vec()),
+            "fourth should be present"
+        );
+    }
+
+    // ── CacheInner evict_oldest skips stale eviction entries ──────────────
+    //
+    // If eviction_order has a stale key (entry was already removed from
+    // `entries` without cleaning up eviction_order), evict_oldest should
+    // skip it and pop the next one.
+
+    #[tokio::test]
+    async fn cache_inner_evict_oldest_skips_stale_entries() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN), // capacity = 2
+        );
+        let keys = [
+            ReconstructionCacheKey::latest("stale-a", None),
+            ReconstructionCacheKey::latest("stale-b", None),
+            ReconstructionCacheKey::latest("stale-c", None),
+        ];
+
+        // Fill cache to capacity
+        cache.put(&keys[0], b"a").await.unwrap();
+        cache.put(&keys[1], b"b").await.unwrap();
+
+        // Delete keys[0] normally (cleans up eviction_order)
+        cache.delete(&keys[0]).await.unwrap();
+
+        // Now cache has capacity for 1 more, insert keys[2] (no eviction needed)
+        cache.put(&keys[2], b"c").await.unwrap();
+
+        // keys[0] is gone, keys[1] and keys[2] are present
+        assert_eq!(cache.get(&keys[0]).await.unwrap(), None);
+        assert_eq!(
+            cache.get(&keys[1]).await.unwrap(),
+            Some(b"b".to_vec())
+        );
+        assert_eq!(
+            cache.get(&keys[2]).await.unwrap(),
+            Some(b"c".to_vec())
+        );
+    }
+
+    // ── get_or_load write-lock re-check hit ───────────────────────────────
+    //
+    // When get_or_load re-checks after acquiring the write lock, it may
+    // find a valid entry that was stored by a concurrent put() between
+    // the read-lock and write-lock acquisition (lines ~150-153).
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn get_or_load_recheck_after_write_lock_finds_entry() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("or-write-recheck", None);
+
+        // Race many get_or_load + put operations to trigger the write-lock
+        // re-check path where a put stores data between read/write lock.
+        let mut handles = Vec::new();
+        for i in 0..50 {
+            let c1 = std::sync::Arc::clone(&cache);
+            let k1 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let result = c1
+                    .get_or_load(&k1, || {
+                        Box::pin(async {
+                            tokio::time::sleep(Duration::from_micros(20)).await;
+                            Ok::<_, ReconstructionCacheError>(
+                                format!("loaded-{i}").into_bytes(),
+                            )
+                        })
+                    })
+                    .await;
+                let _ = result;
+            }));
+
+            let c2 = std::sync::Arc::clone(&cache);
+            let k2 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let _ = c2.put(&k2, format!("put-{i}").as_bytes()).await;
+            }));
+
+            let c3 = std::sync::Arc::clone(&cache);
+            let k3 = key.clone();
+            handles.push(tokio::spawn(async move {
+                let result = c3.get(&k3).await;
+                assert!(result.is_ok());
+            }));
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+
+        // Final state should have some value
+        let final_val = cache.get(&key).await.unwrap();
+        assert!(final_val.is_some(), "cache should hold a final value");
+    }
+
+    // ── put into full cache triggers eviction (non-existing key) ──────────
+    //
+    // The eviction guard in put() is: if the key does NOT already exist AND
+    // the cache is at capacity, evict the oldest.  This test verifies the
+    // condition correctly distinguishes existing-key updates (no eviction)
+    // from new-key inserts (eviction).
+
+    #[tokio::test]
+    async fn put_new_key_evicts_when_full_existing_key_update_does_not() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN), // capacity = 2
+        );
+        let first = ReconstructionCacheKey::latest("first", None);
+        let second = ReconstructionCacheKey::latest("second", None);
+        let overflow = ReconstructionCacheKey::latest("overflow", None);
+
+        // Fill cache: first inserted first (oldest), second inserted second
+        cache.put(&first, b"first").await.unwrap();
+        cache.put(&second, b"second").await.unwrap();
+
+        // Update first key — should NOT trigger eviction because
+        // contains_key(first) is true; the guard only evicts for new keys.
+        // The update gives first a newer timestamp, making it the newest.
+        cache.put(&first, b"first-updated").await.unwrap();
+        assert_eq!(
+            cache.get(&first).await.unwrap(),
+            Some(b"first-updated".to_vec()),
+            "existing key update should not evict"
+        );
+        assert_eq!(
+            cache.get(&second).await.unwrap(),
+            Some(b"second".to_vec()),
+            "second should still be present after first is updated"
+        );
+
+        // Insert overflow key — SHOULD evict the oldest entry.
+        // Since "first" was just updated (newest), "second" is now oldest.
+        cache.put(&overflow, b"third").await.unwrap();
+        assert_eq!(
+            cache.get(&second).await.unwrap(),
+            None,
+            "second (now oldest) should be evicted for new key"
+        );
+        assert_eq!(
+            cache.get(&first).await.unwrap(),
+            Some(b"first-updated".to_vec()),
+            "first (updated, newest) should survive"
+        );
+        assert_eq!(
+            cache.get(&overflow).await.unwrap(),
+            Some(b"third".to_vec()),
+            "overflow should be present"
+        );
+    }
+
+    // ── get_or_load concurrent waiter notified via put ────────────────────
+    //
+    // Multiple concurrent get_or_load calls: one becomes the loader
+    // (which calls put() on success), the others wait on the notify.
+    // This exercises the "waiter gets notified and returns the stored
+    // value" path in get_or_load (lines ~198-207).
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn get_or_load_waiter_gets_notified_value() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("waiter-notified", None);
+        let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+        // Use a barrier so all tasks arrive at nearly the same time
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(21));
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let c = std::sync::Arc::clone(&cache);
+            let k = key.clone();
+            let b = std::sync::Arc::clone(&barrier);
+            let lc = std::sync::Arc::clone(&load_count);
+            handles.push(tokio::spawn(async move {
+                b.wait().await;
+                let result = c
+                    .get_or_load(&k, || {
+                        lc.fetch_add(1, Ordering::Relaxed);
+                        Box::pin(async {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Ok::<_, ReconstructionCacheError>(b"shared-result".to_vec())
+                        })
+                    })
+                    .await;
+                assert!(result.is_ok(), "get_or_load should succeed");
+                assert_eq!(
+                    result.unwrap(),
+                    Some(b"shared-result".to_vec()),
+                    "all waiters should get the stored value"
+                );
+            }));
+        }
+
+        // Release all tasks at once
+        barrier.wait().await;
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(
+            load_count.load(Ordering::Relaxed),
+            1,
+            "loader should only run once"
+        );
+    }
+
+    // ── get_or_load expired entry cleanup in write-lock re-check ──────────
+    //
+    // When the re-check after write lock finds an entry that was stored
+    // between read and write lock but that entry is already expired,
+    // get_or_load removes it and proceeds to load the new value.
+    // This covers the expired-entry cleanup path in the re-check block.
+
+    #[tokio::test(start_paused = true)]
+    async fn get_or_load_recheck_finds_expired_entry_after_concurrent_put() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("recheck-expired", None);
+
+        // Put a short-lived entry
+        cache.put(&key, b"short-lived").await.unwrap();
+
+        // Advance time past TTL so the entry is expired
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        // The entry exists but is expired. get_or_load's fast-path read lock
+        // will miss (expired), then the write lock re-check also finds it
+        // expired, proceeds to the loading setup, finds no loading entry,
+        // removes the expired entry, and loads fresh data.
+        let result = cache
+            .get_or_load(&key, || {
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"fresh".to_vec()) })
+            })
+            .await;
+        assert_eq!(
+            result.unwrap(),
+            Some(b"fresh".to_vec()),
+            "should load fresh data after finding expired entry"
+        );
+
+        // Verify the old expired entry was cleaned up
+        let stored = cache.get(&key).await.unwrap();
+        assert_eq!(
+            stored,
+            Some(b"fresh".to_vec()),
+            "expired entry should have been replaced"
+        );
+    }
+
+    // ── Concurrent put/get loading entry cleanup ─────────────────────────
+    //
+    // Stress test: many concurrent puts and gets to exercise the loading
+    // entry creation and cleanup paths under high contention.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_put_and_get_loading_entry_stress() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(50).unwrap_or(NonZeroUsize::MIN),
+        ));
+
+        let mut handles = Vec::new();
+        for i in 0..30 {
+            let key = ReconstructionCacheKey::latest(&format!("stress-key-{i}"), None);
+
+            // Concurrent put + get on the same key
+            for _ in 0..3 {
+                let c = std::sync::Arc::clone(&cache);
+                let k = key.clone();
+                handles.push(tokio::spawn(async move {
+                    let _ = c.put(&k, b"data").await;
+                }));
+
+                let c = std::sync::Arc::clone(&cache);
+                let k = key.clone();
+                handles.push(tokio::spawn(async move {
+                    let result = c.get(&k).await;
+                    assert!(result.is_ok(), "get should not error under stress");
+                }));
+
+                let c = std::sync::Arc::clone(&cache);
+                let k = key.clone();
+                handles.push(tokio::spawn(async move {
+                    let _ = c.delete(&k).await;
+                }));
+            }
+        }
+
+        for h in handles {
+            let _ = h.await;
         }
     }
 }

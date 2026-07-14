@@ -892,4 +892,387 @@ mod tests {
             Err(FileRecordInvariantError::TotalBytesMismatch)
         );
     }
+
+    #[test]
+    fn file_record_reconstruction_plan_accepts_empty_chunks_zero_bytes() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![],
+        };
+        assert_eq!(record.validate_reconstruction_plan(), Ok(()));
+    }
+
+    #[test]
+    fn file_record_invariant_error_from_hash_parse_error() {
+        // The #[from] attribute means ? works for HashParseError -> FileRecordInvariantError
+        fn convert(err: shardline_protocol::HashParseError) -> FileRecordInvariantError {
+            err.into()
+        }
+        let err = convert(shardline_protocol::HashParseError::InvalidLength);
+        assert_eq!(err.to_string(), "file record chunk hash is invalid");
+        let err = convert(shardline_protocol::HashParseError::InvalidCharacter);
+        assert_eq!(err.to_string(), "file record chunk hash is invalid");
+    }
+
+    #[test]
+    fn repository_record_scope_new_and_accessors() {
+        let scope = RepositoryRecordScope::new(
+            RepositoryProvider::GitHub,
+            "my_owner",
+            "my_repo",
+        );
+        assert_eq!(scope.provider(), RepositoryProvider::GitHub);
+        assert_eq!(scope.owner(), "my_owner");
+        assert_eq!(scope.name(), "my_repo");
+    }
+
+    // ── Default visit_* trait impls ──────────────────────────────────────────
+
+    use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+    use crate::{RecordTraversal, RecordStoreFuture, StoredRecord, RecordMutation};
+
+    /// Minimal store that backs records via BTreeMap but does NOT override any
+    /// of the default `visit_*` implementations from the [`RecordTraversal`] trait.
+    struct DefaultVisitStore {
+        latest: Mutex<BTreeMap<String, (Vec<u8>, Duration)>>,
+        version: Mutex<BTreeMap<String, (Vec<u8>, Duration)>>,
+    }
+
+    impl DefaultVisitStore {
+        fn new() -> Self {
+            Self {
+                latest: Mutex::new(BTreeMap::new()),
+                version: Mutex::new(BTreeMap::new()),
+            }
+        }
+
+        fn write_latest(&self, key: &str, bytes: Vec<u8>) {
+            self.latest.lock().unwrap().insert(key.to_owned(), (bytes, Duration::from_secs(42)));
+        }
+
+        fn write_version(&self, key: &str, bytes: Vec<u8>) {
+            self.version.lock().unwrap().insert(key.to_owned(), (bytes, Duration::from_secs(99)));
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct DefaultVisitLocator(String);
+
+    impl RecordTraversal for DefaultVisitStore {
+        type Error = std::convert::Infallible;
+        type Locator = DefaultVisitLocator;
+
+        fn list_latest_record_locators(
+            &self,
+        ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
+            let keys: Vec<DefaultVisitLocator> = self.latest.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            Box::pin(async move { Ok(keys) })
+        }
+
+        fn list_repository_latest_record_locators<'operation>(
+            &'operation self,
+            _repository: &'operation RepositoryRecordScope,
+        ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
+            // For test simplicity: same as list_latest
+            let keys: Vec<DefaultVisitLocator> = self.latest.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            Box::pin(async move { Ok(keys) })
+        }
+
+        fn list_version_record_locators(
+            &self,
+        ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
+            let keys: Vec<DefaultVisitLocator> = self.version.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            Box::pin(async move { Ok(keys) })
+        }
+
+        fn list_repository_version_record_locators<'operation>(
+            &'operation self,
+            _repository: &'operation RepositoryRecordScope,
+        ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
+            let keys: Vec<DefaultVisitLocator> = self.version.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            Box::pin(async move { Ok(keys) })
+        }
+
+        fn read_record_bytes<'operation>(
+            &'operation self,
+            locator: &'operation Self::Locator,
+        ) -> RecordStoreFuture<'operation, Vec<u8>, Self::Error> {
+            let entry = self
+                .latest
+                .lock()
+                .unwrap()
+                .get(&locator.0)
+                .cloned()
+                .or_else(|| self.version.lock().unwrap().get(&locator.0).cloned());
+            Box::pin(async move { entry.ok_or_else(|| unreachable!("test locator not found")).map(|e| e.0) })
+        }
+
+        fn read_latest_record_bytes<'operation>(
+            &'operation self,
+            _record: &'operation FileRecord,
+        ) -> RecordStoreFuture<'operation, Option<Vec<u8>>, Self::Error> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn record_locator_exists<'operation>(
+            &'operation self,
+            locator: &'operation Self::Locator,
+        ) -> RecordStoreFuture<'operation, bool, Self::Error> {
+            let exists = self.latest.lock().unwrap().contains_key(&locator.0)
+                || self.version.lock().unwrap().contains_key(&locator.0);
+            Box::pin(async move { Ok(exists) })
+        }
+
+        fn modified_since_epoch<'operation>(
+            &'operation self,
+            locator: &'operation Self::Locator,
+        ) -> RecordStoreFuture<'operation, Duration, Self::Error> {
+            let entry = self
+                .latest
+                .lock()
+                .unwrap()
+                .get(&locator.0)
+                .cloned()
+                .or_else(|| self.version.lock().unwrap().get(&locator.0).cloned());
+            Box::pin(async move { entry.ok_or_else(|| unreachable!("test locator not found")).map(|e| e.1) })
+        }
+
+        fn latest_record_locator(&self, _record: &FileRecord) -> Self::Locator {
+            DefaultVisitLocator("latest".to_owned())
+        }
+
+        fn version_record_locator(&self, _record: &FileRecord) -> Self::Locator {
+            DefaultVisitLocator("version".to_owned())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_visit_latest_records_produces_stored_records() {
+        let store = DefaultVisitStore::new();
+        store.write_latest("k1", b"data1".to_vec());
+        store.write_latest("k2", b"data2".to_vec());
+
+        let mut records = Vec::new();
+        store
+            .visit_latest_records(|stored| {
+                assert!(!stored.bytes.is_empty(), "bytes should be present");
+                assert!(
+                    stored.modified_since_epoch > Duration::ZERO,
+                    "modified time should be > 0"
+                );
+                records.push(stored);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 2);
+        // Verify the two records have distinct locators
+        assert_ne!(records[0].locator, records[1].locator);
+    }
+
+    #[tokio::test]
+    async fn default_visit_version_records_produces_stored_records() {
+        let store = DefaultVisitStore::new();
+        store.write_version("v1", b"version1".to_vec());
+
+        let mut records = Vec::new();
+        store
+            .visit_version_records(|stored| {
+                assert_eq!(stored.bytes, b"version1");
+                records.push(stored);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].locator, DefaultVisitLocator("v1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn default_visit_repository_latest_records_produces_stored_records() {
+        let store = DefaultVisitStore::new();
+        store.write_latest("r1", b"repo-data".to_vec());
+
+        let repo = RepositoryRecordScope::new(
+            RepositoryProvider::GitHub,
+            "owner",
+            "repo",
+        );
+        let mut records = Vec::new();
+        store
+            .visit_repository_latest_records(&repo, |stored| {
+                records.push(stored);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].bytes, b"repo-data");
+    }
+
+    #[tokio::test]
+    async fn default_visit_repository_version_records_produces_stored_records() {
+        let store = DefaultVisitStore::new();
+        store.write_version("rv1", b"repo-version".to_vec());
+
+        let repo = RepositoryRecordScope::new(
+            RepositoryProvider::GitLab,
+            "group",
+            "project",
+        );
+        let mut records = Vec::new();
+        store
+            .visit_repository_version_records(&repo, |stored| {
+                records.push(stored);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].bytes, b"repo-version");
+    }
+
+    #[tokio::test]
+    async fn default_visit_latest_record_locators_returns_locators() {
+        let store = DefaultVisitStore::new();
+        store.write_latest("a", vec![]);
+        store.write_latest("b", vec![]);
+
+        let mut locs = Vec::new();
+        store
+            .visit_latest_record_locators(|loc| {
+                locs.push(loc);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(locs.len(), 2);
+        assert!(locs.contains(&DefaultVisitLocator("a".to_owned())));
+        assert!(locs.contains(&DefaultVisitLocator("b".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn default_visit_version_record_locators_returns_locators() {
+        let store = DefaultVisitStore::new();
+        store.write_version("x", vec![]);
+
+        let mut locs = Vec::new();
+        store
+            .visit_version_record_locators(|loc| {
+                locs.push(loc);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(locs, vec![DefaultVisitLocator("x".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn default_visit_repository_latest_record_locators_returns_locators() {
+        let store = DefaultVisitStore::new();
+        store.write_latest("r1", vec![]);
+
+        let repo = RepositoryRecordScope::new(
+            RepositoryProvider::GitHub,
+            "o",
+            "r",
+        );
+        let mut locs = Vec::new();
+        store
+            .visit_repository_latest_record_locators(&repo, |loc| {
+                locs.push(loc);
+                Ok::<(), std::convert::Infallible>(())
+            })
+             .await
+             .unwrap();
+
+        assert_eq!(locs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn default_visit_repository_version_record_locators_returns_locators() {
+        let store = DefaultVisitStore::new();
+        store.write_version("v1", vec![]);
+
+        let repo = RepositoryRecordScope::new(
+            RepositoryProvider::GitLab,
+            "g",
+            "p",
+        );
+        let mut locs = Vec::new();
+        store
+            .visit_repository_version_record_locators(&repo, |loc| {
+                locs.push(loc);
+                Ok::<(), std::convert::Infallible>(())
+            })
+             .await
+             .unwrap();
+
+        assert_eq!(locs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn default_visit_latest_records_empty_store_does_not_call_visitor() {
+        let store = DefaultVisitStore::new();
+        let mut called = false;
+        store
+            .visit_latest_records(|_| {
+                called = true;
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+        assert!(!called);
+    }
+
+    #[tokio::test]
+    async fn default_visit_version_records_empty_store_does_not_call_visitor() {
+        let store = DefaultVisitStore::new();
+        let mut called = false;
+        store
+            .visit_version_records(|_| {
+                called = true;
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+            .unwrap();
+        assert!(!called);
+    }
+
+    #[tokio::test]
+    async fn file_record_validate_rejects_invalid_chunk_hash() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 1,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "not-a-valid-hex-string".to_owned(),
+                offset: 0,
+                length: 1,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 1,
+            }],
+        };
+        let result = record.validate_reconstruction_plan();
+        assert!(result.is_err());
+        // The error should wrap a HashParseError via #[from]
+        match result {
+            Err(FileRecordInvariantError::ChunkHash(_)) => {} // expected
+            other => panic!("Expected ChunkHash error, got: {other:?}"),
+        }
+    }
 }
