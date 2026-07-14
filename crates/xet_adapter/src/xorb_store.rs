@@ -246,7 +246,7 @@ mod tests {
     use super::{
         canonicalize_uploaded_xorb, normalize_serialized_xorb, store_uploaded_xorb,
         store_uploaded_xorb_with_metrics, validate_serialized_xorb,
-        xorb_hash_from_object_key_if_present, xorb_object_key,
+        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
     use shardline_server_core::ServerObjectStore;
@@ -547,6 +547,100 @@ mod tests {
     fn xorb_object_key_rejects_empty_hash() {
         let key = xorb_object_key("");
         assert!(key.is_err());
+    }
+
+    // ── visit_stored_xorb_chunk_hashes ───────────────────────────────────
+
+    #[test]
+    fn visit_stored_xorb_chunk_hashes_visits_all_chunks() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let key = xorb_object_key(&hash).unwrap();
+
+        let mut visited = Vec::new();
+        let result = visit_stored_xorb_chunk_hashes(
+            &object_store,
+            &key,
+            |chunk_hash: String| -> Result<(), XetAdapterError> {
+                visited.push(chunk_hash);
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "visit failed: {result:?}");
+        assert!(!visited.is_empty(), "should have visited chunk hashes");
+        for hex in &visited {
+            assert_eq!(hex.len(), 64, "expected 64-char hex hash");
+        }
+    }
+
+    #[test]
+    fn visit_stored_xorb_chunk_hashes_returns_ok_for_unknown_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/nonexistent.xorb").unwrap();
+        let mut visited = false;
+        let result = visit_stored_xorb_chunk_hashes(
+            &object_store,
+            &key,
+            |_hash: String| -> Result<(), XetAdapterError> {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "expected Ok for missing key");
+        assert!(!visited, "visitor should not be called for missing key");
+    }
+
+    #[test]
+    fn visit_stored_xorb_chunk_hashes_returns_ok_for_invalid_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        // A non-xorb key should cause xorb_hash_from_object_key_if_present to return None
+        let key = shardline_storage::ObjectKey::parse("shards/aa/hash.shard").unwrap();
+        let mut visited = false;
+        let result = visit_stored_xorb_chunk_hashes(
+            &object_store,
+            &key,
+            |_hash: String| -> Result<(), XetAdapterError> {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok(), "expected Ok for invalid key: {result:?}");
+        assert!(!visited, "visitor should not be called for invalid key");
+    }
+
+    #[test]
+    fn visit_stored_xorb_chunk_hashes_propagates_visitor_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let key = xorb_object_key(&hash).unwrap();
+
+        let result = visit_stored_xorb_chunk_hashes(
+            &object_store,
+            &key,
+            |_hash: String| -> Result<(), XetAdapterError> { Err(XetAdapterError::Overflow) },
+        );
+        assert!(
+            matches!(result, Err(XetAdapterError::Overflow)),
+            "expected Overflow error, got {result:?}"
+        );
     }
 
     // ── From<XorbParseError> for XetAdapterError variants ─────────────────

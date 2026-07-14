@@ -867,6 +867,222 @@ mod tests {
         serialized
     }
 
+    // ── shard_hash_from_object_key_if_present edge cases ─────────────────
+
+    #[test]
+    fn shard_hash_from_key_rejects_single_segment() {
+        let key = shardline_storage::ObjectKey::parse("shards").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_two_segments() {
+        let key = shardline_storage::ObjectKey::parse("shards/ab").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_extra_segments() {
+        let key =
+            shardline_storage::ObjectKey::parse("shards/ab/abhash.shard/extra").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_wrong_namespace() {
+        let key =
+            shardline_storage::ObjectKey::parse("xorbs/ab/abhash.shard").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_invalid_prefix_length() {
+        let key =
+            shardline_storage::ObjectKey::parse("shards/abc/abchash.shard").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_non_hex_prefix() {
+        let key =
+            shardline_storage::ObjectKey::parse("shards/xx/xxhash.shard").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_missing_shard_extension() {
+        let key =
+            shardline_storage::ObjectKey::parse("shards/ab/abhash").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_prefix_mismatch() {
+        let key =
+            shardline_storage::ObjectKey::parse("shards/bb/abhash.shard").unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn shard_hash_from_key_rejects_invalid_hash_characters() {
+        let key = shardline_storage::ObjectKey::parse(
+            "shards/gg/gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.shard",
+        )
+        .unwrap();
+        let extracted = super::shard_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    // ── file_section_followed_entries ────────────────────────────────────
+
+    #[test]
+    fn file_section_followed_entries_without_verification_or_metadata() {
+        let seg_count = 3_usize;
+        let header = FileDataSequenceHeader::new(
+            shardline_xet_core::merklehash::compute_data_hash(b"h"),
+            seg_count,
+            false,
+            false,
+        );
+        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
+        assert_eq!(result, seg_count);
+    }
+
+    #[test]
+    fn file_section_followed_entries_with_verification() {
+        let seg_count = 3_usize;
+        let header = FileDataSequenceHeader::new(
+            shardline_xet_core::merklehash::compute_data_hash(b"h"),
+            seg_count,
+            true,
+            false,
+        );
+        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
+        assert_eq!(result, seg_count + seg_count);
+    }
+
+    #[test]
+    fn file_section_followed_entries_with_metadata_ext() {
+        let seg_count = 3_usize;
+        let header = FileDataSequenceHeader::new(
+            shardline_xet_core::merklehash::compute_data_hash(b"h"),
+            seg_count,
+            false,
+            true,
+        );
+        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
+        assert_eq!(result, seg_count + 1);
+    }
+
+    #[test]
+    fn file_section_followed_entries_with_both() {
+        let seg_count = 2_usize;
+        let header = FileDataSequenceHeader::new(
+            shardline_xet_core::merklehash::compute_data_hash(b"h"),
+            seg_count,
+            true,
+            true,
+        );
+        let result = super::file_section_followed_entries(&header, seg_count).unwrap();
+        assert_eq!(result, seg_count + seg_count + 1);
+    }
+
+    // ── validate_referenced_xorb_count ────────────────────────────────────
+
+    #[test]
+    fn validate_referenced_xorb_count_accepts_within_limit() {
+        use shardline_xet_core::merklehash::compute_data_hash;
+        let hash = compute_data_hash(b"xorb");
+        let file_infos = vec![MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, false, false),
+            segments: vec![FileDataSequenceEntry::new(hash, 1, 0, 1)],
+            verification: Vec::new(),
+            metadata_ext: None,
+        }];
+        assert!(super::validate_referenced_xorb_count(&file_infos, 1).is_ok());
+    }
+
+    #[test]
+    fn validate_referenced_xorb_count_exceeds_limit() {
+        use shardline_xet_core::merklehash::compute_data_hash;
+        let first = compute_data_hash(b"xorb1");
+        let second = compute_data_hash(b"xorb2");
+        let file_infos = vec![MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2, false, false),
+            segments: vec![
+                FileDataSequenceEntry::new(first, 1, 0, 1),
+                FileDataSequenceEntry::new(second, 1, 0, 1),
+            ],
+            verification: Vec::new(),
+            metadata_ext: None,
+        }];
+        let result = super::validate_referenced_xorb_count(&file_infos, 1);
+        assert!(matches!(result, Err(XetAdapterError::TooManyShardTerms)));
+    }
+
+    // ── XorbRangeInfo ────────────────────────────────────────────────────
+
+    #[test]
+    fn xorb_range_info_packed_start_zero_for_index_zero() {
+        let info = super::XorbRangeInfo {
+            packed_chunk_ends: vec![100, 200, 300],
+        };
+        assert_eq!(info.packed_start(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn xorb_range_info_packed_start_uses_previous_chunk_end() {
+        let info = super::XorbRangeInfo {
+            packed_chunk_ends: vec![100, 200, 300],
+        };
+        assert_eq!(info.packed_start(1).unwrap(), 100);
+        assert_eq!(info.packed_start(2).unwrap(), 200);
+    }
+
+    #[test]
+    fn xorb_range_info_packed_start_rejects_past_end() {
+        let info = super::XorbRangeInfo {
+            packed_chunk_ends: vec![100, 200],
+        };
+        assert!(info.packed_start(3).is_err());
+    }
+
+    #[test]
+    fn xorb_range_info_packed_end_uses_zero_based_index() {
+        let info = super::XorbRangeInfo {
+            packed_chunk_ends: vec![100, 200, 300],
+        };
+        // packed_end(1) = packed_chunk_ends[0] = 100
+        assert_eq!(info.packed_end(1).unwrap(), 100);
+        assert_eq!(info.packed_end(2).unwrap(), 200);
+        assert_eq!(info.packed_end(3).unwrap(), 300);
+    }
+
+    #[test]
+    fn xorb_range_info_packed_end_rejects_past_end() {
+        let info = super::XorbRangeInfo {
+            packed_chunk_ends: vec![100, 200],
+        };
+        assert!(info.packed_end(3).is_err());
+    }
+
     // ── Pure helper function tests ────────────────────────────────────────
 
     #[test]

@@ -444,11 +444,88 @@ mod tests {
     };
 
     use super::{
-        ValidatedXorb, ValidatedXorbChunk, XorbInvalidFormatError, XorbParseError, XorbVisitError,
-        decode_serialized_xorb_chunks, merkle_hash_to_shardline_hash,
+        DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbInvalidFormatError, XorbParseError,
+        XorbVisitError, decode_serialized_xorb_chunks, merkle_hash_to_shardline_hash,
         try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
     };
+    use crate::XetAdapterError;
     use shardline_protocol::ShardlineHash;
+
+    // ── XorbParseError Display ─────────────────────────────────────────
+
+    #[test]
+    fn xorb_parse_error_display_invalid_format() {
+        let err = XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid"), "msg: {msg}");
+    }
+
+    #[test]
+    fn xorb_parse_error_display_hash_mismatch() {
+        let err = XorbParseError::HashMismatch;
+        let msg = err.to_string();
+        assert!(msg.contains("hash"), "msg: {msg}");
+    }
+
+    #[test]
+    fn xorb_parse_error_display_numeric_conversion() {
+        let err = XorbParseError::NumericConversion(
+            u64::try_from(-1i32).unwrap_err(),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("conversion"), "msg: {msg}");
+    }
+
+    #[test]
+    fn xorb_parse_error_display_io() {
+        let err = XorbParseError::Io(std::io::Error::other("disk failure"));
+        let msg = err.to_string();
+        assert!(msg.contains("io"), "msg: {msg}");
+    }
+
+    // ── XorbInvalidFormatError Display ──────────────────────────────────
+
+    #[test]
+    fn xorb_invalid_format_error_display_all_variants() {
+        let cases: &[(XorbInvalidFormatError, &str)] = &[
+            (XorbInvalidFormatError::StructuralValidationFailed, "structural"),
+            (XorbInvalidFormatError::MetadataSectionLengthMismatch, "length"),
+            (XorbInvalidFormatError::NonMonotonicChunkBoundaries, "boundar"),
+            (XorbInvalidFormatError::PackedContentLengthMismatch, "length"),
+            (XorbInvalidFormatError::PackedChunkLengthOverflow, "overflow"),
+            (XorbInvalidFormatError::ChunkPayloadMetadataMismatch, "metadata"),
+            (XorbInvalidFormatError::ChunkPayloadHashMismatch, "hash"),
+            (XorbInvalidFormatError::DecodedChunkLengthMismatch, "length"),
+            (XorbInvalidFormatError::CoreMalformedData, "malformed"),
+            (XorbInvalidFormatError::CoreRejectedData, "rejected"),
+            (XorbInvalidFormatError::XorbHashConversionFailed, "merkle"),
+            (XorbInvalidFormatError::ChunkHashConversionFailed, "protocol"),
+        ];
+        for (variant, expected) in cases {
+            let msg = variant.to_string();
+            assert!(
+                msg.contains(expected),
+                "variant {variant:?} msg '{msg}' missing '{expected}'"
+            );
+        }
+    }
+
+    // ── XorbVisitError Display ──────────────────────────────────────────
+
+    #[test]
+    fn xorb_visit_error_parse_variant_displays_parse_error() {
+        let err: XorbVisitError<XetAdapterError> =
+            XorbParseError::HashMismatch.into();
+        let msg = err.to_string();
+        assert!(msg.contains("hash"), "msg: {msg}");
+    }
+
+    #[test]
+    fn xorb_visit_error_visitor_variant_displays_generic_message() {
+        let err = XorbVisitError::<XetAdapterError>::Visitor(XetAdapterError::NotFound);
+        let msg = err.to_string();
+        assert!(msg.contains("visitor"), "msg: {msg}");
+    }
 
     #[test]
     fn validate_serialized_xorb_reports_chunk_metadata_and_decodes_bytes() {
@@ -661,5 +738,77 @@ mod tests {
 
         assert!(matches!(result, Err(XorbVisitError::Visitor("stop"))));
         assert_eq!(visited, 1);
+    }
+
+    // ── ValidatedXorbChunk accessors ────────────────────────────────────
+
+    #[test]
+    fn validated_xorb_chunk_accessors() {
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"test")).unwrap();
+        let chunk = ValidatedXorbChunk::new(hash, 10, 100, 50, 80);
+        assert_eq!(chunk.hash(), hash);
+        assert_eq!(chunk.packed_start(), 10);
+        assert_eq!(chunk.packed_end(), 100);
+        assert_eq!(chunk.unpacked_start(), 50);
+        assert_eq!(chunk.unpacked_end(), 80);
+        assert_eq!(chunk.unpacked_len(), 30);
+    }
+
+    #[test]
+    fn validated_xorb_chunk_unpacked_len_zero() {
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"t")).unwrap();
+        let chunk = ValidatedXorbChunk::new(hash, 0, 0, 5, 5);
+        assert_eq!(chunk.unpacked_len(), 0);
+    }
+
+    #[test]
+    fn validated_xorb_chunk_unpacked_len_saturating() {
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"t")).unwrap();
+        let chunk = ValidatedXorbChunk::new(hash, 0, 0, 100, 50);
+        // saturating_sub: 50 - 100 = 0
+        assert_eq!(chunk.unpacked_len(), 0);
+    }
+
+    // ── ValidatedXorb accessors ─────────────────────────────────────────
+
+    #[test]
+    fn validated_xorb_accessors() {
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"test")).unwrap();
+        let chunk = ValidatedXorbChunk::new(hash, 0, 100, 0, 50);
+        let validated = ValidatedXorb::new(hash, 1000, 900, 500, vec![chunk.clone()]);
+        assert_eq!(validated.hash(), hash);
+        assert_eq!(validated.total_length(), 1000);
+        assert_eq!(validated.packed_content_length(), 900);
+        assert_eq!(validated.unpacked_length(), 500);
+        assert_eq!(validated.chunks(), &[chunk]);
+    }
+
+    #[test]
+    fn validated_xorb_empty_chunks() {
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"empty")).unwrap();
+        let validated = ValidatedXorb::new(hash, 0, 0, 0, vec![]);
+        assert!(validated.chunks().is_empty());
+    }
+
+    // ── DecodedXorbChunk accessors ──────────────────────────────────────
+
+    #[test]
+    fn decoded_xorb_chunk_accessors() {
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"data")).unwrap();
+        let descriptor = ValidatedXorbChunk::new(hash, 0, 4, 0, 4);
+        let data = b"hello".to_vec();
+        let decoded = DecodedXorbChunk::new(descriptor.clone(), data.clone());
+        assert_eq!(*decoded.descriptor(), descriptor);
+        assert_eq!(decoded.data(), data.as_slice());
+    }
+
+    // ── merkle_hash_to_shardline_hash round-trip ───────────────────────
+
+    #[test]
+    fn merkle_hash_to_shardline_hash_round_trip() {
+        let merkle = compute_data_hash(b"roundtrip");
+        let shardline = merkle_hash_to_shardline_hash(merkle).unwrap();
+        let bytes: [u8; 32] = merkle.as_bytes().try_into().unwrap();
+        assert_eq!(shardline.as_bytes(), &bytes);
     }
 }

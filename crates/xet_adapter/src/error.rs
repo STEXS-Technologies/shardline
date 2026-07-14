@@ -93,6 +93,7 @@ impl From<XorbParseError> for XetAdapterError {
 #[cfg(test)]
 mod tests {
     use super::XetAdapterError;
+    use crate::xorb::{XorbInvalidFormatError, XorbParseError};
     use shardline_index::FileRecordInvariantError;
     use shardline_protocol::HashParseError;
     use shardline_server_core::InvalidSerializedShardError;
@@ -142,5 +143,35 @@ mod tests {
         let error = XetAdapterError::IndexStore(LocalIndexStoreError::InvalidLegacyImportState);
         let msg = error.to_string();
         assert!(!msg.is_empty());
+    }
+
+    // ── From<XorbParseError> ───────────────────────────────────────────
+
+    #[test]
+    fn from_xorb_parse_error_hash_mismatch() {
+        let err: XetAdapterError = XorbParseError::HashMismatch.into();
+        assert!(matches!(err, XetAdapterError::XorbHashMismatch));
+    }
+
+    #[test]
+    fn from_xorb_parse_error_invalid_format() {
+        let err: XetAdapterError =
+            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed).into();
+        assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
+    }
+
+    #[test]
+    fn from_xorb_parse_error_numeric_conversion() {
+        let err: XetAdapterError = XorbParseError::NumericConversion(
+            u64::try_from(-1i32).unwrap_err(),
+        )
+        .into();
+        assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
+    }
+
+    #[test]
+    fn from_xorb_parse_error_io() {
+        let err: XetAdapterError = XorbParseError::Io(std::io::Error::other("disk failure")).into();
+        assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
     }
 }

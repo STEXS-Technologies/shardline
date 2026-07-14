@@ -118,4 +118,18 @@ mod tests {
     fn validate_hash_path_rejects_invalid_hash() {
         assert!(validate_hash_path("not-a-hash").is_err());
     }
+
+    #[test]
+    fn build_xorb_transfer_url_without_trailing_slash_on_base() {
+        let url = build_xorb_transfer_url("http://example.com", &"a".repeat(64));
+        assert!(url.starts_with("http://example.com/transfer/xorb/default/"));
+        assert_eq!(url.len(), "http://example.com/transfer/xorb/default/".len() + 64);
+    }
+
+    #[test]
+    fn build_xorb_transfer_url_empty_base_url() {
+        let url = build_xorb_transfer_url("", &"b".repeat(64));
+        assert!(url.starts_with("/transfer/xorb/default/"));
+        assert_eq!(url.len(), "/transfer/xorb/default/".len() + 64);
+    }
 }
