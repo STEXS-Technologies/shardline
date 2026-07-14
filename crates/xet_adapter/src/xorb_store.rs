@@ -26,6 +26,7 @@ use super::{
     validate_serialized_xorb,
 };
 
+#[derive(Debug)]
 pub struct StoredXorbUpload {
     pub was_inserted: bool,
     pub stored_bytes: u64,
@@ -243,10 +244,12 @@ mod tests {
     };
 
     use super::{
-        canonicalize_uploaded_xorb, normalize_serialized_xorb, validate_serialized_xorb,
+        canonicalize_uploaded_xorb, normalize_serialized_xorb, store_uploaded_xorb,
+        store_uploaded_xorb_with_metrics, validate_serialized_xorb,
         xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
+    use shardline_server_core::ServerObjectStore;
 
     #[test]
     fn normalize_serialized_xorb_accepts_footerless_uploads() {
@@ -343,6 +346,85 @@ mod tests {
         assert!(matches!(canonicalized, Cow::Owned(_)));
         assert!(canonicalized.len() > serialized.serialized_data.len());
         assert_eq!(validated.hash(), expected_hash);
+    }
+
+    // ---- store_uploaded_xorb tests ----
+
+    #[test]
+    fn store_uploaded_xorb_stores_chunks_and_xorb() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(2, ChunkSize::Fixed(512));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        assert!(result.is_ok(), "store_uploaded_xorb failed: {result:?}");
+        let stored = result.unwrap();
+        assert!(stored.was_inserted, "xorb should be newly inserted");
+        assert!(
+            stored.stored_bytes > 0,
+            "stored_bytes should be > 0, got {}",
+            stored.stored_bytes
+        );
+    }
+
+    #[test]
+    fn store_uploaded_xorb_idempotent_returns_was_inserted_false() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        let first = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        assert!(first.was_inserted);
+
+        let second =
+            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        assert!(
+            !second.was_inserted,
+            "second store should report was_inserted=false"
+        );
+    }
+
+    #[test]
+    fn store_uploaded_xorb_rejects_wrong_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let wrong_hash = "00".repeat(32);
+
+        let result = store_uploaded_xorb(&object_store, &wrong_hash, &serialized.serialized_data);
+        assert!(result.is_err(), "expected error for wrong hash");
+    }
+
+    #[test]
+    fn store_uploaded_xorb_with_metrics_delegates_and_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+
+        let raw = build_raw_xorb(1, ChunkSize::Fixed(256));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+
+        let result =
+            store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
+        assert!(result.is_ok(), "store_uploaded_xorb_with_metrics failed: {result:?}");
+        let stored = result.unwrap();
+        assert!(stored.was_inserted);
     }
 
     #[test]

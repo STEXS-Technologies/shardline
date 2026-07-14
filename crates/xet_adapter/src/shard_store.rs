@@ -616,7 +616,10 @@ mod tests {
         },
     };
 
-    use super::{parse_uploaded_shard, shard_hash_from_object_key_if_present, shard_object_key};
+    use super::{
+        dedupe_shard_mapping, parse_uploaded_shard, retained_shard_chunk_hashes,
+        shard_hash_from_object_key_if_present, shard_object_key,
+    };
     use crate::error::XetAdapterError;
     use shardline_server_core::ServerObjectStore;
 
@@ -745,6 +748,59 @@ mod tests {
         let result = parse_uploaded_shard(&object_store, &shard, None, limits);
 
         assert!(matches!(result, Err(XetAdapterError::TooManyShardTerms)));
+    }
+
+    // ---- retained_shard_chunk_hashes tests ----
+
+    #[test]
+    fn retained_shard_chunk_hashes_returns_expected_hashes() {
+        let bytes = b"x";
+        let chunk_hash = compute_data_hash(bytes);
+        let xorb_hash = xorb_hash(&[(chunk_hash, 1_u64)]);
+        let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
+        let shard = serialize_test_shard(
+            vec![MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb_hash, 1_u32, 0_u32, 1_u32,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            }],
+            vec![MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+            }],
+        );
+
+        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
+        assert!(hashes.is_ok(), "retained_shard_chunk_hashes failed: {hashes:?}");
+        assert_eq!(hashes.unwrap(), vec![chunk_hash.hex()]);
+    }
+
+    #[test]
+    fn retained_shard_chunk_hashes_rejects_empty_bytes() {
+        let result = retained_shard_chunk_hashes(b"", DEFAULT_SHARD_METADATA_LIMITS);
+        assert!(result.is_err());
+    }
+
+    // ---- dedupe_shard_mapping tests ----
+
+    #[test]
+    fn dedupe_shard_mapping_with_valid_hash() {
+        let hash = "ab".repeat(32);
+        let shard_key = shard_object_key(&hash).unwrap();
+        let mapping = dedupe_shard_mapping(&hash, &shard_key).unwrap();
+        let hex_chunk_hash = shardline_index::xet_hash_hex_string(mapping.chunk_hash());
+        assert_eq!(hex_chunk_hash, hash);
+        assert_eq!(mapping.shard_object_key(), &shard_key);
+    }
+
+    #[test]
+    fn dedupe_shard_mapping_rejects_invalid_hash() {
+        let shard_key = shard_object_key(&"ab".repeat(32)).unwrap();
+        let result = dedupe_shard_mapping("not-a-hash", &shard_key);
+        assert!(result.is_err(), "expected error for invalid hash");
     }
 
     fn shard_with_reconstruction_terms(term_count: usize) -> Vec<u8> {
