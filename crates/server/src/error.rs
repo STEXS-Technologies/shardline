@@ -1434,4 +1434,128 @@ mod tests {
         let err = ServerError::NotFound;
         assert_eq!(err.to_string(), "content not found");
     }
+
+    #[test]
+    fn server_error_oci_error_code_for_size_invalid() {
+        let err = ServerError::RequestBodyTooLarge;
+        assert_eq!(err.oci_error_code(), "SIZE_INVALID");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_invalid_manifest_reference() {
+        let err = ServerError::InvalidManifestReference;
+        assert_eq!(err.oci_error_code(), "MANIFEST_INVALID");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_invalid_upload_session() {
+        let err = ServerError::InvalidUploadSession;
+        assert_eq!(err.oci_error_code(), "MANIFEST_INVALID");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_not_acceptable() {
+        let err = ServerError::NotAcceptable;
+        assert_eq!(err.oci_error_code(), "UNSUPPORTED");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_too_many_requests() {
+        let err = ServerError::TooManyUploadSessions;
+        assert_eq!(err.oci_error_code(), "TOO_MANY_REQUESTS");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_expected_body_hash_mismatch() {
+        let err = ServerError::ExpectedBodyHashMismatch;
+        assert_eq!(err.oci_error_code(), "DIGEST_INVALID");
+    }
+
+    #[test]
+    fn server_error_status_code_for_invalid_range_header() {
+        assert_eq!(
+            status_for(&ServerError::InvalidRangeHeader),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_request_query_too_large() {
+        assert_eq!(
+            status_for(&ServerError::RequestQueryTooLarge),
+            StatusCode::URI_TOO_LONG
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_too_many_shard_terms() {
+        assert_eq!(
+            status_for(&ServerError::TooManyShardTerms),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_too_many_batch_reconstruction_file_ids() {
+        assert_eq!(
+            status_for(&ServerError::TooManyBatchReconstructionFileIds),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_transfer_limiter_closed() {
+        assert_eq!(
+            status_for(&ServerError::TransferLimiterClosed),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_missing_provider_subject() {
+        assert_eq!(
+            status_for(&ServerError::MissingProviderSubject),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_invalid_provider_webhook_payload() {
+        assert_eq!(
+            status_for(&ServerError::InvalidProviderWebhookPayload),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_invalid_serialized_shard() {
+        use shardline_server_core::InvalidSerializedShardError;
+        let err = ServerError::InvalidSerializedShard(
+            InvalidSerializedShardError::RetainedShardChunkHashesNotStrictlyOrdered,
+        );
+        assert_eq!(status_for(&err), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn server_error_status_code_for_xorb_hash_mismatch() {
+        assert_eq!(status_for(&ServerError::XorbHashMismatch), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn server_error_status_code_for_invalid_digest() {
+        assert_eq!(status_for(&ServerError::InvalidDigest), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn server_error_status_code_for_missing_referenced_xorb() {
+        assert_eq!(status_for(&ServerError::MissingReferencedXorb), StatusCode::BAD_REQUEST);
+    }
+
+    // ---- ObjectStoreError conversion StatusCode tests ----
+
+    #[test]
+    fn object_store_error_prefix_display() {
+        let err = ObjectStoreError::Prefix(shardline_storage::ObjectPrefixError::UnsafePath);
+        assert_eq!(err.to_string(), "object storage prefix validation failed");
+    }
 }

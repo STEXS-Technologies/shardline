@@ -815,6 +815,61 @@ mod tests {
     }
 
     #[test]
+    fn file_chunk_record_defaults_for_range_end_and_packed_end() {
+        // When range_end and packed_end are not set, they should default
+        // to 1 (range_end) and 0 (packed_end) via serde defaults.
+        let json = r#"{"hash":"a".repeat(64),"offset":0,"length":4,"range_start":0,"packed_start":0}"#;
+        // Build a JSON string with 64 'a' chars
+        let hash_64 = "a".repeat(64);
+        let json = format!(
+            r#"{{"hash":"{hash}","offset":0,"length":4,"range_start":0,"packed_start":0}}"#,
+            hash = hash_64
+        );
+        let chunk: FileChunkRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(chunk.range_end, 1, "range_end should default to 1");
+        assert_eq!(chunk.packed_end, 0, "packed_end should default to 0");
+    }
+
+    #[test]
+    fn file_chunk_record_range_start_defaults_to_zero() {
+        let hash_64 = "a".repeat(64);
+        let json = format!(
+            r#"{{"hash":"{hash}","offset":0,"length":4,"range_end":1,"packed_start":0,"packed_end":4}}"#,
+            hash = hash_64
+        );
+        let chunk: FileChunkRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(chunk.range_start, 0, "range_start should default to 0");
+        assert_eq!(chunk.packed_start, 0, "packed_start should default to 0");
+    }
+
+    #[test]
+    fn file_chunk_record_deserializes_with_all_fields() {
+        let hash_64 = "a".repeat(64);
+        let json = format!(
+            r#"{{"hash":"{hash}","offset":10,"length":100,"range_start":2,"range_end":5,"packed_start":20,"packed_end":120}}"#,
+            hash = hash_64
+        );
+        let chunk: FileChunkRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(chunk.hash, hash_64);
+        assert_eq!(chunk.offset, 10);
+        assert_eq!(chunk.length, 100);
+        assert_eq!(chunk.range_start, 2);
+        assert_eq!(chunk.range_end, 5);
+        assert_eq!(chunk.packed_start, 20);
+        assert_eq!(chunk.packed_end, 120);
+    }
+
+    #[test]
+    fn default_range_end_returns_one() {
+        assert_eq!(super::default_range_end(), 1);
+    }
+
+    #[test]
+    fn default_packed_end_returns_zero() {
+        assert_eq!(super::default_packed_end(), 0);
+    }
+
+    #[test]
     fn file_record_reconstruction_plan_rejects_total_bytes_mismatch() {
         let record = FileRecord {
             file_id: "a".repeat(64),

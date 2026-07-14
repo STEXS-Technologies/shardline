@@ -415,6 +415,41 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn ensure_output_directory_creates_missing_parent_dirs() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let nested = sandbox.path().join("a").join("b").join("c");
+        assert!(!nested.exists());
+        let result = super::ensure_output_directory(&nested);
+        assert!(result.is_ok());
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn ensure_output_directory_succeeds_on_existing_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::ensure_output_directory(sandbox.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn remove_output_file_if_present_returns_false_for_missing_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let missing = sandbox.path().join("nonexistent.txt");
+        let result = super::remove_output_file_if_present(&missing);
+        assert!(matches!(result, Ok(false)));
+    }
+
+    #[test]
+    fn remove_output_file_if_present_returns_true_for_existing_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("exists.txt");
+        std::fs::write(&path, b"content").unwrap();
+        let result = super::remove_output_file_if_present(&path);
+        assert!(matches!(result, Ok(true)));
+        assert!(!path.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_output_bytes_creates_private_file_and_directory_modes() {

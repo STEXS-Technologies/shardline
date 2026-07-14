@@ -733,4 +733,72 @@ mod tests {
             shardline_server_core::ServerObjectStoreError::InvalidContentHash.into();
         assert!(matches!(err, ServerError::InvalidContentHash));
     }
+
+    // ── object_store_from_config ──────────────────────────────────────────
+
+    #[test]
+    fn object_store_from_config_local_adapter_returns_local_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::ServerConfig::new(
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                8080,
+            ),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
+        );
+        let store = super::object_store_from_config(&config);
+        assert!(store.is_ok());
+        assert!(store.unwrap().local_root().is_some());
+    }
+
+    #[test]
+    fn object_store_from_config_s3_without_config_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::ServerConfig::new(
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                8080,
+            ),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
+        )
+        .with_object_storage(crate::ObjectStorageAdapter::S3, None);
+        let store = super::object_store_from_config(&config);
+        assert!(matches!(
+            store,
+            Err(crate::ServerError::ObjectStore(
+                crate::error::ObjectStoreError::MissingS3Config
+            ))
+        ));
+    }
+
+    // ── ServerObjectStoreError StoredObjectLengthMismatch conversion ───────
+
+    #[test]
+    fn server_object_store_error_stored_length_mismatch_converts() {
+        let err: crate::ServerError =
+            shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch.into();
+        assert!(matches!(
+            err,
+            crate::ServerError::ObjectStore(
+                crate::error::ObjectStoreError::StoredLengthMismatch
+            )
+        ));
+    }
+
+    #[test]
+    fn server_object_store_error_local_converts() {
+        let io_err = std::io::Error::other("test");
+        let err: crate::ServerError =
+            shardline_server_core::ServerObjectStoreError::Local(io_err.into()).into();
+        assert!(matches!(
+            err,
+            crate::ServerError::ObjectStore(
+                crate::error::ObjectStoreError::Local(_)
+            )
+        ));
+    }
 }

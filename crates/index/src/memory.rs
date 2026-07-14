@@ -1997,6 +1997,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_read_latest_record_bytes_no_latest() {
+        let store = MemoryRecordStore::new();
+        let record = scoped_file_record().unwrap();
+
+        // No latest record written yet => should return None (not an error).
+        let result = store.read_latest_record_bytes(&record).await;
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_modified_since_epoch_missing_locator() {
         let store = MemoryRecordStore::new();
         let record = scoped_file_record().unwrap();
@@ -2197,6 +2207,78 @@ mod tests {
         let store = MemoryIndexStore::new();
         let states = store.list_provider_repository_states().unwrap();
         assert!(states.is_empty());
+    }
+
+    // ── Repository-scoped listing with populated stores ───────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_list_repository_latest_records_populated() {
+        let store = MemoryRecordStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+        let record = file_record_with_scope(scope, "a");
+        store.write_latest_record(&record).await.unwrap();
+
+        let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
+        let locators = store.list_repository_latest_record_locators(&repository).await.unwrap();
+        assert!(!locators.is_empty());
+
+        let mut visited = Vec::new();
+        store.visit_repository_latest_records(&repository, |stored| {
+            visited.push(stored);
+            Ok::<(), MemoryRecordStoreError>(())
+        }).await.unwrap();
+        assert!(!visited.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_list_repository_version_records_populated() {
+        let store = MemoryRecordStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+        let record = file_record_with_scope(scope, "a");
+        store.insert_version_record(&record).unwrap();
+
+        let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
+        let locators = store.list_repository_version_record_locators(&repository).await.unwrap();
+        assert!(!locators.is_empty());
+
+        let mut visited = Vec::new();
+        store.visit_repository_version_records(&repository, |stored| {
+            visited.push(stored);
+            Ok::<(), MemoryRecordStoreError>(())
+        }).await.unwrap();
+        assert!(!visited.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_list_repository_latest_locators_no_match_different_provider() {
+        let store = MemoryRecordStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+        let record = file_record_with_scope(scope, "a");
+        store.write_latest_record(&record).await.unwrap();
+
+        // Different provider => no match.
+        let repository =
+            RepositoryRecordScope::new(RepositoryProvider::GitLab, "team", "assets");
+        let locators = store.list_repository_latest_record_locators(&repository).await.unwrap();
+        assert!(locators.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_record_store_list_repository_version_locators_no_match_different_owner() {
+        let store = MemoryRecordStore::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let record = file_record_with_scope(scope, "a");
+        store.insert_version_record(&record).unwrap();
+
+        // Different owner => no match.
+        let repository =
+            RepositoryRecordScope::new(RepositoryProvider::GitHub, "other", "assets");
+        let locators = store.list_repository_version_record_locators(&repository).await.unwrap();
+        assert!(locators.is_empty());
     }
 
     // ── Empty visit lifecycle methods ──────────────────────────────────────

@@ -224,8 +224,12 @@ pub(crate) fn content_hash(
 
 #[cfg(test)]
 mod tests {
-    use shardline_index::FileChunkRecord;
+    use std::num::NonZeroUsize;
 
+    use shardline_index::FileChunkRecord;
+    use shardline_storage::{ObjectKey, ObjectStore};
+
+    use super::LocalBackend;
     use super::{chunk_hash, content_hash};
 
     #[test]
@@ -318,5 +322,89 @@ mod tests {
             content_hash(10, 10, &chunks),
             content_hash(20, 10, &chunks)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_new_creates_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await;
+        assert!(backend.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_public_base_url_returns_configured_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://localhost:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+        assert_eq!(backend.public_base_url(), "http://localhost:8080");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_object_backend_name_returns_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+        assert_eq!(backend.object_backend_name(), "local");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_ready_succeeds_with_empty_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+        let result = backend.ready().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_stats_returns_zero_counts_for_empty_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+        let stats = backend.stats().await.unwrap();
+        assert_eq!(stats.chunks, 0);
+        assert_eq!(stats.chunk_bytes, 0);
+        assert_eq!(stats.files, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_object_store_returns_usable_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+        let store = backend.object_store();
+        let key = ObjectKey::parse("test/probe").unwrap();
+        let _meta = store.metadata(&key);
+        // Should not panic
     }
 }

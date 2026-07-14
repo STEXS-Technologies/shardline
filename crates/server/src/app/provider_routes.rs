@@ -160,4 +160,18 @@ mod tests {
         let query = XetTokenQuery { subject: None };
         assert!(query.subject.is_none());
     }
+
+    #[test]
+    fn xet_token_query_deserialize_with_subject() {
+        let json = r#"{"subject": "test-user"}"#;
+        let query: XetTokenQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.subject, Some("test-user".to_owned()));
+    }
+
+    #[test]
+    fn xet_token_query_deserialize_without_subject() {
+        let json = r#"{}"#;
+        let query: XetTokenQuery = serde_json::from_str(json).unwrap();
+        assert!(query.subject.is_none());
+    }
 }

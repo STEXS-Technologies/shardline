@@ -144,6 +144,8 @@ pub(super) async fn batch_reconstruction(
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::Query;
+
     use super::FileVersionQuery;
 
     #[test]
@@ -183,5 +185,29 @@ mod tests {
         let json = r#"{}"#;
         let deserialized: FileVersionQuery = serde_json::from_str(json).unwrap();
         assert!(deserialized.content_hash.is_none());
+    }
+
+    #[test]
+    fn file_version_query_deserialize_from_url_query() {
+        // Verify deserialization from URL query string via axum::extract::Query
+        let query: Query<FileVersionQuery> =
+            Query::try_from_uri(&"http://example.com/path?content_hash=abc123".parse().unwrap())
+                .unwrap();
+        assert_eq!(query.content_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn file_version_query_deserialize_from_url_query_without_hash() {
+        let query: Query<FileVersionQuery> =
+            Query::try_from_uri(&"http://example.com/path".parse().unwrap()).unwrap();
+        assert!(query.content_hash.is_none());
+    }
+
+    #[test]
+    fn file_version_query_deserialize_from_url_query_with_empty_hash() {
+        let query: Query<FileVersionQuery> =
+            Query::try_from_uri(&"http://example.com/path?content_hash=".parse().unwrap())
+                .unwrap();
+        assert_eq!(query.content_hash.as_deref(), Some(""));
     }
 }

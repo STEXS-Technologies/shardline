@@ -379,4 +379,33 @@ mod tests {
 
         assert_eq!(observed, b"cdefgh");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_with_blackhole_returns_not_found_for_nonzero_length() {
+        use crate::object_store::ServerObjectStore;
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let result = super::object_byte_stream(store, key, 10).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_range_stream_with_blackhole_returns_not_found() {
+        use crate::object_store::ServerObjectStore;
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let range = ByteRange::new(0, 9).unwrap();
+        let result = super::object_byte_range_stream(store, key, 10, range).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_blackhole_zero_length_checks_metadata() {
+        use crate::object_store::ServerObjectStore;
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/key").unwrap();
+        // Blackhole returns None for metadata, so this should return NotFound
+        let result = super::object_byte_stream(store, key, 0).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
 }
