@@ -21,9 +21,33 @@ pub enum ReconstructionCacheError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as StdError;
     use std::mem::discriminant;
 
     use super::*;
+
+    #[test]
+    fn error_source_returns_inner_error() {
+        // EmptyRedisUrl has no source
+        assert!(ReconstructionCacheError::EmptyRedisUrl.source().is_none());
+
+        // Operation has no source
+        assert!(ReconstructionCacheError::Operation.source().is_none());
+
+        // Redis wraps a redis::RedisError
+        let redis_err = redis::RedisError::from((redis::ErrorKind::Io, "inner source"));
+        let err = ReconstructionCacheError::Redis(redis_err);
+        let source = err.source();
+        assert!(source.is_some());
+        assert!(source.unwrap().downcast_ref::<redis::RedisError>().is_some());
+
+        // NumericConversion wraps a TryFromIntError
+        let int_err = i64::try_from(u64::MAX).unwrap_err();
+        let err = ReconstructionCacheError::NumericConversion(int_err);
+        let source = err.source();
+        assert!(source.is_some());
+        assert!(source.unwrap().downcast_ref::<TryFromIntError>().is_some());
+    }
 
     #[test]
     fn display_empty_redis_url() {

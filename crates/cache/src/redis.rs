@@ -469,6 +469,21 @@ mod tests {
         assert_eq!(super::encode_component("line1\nline2"), hex::encode("line1\nline2"));
     }
 
+    // ── Clone ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn redis_cache_clone_produces_independent_cache() {
+        let ttl = NonZeroU64::new(60).unwrap();
+        let cache = RedisReconstructionCache::new("redis://localhost", ttl).unwrap();
+        let cloned = cache.clone();
+        // Both should have the same client URL (redacted in Debug)
+        let debug_original = format!("{cache:?}");
+        let debug_cloned = format!("{cloned:?}");
+        assert_eq!(debug_original, debug_cloned);
+        // Verify ttl is preserved
+        assert_eq!(cache.ttl_seconds, cloned.ttl_seconds);
+    }
+
     // ── RedisReconstructionCache::new edge cases ─────────────────────────
 
     #[test]

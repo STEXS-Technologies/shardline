@@ -630,6 +630,371 @@ mod tests {
         drop(task1);
     }
 
+    // ── get_or_load: cache hit (fast path) ────────────────────────────────
+
+    #[tokio::test]
+    async fn get_or_load_cache_hit_fast_path() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        );
+        let key = ReconstructionCacheKey::latest("hit-test", None);
+
+        // First call: loader runs and stores the value
+        let result = cache
+            .get_or_load(&key, || {
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"cached".to_vec()) })
+            })
+            .await;
+        assert_eq!(result.unwrap(), Some(b"cached".to_vec()));
+
+        // Second call: fast path cache hit — loader MUST NOT be called
+        let load_count = std::sync::Arc::new(AtomicU64::new(0));
+        let load_count_2 = std::sync::Arc::clone(&load_count);
+        let result = cache
+            .get_or_load(&key, || {
+                load_count_2.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"should-not-call".to_vec()) })
+            })
+            .await;
+        assert_eq!(result.unwrap(), Some(b"cached".to_vec()));
+        assert_eq!(load_count.load(Ordering::Relaxed), 0);
+    }
+
+    // ── get_or_load: concurrent loading dedup hits loading map ────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_or_load_loading_dedup_hits_loading_map() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("dedup-map", None);
+        let load_count = std::sync::Arc::new(AtomicU64::new(0));
+
+        // Use a barrier so all 10 tasks hit get_or_load nearly simultaneously
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(11));
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let cache = std::sync::Arc::clone(&cache);
+            let key = key.clone();
+            let load_count = std::sync::Arc::clone(&load_count);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cache
+                    .get_or_load(&key, || {
+                        load_count.fetch_add(1, Ordering::Relaxed);
+                        Box::pin(async { Ok::<_, ReconstructionCacheError>(b"result".to_vec()) })
+                    })
+                    .await
+            }));
+        }
+
+        // Release all tasks at once from the main thread
+        barrier.wait().await;
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result.is_ok(), "get_or_load should succeed");
+            assert_eq!(result.unwrap(), Some(b"result".to_vec()));
+        }
+
+        assert_eq!(load_count.load(Ordering::Relaxed), 1);
+    }
+
+    // ── get_or_load: concurrent waiter gets None when loader fails ────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_or_load_concurrent_loader_failure_waiter_gets_none() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("fail-waiter", None);
+
+        // Task 1: slow loader (300ms) that will fail
+        let cache_1 = std::sync::Arc::clone(&cache);
+        let key_1 = key.clone();
+        let task1 = tokio::spawn(async move {
+            cache_1
+                .get_or_load(&key_1, || {
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        Err::<Vec<u8>, ReconstructionCacheError>(
+                            ReconstructionCacheError::Operation,
+                        )
+                    })
+                })
+                .await
+        });
+
+        // Give task1 time to register as the exclusive loader
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Task 2: should find task1 loading and wait on notify
+        let cache_2 = std::sync::Arc::clone(&cache);
+        let key_2 = key.clone();
+        let task2 = tokio::spawn(async move {
+            cache_2
+                .get_or_load(&key_2, || {
+                    Box::pin(async {
+                        panic!("waiter should not call loader");
+                        #[allow(unreachable_code)]
+                        Ok::<_, ReconstructionCacheError>(vec![])
+                    })
+                })
+                .await
+        });
+
+        let result1 = task1.await.unwrap();
+        assert!(result1.is_err(), "loader should have failed");
+
+        let result2 = task2.await.unwrap();
+        // Waiter should get None (not an error), because the cleanup
+        // notifies waiters without propagating the error.
+        assert_eq!(result2.unwrap(), None);
+    }
+
+    // ── get_or_load: expired entry removed before loading ─────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn get_or_load_removes_expired_entry_before_loading() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        );
+        let key = ReconstructionCacheKey::latest("expired-before-load", None);
+
+        // Put an entry
+        cache.put(&key, b"expired").await.unwrap();
+
+        // Advance past TTL
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        // get_or_load should: fast path miss, then in the loading setup,
+        // find the expired entry and remove it (lines 164-167)
+        let result = cache
+            .get_or_load(&key, || {
+                Box::pin(async { Ok::<_, ReconstructionCacheError>(b"fresh".to_vec()) })
+            })
+            .await;
+        assert_eq!(result.unwrap(), Some(b"fresh".to_vec()));
+
+        // Verify the old expired entry was cleaned up
+        let get_result = cache.get(&key).await.unwrap();
+        assert_eq!(get_result, Some(b"fresh".to_vec()));
+    }
+
+    // ── get: loading coalescing — successful notify path ───────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_loading_coalescing_success() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("coalesce-success", None);
+
+        // Spawn a get_or_load with a slow loader so get() can find the loading entry
+        let cache_put = std::sync::Arc::clone(&cache);
+        let key_put = key.clone();
+        let task_loader = tokio::spawn(async move {
+            cache_put
+                .get_or_load(&key_put, || {
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        Ok::<_, ReconstructionCacheError>(b"loaded-data".to_vec())
+                    })
+                })
+                .await
+        });
+
+        // Give get_or_load time to enter loading state
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Now call get() — should find the loading entry, wait, and get the result
+        let result = tokio::time::timeout(Duration::from_secs(5), cache.get(&key)).await;
+
+        match result {
+            Ok(Ok(Some(data))) => {
+                assert_eq!(data, b"loaded-data".to_vec());
+            }
+            Ok(Ok(None)) => {
+                panic!("get() should have returned the loaded data");
+            }
+            Ok(Err(e)) => {
+                panic!("get() returned unexpected error: {e}");
+            }
+            Err(_) => {
+                panic!("get() timed out — loading coalescing failed");
+            }
+        }
+
+        let _ = task_loader.await;
+    }
+
+    // ── get: loading coalescing — loader failure returns None ──────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_loading_coalescing_loader_failure_returns_none() {
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("coalesce-fail", None);
+
+        // Spawn a get_or_load that will fail
+        let cache_loader = std::sync::Arc::clone(&cache);
+        let key_loader = key.clone();
+        let task_loader = tokio::spawn(async move {
+            cache_loader
+                .get_or_load(&key_loader, || {
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        Err::<Vec<u8>, ReconstructionCacheError>(
+                            ReconstructionCacheError::Operation,
+                        )
+                    })
+                })
+                .await
+        });
+
+        // Give get_or_load time to enter loading state
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // get() should find the loading entry, wait on notify, then find nothing
+        // and return None (not propagate the error)
+        let result = tokio::time::timeout(Duration::from_secs(5), cache.get(&key)).await;
+
+        match result {
+            Ok(Ok(None)) => {
+                // Expected: loader failed, no entry stored
+            }
+            Ok(Ok(Some(_))) => {
+                panic!("get() should return None after loader failure");
+            }
+            Ok(Err(e)) => {
+                panic!("get() returned unexpected error: {e}");
+            }
+            Err(_) => {
+                panic!("get() timed out — loading coalescing failed");
+            }
+        }
+
+        let _ = task_loader.await;
+    }
+
+    // ── put: update existing entry does not evict ──────────────────────────
+
+    #[tokio::test]
+    async fn put_update_existing_no_eviction() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN), // capacity = 1
+        );
+        let key = ReconstructionCacheKey::latest("update-key", None);
+
+        // Insert first entry
+        cache.put(&key, b"first").await.unwrap();
+        // Update same key (should NOT evict since key already exists)
+        cache.put(&key, b"second").await.unwrap();
+
+        // Only one entry exists — the updated one
+        let result = cache.get(&key).await.unwrap();
+        assert_eq!(result, Some(b"second".to_vec()));
+    }
+
+    // ── PartialOrd implementation for EvictionKey ────────────────────────
+
+    #[test]
+    fn eviction_key_partial_cmp() {
+        use super::EvictionKey;
+        use tokio::time::Instant;
+
+        let a = EvictionKey(Instant::now(), 1);
+        let b = EvictionKey(Instant::now(), 2);
+        // partial_cmp delegates to cmp
+        let ordering = a.partial_cmp(&b);
+        assert!(ordering.is_some());
+    }
+
+    // ── get: race to hit no-loading / re-check paths ─────────────────────
+
+    // ── Race: get() write-lock contention (triggers re-check + no-loading) ─
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn get_race_with_write_lock_contention() {
+        // Use a longer TTL so pre-seeded entries don't expire before we race.
+        // The goal is to have get()'s read-lock see loading=true on an expired
+        // entry, then lose the write-lock race to a concurrent operation,
+        // landing on lines 260-270.
+        let cache = std::sync::Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(10_000).unwrap_or(NonZeroUsize::MIN),
+        ));
+
+        let mut handles = Vec::new();
+        for i in 0..500 {
+            let key = ReconstructionCacheKey::latest(&format!("contention-{i}"), None);
+
+            // Write-lock contender (put)
+            let c1 = std::sync::Arc::clone(&cache);
+            let k1 = key.clone();
+            let h1 = tokio::spawn(async move {
+                let _ = c1.put(&k1, b"preloaded").await;
+            });
+
+            // Write-lock contender (delete)
+            let c2 = std::sync::Arc::clone(&cache);
+            let k2 = key.clone();
+            let h2 = tokio::spawn(async move {
+                let _ = c2.delete(&k2).await;
+            });
+
+            // Failing loader (get_or_load)
+            let c3 = std::sync::Arc::clone(&cache);
+            let k3 = key.clone();
+            let h3 = tokio::spawn(async move {
+                let _ = c3
+                    .get_or_load(&k3, || {
+                        Box::pin(async {
+                            tokio::time::sleep(Duration::from_micros(100)).await;
+                            Err::<Vec<u8>, ReconstructionCacheError>(
+                                ReconstructionCacheError::Operation,
+                            )
+                        })
+                    })
+                    .await;
+            });
+
+            // Getter
+            let c4 = std::sync::Arc::clone(&cache);
+            let k4 = key.clone();
+            let h4 = tokio::spawn(async move {
+                let _ = c4.get(&k4).await;
+            });
+
+            // Extra write-lock contender
+            let c5 = std::sync::Arc::clone(&cache);
+            let k5 = key.clone();
+            let h5 = tokio::spawn(async move {
+                let _ = c5.put(&k5, b"extra").await;
+            });
+
+            handles.push(h1);
+            handles.push(h2);
+            handles.push(h3);
+            handles.push(h4);
+            handles.push(h5);
+        }
+
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
     // ── Concurrency stress tests ──────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
