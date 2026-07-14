@@ -152,13 +152,15 @@ fn record_identity_key(record: &FileRecord) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use shardline_index::FileChunkRecord;
+    use shardline_index::{
+        FileChunkRecord, MemoryRecordStore, RecordMutation, RecordTraversal,
+    };
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use shardline_vcs::{ProviderKind, RepositoryRef};
 
     use super::{
-        record_belongs_to_repository, record_identity_key, renamed_file_record,
-        repository_record_scope,
+        ensure_absent_or_matching_record, parse_record_entry, record_belongs_to_repository,
+        record_identity_key, renamed_file_record, repository_record_scope,
     };
 
     fn test_record() -> super::FileRecord {
@@ -324,5 +326,84 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(file_versions, 1);
+    }
+
+    #[test]
+    fn parse_record_entry_round_trip() {
+        let record = test_record();
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let parsed = parse_record_entry(&bytes).unwrap();
+        assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn parse_record_entry_invalid_bytes_returns_error() {
+        let result = parse_record_entry(b"not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn record_identity_key_without_revision_uses_latest() {
+        let record = super::FileRecord {
+            repository_scope: Some(
+                RepositoryScope::new(
+                    RepositoryProvider::GitHub,
+                    "owner",
+                    "repo",
+                    None,
+                )
+                .unwrap(),
+            ),
+            ..test_record()
+        };
+        let key = record_identity_key(&record);
+        assert!(key.contains("latest"), "expected 'latest' in identity key, got {key:?}");
+        assert!(!key.contains("main"));
+    }
+
+    #[tokio::test]
+    async fn ensure_absent_or_matching_record_absent_is_ok() {
+        let store = MemoryRecordStore::new();
+        let record = test_record();
+        let locator = RecordTraversal::version_record_locator(&store, &record);
+        let result = ensure_absent_or_matching_record(&store, &locator, &record).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ensure_absent_or_matching_record_succeeds_when_matching() {
+        let store = MemoryRecordStore::new();
+        let record = test_record();
+
+        // Write the record first
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+
+        // Check that the matching record is accepted
+        let locator = RecordTraversal::version_record_locator(&store, &record);
+        let result = ensure_absent_or_matching_record(&store, &locator, &record).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ensure_absent_or_matching_record_rejects_conflicting() {
+        let store = MemoryRecordStore::new();
+        let record = test_record();
+        let mut different = test_record();
+        different.file_id = "different.bin".to_owned();
+
+        // Write the different record
+        RecordMutation::write_version_record(&store, &different)
+            .await
+            .unwrap();
+
+        // Ensure rejects when bytes don't match
+        let locator = RecordTraversal::version_record_locator(&store, &different);
+        let result = ensure_absent_or_matching_record(&store, &locator, &record).await;
+        assert!(matches!(
+            result,
+            Err(crate::ProviderEventsError::ConflictingRenameTargetRecord)
+        ));
     }
 }
