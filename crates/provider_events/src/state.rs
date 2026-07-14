@@ -172,7 +172,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use shardline_index::{LifecycleStore, MemoryIndexStore, ProviderRepositoryState};
+    use shardline_index::{
+    LifecycleStore, MemoryIndexStore, ProviderRepositoryState,
+};
     use shardline_protocol::RepositoryProvider;
     use shardline_vcs::{
         ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind,
@@ -314,7 +316,7 @@ mod tests {
         let old_repo = RepositoryRef::new(ProviderKind::GitHub, "team", "old-repo").unwrap();
         let new_repo = RepositoryRef::new(ProviderKind::GitHub, "team", "new-repo").unwrap();
 
-        // Seed old repo state.
+        // Seed old repo state with reconciliation metadata.
         let old_state = ProviderRepositoryState::new(
             RepositoryProvider::GitHub,
             "team".to_owned(),
@@ -322,7 +324,8 @@ mod tests {
             Some(100),
             Some(200),
             Some("refs/heads/main".to_owned()),
-        );
+        )
+        .with_reconciliation(Some(300), Some(400), Some(500));
         LifecycleStore::upsert_provider_repository_state(&index, &old_state).unwrap();
 
         // Migrate.
@@ -353,6 +356,15 @@ mod tests {
         assert_eq!(new.last_access_changed_at_unix_seconds(), Some(100));
         assert_eq!(new.last_revision_pushed_at_unix_seconds(), Some(200));
         assert_eq!(new.last_pushed_revision(), Some("refs/heads/main"));
+        assert_eq!(
+            new.last_cache_invalidated_at_unix_seconds(),
+            Some(300)
+        );
+        assert_eq!(
+            new.last_authorization_rechecked_at_unix_seconds(),
+            Some(400)
+        );
+        assert_eq!(new.last_drift_checked_at_unix_seconds(), Some(500));
     }
 
     #[tokio::test]
@@ -411,5 +423,44 @@ mod tests {
         assert_eq!(state.last_access_changed_at_unix_seconds(), Some(500));
         assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(600));
         assert_eq!(state.last_pushed_revision(), Some("refs/heads/dev"));
+    }
+
+    #[tokio::test]
+    async fn revision_pushed_then_access_changed_merges_state() {
+        let index = MemoryIndexStore::new();
+        let rev_event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::RevisionPushed {
+                revision: RevisionRef::new("refs/heads/main").unwrap(),
+            },
+            "delivery-rev-first",
+        );
+        let access_event = make_event(
+            "team",
+            "repo",
+            RepositoryWebhookEventKind::AccessChanged,
+            "delivery-access-second",
+        );
+
+        let _r = apply_revision_pushed(&index, &rev_event, "refs/heads/main", 700)
+            .await
+            .unwrap();
+        let _a = apply_access_changed(&index, &access_event, 800)
+            .await
+            .unwrap();
+
+        let state = LifecycleStore::provider_repository_state(
+            &index,
+            RepositoryProvider::GitHub,
+            "team",
+            "repo",
+        )
+        .unwrap()
+        .unwrap();
+        // access now has Some(800), revision still has Some(700) retained from existing state
+        assert_eq!(state.last_access_changed_at_unix_seconds(), Some(800));
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(700));
+        assert_eq!(state.last_pushed_revision(), Some("refs/heads/main"));
     }
 }
