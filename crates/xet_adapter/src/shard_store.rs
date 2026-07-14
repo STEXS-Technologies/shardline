@@ -866,4 +866,104 @@ mod tests {
         assert!(MDBShardInfo::serialize_from(&mut serialized, &shard, None).is_ok());
         serialized
     }
+
+    // ── Pure helper function tests ────────────────────────────────────────
+
+    #[test]
+    fn checked_add_ok() {
+        assert_eq!(super::checked_add(100, 200).unwrap(), 300);
+    }
+
+    #[test]
+    fn checked_add_overflow() {
+        assert!(super::checked_add(usize::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn checked_increment_ok() {
+        assert_eq!(super::checked_increment(41).unwrap(), 42);
+    }
+
+    #[test]
+    fn checked_increment_overflow() {
+        assert!(super::checked_increment(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn checked_mul_ok() {
+        assert_eq!(super::checked_mul(7, 8).unwrap(), 56);
+    }
+
+    #[test]
+    fn checked_mul_overflow() {
+        assert!(super::checked_mul(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn checked_add_limit_ok() {
+        assert_eq!(super::checked_add_limit(50, 50, 200).unwrap(), 100);
+    }
+
+    #[test]
+    fn checked_add_limit_exceeded() {
+        assert!(matches!(
+            super::checked_add_limit(150, 100, 200),
+            Err(XetAdapterError::TooManyShardTerms)
+        ));
+    }
+
+    #[test]
+    fn checked_add_limit_overflow() {
+        assert!(super::checked_add_limit(usize::MAX, 1, usize::MAX).is_err());
+    }
+
+    // ── retained_shard_chunk_hashes edge cases ──────────────────────────
+
+    #[test]
+    fn retained_shard_chunk_hashes_returns_file_start_chunks() {
+        // A chunk that IS a file start (chunk_index_start = 0) should be
+        // included in the retained set.
+        let chunk_hash = compute_data_hash(b"x");
+        let xorb_hash_bytes = compute_data_hash(b"xorb");
+        let file_hash_bytes = compute_data_hash(b"file");
+        let shard = serialize_test_shard(
+            vec![MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(file_hash_bytes, 1_usize, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb_hash_bytes, 1_u32, 0_u32, 1_u32,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            }],
+            vec![MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_hash_bytes, 1_u32, 1_u32),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+            }],
+        );
+
+        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
+
+        assert!(hashes.is_ok());
+        let result = hashes.unwrap();
+        assert_eq!(result.len(), 1, "file start chunk should be retained");
+        assert_eq!(result[0], chunk_hash.hex());
+    }
+
+    // ── map_object_key_error ─────────────────────────────────────────────
+
+    #[test]
+    fn map_object_key_error_maps_all_variants() {
+        use shardline_storage::ObjectKeyError;
+        let cases: &[(ObjectKeyError, &str)] = &[
+            (ObjectKeyError::Empty, "invalid"),
+            (ObjectKeyError::UnsafePath, "invalid"),
+            (ObjectKeyError::ControlCharacter, "invalid"),
+            (ObjectKeyError::TooLong, "invalid"),
+        ];
+        for (err, _) in cases {
+            let mapped = super::map_object_key_error(*err);
+            let msg = mapped.to_string();
+            assert!(msg.contains("hash"), "msg '{msg}' missing 'hash'");
+        }
+    }
 }

@@ -247,6 +247,9 @@ impl LocalBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::LocalBackend;
     use crate::chunk_store::chunk_object_key;
 
     #[test]
@@ -276,5 +279,80 @@ mod tests {
     fn chunk_object_key_rejects_empty_hash() {
         let key = chunk_object_key("");
         assert!(key.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_returns_not_found_for_missing_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.read_chunk(&"aa".repeat(32)).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_rejects_invalid_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.read_chunk("short").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chunk_length_returns_not_found_for_missing_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.chunk_length(&"bb".repeat(32)).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chunk_length_rejects_invalid_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.chunk_length("short").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_total_bytes_rejects_invalid_file_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.file_total_bytes("../invalid-id", None, None).await;
+        assert!(matches!(result, Err(crate::ServerError::InvalidFileId)));
     }
 }

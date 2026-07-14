@@ -63,6 +63,35 @@ mod tests {
     use crate::error::XetAdapterError;
 
     #[test]
+    fn validate_hash_path_accepts_valid_64_char_hex_hash() {
+        let hash = "abcdef0123456789".repeat(4);
+        assert_eq!(hash.len(), 64);
+        assert!(validate_hash_path(&hash).is_ok());
+    }
+
+    #[test]
+    fn validate_hash_path_rejects_uppercase_characters() {
+        let hash = "AB".repeat(32);
+        assert!(validate_hash_path(&hash).is_err());
+    }
+
+    #[test]
+    fn validate_hash_path_rejects_wrong_length() {
+        // 63 chars instead of 64
+        let hash = "a".repeat(63);
+        assert!(validate_hash_path(&hash).is_err());
+        // 65 chars instead of 64
+        let hash = "a".repeat(65);
+        assert!(validate_hash_path(&hash).is_err());
+    }
+
+    #[test]
+    fn validate_optional_content_hash_validates_present_hash() {
+        assert!(validate_optional_content_hash(Some(&"a".repeat(64))).is_ok());
+        assert!(validate_optional_content_hash(Some("not-a-hash")).is_err());
+    }
+
+    #[test]
     fn build_xorb_transfer_url_uses_default_namespace() {
         let url = build_xorb_transfer_url("http://127.0.0.1:8080/", &"a".repeat(64));
         assert_eq!(

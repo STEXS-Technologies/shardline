@@ -451,4 +451,123 @@ mod tests {
             assert_eq!(extracted, Some(hash.as_str()));
         }
     }
+
+    // ── xorb_hash_from_object_key_if_present edge cases ──────────────────
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_non_xorb_namespace() {
+        let key = shardline_storage::ObjectKey::parse("shards/ab/abhash.shard").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_too_many_segments() {
+        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/hash.xorb/extra").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_non_default_namespace() {
+        let key = shardline_storage::ObjectKey::parse("xorbs/custom/aa/hash.xorb").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_invalid_prefix() {
+        let key = shardline_storage::ObjectKey::parse("xorbs/default/xyz/hash.xorb").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_missing_xorb_extension() {
+        let key = shardline_storage::ObjectKey::parse("xorbs/default/aa/hash").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_prefix_mismatch() {
+        let key = shardline_storage::ObjectKey::parse("xorbs/default/bb/aahash.xorb").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    #[test]
+    fn xorb_hash_from_object_key_rejects_invalid_hash_characters() {
+        let key = shardline_storage::ObjectKey::parse("xorbs/default/gg/gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg.xorb").unwrap();
+        let extracted = xorb_hash_from_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap(), None);
+    }
+
+    // ── map_object_key_error ────────────────────────────────────────────
+
+    #[test]
+    fn xorb_store_map_object_key_error_maps_all_variants() {
+        use shardline_storage::ObjectKeyError;
+        let cases: &[(ObjectKeyError, &str)] = &[
+            (ObjectKeyError::Empty, "invalid"),
+            (ObjectKeyError::UnsafePath, "invalid"),
+            (ObjectKeyError::ControlCharacter, "invalid"),
+            (ObjectKeyError::TooLong, "invalid"),
+        ];
+        for (err, _) in cases {
+            let mapped = super::map_object_key_error(*err);
+            let msg = mapped.to_string();
+            assert!(msg.contains("hash"), "msg '{msg}' missing 'hash'");
+        }
+    }
+
+    // ── xorb_object_key hash validation ──────────────────────────────────
+
+    #[test]
+    fn xorb_object_key_rejects_non_hex_characters() {
+        let hash = "zz".repeat(32);
+        let key = xorb_object_key(&hash);
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn xorb_object_key_rejects_short_hash() {
+        let key = xorb_object_key("abc");
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn xorb_object_key_rejects_empty_hash() {
+        let key = xorb_object_key("");
+        assert!(key.is_err());
+    }
+
+    // ── From<XorbParseError> for XetAdapterError variants ─────────────────
+
+    #[test]
+    fn xorb_parse_error_hash_mismatch_maps_to_xorb_hash_mismatch() {
+        use crate::xorb::XorbParseError;
+        let err: XetAdapterError = XorbParseError::HashMismatch.into();
+        let msg = err.to_string();
+        assert!(msg.contains("hash"), "expected hash-related message, got '{msg}'");
+    }
+
+    #[test]
+    fn xorb_parse_error_invalid_format_maps_to_invalid_serialized_xorb() {
+        use crate::xorb::{XorbInvalidFormatError, XorbParseError};
+        let err: XetAdapterError =
+            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed).into();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("xorb"),
+            "expected xorb-related message, got '{msg}'"
+        );
+    }
 }

@@ -587,4 +587,56 @@ mod tests {
         assert!(payload_within_bound(&exact));
     }
 
+    // ── ReconstructionCacheService::from_config ────────────────────────────
+
+    #[test]
+    fn from_config_disabled_adapter_returns_disabled_service() {
+        use crate::config::ServerConfig;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::num::NonZeroUsize;
+        use std::path::PathBuf;
+
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_reconstruction_cache_disabled();
+
+        let service = ReconstructionCacheService::from_config(&config).unwrap();
+        assert_eq!(service.backend_name(), "disabled");
+    }
+
+    #[test]
+    fn from_config_memory_adapter_returns_memory_service() {
+        use crate::config::ServerConfig;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::num::NonZeroUsize;
+        use std::path::PathBuf;
+
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+
+        let service = ReconstructionCacheService::from_config(&config).unwrap();
+        assert_eq!(service.backend_name(), "memory");
+    }
+
+    #[test]
+    fn reconstruction_cache_service_disabled_returns_disabled_name() {
+        let service = ReconstructionCacheService::disabled();
+        assert_eq!(service.backend_name(), "disabled");
+    }
+
+    #[test]
+    fn reconstruction_cache_service_debug_format() {
+        let service = ReconstructionCacheService::disabled();
+        let debug = format!("{service:?}");
+        assert!(debug.contains("ReconstructionCacheService"));
+        assert!(debug.contains("disabled"));
+    }
 }

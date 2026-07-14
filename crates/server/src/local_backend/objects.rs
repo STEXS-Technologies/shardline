@@ -318,4 +318,83 @@ mod tests {
         let outcome = backend.delete_object_if_present(&key).await.unwrap();
         assert_eq!(outcome, shardline_storage::DeleteOutcome::NotFound);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn copy_object_if_absent_copies_new_object() {
+        let (backend, _tmp) = make_backend().await;
+        let src = ObjectKey::parse("src-key").unwrap();
+        let dst = ObjectKey::parse("dst-key").unwrap();
+        backend
+            .put_object_bytes_if_absent(&src, b"copy-source".to_vec())
+            .unwrap();
+        let result = backend.copy_object_if_absent(&src, &dst);
+        assert!(result.is_ok());
+        let src_len = backend.object_length(&src).await.unwrap();
+        let dst_len = backend.object_length(&dst).await.unwrap();
+        assert_eq!(src_len, dst_len);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_object_returns_stored_bytes() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("read-test-key").unwrap();
+        let data = b"readable-content";
+        backend
+            .put_object_bytes_if_absent(&key, data.to_vec())
+            .unwrap();
+        let result = backend.read_object(&key).await.unwrap();
+        assert_eq!(result.as_slice(), data);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_object_returns_not_found_for_missing() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("missing-read-key").unwrap();
+        let result = backend.read_object(&key).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_object_stream_returns_stream_for_existing_object() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("stream-test-key").unwrap();
+        let data = b"stream-content";
+        backend
+            .put_object_bytes_if_absent(&key, data.to_vec())
+            .unwrap();
+        let result = backend.read_object_stream(&key, data.len() as u64, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_object_flat_namespace_page_returns_paginated_results() {
+        let (backend, _tmp) = make_backend().await;
+        let prefix = ObjectPrefix::parse("list-prefix").unwrap();
+        for i in 0..3 {
+            let key = ObjectKey::parse(&format!("list-prefix/obj{i}")).unwrap();
+            backend
+                .put_object_bytes_if_absent(&key, b"data".to_vec())
+                .unwrap();
+        }
+        let page = backend
+            .list_object_flat_namespace_page(&prefix, None, 10)
+            .unwrap();
+        assert_eq!(page.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_object_stream_with_range_returns_substream() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("range-stream-key").unwrap();
+        let data = b"hello-world-range";
+        backend
+            .put_object_bytes_if_absent(&key, data.to_vec())
+            .unwrap();
+        use shardline_protocol::ByteRange;
+        let range = ByteRange::new(0, 4).unwrap();
+        let result = backend
+            .read_object_stream(&key, data.len() as u64, Some(range))
+            .await;
+        assert!(result.is_ok());
+    }
 }

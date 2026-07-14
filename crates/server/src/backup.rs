@@ -532,4 +532,32 @@ mod tests {
         assert!(json.contains("\"webhook_deliveries\":7"));
         assert!(json.contains("\"provider_repository_states\":8"));
     }
+
+    // -----------------------------------------------------------------------
+    // write_backup_manifest integration test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_backup_manifest_writes_valid_json_with_local_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::ServerConfig::new(
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                8080,
+            ),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
+        )
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
+        let mut buffer = Vec::new();
+        let report = write_backup_manifest(config, &mut buffer).await.unwrap();
+        assert_eq!(report.manifest_version, 1);
+        assert_eq!(report.metadata_backend, "local");
+        assert_eq!(report.object_backend, "local");
+        let json = String::from_utf8(buffer).unwrap();
+        assert!(json.contains("manifest_version"));
+        assert!(json.contains("object_backend"));
+    }
 }

@@ -103,6 +103,9 @@ impl LocalBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::LocalBackend;
     use crate::xet_adapter::xorb_object_key;
 
     #[test]
@@ -132,5 +135,36 @@ mod tests {
     fn xorb_object_key_rejects_empty_hash() {
         let key = xorb_object_key("");
         assert!(key.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_xorb_length_returns_not_found_for_missing_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let hash = "aa".repeat(32);
+        let result = backend.xorb_length(&hash).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_xorb_length_rejects_invalid_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.xorb_length("short").await;
+        assert!(result.is_err());
     }
 }

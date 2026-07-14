@@ -2190,6 +2190,584 @@ mod config_types_tests {
         let debug = format!("{err:?}");
         assert!(!debug.is_empty());
     }
+
+    // ── Remaining ServerConfigError Display tests ──────────────────────────
+
+    #[test]
+    fn server_config_error_display_root_dir() {
+        let io_err = std::io::Error::other("permission denied");
+        let err = ServerConfigError::RootDir(io_err);
+        assert_eq!(err.to_string(), "invalid local deployment root");
+    }
+
+    #[test]
+    fn server_config_error_display_invalid_s3_allow_http() {
+        let err = ServerConfigError::InvalidS3AllowHttp;
+        assert_eq!(err.to_string(), "invalid s3 allow-http flag");
+    }
+
+    #[test]
+    fn server_config_error_display_invalid_s3_virtual_hosted_style_request() {
+        let err = ServerConfigError::InvalidS3VirtualHostedStyleRequest;
+        assert_eq!(
+            err.to_string(),
+            "invalid s3 virtual-hosted-style request flag"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_s3_credential_file() {
+        let io_err = std::io::Error::other("file not found");
+        let err = ServerConfigError::S3CredentialFile {
+            name: "AWS_ACCESS_KEY_ID_FILE",
+            source: io_err,
+        };
+        let display = err.to_string();
+        assert!(display.contains("s3 credential file"));
+        assert!(display.contains("AWS_ACCESS_KEY_ID_FILE"));
+    }
+
+    #[test]
+    fn server_config_error_display_s3_credential_too_large() {
+        let err = ServerConfigError::S3CredentialTooLarge {
+            name: "AWS_SECRET_ACCESS_KEY_FILE",
+            observed_bytes: 5000,
+            maximum_bytes: 4096,
+        };
+        let display = err.to_string();
+        assert!(display.contains("exceeded"));
+        assert!(display.contains("AWS_SECRET_ACCESS_KEY_FILE"));
+    }
+
+    #[test]
+    fn server_config_error_display_s3_credential_length_mismatch() {
+        let err = ServerConfigError::S3CredentialLengthMismatch {
+            name: "AWS_SESSION_TOKEN_FILE",
+            expected_bytes: 100,
+            observed_bytes: 200,
+        };
+        let display = err.to_string();
+        assert!(display.contains("changed during bounded read"));
+    }
+
+    #[test]
+    fn server_config_error_display_s3_credential_utf8() {
+        let err = ServerConfigError::S3CredentialUtf8 {
+            name: "AWS_SECRET_ACCESS_KEY_FILE",
+        };
+        let display = err.to_string();
+        assert!(display.contains("not valid utf-8"));
+    }
+
+    #[test]
+    fn server_config_error_display_chunk_size_parse() {
+        let err = ServerConfigError::ChunkSize("not-a-number".parse::<usize>().unwrap_err());
+        assert_eq!(err.to_string(), "invalid chunk size");
+    }
+
+    #[test]
+    fn server_config_error_display_max_request_body_bytes() {
+        let err = ServerConfigError::MaxRequestBodyBytes(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid max request body size");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_max_request_body_bytes() {
+        let err = ServerConfigError::ZeroMaxRequestBodyBytes;
+        assert_eq!(
+            err.to_string(),
+            "max request body size must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_max_shard_files() {
+        let err = ServerConfigError::MaxShardFiles(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid max shard file section count");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_max_shard_files() {
+        let err = ServerConfigError::ZeroMaxShardFiles;
+        assert_eq!(
+            err.to_string(),
+            "max shard file section count must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_max_shard_xorbs() {
+        let err = ServerConfigError::MaxShardXorbs(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid max shard xorb section count");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_max_shard_xorbs() {
+        let err = ServerConfigError::ZeroMaxShardXorbs;
+        assert_eq!(
+            err.to_string(),
+            "max shard xorb section count must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_max_shard_reconstruction_terms() {
+        let err = ServerConfigError::MaxShardReconstructionTerms(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "invalid max shard reconstruction term count"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_zero_max_shard_reconstruction_terms() {
+        let err = ServerConfigError::ZeroMaxShardReconstructionTerms;
+        assert_eq!(
+            err.to_string(),
+            "max shard reconstruction term count must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_max_shard_xorb_chunks() {
+        let err = ServerConfigError::MaxShardXorbChunks(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "invalid max shard xorb chunk record count"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_zero_max_shard_xorb_chunks() {
+        let err = ServerConfigError::ZeroMaxShardXorbChunks;
+        assert_eq!(
+            err.to_string(),
+            "max shard xorb chunk record count must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_upload_max_in_flight_chunks() {
+        let err = ServerConfigError::UploadMaxInFlightChunks(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid upload max in-flight chunks");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_upload_max_in_flight_chunks() {
+        let err = ServerConfigError::ZeroUploadMaxInFlightChunks;
+        assert_eq!(
+            err.to_string(),
+            "upload max in-flight chunks must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_transfer_max_in_flight_chunks() {
+        let err = ServerConfigError::TransferMaxInFlightChunks(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid transfer max in-flight chunks");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_transfer_max_in_flight_chunks() {
+        let err = ServerConfigError::ZeroTransferMaxInFlightChunks;
+        assert_eq!(
+            err.to_string(),
+            "transfer max in-flight chunks must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_invalid_reconstruction_cache_adapter() {
+        let err = ServerConfigError::InvalidReconstructionCacheAdapter;
+        assert_eq!(
+            err.to_string(),
+            "invalid reconstruction cache adapter"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_reconstruction_cache_ttl() {
+        let err = ServerConfigError::ReconstructionCacheTtl(
+            "not-a-number".parse::<u64>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid reconstruction cache ttl");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_reconstruction_cache_ttl() {
+        let err = ServerConfigError::ZeroReconstructionCacheTtlSeconds;
+        assert_eq!(
+            err.to_string(),
+            "reconstruction cache ttl must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_reconstruction_cache_memory_max_entries() {
+        let err = ServerConfigError::ReconstructionCacheMemoryMaxEntries(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "invalid reconstruction cache memory max entries"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_zero_reconstruction_cache_memory_max_entries() {
+        let err = ServerConfigError::ZeroReconstructionCacheMemoryMaxEntries;
+        assert_eq!(
+            err.to_string(),
+            "reconstruction cache memory max entries must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_oci_upload_session_ttl() {
+        let err = ServerConfigError::OciUploadSessionTtl(
+            "not-a-number".parse::<u64>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid oci upload session ttl");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_oci_upload_session_ttl() {
+        let err = ServerConfigError::ZeroOciUploadSessionTtlSeconds;
+        assert_eq!(
+            err.to_string(),
+            "oci upload session ttl must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_oci_upload_max_active_sessions() {
+        let err = ServerConfigError::OciUploadMaxActiveSessions(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "invalid oci upload max active sessions"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_zero_oci_upload_max_active_sessions() {
+        let err = ServerConfigError::ZeroOciUploadMaxActiveSessions;
+        assert_eq!(
+            err.to_string(),
+            "oci upload max active sessions must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_oci_registry_token_ttl() {
+        let err = ServerConfigError::OciRegistryTokenTtl(
+            "not-a-number".parse::<u64>().unwrap_err(),
+        );
+        assert_eq!(err.to_string(), "invalid oci registry token ttl");
+    }
+
+    #[test]
+    fn server_config_error_display_zero_oci_registry_token_ttl() {
+        let err = ServerConfigError::ZeroOciRegistryTokenTtlSeconds;
+        assert_eq!(
+            err.to_string(),
+            "oci registry token ttl must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_oci_registry_token_max_in_flight_requests() {
+        let err = ServerConfigError::OciRegistryTokenMaxInFlightRequests(
+            "not-a-number".parse::<usize>().unwrap_err(),
+        );
+        assert_eq!(
+            err.to_string(),
+            "invalid oci registry token max in-flight requests"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_zero_oci_registry_token_max_in_flight_requests() {
+        let err = ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests;
+        assert_eq!(
+            err.to_string(),
+            "oci registry token max in-flight requests must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_empty_reconstruction_cache_redis_url() {
+        let err = ServerConfigError::EmptyReconstructionCacheRedisUrl;
+        assert_eq!(
+            err.to_string(),
+            "reconstruction cache redis url must not be empty"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_missing_reconstruction_cache_redis_url() {
+        let err = ServerConfigError::MissingReconstructionCacheRedisUrl;
+        assert_eq!(
+            err.to_string(),
+            "redis reconstruction cache requires SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_empty_index_postgres_url() {
+        let err = ServerConfigError::EmptyIndexPostgresUrl;
+        assert_eq!(
+            err.to_string(),
+            "postgres metadata url must not be empty"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_token_signing_key() {
+        let io_err = std::io::Error::other("file error");
+        let err = ServerConfigError::TokenSigningKey(io_err);
+        assert_eq!(err.to_string(), "token signing key could not be read");
+    }
+
+    #[test]
+    fn server_config_error_display_token_signing_key_source_conflict() {
+        let err = ServerConfigError::TokenSigningKeySourceConflict {
+            env: "SHARDLINE_TOKEN_SIGNING_KEY",
+            file_env: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+        };
+        let display = err.to_string();
+        assert!(display.contains("token signing key source conflict"));
+    }
+
+    #[test]
+    fn server_config_error_display_token_signing_key_too_large() {
+        let err = ServerConfigError::TokenSigningKeyTooLarge {
+            observed_bytes: 2_000_000,
+            maximum_bytes: 1_048_576,
+        };
+        let display = err.to_string();
+        assert!(display.contains("exceeded"));
+    }
+
+    #[test]
+    fn server_config_error_display_token_signing_key_length_mismatch() {
+        let err = ServerConfigError::TokenSigningKeyLengthMismatch {
+            expected_bytes: 100,
+            observed_bytes: 200,
+        };
+        let display = err.to_string();
+        assert!(display.contains("changed during bounded read"));
+    }
+
+    #[test]
+    fn server_config_error_display_provider_token_ttl() {
+        let err = ServerConfigError::ProviderTokenTtl;
+        assert_eq!(err.to_string(), "invalid provider token ttl");
+    }
+
+    #[test]
+    fn server_config_error_display_metrics_token() {
+        let io_err = std::io::Error::other("file error");
+        let err = ServerConfigError::MetricsToken(io_err);
+        assert_eq!(err.to_string(), "metrics token could not be read");
+    }
+
+    #[test]
+    fn server_config_error_display_empty_metrics_token() {
+        let err = ServerConfigError::EmptyMetricsToken;
+        assert_eq!(err.to_string(), "metrics token must not be empty");
+    }
+
+    #[test]
+    fn server_config_error_display_metrics_token_too_large() {
+        let err = ServerConfigError::MetricsTokenTooLarge {
+            observed_bytes: 5000,
+            maximum_bytes: 4096,
+        };
+        let display = err.to_string();
+        assert!(display.contains("exceeded"));
+    }
+
+    #[test]
+    fn server_config_error_display_metrics_token_length_mismatch() {
+        let err = ServerConfigError::MetricsTokenLengthMismatch {
+            expected_bytes: 100,
+            observed_bytes: 200,
+        };
+        let display = err.to_string();
+        assert!(display.contains("changed during bounded read"));
+    }
+
+    #[test]
+    fn server_config_error_display_provider_api_key() {
+        let io_err = std::io::Error::other("file error");
+        let err = ServerConfigError::ProviderApiKey(io_err);
+        assert_eq!(err.to_string(), "provider bootstrap key could not be read");
+    }
+
+    #[test]
+    fn server_config_error_display_provider_api_key_too_large() {
+        let err = ServerConfigError::ProviderApiKeyTooLarge {
+            observed_bytes: 5000,
+            maximum_bytes: 4096,
+        };
+        let display = err.to_string();
+        assert!(display.contains("exceeded"));
+    }
+
+    #[test]
+    fn server_config_error_display_provider_api_key_length_mismatch() {
+        let err = ServerConfigError::ProviderApiKeyLengthMismatch {
+            expected_bytes: 100,
+            observed_bytes: 200,
+        };
+        let display = err.to_string();
+        assert!(display.contains("changed during bounded read"));
+    }
+
+    #[test]
+    fn server_config_error_display_zero_provider_token_ttl() {
+        let err = ServerConfigError::ZeroProviderTokenTtl;
+        assert_eq!(
+            err.to_string(),
+            "provider token ttl must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_incomplete_provider_token_config() {
+        let err = ServerConfigError::IncompleteProviderTokenConfig;
+        assert_eq!(
+            err.to_string(),
+            "provider token issuance requires both provider config and provider api key files"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_invalid_public_base_url() {
+        let err = ServerConfigError::InvalidPublicBaseUrl("not-a-url".to_owned());
+        let display = err.to_string();
+        assert!(display.contains("not a valid URL"));
+    }
+
+    #[test]
+    fn server_config_error_display_missing_oidc_issuer() {
+        let err = ServerConfigError::MissingOidcIssuer;
+        assert_eq!(
+            err.to_string(),
+            "oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER"
+        );
+    }
+
+    #[test]
+    fn server_config_error_display_missing_jwks_url() {
+        let err = ServerConfigError::MissingJwksUrl;
+        assert_eq!(
+            err.to_string(),
+            "jwks auth provider requires SHARDLINE_AUTH_JWKS_URL"
+        );
+    }
+
+    // ── Remaining builder method tests ─────────────────────────────────────
+
+    #[test]
+    fn server_config_builder_with_oci_registry_token_ttl_seconds() {
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_oci_registry_token_ttl_seconds(NonZeroU64::new(600).unwrap());
+        assert_eq!(
+            config.oci_registry_token_ttl_seconds(),
+            NonZeroU64::new(600).unwrap()
+        );
+    }
+
+    #[test]
+    fn server_config_builder_with_oci_registry_token_max_in_flight_requests() {
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_oci_registry_token_max_in_flight_requests(NonZeroUsize::new(128).unwrap());
+        assert_eq!(
+            config.oci_registry_token_max_in_flight_requests(),
+            NonZeroUsize::new(128).unwrap()
+        );
+    }
+
+    #[test]
+    fn server_config_reconstruction_cache_redis_url_returns_none_when_not_configured() {
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        assert!(config.reconstruction_cache_redis_url().is_none());
+    }
+
+    #[test]
+    fn server_config_builder_with_metrics_token_rejects_too_large() {
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        let result = config.with_metrics_token(vec![0u8; 5000]);
+        assert!(matches!(
+            result,
+            Err(ServerConfigError::MetricsTokenTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn server_config_transfer_max_in_flight_chunks_accessor() {
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        assert!(config.transfer_max_in_flight_chunks().get() > 0);
+    }
+
+    #[test]
+    fn deduplicated_server_frontends_preserves_single_element() {
+        let result = deduplicated_server_frontends([ServerFrontend::Xet]);
+        assert_eq!(result, vec![ServerFrontend::Xet]);
+    }
+
+    #[test]
+    fn adaptive_default_in_flight_chunks_for_parallelism_zero_parallelism() {
+        let result = adaptive_default_in_flight_chunks_for_parallelism(
+            0,
+            4,
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::new(256).unwrap(),
+        );
+        assert_eq!(result, NonZeroUsize::new(8).unwrap());
+    }
 }
 
 #[cfg(not(test))]

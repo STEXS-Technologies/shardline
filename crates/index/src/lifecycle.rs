@@ -699,4 +699,82 @@ mod tests {
         assert!(hold.is_active_at(0));
         assert!(hold.is_active_at(u64::MAX));
     }
+
+    #[test]
+    fn retention_hold_release_at_exact_boundary_is_inactive() {
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
+        let hold = RetentionHold::new(
+            key,
+            "exact release".to_owned(),
+            10,
+            Some(20),
+        )
+        .unwrap();
+        assert!(!hold.is_active_at(20), "hold with release_at=20 should be inactive at t=20");
+        assert!(!hold.is_active_at(21), "hold with release_at=20 should be inactive at t=21");
+    }
+
+    #[test]
+    fn retention_hold_reason_preserves_non_whitespace_strings() {
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
+        let reason = "  spaced out  ";
+        let hold = RetentionHold::new(
+            key,
+            reason.to_owned(),
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(hold.reason(), "  spaced out  ");
+    }
+
+    #[test]
+    fn provider_repository_state_field_accessors_return_correct_values() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::Gitea,
+            "org".to_owned(),
+            "repo".to_owned(),
+            Some(100),
+            Some(200),
+            Some("refs/heads/dev".to_owned()),
+        );
+        assert_eq!(state.provider(), RepositoryProvider::Gitea);
+        assert_eq!(state.owner(), "org");
+        assert_eq!(state.repo(), "repo");
+        assert_eq!(state.last_access_changed_at_unix_seconds(), Some(100));
+        assert_eq!(state.last_revision_pushed_at_unix_seconds(), Some(200));
+        assert_eq!(state.last_pushed_revision(), Some("refs/heads/dev"));
+    }
+
+    #[test]
+    fn provider_repository_state_with_reconciliation_sets_timestamps() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".to_owned(),
+            "assets".to_owned(),
+            Some(10),
+            Some(20),
+            Some("refs/heads/main".to_owned()),
+        );
+        let reconciled = state.with_reconciliation(Some(30), Some(40), Some(50));
+        assert_eq!(reconciled.last_cache_invalidated_at_unix_seconds(), Some(30));
+        assert_eq!(reconciled.last_authorization_rechecked_at_unix_seconds(), Some(40));
+        assert_eq!(reconciled.last_drift_checked_at_unix_seconds(), Some(50));
+    }
+
+    #[test]
+    fn provider_repository_state_with_reconciliation_partial_none() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::Codeberg,
+            "user".to_owned(),
+            "project".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let reconciled = state.with_reconciliation(Some(1), None, Some(3));
+        assert_eq!(reconciled.last_cache_invalidated_at_unix_seconds(), Some(1));
+        assert!(reconciled.last_authorization_rechecked_at_unix_seconds().is_none());
+        assert_eq!(reconciled.last_drift_checked_at_unix_seconds(), Some(3));
+    }
 }

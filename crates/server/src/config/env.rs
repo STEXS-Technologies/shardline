@@ -435,4 +435,28 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(b"file-key-value".to_vec()));
     }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_direct_empty_string() {
+        let result =
+            optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
+        assert_eq!(result, Some(b"".to_vec()));
+    }
+
+    // -----------------------------------------------------------------------
+    // load_non_zero_usize_env (tested via the helper's logic directly)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_server_frontends_env_accepts_single_xet() {
+        let result = parse_server_frontends_env("xet");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec![ServerFrontend::Xet]);
+    }
+
+    #[test]
+    fn parse_server_frontends_env_rejects_unknown_frontend() {
+        let result = parse_server_frontends_env("unknown");
+        assert!(matches!(result, Err(super::ServerConfigError::InvalidServerFrontend)));
+    }
 }
