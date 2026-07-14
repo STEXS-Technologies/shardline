@@ -1563,4 +1563,335 @@ mod tests {
         let remaining = index_store.list_reconstruction_file_ids().await.unwrap();
         assert_eq!(remaining.len(), 1);
     }
+
+    // ---- StoredFileMetadataTooLarge display ----
+
+    #[test]
+    fn rebuild_error_stored_file_metadata_too_large_display() {
+        let err = RebuildError::StoredFileMetadataTooLarge {
+            observed_bytes: 1_073_741_825,
+            maximum_bytes: 1_073_741_824,
+        };
+        let msg = err.to_string();
+        // The #[error] attribute uses a static string without field interpolation.
+        assert!(
+            msg.contains("stored file metadata exceeded the bounded parser ceiling"),
+            "display should mention stored file metadata: {msg}"
+        );
+        // The large byte values are not included in the static display string.
+        // Field inclusion would require an explicit format string change.
+    }
+
+    // ---- rebuild_dedupe_shard_mappings paths ----
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_dedupe_shard_mappings_empty_produces_clean_report() {
+        let storage = shardline_test_support::TempStorage::new();
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = storage.path().join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+
+        let mut report = empty_report();
+        rebuild_dedupe_shard_mappings(
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(report.scanned_retained_shards, 0);
+        assert_eq!(report.removed_stale_dedupe_shard_mappings, 0);
+        assert_eq!(report.rebuilt_dedupe_shard_mappings, 0);
+        assert_eq!(report.unchanged_dedupe_shard_mappings, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_dedupe_shard_mappings_invalid_shard_bytes_reports_issue() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
+
+        let storage = shardline_test_support::TempStorage::new();
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = storage.path().join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+
+        // Write garbage bytes as a shard file to trigger InvalidSerializedShard
+        let shard_key = ObjectKey::parse("shards/ab/invalid_shard.shard").unwrap();
+        let garbage = b"this is not a valid shard file at all!!!!";
+        object_store
+            .put_overwrite(
+                &shard_key,
+                ObjectBody::from_slice(garbage),
+                &ObjectIntegrity::new(
+                    shardline_server_core::chunk_hash(garbage),
+                    garbage.len() as u64,
+                ),
+            )
+            .unwrap();
+
+        let mut report = empty_report();
+        rebuild_dedupe_shard_mappings(
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.scanned_retained_shards, 1);
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            IndexRebuildIssueKind::InvalidRetainedShard
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_dedupe_shard_mappings_removes_stale_existing_mappings() {
+        use shardline_index::{DedupeShardMapping, DedupeStore};
+        use shardline_protocol::ShardlineHash;
+        use shardline_storage::ObjectKey;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = storage.path().join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+
+        // Insert a dedupe mapping pointing to a shard that no longer exists.
+        // The rebuild will see no shards, so this mapping is stale.
+        let chunk_hash = ShardlineHash::from_bytes([1; 32]);
+        let shard_key = ObjectKey::parse("shards/ab/nonexistent.shard").unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, shard_key);
+        index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
+
+        let mut report = empty_report();
+        rebuild_dedupe_shard_mappings(
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(report.scanned_retained_shards, 0);
+        assert_eq!(report.removed_stale_dedupe_shard_mappings, 1);
+        assert_eq!(report.rebuilt_dedupe_shard_mappings, 0);
+        assert_eq!(report.unchanged_dedupe_shard_mappings, 0);
+
+        // Verify the stale mapping was actually removed from the index store
+        let remaining = DedupeStore::list_dedupe_shard_mappings(&index_store).unwrap();
+        assert!(remaining.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_dedupe_shard_mappings_with_valid_shard_unchanged_mapping() {
+        use shardline_index::{parse_xet_hash_hex, DedupeShardMapping};
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
+        use shardline_xet_core::{
+            merklehash::{compute_data_hash, file_hash, xorb_hash},
+            metadata_shard::{
+                file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
+                shard_in_memory::MDBInMemoryShard,
+                xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+            },
+        };
+
+        // Build a minimal valid shard with one chunk that has the global-dedup flag
+        // so that `collect_dedupe_chunk_hashes` includes it.
+        let chunk_data = b"test chunk data for rebuild dedupe test";
+        let chunk_hash = compute_data_hash(chunk_data);
+        let xorb_hash = xorb_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+        let file_hash_val = file_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+
+        let mut shard = MDBInMemoryShard::default();
+        shard
+            .add_file_reconstruction_info(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb_hash,
+                    chunk_data.len() as u32,
+                    0_u32,
+                    1_u32,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+        shard
+            .add_xorb_block(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+                chunks: vec![XorbChunkSequenceEntry::new(
+                    chunk_hash,
+                    chunk_data.len() as u32,
+                    0_u32,
+                )
+                .with_global_dedup_flag(true)],
+            })
+            .unwrap();
+        let shard_bytes = shard.to_bytes().unwrap();
+        let chunk_hash_hex = chunk_hash.hex();
+
+        let storage = shardline_test_support::TempStorage::new();
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = storage.path().join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+
+        // Store the shard in the object store using a realistic shard key
+        let shard_key_str = format!("shards/{}/{}", &chunk_hash_hex[..2], chunk_hash_hex);
+        let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
+        object_store
+            .put_overwrite(
+                &shard_key,
+                ObjectBody::from_slice(&shard_bytes),
+                &ObjectIntegrity::new(
+                    shardline_server_core::chunk_hash(&shard_bytes),
+                    shard_bytes.len() as u64,
+                ),
+            )
+            .unwrap();
+
+        // Insert a matching dedupe mapping so the rebuild finds it unchanged
+        let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
+        let existing_mapping =
+            DedupeShardMapping::new(shardline_chunk_hash, shard_key.clone());
+        index_store
+            .upsert_dedupe_shard_mapping(&existing_mapping)
+            .unwrap();
+
+        let mut report = empty_report();
+        rebuild_dedupe_shard_mappings(
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+        assert_eq!(report.scanned_retained_shards, 1);
+        assert_eq!(report.unchanged_dedupe_shard_mappings, 1);
+        assert_eq!(report.rebuilt_dedupe_shard_mappings, 0);
+        assert_eq!(report.removed_stale_dedupe_shard_mappings, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping() {
+        use shardline_index::{parse_xet_hash_hex, DedupeShardMapping, DedupeStore};
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
+        use shardline_xet_core::{
+            merklehash::{compute_data_hash, file_hash, xorb_hash},
+            metadata_shard::{
+                file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
+                shard_in_memory::MDBInMemoryShard,
+                xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+            },
+        };
+
+        // Build a minimal valid shard with one chunk (global-dedup flagged)
+        let chunk_data = b"rebuild test data for changed mapping";
+        let chunk_hash = compute_data_hash(chunk_data);
+        let xorb_hash = xorb_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+        let file_hash_val = file_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+
+        let mut shard = MDBInMemoryShard::default();
+        shard
+            .add_file_reconstruction_info(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb_hash,
+                    chunk_data.len() as u32,
+                    0_u32,
+                    1_u32,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+        shard
+            .add_xorb_block(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+                chunks: vec![XorbChunkSequenceEntry::new(
+                    chunk_hash,
+                    chunk_data.len() as u32,
+                    0_u32,
+                )
+                .with_global_dedup_flag(true)],
+            })
+            .unwrap();
+        let shard_bytes = shard.to_bytes().unwrap();
+        let chunk_hash_hex = chunk_hash.hex();
+
+        let storage = shardline_test_support::TempStorage::new();
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = storage.path().join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+
+        // Store the shard
+        let shard_key_str = format!("shards/{}/{}", &chunk_hash_hex[..2], chunk_hash_hex);
+        let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
+        object_store
+            .put_overwrite(
+                &shard_key,
+                ObjectBody::from_slice(&shard_bytes),
+                &ObjectIntegrity::new(
+                    shardline_server_core::chunk_hash(&shard_bytes),
+                    shard_bytes.len() as u64,
+                ),
+            )
+            .unwrap();
+
+        // Insert an existing mapping that points to a DIFFERENT shard key.
+        // The rebuild will see that the desired mapping (pointing to the real shard)
+        // differs from the existing mapping (pointing to a fake shard) and will
+        // upsert the correct one.
+        let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
+        let fake_shard_key =
+            ObjectKey::parse("shards/ab/a_different_shard.shard").unwrap();
+        let old_mapping =
+            DedupeShardMapping::new(shardline_chunk_hash, fake_shard_key);
+        index_store.upsert_dedupe_shard_mapping(&old_mapping).unwrap();
+
+        let mut report = empty_report();
+        rebuild_dedupe_shard_mappings(
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+        assert_eq!(report.scanned_retained_shards, 1);
+        assert_eq!(report.rebuilt_dedupe_shard_mappings, 1);
+        assert_eq!(report.unchanged_dedupe_shard_mappings, 0);
+        assert_eq!(report.removed_stale_dedupe_shard_mappings, 0);
+
+        // Verify the mapping was updated to point to the correct shard key
+        let updated =
+            DedupeStore::dedupe_shard_mapping(&index_store, &shardline_chunk_hash).unwrap();
+        assert!(
+            updated.is_some(),
+            "mapping should still exist after rebuild"
+        );
+        if let Some(updated) = updated {
+            assert_eq!(
+                updated.shard_object_key(),
+                &shard_key,
+                "mapping should be updated to point to the real shard"
+            );
+        }
+    }
 }
