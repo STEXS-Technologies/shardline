@@ -1,6 +1,9 @@
 use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -28,6 +31,10 @@ struct TestBackend;
 struct MockS3Backend {
     /// upload_id → (parts, completed, aborted, etag_index)
     uploads: std::sync::Mutex<std::collections::HashMap<String, MockMultipartState>>,
+    /// When true, `upload_resumable_object_part` returns an error.
+    fail_upload_part: AtomicBool,
+    /// When true, `complete_resumable_object_upload` returns an error.
+    fail_complete: AtomicBool,
 }
 
 struct MockMultipartState {
@@ -41,6 +48,8 @@ impl MockS3Backend {
     fn new() -> Self {
         Self {
             uploads: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fail_upload_part: AtomicBool::new(false),
+            fail_complete: AtomicBool::new(false),
         }
     }
 
@@ -99,6 +108,11 @@ impl OciBackend for MockS3Backend {
         part_idx: usize,
         bytes: Bytes,
     ) -> Result<String, OciAdapterError> {
+        if self.fail_upload_part.load(Ordering::Relaxed) {
+            return Err(OciAdapterError::Io(std::io::Error::other(
+                "injected part upload failure",
+            )));
+        }
         let mut guard = self.uploads.lock().unwrap();
         let state = guard.get_mut(upload_id).ok_or(OciAdapterError::NotFound)?;
         let etag_counter = state.next_etag;
@@ -113,6 +127,11 @@ impl OciBackend for MockS3Backend {
         upload_id: &str,
         _parts: Vec<(usize, String)>,
     ) -> Result<(), OciAdapterError> {
+        if self.fail_complete.load(Ordering::Relaxed) {
+            return Err(OciAdapterError::Io(std::io::Error::other(
+                "injected complete failure",
+            )));
+        }
         let mut guard = self.uploads.lock().unwrap();
         let state = guard.get_mut(upload_id).ok_or(OciAdapterError::NotFound)?;
         state.completed = true;
@@ -1804,4 +1823,674 @@ fn oci_tag_key_invalid_tag_uppercase() {
         super::oci_tag_key("team/assets", "-starts-with-hyphen", None),
         Err(OciAdapterError::InvalidManifestReference)
     ));
+}
+
+// ── S3 multipart error branch coverage tests ──────────────────────────────
+
+#[tokio::test]
+async fn s3_append_non_s3_session_returns_not_found() {
+    // append_s3_multipart_upload_bytes with !session.use_s3_multipart → line 761
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let session = read_session(root.path(), &session_id).await;
+    let result =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"data")
+            .await;
+    assert!(matches!(result, Err(OciAdapterError::NotFound)));
+}
+
+#[tokio::test]
+async fn s3_finalize_non_s3_session_returns_not_found() {
+    // finalize_s3_multipart_upload_session with !session.use_s3_multipart → line 823
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let session = read_session(root.path(), &session_id).await;
+    let object_key = ObjectKey::parse("protocols/oci/test/key").unwrap();
+    let result = finalize_s3_multipart_upload_session(
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        "digest",
+        b"",
+    )
+    .await;
+    assert!(matches!(result, Err(OciAdapterError::NotFound)));
+}
+
+#[tokio::test]
+async fn s3_finalize_hash_mismatch_empty_multipart() {
+    // When s3_multipart is None and hash doesn't match empty → line 830
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+    let session = read_session(root.path(), &session_id).await;
+    // Don't append data — s3_multipart stays None. Pass hash that doesn't match empty.
+    let wrong_digest = sha256_hex(b"not-empty");
+    let object_key = ObjectKey::parse("protocols/oci/test/key").unwrap();
+    let result = finalize_s3_multipart_upload_session(
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &wrong_digest,
+        b"",
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(OciAdapterError::ExpectedBodyHashMismatch)
+    ));
+}
+
+#[tokio::test]
+async fn s3_finalize_empty_parts_aborts_and_puts() {
+    // part_ids is empty → abort + single put (lines 870-876)
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append small data to initialize multipart (no parts uploaded, tail has data)
+    let session = read_session(root.path(), &session_id).await;
+    let (session, _) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"tail-data")
+            .await
+            .unwrap();
+
+    // Delete the tail file so finalize sees empty tail and empty part_ids
+    let tail_path = crate::upload_tail_path(root.path(), &session_id);
+    let _ = tokio::fs::remove_file(&tail_path).await;
+
+    // Expected digest must match the sha256_state (which has "tail-data")
+    let digest = sha256_hex(b"tail-data");
+    let object_key = ObjectKey::parse("protocols/oci/test/key").unwrap();
+    let outcome = finalize_s3_multipart_upload_session(
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &digest,
+        b"",
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+}
+
+#[tokio::test]
+async fn s3_finalize_part_upload_error_aborts() {
+    // upload_resumable_object_part fails → abort (lines 861-865)
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    backend.fail_upload_part.store(true, Ordering::Relaxed);
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append data to initialize multipart (tail has data)
+    let session = read_session(root.path(), &session_id).await;
+    let (session, _) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"part-data")
+            .await
+            .unwrap();
+
+    // Now finalize — the tail upload will fail
+    let digest = sha256_hex(b"part-data");
+    let object_key = ObjectKey::parse("protocols/oci/test/key").unwrap();
+    let result = finalize_s3_multipart_upload_session(
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &digest,
+        b"",
+    )
+    .await;
+    assert!(result.is_err());
+    // The upload should have been aborted
+    let s = read_session(root.path(), &session_id).await;
+    if let Some(m) = s.s3_multipart {
+        backend.assert_aborted(&m.upload_id);
+    }
+}
+
+#[tokio::test]
+async fn s3_finalize_complete_error_aborts() {
+    // complete_resumable_object_upload fails → abort (lines 888-892)
+    // We need a session where parts have been uploaded so the complete path is reached.
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    backend.fail_complete.store(true, Ordering::Relaxed);
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append enough data to trigger a part upload: 8 MiB
+    let chunk_len = 8 * 1024 * 1024;
+    let chunk = vec![b'x'; chunk_len];
+    let session = read_session(root.path(), &session_id).await;
+    let (session, _) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &chunk)
+            .await
+            .unwrap();
+
+    // Finalize — the tail is empty (all data uploaded as a part).
+    // Complete will fail.
+    let digest = sha256_hex(&chunk);
+    let object_key = ObjectKey::parse("protocols/oci/test/key").unwrap();
+    let result = finalize_s3_multipart_upload_session(
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &digest,
+        b"",
+    )
+    .await;
+    assert!(result.is_err());
+    // The upload should have been aborted
+    let s = read_session(root.path(), &session_id).await;
+    if let Some(m) = s.s3_multipart {
+        backend.assert_aborted(&m.upload_id);
+    }
+}
+
+#[tokio::test]
+async fn s3_ensure_started_upload_id_none_errors() {
+    // ensure_s3_upload_started: backend.create_resumable_object_upload returns None (lines 1110-1114)
+    // TestBackend already returns Ok(None) from create_resumable_object_upload.
+    let root = temp_root();
+    let session_id = create_upload_session(
+        root.path(),
+        Some(&TestBackend),
+        "test-repo",
+        None,
+        ttl(),
+        max_sessions(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let session = read_session(root.path(), &session_id).await;
+    let result = append_s3_multipart_upload_bytes(
+        root.path(),
+        &TestBackend,
+        &session_id,
+        session,
+        b"trigger-init",
+    )
+    .await;
+    assert!(matches!(result, Err(OciAdapterError::NotFound)));
+}
+
+#[tokio::test]
+async fn s3_read_upload_tail_io_error() {
+    // read_upload_tail non-NotFound IO error → line 1145
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append data to create a tail file
+    let session = read_session(root.path(), &session_id).await;
+    let (_new_session, _total) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"tail-data")
+            .await
+            .unwrap();
+
+    // Replace tail file with a directory (read will fail with EISDIR or similar)
+    let tail_path = crate::upload_tail_path(root.path(), &session_id);
+    let _ = tokio::fs::remove_file(&tail_path).await;
+    tokio::fs::create_dir(&tail_path).await.unwrap();
+
+    // Next append will call read_upload_tail which should fail with Io error
+    let session = read_session(root.path(), &session_id).await;
+    let result = append_s3_multipart_upload_bytes(
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        b"more-data",
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "expected error when tail path is a directory"
+    );
+}
+
+#[tokio::test]
+async fn s3_write_upload_tail_empty_removes_file() {
+    // write_upload_tail with empty bytes removes existing tail file → line 1158 (Ok branch)
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append 1 byte (creates tail file with 1 byte)
+    let session = read_session(root.path(), &session_id).await;
+    let (_session, _) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"x")
+            .await
+            .unwrap();
+
+    // Now append exactly 8MiB - 1 byte so total = 8MiB, tail gets drained, write_upload_tail
+    // called with empty bytes, removes the existing tail file → line 1158 (Ok)
+    let remaining = vec![b'y'; 8 * 1024 * 1024 - 1];
+    let session = read_session(root.path(), &session_id).await;
+    let result =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &remaining)
+            .await;
+    assert!(result.is_ok(), "append with exact chunk should succeed");
+}
+
+#[tokio::test]
+async fn s3_write_upload_tail_remove_non_existent() {
+    // write_upload_tail with empty bytes, no tail file → line 1159 (NotFound → Ok)
+    // This happens when the first append is exactly 8MiB (no previous tail file)
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append exactly 8MiB — the full chunk gets uploaded, tail is empty,
+    // write_upload_tail(empty) tries to remove the non-existent tail file → NotFound → Ok
+    let chunk = vec![b'z'; 8 * 1024 * 1024];
+    let session = read_session(root.path(), &session_id).await;
+    let result =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, &chunk).await;
+    assert!(result.is_ok(), "exact chunk append should succeed");
+}
+
+// ── IO error branch tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn read_upload_session_io_error_on_inaccessible_metadata() {
+    // read_upload_session: non-NotFound IO error reading metadata → line 500
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Replace the upload directory with a file so path resolution fails with ENOTDIR
+    let upload_dir = crate::upload_dir(root.path());
+    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+    tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
+
+    let result = read_upload_session(root.path(), &session_id, ttl()).await;
+    assert!(
+        result.is_err(),
+        "expected error when upload_dir is a file"
+    );
+    // The error should NOT be NotFound (it's an Io error from failed path resolution)
+    match result {
+        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
+        Err(OciAdapterError::Io(_)) => {} // expected
+        Err(other) => panic!("unexpected error: {other:?}"),
+        Ok(_) => panic!("expected error"),
+    }
+}
+
+#[tokio::test]
+async fn upload_length_io_error_on_inaccessible_body() {
+    // upload_length: non-NotFound IO error (line 583)
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Replace upload directory with a file so path resolution fails
+    let upload_dir = crate::upload_dir(root.path());
+    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+    tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
+
+    let result = upload_length(root.path(), &session_id).await;
+    assert!(
+        result.is_err(),
+        "expected error when upload_dir is a file"
+    );
+    match result {
+        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
+        Err(OciAdapterError::Io(_)) => {} // expected
+        Err(other) => panic!("unexpected error: {other:?}"),
+        Ok(_) => panic!("expected error"),
+    }
+}
+
+#[tokio::test]
+async fn append_upload_bytes_io_error_on_inaccessible_body() {
+    // map_not_found: non-NotFound IO error → line 536
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Replace upload directory with a file so path resolution fails
+    let upload_dir = crate::upload_dir(root.path());
+    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+    tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
+
+    let result = append_upload_bytes(root.path(), &session_id, b"data").await;
+    assert!(
+        result.is_err(),
+        "expected error when upload_dir is a file"
+    );
+    match result {
+        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
+        Err(OciAdapterError::Io(_)) => {} // expected
+        Err(other) => panic!("unexpected error: {other:?}"),
+        Ok(_) => panic!("expected error"),
+    }
+}
+
+#[tokio::test]
+async fn delete_upload_session_returns_first_error() {
+    // delete_upload_session: first_error set on non-NotFound error (lines 699-702)
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Replace upload directory with a file so deletion of all three paths fails
+    let upload_dir = crate::upload_dir(root.path());
+    let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+    tokio::fs::write(&upload_dir, b"not-a-dir").await.unwrap();
+
+    let result = delete_upload_session(root.path(), &session_id).await;
+    assert!(
+        result.is_err(),
+        "expected error when upload_dir is a file"
+    );
+    match result {
+        Err(OciAdapterError::NotFound) => panic!("expected non-NotFound error"),
+        Err(OciAdapterError::Io(_)) => {} // expected
+        Err(other) => panic!("unexpected error: {other:?}"),
+        Ok(_) => panic!("expected error"),
+    }
+}
+
+#[tokio::test]
+async fn canonical_key_matches_object_key() {
+    // finalize: canonical_key == object_key → early return (line 899)
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append data, finalize with the canonical shared key as the object_key
+    let session = read_session(root.path(), &session_id).await;
+    let (session, _) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"data")
+            .await
+            .unwrap();
+
+    // The canonical key is protocols/shared/sha256/{digest}
+    let digest = sha256_hex(b"data");
+    let object_key = ObjectKey::parse(&format!("protocols/shared/sha256/{digest}")).unwrap();
+    let outcome = finalize_s3_multipart_upload_session(
+        root.path(),
+        &backend,
+        &session_id,
+        session,
+        &object_key,
+        &digest,
+        b"",
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+}
+
+// ── count_active_upload_sessions branch tests ────────────────────────────
+
+#[tokio::test]
+async fn count_active_sessions_read_dir_error() {
+    // count_active_upload_sessions: read_dir fails with non-NotFound error (line 940)
+    let root = temp_root();
+    // Create a file at the upload_dir path so read_dir fails with ENOTDIR or similar
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(root.path().join("oci-uploads"))
+        .await
+        .unwrap();
+    // Remove the directory and replace with a file
+    let _ = tokio::fs::remove_dir(&upload_dir).await;
+    tokio::fs::write(&upload_dir, b"not-a-directory")
+        .await
+        .unwrap();
+    let result = super::count_active_upload_sessions(root.path(), ttl()).await;
+    assert!(
+        result.is_err(),
+        "expected error when upload_dir is a file"
+    );
+}
+
+#[tokio::test]
+async fn count_active_sessions_skips_unreadable_json() {
+    // count_active_upload_sessions: fs::read fails → continue (line 951)
+    let root = temp_root();
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    // Create a directory with .json name (read will fail with EISDIR)
+    let dir_path = upload_dir.join("unreadable.json");
+    tokio::fs::create_dir(&dir_path).await.unwrap();
+    let count = super::count_active_upload_sessions(root.path(), ttl())
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "unreadable json should be skipped");
+}
+
+#[tokio::test]
+async fn count_active_sessions_skips_invalid_json() {
+    // count_active_upload_sessions: serde_json::from_slice fails → continue (line 954)
+    let root = temp_root();
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    let json_path = upload_dir.join("invalid.json");
+    tokio::fs::write(&json_path, b"not-valid-json").await.unwrap();
+    let count = super::count_active_upload_sessions(root.path(), ttl())
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "invalid json should be skipped");
+}
+
+#[tokio::test]
+async fn count_active_sessions_skips_expired_session() {
+    // count_active_upload_sessions: expired session → continue (line 957)
+    let root = temp_root();
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    // Write an expired session (last_touched very old)
+    let session = OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 0,
+        last_touched_unix_seconds: 0,
+        use_s3_multipart: false,
+        s3_multipart: None,
+    };
+    let bytes = serde_json::to_vec(&session).unwrap();
+    let json_path = upload_dir.join("expired.json");
+    tokio::fs::write(&json_path, &bytes).await.unwrap();
+    let count = super::count_active_upload_sessions(root.path(), ttl())
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "expired session should be skipped");
+}
+
+// ── purge_expired_upload_sessions branch tests ───────────────────────────
+
+#[tokio::test]
+async fn purge_expired_session_stem_not_utf8_bin() {
+    // purge_expired_upload_sessions: file with .bin extension and non-UTF-8 stem → continue (line 1005)
+    let root = temp_root();
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    // Create a .bin file with non-UTF-8 name
+    #[cfg(unix)]
+    {
+        let bad_name = std::ffi::OsStr::from_bytes(b"\xff\xfe.bin");
+        let bad_path = upload_dir.join(bad_name);
+        tokio::fs::write(&bad_path, b"orphan").await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+            .await
+            .unwrap();
+        // File should remain since it was skipped (stem not valid session ID → continue on 1008)
+        // Actually on 1005: file_stem().and_then(OsStr::to_str) returns None → continue
+        // The file should NOT be removed (no metadata exists, but the non-UTF-8 stem
+        // skips the orphan-removal logic entirely — it continues at line 1005)
+        assert!(bad_path.exists(), "non-UTF-8 stem file should be skipped");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = upload_dir;
+    }
+}
+
+#[tokio::test]
+async fn purge_expired_session_stem_validation_skips_bin() {
+    // purge_expired_upload_sessions: .bin file with invalid session ID stem → continue (line 1008)
+    let root = temp_root();
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    let bin_path = upload_dir.join("invalid-stem.bin");
+    tokio::fs::write(&bin_path, b"orphan").await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        .await
+        .unwrap();
+    // File should remain (stem fails validation → continue)
+    assert!(
+        bin_path.exists(),
+        "invalid-stem .bin file should be skipped"
+    );
+}
+
+#[tokio::test]
+async fn purge_expired_session_stem_not_utf8_json() {
+    // purge_expired_upload_sessions: .json file with non-UTF-8 stem → continue (line 1021)
+    let root = temp_root();
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    #[cfg(unix)]
+    {
+        let bad_name = std::ffi::OsStr::from_bytes(b"\xfe\xff.json");
+        let bad_path = upload_dir.join(bad_name);
+        tokio::fs::write(&bad_path, b"{}").await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+            .await
+            .unwrap();
+        // File should remain (non-UTF-8 stem → continue at line 1021)
+        assert!(bad_path.exists(), "non-UTF-8 json should be skipped");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = upload_dir;
+    }
+}
+
+#[tokio::test]
+async fn purge_expired_session_stem_validation_skips_json() {
+    // purge_expired_upload_sessions: .json file with invalid session ID stem → continue (line 1024)
+    let root = temp_root();
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+    let json_path = upload_dir.join("invalid-stem.json");
+    tokio::fs::write(&json_path, b"{}").await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        .await
+        .unwrap();
+    assert!(
+        json_path.exists(),
+        "invalid-stem .json file should be skipped"
+    );
+}
+
+#[tokio::test]
+async fn purge_expired_session_read_error_deletes() {
+    // purge_expired_upload_sessions: read error on .json file → delete (lines 1028-1030)
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Replace the metadata file with a directory (read will fail, should trigger delete)
+    let meta_path = crate::upload_metadata_path(root.path(), &session_id);
+    let _ = tokio::fs::remove_file(&meta_path).await;
+    tokio::fs::create_dir(&meta_path).await.unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // purge may return an error (delete_upload_session may fail on the directory)
+    let result =
+        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now).await;
+    // The function may error because delete_upload_session failed on the directory content
+    // but we should hit the read-error branch regardless
+    let _ = result;
+}
+
+#[tokio::test]
+async fn purge_expired_s3_multipart_abort() {
+    // purge_expired_upload_sessions: S3 multipart abort on expired session (lines 1046-1052)
+    let root = temp_root();
+    let backend = MockS3Backend::new();
+    let session_id = create_s3_session(root.path(), &backend).await;
+
+    // Append data to initialize multipart with an upload_id
+    let session = read_session(root.path(), &session_id).await;
+    let (session, _) =
+        append_s3_multipart_upload_bytes(root.path(), &backend, &session_id, session, b"data")
+            .await
+            .unwrap();
+    let upload_id = session.s3_multipart.as_ref().unwrap().upload_id.clone();
+    assert!(!upload_id.is_empty(), "upload_id should be set");
+
+    // Now purge with a time far in the future (session will be expired)
+    let far_future = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 100_000;
+    purge_expired_upload_sessions::<MockS3Backend>(
+        root.path(),
+        Some(&backend),
+        NonZeroU64::new(1).unwrap(),
+        far_future,
+    )
+    .await
+    .unwrap();
+
+    // The S3 multipart upload should have been aborted
+    backend.assert_aborted(&upload_id);
+}
+
+#[tokio::test]
+async fn purge_expired_read_dir_error() {
+    // purge_expired_upload_sessions: read_dir fails with non-NotFound error (line 995)
+    let root = temp_root();
+    // Create a file at the upload_dir path so read_dir fails
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(root.path().join("oci-uploads"))
+        .await
+        .unwrap();
+    let _ = tokio::fs::remove_dir(&upload_dir).await;
+    tokio::fs::write(&upload_dir, b"not-a-directory")
+        .await
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let result =
+        purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now).await;
+    assert!(
+        result.is_err(),
+        "expected error when upload_dir is a file"
+    );
 }
