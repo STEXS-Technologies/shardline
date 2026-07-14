@@ -192,4 +192,67 @@ mod tests {
             inspect_repository_record_for_xorb(&mut found, b"not valid json", "anything", &scope);
         assert!(result.is_err());
     }
+
+    // ── read_record tests ───────────────────────────────────────────────────
+
+    use super::read_record;
+    use shardline_index::LocalRecordStore;
+
+    fn make_temp_record_store() -> (tempfile::TempDir, LocalRecordStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalRecordStore::open(tmp.path().to_path_buf());
+        (tmp, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_returns_not_found_for_missing_file() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(&store, "nonexistent.txt", None, None).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_rejects_invalid_file_id() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(&store, "../bad", None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_rejects_invalid_content_hash() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(&store, "test.txt", Some("badhash"), None).await;
+        assert!(matches!(result, Err(crate::ServerError::InvalidContentHash)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_with_hash_not_found_for_missing_file() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(
+            &store,
+            "test.txt",
+            Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    // ── repository_references_xorb tests ────────────────────────────────────
+
+    use super::repository_references_xorb;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_returns_false_for_empty_store() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let result = repository_references_xorb(
+            &store,
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            &scope,
+        )
+        .await
+        .unwrap();
+        assert!(!result);
+    }
 }

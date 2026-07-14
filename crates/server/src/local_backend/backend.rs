@@ -407,4 +407,89 @@ mod tests {
         let _meta = store.metadata(&key);
         // Should not panic
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_new_with_upload_parallelism_creates_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new_with_upload_parallelism(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+            NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await;
+        assert!(backend.is_ok());
+        let backend = backend.unwrap();
+        assert_eq!(backend.public_base_url(), "http://127.0.0.1:8080");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_read_record_returns_not_found_for_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+        let result = backend.read_record("nonexistent.txt", None, None).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_read_record_rejects_invalid_file_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+        let result = backend.read_record("../bad", None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn content_hash_with_single_chunk() {
+        let chunks = [FileChunkRecord {
+            hash: "abc".to_owned(),
+            offset: 0,
+            length: 10,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 10,
+        }];
+        let hash = content_hash(10, 10, &chunks);
+        assert_eq!(hash.len(), 64); // blake3 hex
+    }
+
+    #[test]
+    fn content_hash_with_multiple_chunks() {
+        let chunks = [
+            FileChunkRecord {
+                hash: "abc".to_owned(),
+                offset: 0,
+                length: 10,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 10,
+            },
+            FileChunkRecord {
+                hash: "def".to_owned(),
+                offset: 10,
+                length: 20,
+                range_start: 1,
+                range_end: 2,
+                packed_start: 10,
+                packed_end: 30,
+            },
+        ];
+        let hash = content_hash(30, 10, &chunks);
+        assert_eq!(hash.len(), 64);
+        assert!(!hash.is_empty());
+    }
 }

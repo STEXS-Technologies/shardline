@@ -25,6 +25,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
+chrono.workspace = true
 hex.workspace = true
 proptest.workspace = true
 shardline-test-support = { workspace = true, features = ["docker"] }

@@ -2494,3 +2494,177 @@ async fn purge_expired_read_dir_error() {
         "expected error when upload_dir is a file"
     );
 }
+
+// ── write_upload_tail non-NotFound IO error (line 1163) ───────────────────
+
+#[tokio::test]
+async fn write_upload_tail_io_error_on_remove_direct() {
+    let root = temp_root();
+    let session_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // valid 32-char hex
+    let tail_dir = crate::upload_tail_path(root.path(), session_id);
+    tokio::fs::create_dir_all(&tail_dir).await.unwrap();
+
+    // write_upload_tail with empty bytes → fs::remove_file on a directory → EISDIR
+    let result = super::write_upload_tail(root.path(), session_id, b"").await;
+    assert!(result.is_err(), "expected error when tail path is a directory");
+    match &result {
+        Err(OciAdapterError::Io(io_err)) => {
+            assert_ne!(
+                io_err.kind(),
+                std::io::ErrorKind::NotFound,
+                "expected non-NotFound error"
+            );
+        }
+        Err(other) => panic!("expected Io error, got: {other:?}"),
+        Ok(_) => panic!("expected error"),
+    }
+}
+
+// ── purge_expired read-error-on-metadata → delete + continue (line 1033) ─
+
+#[tokio::test]
+async fn purge_expired_read_error_deletes_with_permission_denied() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Make the metadata file unreadable so fs::read fails with PermissionDenied
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta_path = crate::upload_metadata_path(root.path(), &session_id);
+        std::fs::set_permissions(&meta_path, std::fs::Permissions::from_mode(0o200))
+            .expect("set_permissions should work");
+    }
+    #[cfg(not(unix))]
+    {
+        let meta_path = crate::upload_metadata_path(root.path(), &session_id);
+        let mut perms = std::fs::metadata(&meta_path).await.unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&meta_path, perms).unwrap();
+    }
+
+    let far_future = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 100_000;
+
+    purge_expired_upload_sessions::<TestBackend>(
+        root.path(),
+        NO_BACKEND,
+        NonZeroU64::new(1).unwrap(),
+        far_future,
+    )
+    .await
+    .unwrap();
+
+    // Session should be fully purged
+    let result = read_upload_session(root.path(), &session_id, ttl()).await;
+    assert!(
+        matches!(result, Err(OciAdapterError::NotFound)),
+        "session with unreadable metadata should be purged"
+    );
+}
+
+// ── Unix anchored-file closure coverage (path-escape closures) ────────────
+// These test the error-factory closures passed to open_anchored_target.
+// They are only invoked when the path escapes the root.
+
+#[cfg(unix)]
+#[test]
+fn open_anchored_file_rejects_escaped_path() {
+    let root = temp_root();
+    let escaped = root.path().join("../../../etc/passwd");
+    let result = super::open_anchored_file(root.path(), &escaped);
+    assert!(result.is_err(), "path escaping root should be rejected");
+}
+
+#[cfg(unix)]
+#[test]
+fn read_file_anchored_rejects_escaped_path() {
+    let root = temp_root();
+    let escaped = root.path().join("../../../etc/hostname");
+    let result = super::read_file_anchored(root.path(), &escaped);
+    assert!(result.is_err(), "path escaping root should be rejected");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_file_anchored_rejects_escaped_path() {
+    let root = temp_root();
+    let escaped = root.path().join("../../../tmp/escape");
+    let result = super::delete_file_anchored(root.path(), &escaped);
+    assert!(result.is_err(), "path escaping root should be rejected");
+}
+
+#[cfg(unix)]
+#[test]
+fn append_file_anchored_rejects_escaped_path() {
+    let root = temp_root();
+    let escaped = root.path().join("../../../tmp/escape");
+    let result = super::append_file_anchored(root.path(), &escaped, b"data");
+    assert!(result.is_err(), "path escaping root should be rejected");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn upload_file_len_async_rejects_escaped_path() {
+    let root = temp_root();
+    let escaped = root.path().join("../../../etc/passwd");
+    let result = super::upload_file_len_async(root.path(), &escaped).await;
+    assert!(result.is_err(), "path escaping root should be rejected");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn upload_file_exists_async_rejects_escaped_path() {
+    let root = temp_root();
+    let escaped = root.path().join("../../../etc/passwd");
+    let result = super::upload_file_exists_async(root.path(), &escaped).await;
+    assert!(result.is_err(), "path escaping root should be rejected");
+}
+
+// ── create_upload_session metadata write failure cleanup (lines 481-482) ──
+// This tests that create_upload_session cleans up properly when
+// write_upload_metadata fails (e.g., metadata path is a directory).
+// We pre-create a directory at the metadata path by first creating a
+// session, noting its ID, then recreating the scenario.
+
+#[tokio::test]
+async fn create_upload_session_metadata_write_failure_cleans_up() {
+    let root = temp_root();
+
+    // Create the oci-uploads directory
+    let upload_dir = crate::upload_dir(root.path());
+    tokio::fs::create_dir_all(&upload_dir).await.unwrap();
+
+    // We cannot predict the session_id, so we create a session, grab its ID,
+    // delete the session files, then create a directory at the metadata path.
+    // Then we try to call persist_upload_session (which calls
+    // write_upload_metadata) and verify the error propagates.
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Delete the session's files so we can recreate the metadata path as dir
+    delete_upload_session(root.path(), &session_id).await.unwrap();
+
+    // Create a directory at the metadata path (makes write fail)
+    let meta_path = crate::upload_metadata_path(root.path(), &session_id);
+    tokio::fs::create_dir_all(&meta_path).await.unwrap();
+
+    // Create a minimal session object and try to persist it
+    let session = OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 1,
+        last_touched_unix_seconds: 1,
+        use_s3_multipart: false,
+        s3_multipart: None,
+    };
+    let result = super::persist_upload_session(root.path(), &session_id, session).await;
+    assert!(result.is_err(), "persist should fail when metadata path is a directory");
+    match &result {
+        Err(OciAdapterError::Io(_)) | Err(OciAdapterError::BlockingTask(_)) => {} // expected
+        Err(other) => panic!("expected Io or BlockingTask error, got: {other:?}"),
+        Ok(_) => panic!("expected error"),
+    }
+}

@@ -114,22 +114,14 @@ mod tests {
 
     #[test]
     fn bash_completion_mentions_shardline() {
-        let rendered = render_completion(CompletionShell::Bash);
-        assert!(rendered.is_ok());
-        let Ok(rendered) = rendered else {
-            return;
-        };
+        let rendered = render_completion(CompletionShell::Bash).unwrap();
         assert!(rendered.contains("shardline"));
         assert!(rendered.contains("complete"));
     }
 
     #[test]
     fn manpage_mentions_core_commands() {
-        let rendered = render_manpage();
-        assert!(rendered.is_ok());
-        let Ok(rendered) = rendered else {
-            return;
-        };
+        let rendered = render_manpage().unwrap();
         assert!(rendered.contains(".TH shardline"));
         assert!(rendered.contains("gc"));
         assert!(rendered.contains("bench"));

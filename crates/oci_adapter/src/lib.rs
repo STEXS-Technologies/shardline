@@ -1462,4 +1462,28 @@ mod write_file_atomically_tests {
         assert_eq!(std::fs::read(&path1).unwrap(), b"alpha");
         assert_eq!(std::fs::read(&path2).unwrap(), b"beta");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_failure_cleans_up_temporary() {
+        let (_dir, root) = temp_root();
+        // Create a non-empty directory at the target path so rename fails
+        // (rename(2) cannot overwrite a non-empty directory with a file).
+        let target = root.join("target.json");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("child"), b"x").unwrap();
+
+        let result = write_file_atomically(&root, &target, b"data");
+        assert!(
+            result.is_err(),
+            "rename should fail when target is a non-empty directory"
+        );
+        // The temporary file must have been cleaned up:
+        // the directory should still contain only "child".
+        let entries: Vec<_> = std::fs::read_dir(&target)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "temp file should have been cleaned up");
+    }
 }

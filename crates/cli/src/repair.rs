@@ -371,4 +371,22 @@ mod tests {
         let report = empty_repair_report();
         report.print_issues();
     }
+
+    #[tokio::test]
+    async fn run_lifecycle_repair_rejects_missing_root() {
+        let result = super::run_lifecycle_repair(
+            Some(Path::new("/nonexistent-shardline-test-root")),
+            3600,
+        ).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_repair_rejects_missing_root() {
+        let result = super::run_repair(
+            Some(Path::new("/nonexistent-shardline-test-root")),
+            3600,
+        ).await;
+        assert!(result.is_err());
+    }
 }

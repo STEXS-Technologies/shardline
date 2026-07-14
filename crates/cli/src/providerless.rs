@@ -208,18 +208,12 @@ mod tests {
 
     #[test]
     fn providerless_setup_creates_expected_local_state() {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
+        let temp = tempfile::tempdir().unwrap();
         let state_dir = temp.path().join(".shardline");
 
         let report = run_providerless_setup(Some(&state_dir));
         assert!(report.is_ok());
-        let Ok(report) = report else {
-            return;
-        };
+        let report = report.unwrap();
 
         assert_eq!(report.state_dir, state_dir);
         assert_eq!(report.data_dir, state_dir.join(PROVIDERLESS_DATA_DIR_NAME));
@@ -232,28 +226,24 @@ mod tests {
         assert!(report.key_file.is_file());
         assert!(report.env_file.is_file());
 
-        let env_contents = read_to_string(&report.env_file);
-        assert!(env_contents.is_ok());
-        let Ok(env_contents) = env_contents else {
-            return;
-        };
+        let env_contents = read_to_string(&report.env_file).unwrap();
         assert!(env_contents.contains("SHARDLINE_ROOT_DIR="));
         assert!(env_contents.contains("SHARDLINE_TOKEN_SIGNING_KEY_FILE="));
     }
 
     #[test]
+    fn providerless_setup_report_print_summary_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join(".shardline");
+        let report = run_providerless_setup(Some(&state_dir)).unwrap();
+        report.print_summary();
+    }
+
+    #[test]
     fn providerless_runtime_defaults_bootstrap_source_checkout_root() {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
+        let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join(".shardline").join("data");
-        let bind_addr: Result<SocketAddr, _> = "127.0.0.1:8080".parse();
-        assert!(bind_addr.is_ok());
-        let Ok(bind_addr) = bind_addr else {
-            return;
-        };
+        let bind_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let config = ServerConfig::new(
             bind_addr,
             "http://127.0.0.1:8080".to_owned(),
@@ -263,9 +253,7 @@ mod tests {
 
         let config = apply_providerless_source_checkout_defaults(config);
         assert!(config.is_ok());
-        let Ok(config) = config else {
-            return;
-        };
+        let config = config.unwrap();
 
         assert_eq!(config.root_dir(), data_root.as_path());
         assert!(config.token_signing_key().is_some());
@@ -278,16 +266,8 @@ mod tests {
 
     #[test]
     fn providerless_runtime_defaults_ignore_non_checkout_roots() {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
-        let bind_addr: Result<SocketAddr, _> = "127.0.0.1:8080".parse();
-        assert!(bind_addr.is_ok());
-        let Ok(bind_addr) = bind_addr else {
-            return;
-        };
+        let temp = tempfile::tempdir().unwrap();
+        let bind_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let config = ServerConfig::new(
             bind_addr,
             "http://127.0.0.1:8080".to_owned(),
@@ -297,20 +277,33 @@ mod tests {
 
         let config = apply_providerless_source_checkout_defaults(config);
         assert!(config.is_ok());
-        let Ok(config) = config else {
-            return;
-        };
+        let config = config.unwrap();
 
         assert!(config.token_signing_key().is_none());
     }
 
     #[test]
+    fn providerless_runtime_defaults_respects_existing_signing_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let bind_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let data_root = temp.path().join(".shardline").join("data");
+        let mut config = ServerConfig::new(
+            bind_addr,
+            "http://127.0.0.1:8080".to_owned(),
+            data_root,
+            NonZeroUsize::MIN,
+        );
+        // Set a signing key to trigger early return
+        let key = b"a]32-byte-signing-key-for-testing!".to_vec();
+        config = config.with_token_signing_key(key).unwrap();
+
+        let result = apply_providerless_source_checkout_defaults(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn setup_rejects_existing_invalid_signing_key() {
-        let temp = tempfile::tempdir();
-        assert!(temp.is_ok());
-        let Ok(temp) = temp else {
-            return;
-        };
+        let temp = tempfile::tempdir().unwrap();
         let state_dir = temp.path().join(".shardline");
         let created = create_dir_all(&state_dir);
         assert!(created.is_ok());
@@ -338,5 +331,36 @@ mod tests {
             state_dir_for_source_checkout_root(PathBuf::from("/tmp/project/data").as_path()),
             None
         );
+    }
+
+    #[test]
+    fn resolve_providerless_state_dir_without_override_uses_cwd() {
+        let dir = super::resolve_providerless_state_dir(None);
+        assert!(dir.is_ok());
+        let dir = dir.unwrap();
+        assert!(dir.ends_with(".shardline"));
+    }
+
+    #[test]
+    fn state_dir_for_source_checkout_root_returns_none_for_non_data_dirname() {
+        let root = PathBuf::from("/tmp/project/.shardline/not-data");
+        assert_eq!(state_dir_for_source_checkout_root(&root), None);
+    }
+
+    #[test]
+    fn state_dir_for_source_checkout_root_returns_none_for_non_state_parent() {
+        let root = PathBuf::from("/tmp/project/not-shardline/data");
+        assert_eq!(state_dir_for_source_checkout_root(&root), None);
+    }
+
+    #[test]
+    fn render_providerless_env_file_contains_expected_vars() {
+        let data_dir = PathBuf::from("/tmp/.shardline/data");
+        let key_file = PathBuf::from("/tmp/.shardline/token-signing-key");
+        let contents = super::render_providerless_env_file(&data_dir, &key_file);
+        assert!(contents.contains("SHARDLINE_BIND_ADDR=0.0.0.0:8080"));
+        assert!(contents.contains("SHARDLINE_ROOT_DIR=/tmp/.shardline/data"));
+        assert!(contents.contains("SHARDLINE_TOKEN_SIGNING_KEY_FILE=/tmp/.shardline/token-signing-key"));
+        assert!(contents.contains("SHARDLINE_OBJECT_STORAGE_ADAPTER=local"));
     }
 }

@@ -313,16 +313,15 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::{fs, io::ErrorKind, path::PathBuf};
 
-    use super::{remove_output_file_if_present, set_before_local_write_hook, write_output_bytes};
+    use super::{
+        effective_parent_path, remove_output_file_if_present, set_before_local_write_hook,
+        write_output_bytes,
+    };
 
     #[cfg(unix)]
     #[test]
     fn write_output_bytes_rejects_symlinked_output_path() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let target = sandbox.path().join("target.json");
         let write = fs::write(&target, b"original");
         assert!(write.is_ok());
@@ -336,34 +335,18 @@ mod tests {
             result,
             Err(error) if error.kind() == ErrorKind::InvalidInput
         ));
-        let target_bytes = fs::read(&target);
-        assert!(target_bytes.is_ok());
-        let Ok(target_bytes) = target_bytes else {
-            return;
-        };
+        let target_bytes = fs::read(&target).unwrap();
         assert_eq!(target_bytes, b"original");
     }
 
     #[cfg(unix)]
     #[test]
     fn write_output_bytes_rejects_parent_swap_race() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
-        let outside = tempfile::tempdir();
-        assert!(outside.is_ok());
-        let Ok(outside) = outside else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
 
         let output = sandbox.path().join("reports").join("output.json");
-        let parent = output.parent().map(PathBuf::from);
-        assert!(parent.is_some());
-        let Some(parent) = parent else {
-            return;
-        };
+        let parent = output.parent().map(PathBuf::from).unwrap();
         let created = fs::create_dir_all(&parent);
         assert!(created.is_ok());
         let moved_parent = sandbox.path().join("detached-reports");
@@ -396,16 +379,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remove_output_file_if_present_rejects_symlinked_parent_directory() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
-        let outside = tempfile::tempdir();
-        assert!(outside.is_ok());
-        let Ok(outside) = outside else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
 
         let output_dir = sandbox.path().join("units");
         let linked = symlink(outside.path(), &output_dir);
@@ -453,28 +428,41 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_output_bytes_creates_private_file_and_directory_modes() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let output = sandbox.path().join("reports").join("output.json");
 
         let wrote = write_output_bytes(&output, br#"{"ok":true}"#, true);
         assert!(wrote.is_ok());
 
-        let file_metadata = fs::metadata(&output);
-        assert!(file_metadata.is_ok());
-        let Ok(file_metadata) = file_metadata else {
-            return;
-        };
-        let directory_metadata = fs::metadata(sandbox.path().join("reports"));
-        assert!(directory_metadata.is_ok());
-        let Ok(directory_metadata) = directory_metadata else {
-            return;
-        };
+        let file_metadata = fs::metadata(&output).unwrap();
+        let directory_metadata = fs::metadata(sandbox.path().join("reports")).unwrap();
 
         assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(directory_metadata.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_parent_path_uses_dot_for_rootless_path() {
+        // Simulate a path with no parent (e.g. just "file.txt")
+        let path = std::path::Path::new("file.txt");
+        let parent = effective_parent_path(path);
+        assert_eq!(parent, std::path::Path::new("."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_parent_path_uses_given_parent() {
+        let path = std::path::Path::new("/some/dir/file.txt");
+        let parent = effective_parent_path(path);
+        assert_eq!(parent, std::path::Path::new("/some/dir"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_output_path_error_has_expected_message() {
+        let err = super::invalid_output_path_error();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("regular file"));
     }
 }

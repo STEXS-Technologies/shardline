@@ -79,7 +79,40 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{CliRuntimeError, endpoint};
+    use std::net::TcpListener;
+
+    use super::{
+        CliRuntimeError, endpoint, run_health_check,
+    };
+
+    /// Spawn a minimal blocking HTTP server that responds with the given bytes.
+    fn spawn_http_server(response: &'static [u8]) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            if let Some(Ok(mut stream)) = listener.incoming().next() {
+                // Read the entire HTTP request before responding
+                let mut buf = [0_u8; 4096];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            // Check for end of headers (double CRLF)
+                            let text = String::from_utf8_lossy(&buf[..n]);
+                            if text.contains("\r\n\r\n") || text.contains("\n\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        (addr, handle)
+    }
 
     #[test]
     fn endpoint_joins_base_url_and_path() {
@@ -168,5 +201,44 @@ mod tests {
         };
         let debug = format!("{err:?}");
         assert!(debug.contains("ServerStatus"));
+    }
+
+    // ── HTTP integration tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_health_check_ok_response_returns_ok() {
+        let response = b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\ncontent-type: application/json\r\n\r\n{\"status\":\"ok\"}";
+        let (addr, thread) = spawn_http_server(response);
+        let url = format!("http://{addr}");
+        let result = run_health_check(&url).await;
+        thread.join().unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_health_check_degraded_returns_unhealthy_error() {
+        let response = b"HTTP/1.1 200 OK\r\ncontent-length: 21\r\ncontent-type: application/json\r\n\r\n{\"status\":\"degraded\"}";
+        let (addr, thread) = spawn_http_server(response);
+        let url = format!("http://{addr}");
+        let result = run_health_check(&url).await;
+        thread.join().unwrap();
+        assert!(matches!(result, Err(CliRuntimeError::Unhealthy { .. })));
+    }
+
+    #[tokio::test]
+    async fn run_health_check_500_response_returns_server_status_error() {
+        let response = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 12\r\n\r\nserver error";
+        let (addr, thread) = spawn_http_server(response);
+        let url = format!("http://{addr}");
+        let result = run_health_check(&url).await;
+        thread.join().unwrap();
+        assert!(matches!(result, Err(CliRuntimeError::ServerStatus { status: 500, .. })));
+    }
+
+    #[tokio::test]
+    async fn run_health_check_connection_refused_returns_http_error() {
+        // Connect to a port that's not listening
+        let result = run_health_check("http://127.0.0.1:1").await;
+        assert!(result.is_err());
     }
 }

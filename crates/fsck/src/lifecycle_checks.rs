@@ -562,4 +562,98 @@ mod tests {
             report.issues
         );
     }
+
+    // ── Quarantine candidate with matching length (happy path) ───────
+
+    #[tokio::test]
+    async fn quarantine_length_matches_is_clean() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+
+        let content = b"exact-length-content";
+        let object_storage_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_storage_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_storage_path, content).unwrap();
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // observed_length matches actual content length
+        let candidate = shardline_index::QuarantineCandidate::new(
+            obj_key.clone(),
+            content.len() as u64,
+            100,
+            200,
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&index_store, &candidate).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        // No length-mismatch issue; only MissingQuarantinedObject would appear
+        // if the object were missing, but it exists.  The object is not reachable,
+        // so no ReachableQuarantinedObject either.  Report should be clean.
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
+
+    // ── All five provider state timestamps exceed max ─────────────────
+
+    #[tokio::test]
+    async fn provider_state_all_timestamps_exceed_max() {
+        use shardline_index::LifecycleStore;
+
+        let store = shardline_index::MemoryIndexStore::new();
+        // Set all 5 timestamps to u64::MAX so they exceed the computed max.
+        // First create the base state with 2 timestamps + a pushed_revision string.
+        let state = shardline_index::ProviderRepositoryState::new(
+            shardline_protocol::RepositoryProvider::GitHub,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            Some(u64::MAX), // last_access_changed_at
+            Some(u64::MAX), // last_revision_pushed_at
+            None,           // last_pushed_revision (not a timestamp field)
+        )
+        .with_reconciliation(
+            Some(u64::MAX), // last_cache_invalidated_at
+            Some(u64::MAX), // last_authorization_rechecked_at
+            Some(u64::MAX), // last_drift_checked_at
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        let object_root = std::path::Path::new("/tmp");
+        let object_store = ServerObjectStore::blackhole();
+        inspect_lifecycle_metadata(&store, object_root, &object_store, &reach, &mut report)
+            .await
+            .unwrap();
+
+        // All 5 timestamp fields should produce issues.
+        let timestamp_count = report
+            .issues
+            .iter()
+            .filter(|i| i.kind == FsckIssueKind::InvalidProviderRepositoryStateTimestamp)
+            .count();
+        assert_eq!(
+            timestamp_count,
+            5,
+            "expected 5 timestamp issues (for all 5 fields), got: {report:?}"
+        );
+    }
 }

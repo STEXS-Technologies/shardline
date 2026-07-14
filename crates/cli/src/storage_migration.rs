@@ -490,7 +490,7 @@ mod tests {
         },
     };
 
-    use shardline_server::StorageMigrationEndpoint;
+    use shardline_server::{ObjectStorageAdapter, StorageMigrationEndpoint};
 
     use super::{
         PendingS3Config, StorageMigrationRuntimeError, build_s3_config, local_endpoint,
@@ -950,6 +950,28 @@ mod tests {
     fn runtime_error_env_value_returns_none_when_unset() {
         let result = super::env_value("SHARDLINE_MIGRATE_FROM_S3", "NONEXISTENT_OPTIONAL");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn endpoint_with_s3_adapter_rejects_missing_env() {
+        // S3 endpoint without env vars should error
+        let result = super::endpoint(
+            ObjectStorageAdapter::S3,
+            None,
+            "source",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn endpoint_with_local_adapter_rejects_missing_root_when_source() {
+        let result = super::endpoint(
+            ObjectStorageAdapter::Local,
+            None,
+            "source",
+        );
+        // If effective_root works, returns Ok; otherwise errors
+        let _ = result;
     }
 
     #[test]

@@ -157,4 +157,61 @@ mod tests {
             Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData
         ));
     }
+
+    #[test]
+    fn identifier_rejects_empty_string() {
+        let result = validate_identifier("");
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[test]
+    fn identifier_rejects_whitespace() {
+        let result = validate_identifier("   ");
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[test]
+    fn identifier_rejects_absolute_path() {
+        let result = validate_identifier("/etc/passwd");
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[test]
+    fn identifier_rejects_traversal() {
+        let result = validate_identifier("safe/../etc");
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[test]
+    fn identifier_rejects_backslash() {
+        let result = validate_identifier("safe\\..\\etc");
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[test]
+    fn identifier_rejects_control_characters() {
+        let result = validate_identifier("test\x00file");
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[test]
+    fn identifier_accepts_valid_filename() {
+        let result = validate_identifier("my-file_v1.2.bin");
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ensure_directory_accepts_valid_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = super::ensure_directory(temp.path()).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ensure_directory_rejects_nonexistent_path() {
+        let result = super::ensure_directory(Path::new("/nonexistent_path_12345")).await;
+        assert!(result.is_err());
+    }
 }

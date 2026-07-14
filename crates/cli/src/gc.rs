@@ -103,6 +103,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use shardline_server::LocalGcOptions;
 
     use super::MINIMUM_GC_RETENTION_SECONDS;
@@ -289,5 +291,44 @@ mod tests {
         assert!(!display.is_empty());
         let debug = format!("{err:?}");
         assert!(debug.contains("Io("));
+    }
+
+    #[tokio::test]
+    async fn run_gc_rejects_missing_root() {
+        let result = super::run_gc(
+            Some(Path::new("/nonexistent-shardline-test-root")),
+            true, true, 3600, None, None,
+        ).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_gc_diagnostics_rejects_missing_root() {
+        let result = super::run_gc_diagnostics(
+            Some(Path::new("/nonexistent-shardline-test-root")),
+            true, false, 3600, None, None,
+        ).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_gc_diagnostics_rejects_symlinked_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("real-root");
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(unix)]
+        let link = {
+            let link = sandbox.path().join("root-link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            link
+        };
+        #[cfg(not(unix))]
+        let link = target.clone();
+        let result = super::run_gc_diagnostics(
+            Some(&link),
+            false, false, 3600, None, None,
+        ).await;
+        #[cfg(unix)]
+        assert!(result.is_err());
     }
 }
