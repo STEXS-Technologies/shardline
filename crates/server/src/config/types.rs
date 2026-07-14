@@ -2768,6 +2768,18 @@ mod config_types_tests {
         );
         assert_eq!(result, NonZeroUsize::new(8).unwrap());
     }
+
+    #[test]
+    fn server_config_upload_max_in_flight_chunks_default_is_positive() {
+        // Use ServerConfig::new to verify the default is greater than zero
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        assert!(config.upload_max_in_flight_chunks().get() > 0);
+    }
 }
 
 #[cfg(not(test))]

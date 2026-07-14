@@ -1687,6 +1687,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn patch_object_rejects_body_length_mismatch() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state.clone());
+        let oid = test_oid_constant();
+        let object_key = lfs_object_key(&oid, None).expect("object key");
+
+        // Store an initial object with known size
+        let content = b"0123456789abcdef";
+        state
+            .backend
+            .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .expect("store initial object");
+
+        // Send PATCH with Content-Range claiming 10 bytes but body only has 5
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("Content-Range", "bytes 0-4/20")  // claim 5 bytes
+                    .header("Content-Length", "10")            // but say 10
+                    .header("Content-Type", "application/octet-stream")
+                    .body(Body::from(b"short-body".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Content-Length != expected_chunk_size → RangeNotSatisfiable
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verify_object_invalid_oid_returns_422() {
         let (state, _tmp) = build_test_state().await;
         let app = lfs_router(state);

@@ -152,4 +152,33 @@ mod tests {
         // Transfer role has no signing key, so it will fail validation first.
         assert!(report.is_err());
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_check_provider_tokens_enabled_when_all_configured() {
+        use std::num::NonZeroU64;
+        let storage = shardline_test_support::TempStorage::new();
+        let issuer = "https://provider.example.test".to_owned();
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            storage.path_buf(),
+            NonZeroUsize::MIN,
+        )
+        .with_server_role(ServerRole::All)
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap()
+        .with_provider_runtime(
+            storage.path_buf().join("provider.toml"),
+            b"test-api-key".to_vec(),
+            issuer,
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+        )
+        .unwrap();
+
+        let report = run_config_check(config).await.unwrap();
+
+        assert!(report.auth_enabled);
+        assert!(report.provider_tokens_enabled);
+        assert_eq!(report.cache_backend, "memory");
+    }
 }

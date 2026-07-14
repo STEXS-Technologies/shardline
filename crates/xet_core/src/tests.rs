@@ -29,7 +29,7 @@ use crate::xorb_object::{
     raw_xorb_data::XorbInfo,
     xorb_chunk_format::{
         XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk, deserialize_chunk_header,
-        deserialize_chunks_to_writer, parse_chunk_header, serialize_chunk,
+        deserialize_chunks_to_writer, parse_chunk_header, serialize_chunk, write_chunk_header,
     },
     xorb_format_test_utils::{ChunkSize, build_raw_xorb, build_xorb_object},
     xorb_object_format::{
@@ -37,6 +37,7 @@ use crate::xorb_object::{
         reconstruct_xorb_with_footer,
     },
 };
+use crate::utils::serialization_utils::write_u32;
 
 // ============================================================================
 // DataHash / MerkleHash tests
@@ -3211,4 +3212,1062 @@ fn mdb_file_info_view_into_with_verification() {
     assert_eq!(info.segments.len(), 1);
     assert_eq!(info.verification.len(), 1);
     assert_eq!(info.verification[0].range_hash, compute_data_hash(b"v"));
+}
+
+// ============================================================================
+// aggregated_hashes — write_decimal_u64 with val=0, next_merge_cut edge cases
+// ============================================================================
+
+#[test]
+fn xorb_hash_with_zero_size_triggers_write_decimal_zero_branch() {
+    // write_decimal_u64 has a fast path for val==0 that writes '0' directly.
+    // xorb_hash -> aggregated_node_hash -> merged_hash_of_sequence -> write_hash_entry -> write_decimal_u64.
+    // Passing a chunk with size=0 triggers that branch.
+    let chunks = vec![(MerkleHash::from([1u64, 0, 0, 0]), 0u64)];
+    let result = xorb_hash(&chunks);
+    assert_ne!(result, MerkleHash::default());
+}
+
+#[test]
+fn xorb_hash_with_zero_and_nonzero_sizes_exercises_write_decimal_mixed() {
+    // Mix zero and non-zero sizes to exercise write_decimal_u64 both branches.
+    let chunks = vec![
+        (MerkleHash::from([1u64, 0, 0, 0]), 0u64),
+        (MerkleHash::from([2u64, 0, 0, 0]), 100u64),
+        (MerkleHash::from([3u64, 0, 0, 0]), 0u64),
+    ];
+    let result = xorb_hash(&chunks);
+    assert_ne!(result, MerkleHash::default());
+}
+
+#[test]
+fn xorb_hash_exact_two_chunks_triggers_next_merge_cut_len_eq_2() {
+    // next_merge_cut returns hashes.len() when len <= 2.
+    let chunks = vec![
+        (MerkleHash::from([0u64, 0, 0, 1]), 10u64),
+        (MerkleHash::from([0u64, 0, 0, 2]), 20u64),
+    ];
+    let result = xorb_hash(&chunks);
+    assert_ne!(result, MerkleHash::default());
+}
+
+#[test]
+fn xorb_hash_mod_condition_at_various_positions_exercises_next_merge_cut() {
+    // Test mod condition hits at different positions (index 2, 3, 4, etc.)
+    for mod_pos in 2..=5 {
+        let mut chunks: Vec<(MerkleHash, u64)> = (0..6)
+            .map(|i| {
+                // Make position `mod_pos` have hash[3] % 4 == 0
+                let h = if i == mod_pos {
+                    MerkleHash::from([0u64, 0, 0, 4]) // 4 % 4 == 0
+                } else {
+                    MerkleHash::from([0u64, 0, 0, (i + 1) as u64]) // avoid mod 4 == 0
+                };
+                (h, (i + 1) as u64)
+            })
+            .collect();
+        let result = xorb_hash(&chunks);
+        assert_ne!(result, MerkleHash::default(), "failed at mod_pos={mod_pos}");
+    }
+}
+
+#[test]
+fn xorb_hash_large_set_triggers_multiple_merge_passes() {
+    // 12 chunks with sizes that force multiple merge passes.
+    let mut chunks = Vec::new();
+    for i in 0u64..12 {
+        let h = MerkleHash::from([i, i * 3, i * 7, i * 11]);
+        chunks.push((h, (i + 1) * 10));
+    }
+    let result = xorb_hash(&chunks);
+    assert_ne!(result, MerkleHash::default());
+}
+
+// ============================================================================
+// aggregated_hashes — file_hash_with_salt non-empty edge case
+// ============================================================================
+
+#[test]
+fn file_hash_with_salt_non_empty_produces_different_hash_for_different_salts() {
+    let chunks = vec![(MerkleHash::from([1u64, 2, 3, 4]), 100u64)];
+    let salt1 = [1u8; 32];
+    let salt2 = [2u8; 32];
+    let h1 = file_hash_with_salt(&chunks, &salt1);
+    let h2 = file_hash_with_salt(&chunks, &salt2);
+    assert_ne!(h1, h2);
+    assert_ne!(h1, MerkleHash::default());
+    assert_ne!(h2, MerkleHash::default());
+}
+
+// ============================================================================
+// data_hash — remaining untested methods
+// ============================================================================
+
+#[test]
+fn data_hash_as_bytes_returns_correct_slice() {
+    let h = DataHash::from([0x0102030405060708u64, 0, 0, 0]);
+    let bytes = h.as_bytes();
+    assert_eq!(bytes.len(), 32);
+    // First 8 bytes should be little-endian of the first u64
+    let first_u64 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    assert_eq!(first_u64, 0x0102030405060708u64);
+}
+
+#[test]
+fn data_hash_try_from_slice_exact_32() {
+    let bytes = [0xABu8; 32];
+    let h = DataHash::try_from(bytes.as_slice()).unwrap();
+    let back: [u8; 32] = h.into();
+    assert_eq!(bytes, back);
+}
+
+#[test]
+fn data_hash_into_vec_u8() {
+    let h = DataHash::from([0xDEADBEEFu64, 0xCAFEBABE, 0x12345678, 0x9ABCDEF0]);
+    let vec: Vec<u8> = h.into();
+    assert_eq!(vec.len(), 32);
+    let back = DataHash::from_slice(&vec).unwrap();
+    assert_eq!(back, h);
+}
+
+// ============================================================================
+// XorbObjectInfoV1 — remaining deserialize error paths
+// ============================================================================
+
+#[test]
+fn xorb_object_info_v1_deserialize_wrong_hashes_version() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"test");
+    info.num_chunks = 0;
+    info.fill_in_boundary_offsets();
+    let mut buf = Vec::new();
+    info.serialize(&mut buf).unwrap();
+    // Corrupt hashes_version byte (offset 47 for 0 chunks: 7+1+32+7 = 47)
+    assert!(buf.len() > 47, "buffer too small: {}", buf.len());
+    buf[47] = 99; // invalid hashes version
+    let mut cursor = Cursor::new(buf);
+    let result = XorbObjectInfoV1::deserialize(&mut cursor);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Hash Metadata Section"));
+}
+
+#[test]
+fn xorb_object_info_v1_deserialize_wrong_boundaries_version() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"test");
+    info.num_chunks = 0;
+    info.fill_in_boundary_offsets();
+    let mut buf = Vec::new();
+    info.serialize(&mut buf).unwrap();
+    // boundaries_version offset for 0 chunks: 7+1+32+7+1+4+7 = 59
+    assert!(buf.len() > 59);
+    buf[59] = 99; // invalid boundaries version
+    let mut cursor = Cursor::new(buf);
+    let result = XorbObjectInfoV1::deserialize(&mut cursor);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Boundaries Metadata Section"));
+}
+
+#[test]
+fn xorb_object_info_v1_deserialize_inconsistent_num_chunks_between_sections() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"test");
+    info.num_chunks = 1;
+    info.chunk_hashes = vec![compute_data_hash(b"c1")];
+    info.chunk_boundary_offsets = vec![100];
+    info.unpacked_chunk_offsets = vec![50];
+    info.fill_in_boundary_offsets();
+    let mut buf = Vec::new();
+    info.serialize(&mut buf).unwrap();
+    // Change the boundary section num_chunks (second num_chunks, at offset 60 for n=1)
+    // For n=1: 7+1+32+7+1+4+32+7+1 = offset 92... let me compute more carefully.
+    // Actually let's just patch it via the helper approach: serialize with mismatched values.
+    // Simpler: construct an info with one value, serialize, then corrupt the byte.
+    // For 1 chunk with these values, the buffer layout is:
+    // 0: ident(7) 7:ver(1) 8:xorb_hash(32) 40:hash_ident(7) 47:hash_ver(1) 48:nchunks(4)
+    // 52:chunk_hash(32) 84:bnd_ident(7) 91:bnd_ver(1) 92:nchunks(4) 96:offsets(4)
+    // 100:unpacked(4) 104:nchunks(4) 108:hdr_off(4) 112:bnd_off(4) 116:buf(16)
+    // So boundary section num_chunks is at offset 92
+    assert!(buf.len() > 92);
+    buf[92..96].copy_from_slice(&2u32.to_le_bytes()); // mismatch: hash count 1 but boundary says 2
+    let mut cursor = Cursor::new(buf);
+    let result = XorbObjectInfoV1::deserialize(&mut cursor);
+    assert!(result.is_err());
+}
+
+#[test]
+fn xorb_object_info_v1_deserialize_inconsistent_num_chunks_final() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"test");
+    info.num_chunks = 1;
+    info.chunk_hashes = vec![compute_data_hash(b"c1")];
+    info.chunk_boundary_offsets = vec![100];
+    info.unpacked_chunk_offsets = vec![50];
+    info.fill_in_boundary_offsets();
+    let mut buf = Vec::new();
+    info.serialize(&mut buf).unwrap();
+    // The final num_chunks is at offset 104 for n=1
+    assert!(buf.len() > 104);
+    buf[104..108].copy_from_slice(&99u32.to_le_bytes());
+    let mut cursor = Cursor::new(buf);
+    let result = XorbObjectInfoV1::deserialize(&mut cursor);
+    assert!(result.is_err());
+}
+
+#[test]
+fn xorb_object_info_v1_deserialize_incorrect_hashes_section_offset() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"test");
+    info.num_chunks = 1;
+    info.chunk_hashes = vec![compute_data_hash(b"c1")];
+    info.chunk_boundary_offsets = vec![100];
+    info.unpacked_chunk_offsets = vec![50];
+    info.fill_in_boundary_offsets();
+    let mut buf = Vec::new();
+    info.serialize(&mut buf).unwrap();
+    // hashes_section_offset_from_end is at offset 108 for n=1
+    assert!(buf.len() > 108);
+    buf[108..112].copy_from_slice(&0u32.to_le_bytes()); // set to 0 -> incorrect
+    let mut cursor = Cursor::new(buf);
+    let result = XorbObjectInfoV1::deserialize(&mut cursor);
+    assert!(result.is_err());
+}
+
+#[test]
+fn xorb_object_info_v1_deserialize_incorrect_boundary_section_offset() {
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"test");
+    info.num_chunks = 1;
+    info.chunk_hashes = vec![compute_data_hash(b"c1")];
+    info.chunk_boundary_offsets = vec![100];
+    info.unpacked_chunk_offsets = vec![50];
+    info.fill_in_boundary_offsets();
+    let mut buf = Vec::new();
+    info.serialize(&mut buf).unwrap();
+    // boundary_section_offset_from_end is at offset 112 for n=1
+    assert!(buf.len() > 112);
+    buf[112..116].copy_from_slice(&0u32.to_le_bytes()); // set to 0 -> incorrect
+    let mut cursor = Cursor::new(buf);
+    let result = XorbObjectInfoV1::deserialize(&mut cursor);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// XorbObjectInfoV1 — serialize edge case: zero chunks with explicit values
+// ============================================================================
+
+#[test]
+fn xorb_object_info_v1_serialize_zero_chunks_succeeds() {
+    let info = XorbObjectInfoV1::default(); // num_chunks=0
+    let mut buf = Vec::new();
+    let n = info.serialize(&mut buf).unwrap();
+    assert!(n > 0);
+    // Should deserialize successfully
+    let mut cursor = Cursor::new(&buf);
+    let (deser, _) = XorbObjectInfoV1::deserialize(&mut cursor).unwrap();
+    assert_eq!(deser.num_chunks, 0);
+}
+
+// ============================================================================
+// XorbObject validate_xorb_object — comprehensive error path tests
+// ============================================================================
+
+#[test]
+fn xorb_object_validate_xorb_object_chunk_hash_mismatch() {
+    // Build a valid xorb with one chunk
+    let (obj, chunk_data, _, _) =
+        build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::None).unwrap();
+    let chunk_len = chunk_data.len();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&chunk_data);
+    let info_offset = buf.len();
+    let info_len = obj.info.serialize(&mut buf).unwrap();
+    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+
+    // Corrupt the chunk hash in info portion of buffer.
+    // In the info serialization for n=1:
+    //   ident(7) + ver(1) + xorb_hash(32) + hash_ident(7) + hash_ver(1) + nchunks(4) = 52
+    // So chunk_hash[0] is at info_offset + 52
+    let hash_offset = info_offset + 52;
+    buf[hash_offset..hash_offset + 32].copy_from_slice(&[0u8; 32]);
+
+    // Provide a hash that won't match the final computed xorb_hash either
+    let wrong_hash = compute_data_hash(b"wrong_hash");
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::validate_xorb_object(&mut cursor, &wrong_hash).unwrap();
+    // Since the stored chunk_hash is all zeros and the actual chunk hash differs,
+    // the validation finds a chunk hash mismatch → returns Ok(None) without error
+    assert!(result.is_none());
+}
+
+#[test]
+fn xorb_object_validate_xorb_object_boundary_mismatch() {
+    // Build a valid xorb with 1 chunk via build_xorb_object + serialization
+    let (obj, chunk_data, _, _) =
+        build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::None).unwrap();
+    let chunk_data_len = chunk_data.len();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&chunk_data);
+    let info_offset = buf.len();
+    let info_len = obj.info.serialize(&mut buf).unwrap();
+    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    let hash = obj.info.xorb_hash;
+
+    // The boundary offset is stored in the info portion of the buffer (after chunk data).
+    // In the info serialization for n=1:
+    //   ident(7) + ver(1) + xorb_hash(32) + hash_ident(7) + hash_ver(1) + nchunks(4)
+    //   + chunk_hash(32) + bnd_ident(7) + bnd_ver(1) + nchunks(4) + bnd_offset(4)
+    // The bnd_offset is at info_offset + 96 (= 7+1+32+7+1+4+32+7+1+4).
+    let bnd_offset_pos = info_offset + 96;
+    if bnd_offset_pos + 4 <= buf.len() {
+        buf[bnd_offset_pos..bnd_offset_pos + 4].copy_from_slice(&9999u32.to_le_bytes());
+    }
+
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::validate_xorb_object(&mut cursor, &hash).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn xorb_object_validate_xorb_object_content_bytes_mismatch_returns_none() {
+    let (obj, chunk_data, _, _) =
+        build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::None).unwrap();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&chunk_data);
+    // Append extra garbage bytes after chunk data but before footer
+    buf.extend_from_slice(b"EXTRA_GARBAGE_BYTES");
+    let info_len = obj.info.serialize(&mut buf).unwrap();
+    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+
+    let hash = obj.info.xorb_hash;
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::validate_xorb_object(&mut cursor, &hash).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn xorb_object_validate_xorb_object_hash_mismatch() {
+    let (obj, chunk_data, _, _) =
+        build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::None).unwrap();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&chunk_data);
+    let info_len = obj.info.serialize(&mut buf).unwrap();
+    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+
+    let wrong_hash = compute_data_hash(b"completely_wrong_hash");
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::validate_xorb_object(&mut cursor, &wrong_hash).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn xorb_object_validate_xorb_object_unpacked_offset_mismatch_v1() {
+    // Build with v1 boundaries (the default), corrupt unpacked offset
+    let (obj, chunk_data, _, _) =
+        build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::None).unwrap();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&chunk_data);
+    let info_offset = buf.len();
+    let info_len = obj.info.serialize(&mut buf).unwrap();
+    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    let hash = obj.info.xorb_hash;
+
+    // unpacked offset position = bnd_offset_pos + 4 = info_offset + 96 + 4 = info_offset + 100
+    let unpacked_pos = info_offset + 100;
+    if unpacked_pos + 4 <= buf.len() {
+        buf[unpacked_pos..unpacked_pos + 4].copy_from_slice(&9999u32.to_le_bytes());
+    }
+
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::validate_xorb_object(&mut cursor, &hash).unwrap();
+    assert!(result.is_none());
+}
+
+// ============================================================================
+// SerializedXorbObject::from_xorb_with_compression without footer
+// ============================================================================
+
+#[test]
+fn serialized_xorb_object_from_xorb_without_footer() {
+    let chunks = vec![
+        Chunk {
+            hash: compute_data_hash(b"c1"),
+            data: vec![1u8; 50].into(),
+        },
+        Chunk {
+            hash: compute_data_hash(b"c2"),
+            data: vec![2u8; 100].into(),
+        },
+    ];
+    let raw = RawXorbData::from_chunks(&chunks, vec![0, 50]);
+    let serialized = SerializedXorbObject::from_xorb_with_compression(
+        raw,
+        CompressionScheme::None,
+        false, // no footer serialized
+    )
+    .unwrap();
+    assert!(serialized.footer_start.is_none());
+    assert_eq!(serialized.num_chunks, 2);
+    assert_ne!(serialized.hash, MerkleHash::default());
+    assert!(serialized.raw_num_bytes > 0);
+    assert!(!serialized.serialized_data.is_empty());
+}
+
+#[test]
+fn serialized_xorb_object_from_xorb_with_footer_and_lz4() {
+    let chunks = vec![
+        Chunk {
+            hash: compute_data_hash(b"x1"),
+            data: vec![0xABu8; 200].into(),
+        },
+    ];
+    let raw = RawXorbData::from_chunks(&chunks, vec![0]);
+    let serialized = SerializedXorbObject::from_xorb_with_compression(
+        raw,
+        CompressionScheme::LZ4,
+        true, // with footer
+    )
+    .unwrap();
+    assert!(serialized.footer_start.is_some());
+    assert_eq!(serialized.num_chunks, 1);
+}
+
+// ============================================================================
+// XorbObjectInfoV0 — remaining tests
+// ============================================================================
+
+#[test]
+fn xorb_object_info_v0_serialize_with_multiple_chunks() {
+    let mut info = XorbObjectInfoV0::default();
+    info.xorb_hash = compute_data_hash(b"multi");
+    info.num_chunks = 3;
+    info.chunk_boundary_offsets = vec![100, 250, 400];
+    info.chunk_hashes = vec![
+        compute_data_hash(b"c1"),
+        compute_data_hash(b"c2"),
+        compute_data_hash(b"c3"),
+    ];
+
+    let mut buf = Vec::new();
+    #[allow(deprecated)]
+    let written = info.serialize(&mut buf).unwrap();
+    assert!(written > 0);
+
+    // Deserialize from scratch
+    let mut cursor = Cursor::new(&buf);
+    #[allow(deprecated)]
+    let (deser, _) = XorbObjectInfoV0::deserialize(&mut cursor).unwrap();
+    assert_eq!(deser.num_chunks, 3);
+    assert_eq!(deser.chunk_boundary_offsets.len(), 3);
+    assert_eq!(deser.chunk_hashes.len(), 3);
+}
+
+// ============================================================================
+// XorbChunkHeader — remaining validation paths
+// ============================================================================
+
+#[test]
+fn xorb_chunk_header_validate_invalid_compression_scheme_via_header() {
+    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
+    buf[1..4].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    buf[4] = 255; // invalid scheme
+    buf[5..8].copy_from_slice(&100u32.to_le_bytes()[0..3]);
+    let result = parse_chunk_header(buf);
+    assert!(result.is_err());
+}
+
+#[test]
+fn xorb_chunk_header_validate_compressed_length_zero() {
+    let mut buf = [0u8; XORB_CHUNK_HEADER_LENGTH];
+    buf[1..4].copy_from_slice(&0u32.to_le_bytes()[0..3]);
+    buf[4] = CompressionScheme::None as u8;
+    buf[5..8].copy_from_slice(&0u32.to_le_bytes()[0..3]);
+    let result = parse_chunk_header(buf);
+    assert!(result.is_ok());
+    let header = result.unwrap();
+    assert_eq!(header.get_compressed_length(), 0);
+    assert_eq!(header.get_uncompressed_length(), 0);
+}
+
+#[test]
+fn xorb_chunk_header_get_set_compressed_length_roundtrip_edge() {
+    let mut header = XorbChunkHeader::new(CompressionScheme::None, 0, 0);
+    assert_eq!(header.get_compressed_length(), 0);
+    assert_eq!(header.get_uncompressed_length(), 0);
+    // Max 3-byte value
+    header.set_compressed_length(0xFFFFFF);
+    assert_eq!(header.get_compressed_length(), 0xFFFFFF);
+}
+
+// ============================================================================
+// deserialize_chunk — compressed length vs header decompressed length mismatch
+// ============================================================================
+
+#[test]
+fn deserialize_chunk_rejects_uncompressed_length_mismatch_using_function() {
+    // Use deserialize_chunk_to_writer with a bogus header that lies about
+    // uncompressed length (0 bytes claimed but data present).
+    let data = b"some data that decompresses fine";
+    let mut compressed_buf = Vec::new();
+    serialize_chunk(data, &mut compressed_buf, CompressionScheme::None).unwrap();
+
+    // Now overwrite the header's uncompressed_length to be much larger
+    // header is at bytes 0..8
+    let wrong_len = 999999u32;
+    compressed_buf[5..8].copy_from_slice(&wrong_len.to_le_bytes()[0..3]);
+
+    let mut reader = Cursor::new(&compressed_buf);
+    let result = deserialize_chunk(&mut reader);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// try_read_chunk_header — partial read edge case
+// ============================================================================
+
+#[test]
+fn try_read_chunk_header_partial_read_triggers_read_exact_fallback() {
+    // Provide exactly 5 bytes (less than full 8-byte header)
+    let partial = [0u8, 1, 2, 3, 4];
+    let mut reader = Cursor::new(&partial);
+    let mut writer = Vec::new();
+    let result = deserialize_chunks_to_writer(&mut reader, &mut writer);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// MDBShardInfo load_from_reader — error paths
+// ============================================================================
+
+#[test]
+fn mdb_shard_info_load_from_reader_bad_header() {
+    let mut buf = vec![0u8; 48]; // all zeros, wrong magic
+    let mut cursor = Cursor::new(buf);
+    let result = MDBShardInfo::load_from_reader(&mut cursor);
+    assert!(result.is_err());
+}
+
+#[test]
+fn mdb_shard_info_load_from_reader_file_info_error_when_empty() {
+    // Valid header, then garbage (so file info read fails with empty)
+    let mut buf = Vec::new();
+    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
+    buf.extend_from_slice(b"GARBAGE DATA THAT IS NOT A VALID FILE INFO");
+    let mut cursor = Cursor::new(buf);
+    let result = MDBShardInfo::load_from_reader(&mut cursor);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Failed to read file info"));
+}
+
+#[test]
+fn mdb_shard_info_load_from_reader_file_info_break_on_error_with_data() {
+    // File loop gets 2 valid files, then hit EOF (simulate truncated data).
+    // The loop breaks (file_infos not empty). Then xorb loop gets EOF and also
+    // breaks (xorb_infos empty -> returns error).
+    let mut buf = Vec::new();
+    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
+    let file = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(), 100u32, 0u32, 0u32,
+        )],
+        verification: vec![],
+        metadata_ext: None,
+    };
+    file.serialize(&mut buf).unwrap();
+    let file2 = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f2"), 0u32, false, false),
+        segments: vec![],
+        verification: vec![],
+        metadata_ext: None,
+    };
+    file2.serialize(&mut buf).unwrap();
+    // Truncate so next read fails (no more data)
+    let mut cursor = Cursor::new(buf);
+    let result = MDBShardInfo::load_from_reader(&mut cursor);
+    // xorb_infos is empty and header read fails -> returns error
+    assert!(result.is_err());
+}
+
+#[test]
+fn mdb_shard_info_load_from_reader_xorb_info_error_when_empty() {
+    let mut buf = Vec::new();
+    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
+    // Write a valid file bookend
+    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    // Then garbage for xorb info section
+    buf.extend_from_slice(b"GARBAGE XORB DATA");
+    let mut cursor = Cursor::new(buf);
+    let result = MDBShardInfo::load_from_reader(&mut cursor);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("Failed to read xorb info"));
+}
+
+#[test]
+fn mdb_shard_info_load_from_reader_xorb_info_error_when_non_empty() {
+    let mut buf = Vec::new();
+    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
+    // Valid file bookend
+    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    // Valid xorb info
+    let xorb = MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 100u32),
+        chunks: vec![XorbChunkSequenceEntry::new(
+            compute_data_hash(b"c"), 100u32, 0u32,
+        )],
+    };
+    xorb.serialize(&mut buf).unwrap();
+    // Garbage after valid xorb
+    buf.extend_from_slice(b"GARBAGE");
+    let mut cursor = Cursor::new(buf);
+    let result = MDBShardInfo::load_from_reader(&mut cursor);
+    assert!(result.is_ok());
+    let info = result.unwrap();
+    assert_eq!(info.num_xorb_entries(), 1);
+}
+
+#[test]
+fn mdb_shard_info_load_from_reader_full_roundtrip() {
+    let mut buf = Vec::new();
+    MDBShardFileHeader::default().serialize(&mut buf).unwrap();
+
+    let file = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false),
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(), 100u32, 0u32, 50u32,
+        )],
+        verification: vec![],
+        metadata_ext: None,
+    };
+    file.serialize(&mut buf).unwrap();
+    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+
+    let xorb = MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 100u32),
+        chunks: vec![XorbChunkSequenceEntry::new(
+            compute_data_hash(b"c"), 100u32, 0u32,
+        )],
+    };
+    xorb.serialize(&mut buf).unwrap();
+    XorbChunkSequenceHeader::bookend().serialize(&mut buf).unwrap();
+
+    // Footer (for roundtrip we don't need real footer values)
+    MDBShardFileFooter::default().serialize(&mut buf).unwrap();
+
+    let mut cursor = Cursor::new(&buf);
+    let info = MDBShardInfo::load_from_reader(&mut cursor).unwrap();
+    assert_eq!(info.num_file_entries(), 1);
+    assert_eq!(info.num_xorb_entries(), 1);
+    assert_eq!(info.file_infos[0].segments[0].unpacked_segment_bytes, 100);
+}
+
+// ============================================================================
+// MDBShardInfo serialize_from — basic path
+// ============================================================================
+
+#[test]
+fn mdb_shard_info_serialize_from_roundtrip() {
+    let mut shard = crate::metadata_shard::shard_in_memory::MDBInMemoryShard::default();
+    let xorb = MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 0u32, 0u32),
+        chunks: vec![],
+    };
+    shard.add_xorb_block(xorb).unwrap();
+    let file = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 0u32, false, false),
+        segments: vec![],
+        verification: vec![],
+        metadata_ext: None,
+    };
+    shard.add_file_reconstruction_info(file).unwrap();
+
+    let mut buf = Vec::new();
+    MDBShardInfo::serialize_from(&mut buf, &shard, None).unwrap();
+    assert!(!buf.is_empty());
+}
+
+// ============================================================================
+// XorbStructs — remaining paths
+// ============================================================================
+
+#[test]
+fn mdb_xorb_info_deserialize_empty_chunks() {
+    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"empty"), 0u32, 0u32);
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    let mut cursor = Cursor::new(&buf);
+    let result = MDBXorbInfo::deserialize(&mut cursor).unwrap();
+    assert!(result.is_some());
+    let info = result.unwrap();
+    assert_eq!(info.chunks.len(), 0);
+    assert_eq!(info.metadata.xorb_hash, header.xorb_hash);
+}
+
+#[test]
+fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_clear_hash_mod_nonzero() {
+    // Create entry with flag cleared and hash where [3] % 1024 != 0
+    let h = DataHash::from([0, 0, 0, 5]); // 5 % 1024 != 0
+    let entry = XorbChunkSequenceEntry::new(h, 100u32, 0u32);
+    let entry = entry.with_global_dedup_flag(false);
+    assert!(!entry.is_global_dedup_eligible());
+}
+
+#[test]
+fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_set_overrides_hash() {
+    // Entry with flag set but hash where [3] % 1024 != 0 → still eligible
+    let h = DataHash::from([0, 0, 0, 5]); // 5 % 1024 != 0
+    let entry = XorbChunkSequenceEntry::new(h, 100u32, 0u32);
+    let entry = entry.with_global_dedup_flag(true);
+    assert!(entry.is_global_dedup_eligible());
+}
+
+// ============================================================================
+// CompressionScheme — remaining edge cases
+// ============================================================================
+
+#[test]
+fn compression_scheme_try_from_auto_is_99() {
+    assert_eq!(CompressionScheme::try_from(99u8).unwrap(), CompressionScheme::Auto);
+}
+
+#[test]
+fn compression_scheme_resolve_for_data_auto_returns_lz4() {
+    assert_eq!(
+        CompressionScheme::Auto.resolve_for_data(b"any"),
+        CompressionScheme::LZ4
+    );
+}
+
+#[test]
+fn compression_scheme_resolve_for_data_lz4_stays_lz4() {
+    assert_eq!(
+        CompressionScheme::LZ4.resolve_for_data(b"any"),
+        CompressionScheme::LZ4
+    );
+}
+
+#[test]
+fn compression_scheme_resolve_for_data_none_stays_none() {
+    assert_eq!(
+        CompressionScheme::None.resolve_for_data(b"any"),
+        CompressionScheme::None
+    );
+}
+
+#[test]
+fn compression_scheme_compress_auto_delegates() {
+    let data = b"auto compression delegation test";
+    let compressed = CompressionScheme::Auto.compress_from_slice(data).unwrap();
+    // Auto resolves to LZ4, so LZ4 can decompress it
+    let decompressed = CompressionScheme::LZ4.decompress_from_slice(&compressed).unwrap();
+    assert_eq!(&*decompressed, data);
+}
+
+// ============================================================================
+// CompressionScheme — decompress_from_reader with none and bg4-lz4
+// ============================================================================
+
+#[test]
+fn compression_scheme_decompress_from_reader_bg4_lz4() {
+    let data = b"bg4-lz4 decompress from reader test";
+    let compressed = CompressionScheme::ByteGrouping4LZ4
+        .compress_from_slice(data)
+        .unwrap();
+    let mut reader = Cursor::new(&*compressed);
+    let mut writer = Vec::new();
+    let bytes = CompressionScheme::ByteGrouping4LZ4
+        .decompress_from_reader(&mut reader, &mut writer)
+        .unwrap();
+    assert_eq!(bytes, data.len() as u64);
+    assert_eq!(writer, data);
+}
+
+// ============================================================================
+// RawXorbData — XorbInfo::chunks_and_boundaries with empty
+// ============================================================================
+
+#[test]
+fn raw_xorb_data_xorb_info_chunks_and_boundaries_empty() {
+    let info = XorbInfo::default();
+    let boundaries = info.chunks_and_boundaries();
+    assert!(boundaries.is_empty());
+}
+
+// ============================================================================
+// MDBFileInfo — num_bytes and file_size edge cases
+// ============================================================================
+
+#[test]
+fn mdb_file_info_num_bytes_with_verification() {
+    let info = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, true, false),
+        segments: vec![
+            FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32),
+            FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32),
+        ],
+        verification: vec![
+            FileVerificationEntry::new(compute_data_hash(b"v1")),
+            FileVerificationEntry::new(compute_data_hash(b"v2")),
+        ],
+        metadata_ext: None,
+    };
+    let nbytes = info.num_bytes();
+    assert!(nbytes > 0);
+    assert_eq!(info.file_size(), 125);
+}
+
+#[test]
+fn mdb_file_info_num_bytes_with_metadata_ext() {
+    let info = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, true),
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(), 100u32, 0u32, 50u32,
+        )],
+        verification: vec![],
+        metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
+    };
+    let nbytes = info.num_bytes();
+    assert!(nbytes > 0);
+}
+
+// ============================================================================
+// FileDataSequenceHeader num_info_entry_following edge cases
+// ============================================================================
+
+#[test]
+fn file_data_sequence_header_num_info_entry_following_zero_entries() {
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, true, true);
+    assert_eq!(header.num_info_entry_following(), 1);
+}
+
+// ============================================================================
+// FileDataSequenceHeader contains_* methods
+// ============================================================================
+
+#[test]
+fn file_data_sequence_header_contains_neither() {
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false);
+    assert!(!header.contains_verification());
+    assert!(!header.contains_metadata_ext());
+}
+
+// ============================================================================
+// MDBFileInfoView — from_data_and_header error path with insufficient size
+// ============================================================================
+
+#[test]
+fn mdb_file_info_view_from_data_too_small_with_flags() {
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 1u32, true, true);
+    let result = MDBFileInfoView::from_data_and_header(header, bytes::Bytes::from(vec![0u8; 10]));
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// HashedWrite — byte-level write and flush coverage
+// ============================================================================
+
+#[test]
+fn hashed_write_multiple_writes() {
+    use crate::merklehash::HashedWrite;
+    let mut writer = HashedWrite::new(Vec::new());
+    writer.write_all(b"part1").unwrap();
+    writer.write_all(b"part2").unwrap();
+    writer.write_all(b"part3").unwrap();
+    let hash = writer.hash();
+    let expected = compute_data_hash(b"part1part2part3");
+    assert_eq!(hash, expected);
+}
+
+// ============================================================================
+// Validate trait — ok_for_format_error with all variants
+// ============================================================================
+
+#[test]
+fn validate_ok_for_format_error_io_passthrough() {
+    let result: Result<u32, CoreError> = Err(CoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "io error",
+    )));
+    let err = result.ok_for_format_error().unwrap_err();
+    assert!(matches!(err, CoreError::Io(_)));
+}
+
+#[test]
+fn validate_ok_for_format_error_internal_passthrough() {
+    let result: Result<u32, CoreError> = Err(CoreError::InternalError("bug".into()));
+    let err = result.ok_for_format_error().unwrap_err();
+    assert!(matches!(err, CoreError::InternalError(_)));
+}
+
+// ============================================================================
+// XorbObject::deserialize with info_length mismatch
+// ============================================================================
+
+#[test]
+fn xorb_object_deserialize_info_length_zero() {
+    // Footer says info_length=0 → seek to end-4, read nothing, total_bytes_read(0) != info_length(0)?
+    // Actually it depends. Let's check the behavior.
+    let mut info = XorbObjectInfoV1::default();
+    info.xorb_hash = compute_data_hash(b"test");
+    let mut buf = Vec::new();
+    info.serialize(&mut buf).unwrap();
+    // Write footer with 0 length (truncated)
+    write_u32(&mut buf, 0u32).unwrap();
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::deserialize(&mut cursor);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// test_utils coverage: build_raw_xorb / build_xorb_object with ChunkSize::Random
+// ============================================================================
+
+#[test]
+fn build_raw_xorb_random_chunk_size() {
+    let raw = build_raw_xorb(2, ChunkSize::Random(500, 1000));
+    assert_eq!(raw.data.len(), 2);
+    assert_eq!(raw.num_bytes(), 2 * 1024); // Random falls back to 1024
+}
+
+#[test]
+fn build_xorb_object_random_chunk_size() {
+    let (obj, chunk_data, raw_data, boundaries) =
+        build_xorb_object(3, ChunkSize::Random(200, 800), CompressionScheme::LZ4).unwrap();
+    assert_eq!(obj.info.num_chunks, 3);
+    assert!(!chunk_data.is_empty());
+    assert_eq!(raw_data.len(), 3 * 1024);
+    assert_eq!(boundaries.len(), 3);
+}
+
+// ============================================================================
+// validate_xorb_object — SUCCESS path (covers L574, L576)
+// ============================================================================
+
+#[test]
+fn xorb_object_validate_xorb_object_success_path() {
+    let (obj, chunk_data, _, _) =
+        build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::LZ4).unwrap();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&chunk_data);
+    let info_len = obj.info.serialize(&mut buf).unwrap();
+    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+
+    let hash = obj.info.xorb_hash;
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::validate_xorb_object(&mut cursor, &hash).unwrap();
+    assert!(result.is_some());
+    let validated = result.unwrap();
+    assert_eq!(validated.info.num_chunks, 1);
+    assert_eq!(validated.info.xorb_hash, hash);
+}
+
+// ============================================================================
+// validate_xorb_object — empty chunks error
+// ============================================================================
+
+#[test]
+fn xorb_object_validate_xorb_object_empty_chunks_errors() {
+    // Try validating with no chunk data at all (reader has only footer)
+    let mut buf = Vec::new();
+    let info = XorbObjectInfoV1::default(); // num_chunks=0, no xorb_hash
+    let info_len = info.serialize(&mut buf).unwrap() as u32;
+    write_u32(&mut buf, info_len).unwrap();
+    let mut cursor = Cursor::new(&buf);
+    let result = XorbObject::validate_xorb_object(&mut cursor, &MerkleHash::default());
+    assert!(result.is_err() || result.unwrap().is_none());
+}
+
+// ============================================================================
+// reconstruct_xorb_with_footer — edge cases
+// ============================================================================
+
+#[test]
+fn reconstruct_xorb_with_footer_empty_data() {
+    let mut output = Vec::new();
+    let result = reconstruct_xorb_with_footer(&mut output, b"");
+    assert!(result.is_ok());
+    let (obj, hash) = result.unwrap();
+    assert_eq!(obj.info.num_chunks, 0);
+    assert_eq!(hash, MerkleHash::default());
+}
+
+#[test]
+fn reconstruct_xorb_with_footer_xetblob_ident_breaks() {
+    // Data starting with "XETBLOB" ident breaks the deserialize_chunk_header loop
+    let mut output = Vec::new();
+    let result = reconstruct_xorb_with_footer(&mut output, b"XETBLOBextra");
+    // Should succeed with 0 chunks (header parse returns ChunkHeaderParse -> break)
+    assert!(result.is_ok());
+    let (obj, hash) = result.unwrap();
+    assert_eq!(obj.info.num_chunks, 0);
+    assert_eq!(hash, MerkleHash::default());
+}
+
+#[test]
+fn reconstruct_xorb_with_footer_zero_compressed_length_errors() {
+    // Create a chunk header with compressed_length=0, then try to read 0 bytes
+    let mut chunk = Vec::new();
+    let header = XorbChunkHeader::new(CompressionScheme::None, 0, 100);
+    write_chunk_header(&mut chunk, &header).unwrap();
+    // Don't add data (compressed_length=0 so no data follows)
+    let mut output = Vec::new();
+    let result = reconstruct_xorb_with_footer(&mut output, &chunk);
+    // 0 compressed length will try to decompress empty slice with None scheme -> succeeds but hash is of empty
+    assert!(result.is_ok());
+    let (obj, _) = result.unwrap();
+    assert_eq!(obj.info.num_chunks, 1);
+}
+
+#[test]
+fn reconstruct_xorb_with_footer_malformed_compressed_length_causes_read_error() {
+    // Header says compressed_length=100 but only 5 bytes follow
+    let mut chunk = Vec::new();
+    let header = XorbChunkHeader::new(CompressionScheme::None, 100, 100);
+    write_chunk_header(&mut chunk, &header).unwrap();
+    chunk.extend_from_slice(b"SHORT"); // only 5 bytes, not 100
+    let mut output = Vec::new();
+    let result = reconstruct_xorb_with_footer(&mut output, &chunk);
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// try_read_chunk_header — IO error on read (private fn tested via
+// deserialize_chunks_to_writer with a reader that returns errors)
+// ============================================================================
+
+struct ErrorReader;
+
+impl std::io::Read for ErrorReader {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "read error"))
+    }
+}
+
+#[test]
+fn deserialize_chunks_to_writer_io_error_propagates() {
+    let mut reader = ErrorReader;
+    let mut writer = Vec::new();
+    let result = deserialize_chunks_to_writer(&mut reader, &mut writer);
+    assert!(result.is_err());
+    // Should be an IO error, not a header parse error
+    let err = result.unwrap_err();
+    assert!(matches!(err, CoreError::Io(_)));
+}
+
+// ============================================================================
+// Chunk struct — basic sanity
+// ============================================================================
+
+#[test]
+fn chunk_struct_basic() {
+    let hash = compute_data_hash(b"test");
+    let data: Vec<u8> = vec![1u8, 2, 3];
+    let chunk = Chunk {
+        hash,
+        data: data.into(),
+    };
+    assert_eq!(chunk.hash, hash);
+    assert_eq!(&*chunk.data, &[1u8, 2, 3]);
 }

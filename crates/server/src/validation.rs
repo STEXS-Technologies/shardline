@@ -214,4 +214,27 @@ mod tests {
         let result = super::ensure_directory(Path::new("/nonexistent_path_12345")).await;
         assert!(result.is_err());
     }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ensure_directory_rejects_regular_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("not_a_dir.txt");
+        tokio::fs::write(&file_path, b"content").await.unwrap();
+        let result = super::ensure_directory(&file_path).await;
+        assert!(matches!(
+            result,
+            Err(ServerError::Io(error)) if error.kind() == ErrorKind::InvalidData
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ensure_directory_reopens_valid_directory_after_open() {
+        // ensure_directory opens with O_NOFOLLOW, then stats; this test
+        // verifies a valid directory passes.
+        let temp = tempfile::tempdir().unwrap();
+        let result = super::ensure_directory(temp.path()).await;
+        assert!(result.is_ok());
+    }
 }

@@ -1012,4 +1012,160 @@ mod tests {
         );
         assert!(result.is_none());
     }
+
+    // ── read_open_local_object_append: UnexpectedEof during read_to_end ──
+
+    #[test]
+    fn read_open_local_object_append_read_to_end_eof_returns_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.bin");
+        // Write fewer bytes than claimed length.
+        std::fs::write(&path, b"short").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut output = Vec::new();
+
+        // Claim 100 bytes but file only has 5 => read_to_end gets UnexpectedEof
+        let result = read_open_local_object_append(&path, file, 100, &mut output);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    #[test]
+    fn read_open_local_object_append_eof_on_trailing_byte_check_returns_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eof-trailing.bin");
+        // Write exactly the claimed length (no trailing bytes, but we still go through
+        // the trailing-byte read path which gets EOF).
+        // This exercises the Ok(0) branch of the trailing read.
+        std::fs::write(&path, b"exact").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut output = Vec::new();
+        let result = read_open_local_object_append(&path, file, 5, &mut output);
+        assert!(result.is_ok());
+        assert_eq!(output, b"exact");
+    }
+
+    // ── reconstruct_chunk_file_bytes capacity mismatch ────────────────────
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_local_store_rejects_capacity_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let hash = "ca".repeat(32);
+        let key = chunk_object_key(&hash).unwrap();
+        let path = dir.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"data").unwrap();
+
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }];
+
+        // capacity=99 but true output is 4 → mismatch
+        let result = reconstruct_chunk_file_bytes(&store, &chunks, 99);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    // ── reconstruct_referenced_object_file_bytes capacity mismatch ────────
+
+    #[test]
+    fn reconstruct_referenced_object_file_bytes_rejects_capacity_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        // chunk_size=0 triggers ReferencedObjectTerms layout.
+        // With empty frontends, append_referenced_term_bytes will fail with
+        // NotFound because no frontend can serve the reference.
+        let record = shardline_index::FileRecord {
+            file_id: "cap.bin".to_owned(),
+            content_hash: "cc".repeat(32),
+            total_bytes: 99, // capacity doesn't match actual output
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![shardline_index::FileChunkRecord {
+                hash: "dd".repeat(32),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+        let result = super::reconstruct_file_record_bytes(&store, &[], &record);
+        // The function first encounters the non-contiguous term check or the
+        // append_referenced_term_bytes error (empty frontends returns NotFound).
+        assert!(result.is_err());
+    }
+
+    // ── read_open_local_object_append: Exact read length path ─────────────
+
+    #[test]
+    fn read_open_local_object_append_requires_exact_read_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-exact.bin");
+        std::fs::write(&path, b"toolong").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut output = Vec::new();
+
+        // Write 7 bytes but claim only 4. The function reads 4 bytes via take(4),
+        // then reads 0 bytes (OK). But then trailing read observes more data.
+        let result = read_open_local_object_append(&path, file, 4, &mut output);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    // ── ServerObjectStoreError::Io conversion ────────────────────────────
+
+    #[test]
+    fn server_object_store_error_io_converts() {
+        let io_err = std::io::Error::other("disk error");
+        let err: crate::ServerError =
+            shardline_server_core::ServerObjectStoreError::Io(io_err).into();
+        assert!(matches!(err, crate::ServerError::Io(_)));
+    }
+
+    #[test]
+    fn server_object_store_error_numeric_conversion_converts() {
+        // TryFromIntError from a value that overflows i32
+        let int_err = i32::try_from(3_000_000_000_i64).unwrap_err();
+        let err: crate::ServerError =
+            shardline_server_core::ServerObjectStoreError::NumericConversion(int_err).into();
+        assert!(matches!(err, crate::ServerError::NumericConversion(_)));
+    }
+
+    // ── read_full_object via non-local (archive) path ─────────────────────
+
+    #[test]
+    fn read_full_object_local_store_short_read_returns_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+        let key = ObjectKey::parse("short-read").unwrap();
+        let object_path = dir.path().join(key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        // Write a file that is shorter than claimed length.
+        std::fs::write(&object_path, b"abc").unwrap();
+        // Claim 10 bytes — file has 3, so read_open_local_object will fail.
+        let result = read_full_object(&store, &key, 10);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
 }

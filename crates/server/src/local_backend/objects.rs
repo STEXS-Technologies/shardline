@@ -397,4 +397,39 @@ mod tests {
             .await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_sha256_addressed_object_file_uses_canonical_key_when_matching() {
+        use sha2::Digest;
+        use std::io::Write;
+        let (backend, _tmp) = make_backend().await;
+        let data = b"sha256-content-for-file";
+        let digest_hex = hex::encode(sha2::Sha256::digest(data));
+        let canonical_key =
+            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+
+        // Write to a temp file in the backend's temp dir so block_in_place can access it.
+        let tmp_path = _tmp.path().join("sha256-upload.tmp");
+        let mut tmpfile = std::fs::File::create(&tmp_path).unwrap();
+        tmpfile.write_all(data).unwrap();
+        tmpfile.sync_all().unwrap();
+        drop(tmpfile);
+
+        // When object_key == canonical_key, the function should return
+        // the canonical outcome directly (without copy_if_absent).
+        use shardline_storage::ObjectIntegrity;
+        let integrity = ObjectIntegrity::new(
+            crate::local_backend::chunk_hash(data),
+            data.len() as u64,
+        );
+        let result = backend.put_sha256_addressed_object_file(
+            &canonical_key,
+            &digest_hex,
+            &tmp_path,
+            &integrity,
+        );
+        assert!(result.is_ok(), "put_sha256_addressed_object_file failed: {:?}", result.err());
+        let length = backend.object_length(&canonical_key).await.unwrap();
+        assert_eq!(length, data.len() as u64);
+    }
 }

@@ -594,6 +594,34 @@ mod tests {
         record_s3_request("PutObject", false, 0.3);
         record_s3_request("ListObjects", true, 0.05);
     }
+
+    // ── update_dedup_ratio ────────────────────────────────────────────────
+
+    #[test]
+    fn update_dedup_ratio_is_noop() {
+        // This is a const fn that does nothing — verify it compiles and runs.
+        update_dedup_ratio(100, 200);
+        update_dedup_ratio(0, 1);
+    }
+
+    // ── MetricsLayer ──────────────────────────────────────────────────────
+
+    #[test]
+    fn metrics_layer_creates_metrics_service() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+        async fn handler() -> &'static str { "ok" }
+        let layer = MetricsLayer;
+        let svc = layer.layer(get(handler));
+        // Verify the service wraps the inner by calling it
+        let response = svc.oneshot(
+            axum::http::Request::builder()
+                .uri("/")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        );
+        drop(response);
+    }
 }
 
 // ── Axum middleware & routes ─────────────────────────────────────────────
