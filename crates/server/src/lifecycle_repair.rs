@@ -481,4 +481,241 @@ pub(crate) const fn classify_webhook_delivery_repair_action(
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::{
+        QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
+        classify_quarantine_repair_action, classify_retention_hold_repair_action,
+        classify_webhook_delivery_repair_action, LifecycleRepairOptions,
+        DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS,
+    };
+
+    // ── classify_quarantine_repair_action ──────────────────────────────────
+
+    #[test]
+    fn classify_quarantine_missing_object_is_delete_missing() {
+        assert_eq!(
+            classify_quarantine_repair_action(false, false, false),
+            QuarantineRepairAction::DeleteMissing
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_reachable_object_is_delete_reachable() {
+        assert_eq!(
+            classify_quarantine_repair_action(true, true, false),
+            QuarantineRepairAction::DeleteReachable
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_held_object_is_delete_held() {
+        assert_eq!(
+            classify_quarantine_repair_action(true, false, true),
+            QuarantineRepairAction::DeleteHeld
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_keep_when_none_apply() {
+        assert_eq!(
+            classify_quarantine_repair_action(true, false, false),
+            QuarantineRepairAction::Keep
+        );
+    }
+
+    #[test]
+    fn classify_quarantine_missing_takes_precedence_over_reachable() {
+        // object does not exist → DeleteMissing regardless of reachability
+        assert_eq!(
+            classify_quarantine_repair_action(false, true, false),
+            QuarantineRepairAction::DeleteMissing
+        );
+    }
+
+    // ── classify_retention_hold_repair_action ──────────────────────────────
+
+    #[test]
+    fn classify_retention_hold_expired_release_is_delete_expired() {
+        assert_eq!(
+            classify_retention_hold_repair_action(Some(50), 10, true, 100),
+            RetentionHoldRepairAction::DeleteExpired
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_missing_object_is_delete_missing() {
+        assert_eq!(
+            classify_retention_hold_repair_action(Some(150), 10, false, 100),
+            RetentionHoldRepairAction::DeleteMissing
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_expired_takes_precedence_over_missing() {
+        // release_after (50) <= now (100) → DeleteExpired (checked first)
+        assert_eq!(
+            classify_retention_hold_repair_action(Some(50), 10, false, 100),
+            RetentionHoldRepairAction::DeleteExpired
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_keep_when_not_expired_and_object_exists() {
+        assert_eq!(
+            classify_retention_hold_repair_action(Some(150), 10, true, 100),
+            RetentionHoldRepairAction::Keep
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_no_release_is_keep_when_object_exists() {
+        assert_eq!(
+            classify_retention_hold_repair_action(None, 10, true, 100),
+            RetentionHoldRepairAction::Keep
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_no_release_is_delete_missing_when_object_missing() {
+        assert_eq!(
+            classify_retention_hold_repair_action(None, 10, false, 100),
+            RetentionHoldRepairAction::DeleteMissing
+        );
+    }
+
+    #[test]
+    fn classify_retention_hold_exact_expiry_is_delete_expired() {
+        assert_eq!(
+            classify_retention_hold_repair_action(Some(100), 10, true, 100),
+            RetentionHoldRepairAction::DeleteExpired
+        );
+    }
+
+    // ── classify_webhook_delivery_repair_action ────────────────────────────
+
+    #[test]
+    fn classify_webhook_delivery_future_is_delete_future() {
+        assert_eq!(
+            classify_webhook_delivery_repair_action(500, 100, 400),
+            WebhookDeliveryRepairAction::DeleteFuture
+        );
+    }
+
+    #[test]
+    fn classify_webhook_delivery_stale_is_delete_stale() {
+        assert_eq!(
+            classify_webhook_delivery_repair_action(50, 100, 400),
+            WebhookDeliveryRepairAction::DeleteStale
+        );
+    }
+
+    #[test]
+    fn classify_webhook_delivery_keep_when_within_window() {
+        assert_eq!(
+            classify_webhook_delivery_repair_action(200, 100, 400),
+            WebhookDeliveryRepairAction::Keep
+        );
+    }
+
+    #[test]
+    fn classify_webhook_delivery_future_takes_precedence_over_stale() {
+        // processed_at (500) > max_processed_at (400) → DeleteFuture
+        // even though it would also be stale (cutoff=100)
+        assert_eq!(
+            classify_webhook_delivery_repair_action(500, 100, 400),
+            WebhookDeliveryRepairAction::DeleteFuture
+        );
+    }
+
+    #[test]
+    fn classify_webhook_delivery_exact_stale_cutoff_is_delete_stale() {
+        assert_eq!(
+            classify_webhook_delivery_repair_action(100, 100, 400),
+            WebhookDeliveryRepairAction::DeleteStale
+        );
+    }
+
+    #[test]
+    fn classify_webhook_delivery_zero_processed_is_keep_when_within_window() {
+        assert_eq!(
+            classify_webhook_delivery_repair_action(0, 100, 400),
+            WebhookDeliveryRepairAction::DeleteStale
+        );
+    }
+
+    // ── LifecycleRepairOptions ─────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_repair_options_default() {
+        let options = LifecycleRepairOptions::default();
+        assert_eq!(
+            options.webhook_retention_seconds,
+            DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS
+        );
+    }
+
+    #[test]
+    fn lifecycle_repair_options_debug_and_clone() {
+        let options = LifecycleRepairOptions {
+            webhook_retention_seconds: 3600,
+        };
+        let cloned = options;
+        assert_eq!(options, cloned);
+        let debug = format!("{options:?}");
+        assert!(debug.contains("3600"));
+    }
+
+    // ── Enum formatting ────────────────────────────────────────────────────
+
+    #[test]
+    fn quarantine_repair_action_debug_format() {
+        assert_eq!(
+            format!("{:?}", QuarantineRepairAction::Keep),
+            "Keep"
+        );
+        assert_eq!(
+            format!("{:?}", QuarantineRepairAction::DeleteMissing),
+            "DeleteMissing"
+        );
+        assert_eq!(
+            format!("{:?}", QuarantineRepairAction::DeleteReachable),
+            "DeleteReachable"
+        );
+        assert_eq!(
+            format!("{:?}", QuarantineRepairAction::DeleteHeld),
+            "DeleteHeld"
+        );
+    }
+
+    #[test]
+    fn retention_hold_repair_action_debug_format() {
+        assert_eq!(
+            format!("{:?}", RetentionHoldRepairAction::Keep),
+            "Keep"
+        );
+        assert_eq!(
+            format!("{:?}", RetentionHoldRepairAction::DeleteExpired),
+            "DeleteExpired"
+        );
+        assert_eq!(
+            format!("{:?}", RetentionHoldRepairAction::DeleteMissing),
+            "DeleteMissing"
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_repair_action_debug_format() {
+        assert_eq!(
+            format!("{:?}", WebhookDeliveryRepairAction::Keep),
+            "Keep"
+        );
+        assert_eq!(
+            format!("{:?}", WebhookDeliveryRepairAction::DeleteStale),
+            "DeleteStale"
+        );
+        assert_eq!(
+            format!("{:?}", WebhookDeliveryRepairAction::DeleteFuture),
+            "DeleteFuture"
+        );
+    }
+}

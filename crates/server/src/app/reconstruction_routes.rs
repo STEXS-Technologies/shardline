@@ -141,3 +141,24 @@ pub(super) async fn batch_reconstruction(
 
     Ok(Json(build_batch_reconstruction_response(responses)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::FileVersionQuery;
+
+    #[test]
+    fn file_version_query_debug_format() {
+        let query = FileVersionQuery {
+            content_hash: Some("hash".to_owned()),
+        };
+        let debug = format!("{query:?}");
+        assert!(debug.contains("content_hash"));
+        assert!(debug.contains("hash"));
+    }
+
+    #[test]
+    fn file_version_query_content_hash_none() {
+        let query = FileVersionQuery { content_hash: None };
+        assert!(query.content_hash.is_none());
+    }
+}

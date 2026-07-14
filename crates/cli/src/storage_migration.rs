@@ -761,4 +761,169 @@ mod tests {
             }) if name == "SHARDLINE_MIGRATE_FROM_S3_ACCESS_KEY_ID_FILE"
         ));
     }
+
+    // ── env_key ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn env_key_joins_prefix_and_name() {
+        assert_eq!(
+            super::env_key("SHARDLINE_MIGRATE_FROM_S3", "BUCKET"),
+            "SHARDLINE_MIGRATE_FROM_S3_BUCKET"
+        );
+    }
+
+    #[test]
+    fn env_key_with_empty_prefix() {
+        assert_eq!(super::env_key("", "KEY"), "_KEY");
+    }
+
+    // ── ensure_s3_credential_size_within_limit ─────────────────────────────
+
+    #[test]
+    fn s3_credential_size_within_limit_accepts_small_value() {
+        assert!(super::ensure_s3_credential_size_within_limit("test".to_owned(), 100).is_ok());
+    }
+
+    #[test]
+    fn s3_credential_size_within_limit_rejects_too_large_value() {
+        let result =
+            super::ensure_s3_credential_size_within_limit("ACCESS_KEY_ID".to_owned(), 5000);
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::S3CredentialTooLarge {
+                name,
+                observed_bytes: 5000,
+                maximum_bytes: 4096,
+            }) if name == "ACCESS_KEY_ID"
+        ));
+    }
+
+    #[test]
+    fn s3_credential_size_within_limit_accepts_exact_maximum() {
+        assert!(
+            super::ensure_s3_credential_size_within_limit("test".to_owned(), 4096).is_ok()
+        );
+    }
+
+    // ── StorageMigrationRuntimeError Display ───────────────────────────────
+
+    #[test]
+    fn runtime_error_missing_local_root_display() {
+        let err = StorageMigrationRuntimeError::MissingLocalRoot {
+            flag: "--to-root",
+            side: "destination",
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("--to-root"));
+        assert!(msg.contains("destination"));
+    }
+
+    #[test]
+    fn runtime_error_missing_s3_env_display() {
+        let err =
+            StorageMigrationRuntimeError::MissingS3Env("SHARDLINE_MIGRATE_FROM_S3_BUCKET".to_owned());
+        let msg = format!("{err}");
+        assert!(msg.contains("SHARDLINE_MIGRATE_FROM_S3_BUCKET"));
+    }
+
+    #[test]
+    fn runtime_error_invalid_s3_bool_display() {
+        let err = StorageMigrationRuntimeError::InvalidS3Bool {
+            name: "SHARDLINE_MIGRATE_FROM_S3_ALLOW_HTTP".to_owned(),
+            value: "maybe".to_owned(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("maybe"));
+        assert!(msg.contains("ALLOW_HTTP"));
+    }
+
+    #[test]
+    fn runtime_error_s3_credential_source_conflict_display() {
+        let err = StorageMigrationRuntimeError::S3CredentialSourceConflict {
+            env: "ACCESS_KEY_ID".to_owned(),
+            file_env: "ACCESS_KEY_ID_FILE".to_owned(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("ACCESS_KEY_ID"));
+        assert!(msg.contains("ACCESS_KEY_ID_FILE"));
+    }
+
+    #[test]
+    fn runtime_error_s3_credential_file_display() {
+        use std::io::{Error, ErrorKind};
+        let err = StorageMigrationRuntimeError::S3CredentialFile {
+            name: "ACCESS_KEY_ID_FILE".to_owned(),
+            source: Error::new(ErrorKind::NotFound, "file not found"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("ACCESS_KEY_ID_FILE"));
+        // The source should be chained
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some());
+    }
+
+    #[test]
+    fn runtime_error_s3_credential_too_large_display() {
+        let err = StorageMigrationRuntimeError::S3CredentialTooLarge {
+            name: "SECRET_ACCESS_KEY_FILE".to_owned(),
+            observed_bytes: 5000,
+            maximum_bytes: 4096,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("SECRET_ACCESS_KEY_FILE"));
+        // The numbers are not included in the display message per the #[error] attribute
+    }
+
+    #[test]
+    fn runtime_error_s3_credential_length_mismatch_display() {
+        let err = StorageMigrationRuntimeError::S3CredentialLengthMismatch {
+            name: "ACCESS_KEY_ID_FILE".to_owned(),
+            expected_bytes: 10,
+            observed_bytes: 15,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("ACCESS_KEY_ID_FILE"));
+        // The numbers are not included in the display message per the #[error] attribute
+    }
+
+    #[test]
+    fn runtime_error_s3_credential_utf8_display() {
+        let err = StorageMigrationRuntimeError::S3CredentialUtf8 {
+            name: "ACCESS_KEY_ID_FILE".to_owned(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("ACCESS_KEY_ID_FILE"));
+        assert!(msg.contains("utf-8"));
+    }
+
+    #[test]
+    fn runtime_error_invalid_local_root_display() {
+        use std::io::{Error, ErrorKind};
+        let err = StorageMigrationRuntimeError::InvalidLocalRoot {
+            side: "source",
+            path: PathBuf::from("/invalid/path"),
+            source: Error::new(ErrorKind::PermissionDenied, "permission denied"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("source"));
+        assert!(msg.contains("/invalid/path"));
+        // The source is #[source] so it's only available via .source(), not in Display
+    }
+
+    #[test]
+    fn runtime_error_config_from_server_config_error() {
+        let inner = shardline_server::ServerConfigError::MissingServerFrontends;
+        let err = StorageMigrationRuntimeError::Config(inner);
+        let msg = format!("{err}");
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn runtime_error_server_from_server_error() {
+        use shardline_server::ServerError;
+        let inner = ServerError::NotFound;
+        let err = StorageMigrationRuntimeError::Server(inner);
+        let msg = format!("{err}");
+        assert!(!msg.is_empty());
+    }
 }

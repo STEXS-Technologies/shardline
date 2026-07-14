@@ -2201,4 +2201,158 @@ mod tests {
             );
         }
     }
+
+    // ── parse_positive_usize ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_positive_usize_accepts_positive_number() {
+        let result = super::parse_positive_usize("42");
+        assert_eq!(result, Ok(std::num::NonZeroUsize::new(42).unwrap()));
+    }
+
+    #[test]
+    fn parse_positive_usize_rejects_zero() {
+        let result = super::parse_positive_usize("0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_positive_usize_rejects_non_numeric() {
+        let result = super::parse_positive_usize("abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_positive_usize_rejects_negative_number() {
+        let result = super::parse_positive_usize("-5");
+        assert!(result.is_err());
+    }
+
+    // ── deduplicated_cli_frontends ──────────────────────────────────────────
+
+    #[test]
+    fn deduplicated_cli_frontends_removes_duplicates() {
+        use shardline_server::ServerFrontend;
+        let frontends = vec![
+            ServerFrontend::Xet,
+            ServerFrontend::Lfs,
+            ServerFrontend::Xet,
+            ServerFrontend::Oci,
+            ServerFrontend::Lfs,
+        ];
+        let deduped = super::deduplicated_cli_frontends(frontends);
+        assert_eq!(
+            deduped,
+            vec![ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci]
+        );
+    }
+
+    #[test]
+    fn deduplicated_cli_frontends_preserves_order_of_first_seen() {
+        use shardline_server::ServerFrontend;
+        let frontends = vec![
+            ServerFrontend::Oci,
+            ServerFrontend::Xet,
+            ServerFrontend::Oci,
+        ];
+        let deduped = super::deduplicated_cli_frontends(frontends);
+        assert_eq!(deduped, vec![ServerFrontend::Oci, ServerFrontend::Xet]);
+    }
+
+    #[test]
+    fn deduplicated_cli_frontends_handles_empty_input() {
+        let deduped = super::deduplicated_cli_frontends(vec![]);
+        assert!(deduped.is_empty());
+    }
+
+    // ── RedactedDbUrl ──────────────────────────────────────────────────────
+
+    #[test]
+    fn redacted_db_url_debug_hides_url() {
+        let url = RedactedDbUrl("postgres://user:pass@localhost/db".to_owned());
+        let debug = format!("{url:?}");
+        assert_eq!(debug, "***");
+        assert!(!debug.contains("postgres"));
+    }
+
+    #[test]
+    fn redacted_db_url_as_str_returns_original() {
+        let url = RedactedDbUrl("postgres://localhost/db".to_owned());
+        assert_eq!(url.as_str(), "postgres://localhost/db");
+    }
+
+    #[allow(clippy::redundant_clone)]
+    #[test]
+    fn redacted_db_url_clone() {
+        let url = RedactedDbUrl("url".to_owned());
+        let cloned = url.clone();
+        assert_eq!(cloned.as_str(), "url");
+    }
+
+    #[test]
+    fn redacted_db_url_partial_eq() {
+        let a = RedactedDbUrl("same".to_owned());
+        let b = RedactedDbUrl("same".to_owned());
+        assert_eq!(a, b);
+    }
+
+    // ── CliParseError ──────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_parse_error_display_contains_message() {
+        let error = super::CliParseError::validation(
+            clap::error::ErrorKind::InvalidSubcommand,
+            "unknown command",
+        );
+        let msg = format!("{error}");
+        assert!(msg.contains("unknown command"));
+    }
+
+    #[test]
+    fn cli_parse_error_kind() {
+        let error = super::CliParseError::validation(
+            clap::error::ErrorKind::InvalidSubcommand,
+            "bad",
+        );
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::InvalidSubcommand
+        );
+    }
+
+    #[test]
+    fn cli_parse_error_is_help_true_for_display_help() {
+        let error = super::CliParseError::validation(
+            clap::error::ErrorKind::DisplayHelp,
+            "help",
+        );
+        assert!(error.is_help());
+    }
+
+    #[test]
+    fn cli_parse_error_is_help_true_for_display_version() {
+        let error = super::CliParseError::validation(
+            clap::error::ErrorKind::DisplayVersion,
+            "version",
+        );
+        assert!(error.is_help());
+    }
+
+    #[test]
+    fn cli_parse_error_is_help_false_for_other_kinds() {
+        let error = super::CliParseError::validation(
+            clap::error::ErrorKind::InvalidSubcommand,
+            "bad",
+        );
+        assert!(!error.is_help());
+    }
+
+    #[test]
+    fn cli_parse_error_from_clap_error() {
+        use clap::CommandFactory;
+        let clap_err = super::CliDefinition::command()
+            .error(clap::error::ErrorKind::MissingRequiredArgument, "missing --flag");
+        let error = super::CliParseError::from(clap_err);
+        assert!(format!("{error}").contains("missing --flag"));
+    }
 }

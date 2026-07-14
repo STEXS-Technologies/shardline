@@ -592,3 +592,28 @@ fn print_error_chain(error: &dyn Error) {
         source = next.source();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::gc_mode_name;
+
+    #[test]
+    fn gc_mode_name_dry_run() {
+        assert_eq!(gc_mode_name(false, false), "dry-run");
+    }
+
+    #[test]
+    fn gc_mode_name_mark() {
+        assert_eq!(gc_mode_name(true, false), "mark");
+    }
+
+    #[test]
+    fn gc_mode_name_sweep() {
+        assert_eq!(gc_mode_name(false, true), "sweep");
+    }
+
+    #[test]
+    fn gc_mode_name_mark_and_sweep() {
+        assert_eq!(gc_mode_name(true, true), "mark-and-sweep");
+    }
+}

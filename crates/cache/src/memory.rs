@@ -555,6 +555,81 @@ mod tests {
         assert_eq!(result.unwrap(), None, "expired entry should return None");
     }
 
+    // ── delete on expired entry ───────────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn memory_cache_delete_expired_entry_returns_true() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        );
+        let key = ReconstructionCacheKey::latest("expired-del", None);
+        cache.put(&key, b"data").await.unwrap();
+
+        // Advance past TTL
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        // Entry is expired but still stored — delete should succeed
+        let deleted = cache.delete(&key).await.unwrap();
+        assert!(deleted, "delete should return true even for expired entry");
+
+        // After delete, get should return None
+        let result = cache.get(&key).await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    // ── get_or_load with concurrent timeout ──────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_cache_get_times_out_when_loader_hangs() {
+        use std::sync::Arc;
+
+        let cache = Arc::new(MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        ));
+        let key = ReconstructionCacheKey::latest("hung-loader", None);
+
+        // Task1: start get_or_load with a slow loader (60s)
+        let cache_1 = Arc::clone(&cache);
+        let key_1 = key.clone();
+        let task1 = tokio::spawn(async move {
+            let _result = cache_1
+                .get_or_load(&key_1, || {
+                    Box::pin(async {
+                        // Slow loader — takes 60 seconds
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        Ok::<_, ReconstructionCacheError>(b"new-data".to_vec())
+                    })
+                })
+                .await;
+        });
+
+        // Give task1 time to enter the loading state
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Task2: get() should hit the internal 30-second timeout
+        let result = tokio::time::timeout(
+            Duration::from_secs(35),
+            cache.get(&key),
+        )
+        .await;
+
+        #[allow(clippy::panic, clippy::match_wild_err_arm)]
+        match result {
+            Ok(Ok(value)) => {
+                // Internal timeout fired — get returned None
+                assert_eq!(value, None, "get should return None after internal timeout");
+            }
+            Ok(Err(e)) => panic!("get returned unexpected error: {e}"),
+            Err(_elapsed) => {
+                panic!("get did not complete within 35 seconds (internal 30s timeout should have fired)");
+            }
+        }
+
+        drop(task1);
+    }
+
     // ── Concurrency stress tests ──────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -215,15 +215,144 @@ fn endpoint_store(endpoint: &StorageMigrationEndpoint) -> Result<ServerObjectSto
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
-    use super::{StorageMigrationEndpoint, StorageMigrationOptions, run_storage_migration};
+    use super::{
+        StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport,
+        endpoint_store, ensure_observed_hash_matches_key, run_storage_migration,
+    };
     use crate::{
+        ServerError,
         chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
         object_store::ServerObjectStore,
     };
+
+    // ── StorageMigrationEndpoint ──────────────────────────────────────────
+
+    #[test]
+    fn storage_migration_endpoint_backend_name_local() {
+        let endpoint = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/tmp"));
+        assert_eq!(endpoint.backend_name(), "local");
+    }
+
+    #[test]
+    fn storage_migration_endpoint_backend_name_s3() {
+        let config =
+            shardline_storage::S3ObjectStoreConfig::new("bucket".to_owned(), "us-east-1".to_owned());
+        let endpoint = StorageMigrationEndpoint::S3(config);
+        assert_eq!(endpoint.backend_name(), "s3");
+    }
+
+    // ── StorageMigrationOptions ───────────────────────────────────────────
+
+    #[test]
+    fn storage_migration_options_constructors() {
+        let source = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/src"));
+        let dest = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/dst"));
+
+        let options = StorageMigrationOptions::new(source, dest);
+        assert!(!options.dry_run);
+        assert!(options.prefix.is_empty());
+
+        let with_prefix = options.with_prefix("xorbs/default/".to_owned());
+        assert_eq!(with_prefix.prefix, "xorbs/default/");
+
+        let with_dry_run = with_prefix.with_dry_run(true);
+        assert!(with_dry_run.dry_run);
+    }
+
+    #[test]
+    fn storage_migration_options_debug_and_clone() {
+        let source = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/src"));
+        let dest = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/dst"));
+        let options = StorageMigrationOptions::new(source, dest);
+        let debug = format!("{options:?}");
+        assert!(debug.contains("dry_run"));
+    }
+
+    // ── StorageMigrationReport ────────────────────────────────────────────
+
+    #[test]
+    fn storage_migration_report_new_initializes_fields() {
+        let source = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/src"));
+        let dest = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/dst"));
+        let options = StorageMigrationOptions::new(source, dest);
+        let report = StorageMigrationReport::new(&options);
+
+        assert_eq!(report.source_backend, "local");
+        assert_eq!(report.destination_backend, "local");
+        assert!(!report.dry_run);
+        assert_eq!(report.scanned_objects, 0);
+        assert_eq!(report.inserted_objects, 0);
+        assert_eq!(report.already_present_objects, 0);
+        assert_eq!(report.copied_bytes, 0);
+        assert_eq!(report.scanned_bytes, 0);
+    }
+
+    #[test]
+    fn storage_migration_report_new_dry_run() {
+        let source = StorageMigrationEndpoint::S3(shardline_storage::S3ObjectStoreConfig::new(
+            "bucket".to_owned(),
+            "us-east-1".to_owned(),
+        ));
+        let dest = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/dst"));
+        let options = StorageMigrationOptions::new(source, dest).with_dry_run(true);
+        let report = StorageMigrationReport::new(&options);
+
+        assert_eq!(report.source_backend, "s3");
+        assert_eq!(report.destination_backend, "local");
+        assert!(report.dry_run);
+    }
+
+    #[test]
+    fn storage_migration_report_serialize() {
+        let source = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/src"));
+        let dest = StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/dst"));
+        let options = StorageMigrationOptions::new(source, dest);
+        let report = StorageMigrationReport::new(&options);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains(r#""scanned_objects":0"#));
+    }
+
+    // ── endpoint_store ────────────────────────────────────────────────────
+
+    #[test]
+    fn endpoint_store_local_creates_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let endpoint = StorageMigrationEndpoint::LocalStateRoot(tmp.path().to_path_buf());
+        let store = endpoint_store(&endpoint);
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn endpoint_store_local_rejects_invalid_path() {
+        let endpoint =
+            StorageMigrationEndpoint::LocalStateRoot(PathBuf::from("/nonexistent/path/chunks"));
+        let store = endpoint_store(&endpoint);
+        assert!(store.is_err());
+    }
+
+    // ── ensure_observed_hash_matches_key ──────────────────────────────────
+
+    #[test]
+    fn ensure_observed_hash_matches_key_ok_when_equal() {
+        let key = ObjectKey::parse("aa/aaa").unwrap();
+        let result = ensure_observed_hash_matches_key(&key, "abc", "abc");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_observed_hash_matches_key_err_when_not_equal() {
+        let key = ObjectKey::parse("aa/aaa").unwrap();
+        let result = ensure_observed_hash_matches_key(&key, "abc", "xyz");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ServerError::ObjectStore(_)));
+        let msg = format!("{err}");
+        assert!(msg.contains("object storage operation failed"));
+    }
 
     #[test]
     fn storage_migration_copies_local_objects_idempotently() {

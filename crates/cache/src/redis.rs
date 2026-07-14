@@ -387,4 +387,27 @@ mod tests {
         let hash_hex = hex::encode("");
         assert!(redis_key.contains(&format!(":{hash_hex}:")));
     }
+
+    // ── Redis URL validation ─────────────────────────────────────────────
+
+    #[test]
+    fn redis_cache_rejects_missing_scheme() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("localhost:6379", ttl_seconds);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn redis_cache_rejects_invalid_port() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("redis://localhost:abc", ttl_seconds);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn redis_cache_rejects_whitespace_only_url() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("   ", ttl_seconds);
+        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+    }
 }

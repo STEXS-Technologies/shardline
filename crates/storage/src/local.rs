@@ -1220,6 +1220,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_object_store_put_overwrite_rejects_parent_swap_race() {
+        let storage = shardline_test_support::TempStorage::new();
+        let outside = tempfile::tempdir();
+        assert!(outside.is_ok());
+        let Ok(outside) = outside else {
+            return;
+        };
+        let store = LocalObjectStore::new(storage.path().join("objects"));
+        assert!(store.is_ok());
+        let Ok(store) = store else {
+            return;
+        };
+
+        let key = ObjectKey::parse("xorbs/default/ee/hash.xorb").unwrap();
+        let path = store.path_for_key(&key);
+        let parent = path.parent().map(PathBuf::from).unwrap();
+        let moved_parent = storage.path().join("swapped-overwrite-parent");
+        let escape_dir = outside.path().to_path_buf();
+
+        set_before_local_write_hook(path, move || {
+            let renamed = fs::rename(&parent, &moved_parent);
+            assert!(renamed.is_ok());
+            let linked = symlink(&escape_dir, &parent);
+            assert!(linked.is_ok());
+        });
+
+        let body = b"payload for overwrite";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 21);
+        let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &integrity);
+
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::Io(error)) if error.kind() == IoErrorKind::InvalidData
+        ));
+        assert!(
+            !outside.path().join("hash.xorb").exists(),
+            "object write escaped into an attacker-controlled symlink target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_object_store_rejects_parent_swap_race() {
         let storage = shardline_test_support::TempStorage::new();
         let outside = tempfile::tempdir();
@@ -1569,6 +1611,71 @@ mod tests {
         let store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let key = ObjectKey::parse("ab/missing").unwrap();
         let result = store.open_object_file(&key);
+        assert!(result.is_err());
+    }
+
+    // ── root() accessor ─────────────────────────────────────────────────────
+
+    #[test]
+    fn local_object_store_root_accessor() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let root = store.root();
+        assert_eq!(root, storage.path());
+    }
+
+    #[test]
+    fn local_object_store_open_root_accessor() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("objects");
+        let store = LocalObjectStore::open(root.clone());
+        assert_eq!(store.root(), root);
+    }
+
+    // ── path_for_key with various keys ──────────────────────────────────────
+
+    #[test]
+    fn local_object_store_path_for_key_deeply_nested() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("objects");
+        let store = LocalObjectStore::open(root.clone());
+        let key = ObjectKey::parse("a/b/c/d/e/f/g/h/file.xorb").unwrap();
+        let path = store.path_for_key(&key);
+        assert_eq!(path, root.join("a/b/c/d/e/f/g/h/file.xorb"));
+    }
+
+    #[test]
+    fn local_object_store_path_for_key_single_component() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("objects");
+        let store = LocalObjectStore::open(root.clone());
+        let key = ObjectKey::parse("file.xorb").unwrap();
+        let path = store.path_for_key(&key);
+        assert_eq!(path, root.join("file.xorb"));
+    }
+
+    #[test]
+    fn local_object_store_path_for_key_with_dashes_and_underscores() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("objects");
+        let store = LocalObjectStore::open(root.clone());
+        let key = ObjectKey::parse("my-prefix/my_file-v2.xorb").unwrap();
+        let path = store.path_for_key(&key);
+        assert_eq!(path, root.join("my-prefix/my_file-v2.xorb"));
+    }
+
+    // ── put_if_absent error on directory creation failure ───────────────────
+
+    #[test]
+    fn local_object_store_put_if_absent_fails_when_root_is_file_not_directory() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("file-instead-of-dir");
+        // Create a file at the root location
+        std::fs::write(&root, b"not a directory").unwrap();
+        let store = LocalObjectStore::open(root);
+        let key = ObjectKey::parse("some/key").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"data"), 4);
+        let result = store.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity);
         assert!(result.is_err());
     }
 }
