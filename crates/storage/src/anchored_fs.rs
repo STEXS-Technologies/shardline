@@ -653,6 +653,23 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn open_directory_chain_with_parent_dir_component() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let path = sub.join("..");
+        let result = open_directory_chain(&path, false, None, invalid_path_error);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn open_directory_chain_absolute_path() {
+        let dir = tempdir().unwrap();
+        let result = open_directory_chain(dir.path(), false, None, invalid_path_error);
+        assert!(result.is_ok());
+    }
+
     // ── open_or_create_child_directory ────────────────────────────────────
 
     #[test]
@@ -685,6 +702,17 @@ mod tests {
 
         let result = open_or_create_child_directory(&parent, child_name, false, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_or_create_child_race_condition_already_exists() {
+        let dir = tempdir().unwrap();
+        let child_name: &OsStr = "racechild".as_ref();
+        fs::create_dir(dir.path().join("racechild")).unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
+
+        let result = open_or_create_child_directory(&parent, child_name, true, None);
+        assert!(result.is_ok());
     }
 
     // ── write_anchored_temporary_file ─────────────────────────────────────

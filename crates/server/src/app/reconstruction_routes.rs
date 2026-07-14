@@ -161,4 +161,27 @@ mod tests {
         let query = FileVersionQuery { content_hash: None };
         assert!(query.content_hash.is_none());
     }
+
+    #[test]
+    fn file_version_query_with_content_hash() {
+        let query = FileVersionQuery {
+            content_hash: Some("abc123".to_owned()),
+        };
+        assert_eq!(query.content_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn file_version_query_deserialize_from_json() {
+        // Verify deserialization from JSON representation
+        let json = r#"{"content_hash": "abc123"}"#;
+        let deserialized: FileVersionQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.content_hash, Some("abc123".to_owned()));
+    }
+
+    #[test]
+    fn file_version_query_deserialize_empty_json() {
+        let json = r#"{}"#;
+        let deserialized: FileVersionQuery = serde_json::from_str(json).unwrap();
+        assert!(deserialized.content_hash.is_none());
+    }
 }

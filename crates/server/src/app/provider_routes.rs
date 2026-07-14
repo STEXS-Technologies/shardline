@@ -141,3 +141,23 @@ pub(super) async fn handle_provider_webhook(
     )
         .into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::XetTokenQuery;
+
+    #[test]
+    fn xet_token_query_debug_format() {
+        let query = XetTokenQuery {
+            subject: Some("user".to_owned()),
+        };
+        let debug = format!("{query:?}");
+        assert!(debug.contains("user"));
+    }
+
+    #[test]
+    fn xet_token_query_subject_none() {
+        let query = XetTokenQuery { subject: None };
+        assert!(query.subject.is_none());
+    }
+}

@@ -363,7 +363,9 @@ fn load_non_zero_usize_env(
 mod tests {
     use crate::ServerFrontend;
 
-    use super::parse_server_frontends_env;
+    use super::{
+        optional_token_signing_key_from_sources, parse_server_frontends_env,
+    };
 
     #[test]
     fn parse_server_frontends_env_accepts_one_or_more_tokens() {
@@ -396,5 +398,41 @@ mod tests {
         assert!(empty_segments.is_ok());
         assert_eq!(empty_segments.ok(), Some(vec![ServerFrontend::Xet]));
         assert!(parse_server_frontends_env("unknown").is_err());
+    }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_none() {
+        let result = optional_token_signing_key_from_sources(None, None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_direct() {
+        let result =
+            optional_token_signing_key_from_sources(Some("my-key".to_owned()), None).unwrap();
+        assert_eq!(result, Some(b"my-key".to_vec()));
+    }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_both_conflict() {
+        let result = optional_token_signing_key_from_sources(
+            Some("direct".to_owned()),
+            Some("/path/to/file".to_owned()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn optional_token_signing_key_from_sources_file_read() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        tmp.write_all(b"file-key-value").unwrap();
+        tmp.flush().unwrap();
+        let result = optional_token_signing_key_from_sources(
+            None,
+            Some(tmp.path().display().to_string()),
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(b"file-key-value".to_vec()));
     }
 }

@@ -1569,6 +1569,29 @@ mod tests {
     }
 
     #[test]
+    fn local_object_store_copy_source_equals_destination_returns_already_exists() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("ab/self").unwrap();
+        let body = b"self copy data";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 14);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        let result = store.copy_object_if_absent(&key, &key);
+        assert!(matches!(result, Ok(PutOutcome::AlreadyExists)));
+    }
+
+    #[test]
+    fn local_object_store_copy_source_equals_destination_reports_not_found_when_missing() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("ab/self-missing").unwrap();
+
+        let result = store.copy_object_if_absent(&key, &key);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn local_object_store_put_overwrite_replaces_existing_content() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path_buf()).unwrap();
@@ -1603,6 +1626,16 @@ mod tests {
         // List with start_after returns remaining
         let page = store.list_flat_namespace_page(&prefix, Some(&key_a), 10).unwrap();
         assert_eq!(page.len(), 1);
+    }
+
+    #[test]
+    fn local_object_store_list_flat_namespace_rejects_start_after_outside_prefix() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let prefix = ObjectPrefix::parse("ab/").unwrap();
+        let key = ObjectKey::parse("cd/outsider").unwrap();
+        let result = store.list_flat_namespace_page(&prefix, Some(&key), 10);
+        assert!(matches!(result, Err(LocalObjectStoreError::InvalidStartAfter)));
     }
 
     #[test]
