@@ -2382,4 +2382,42 @@ mod tests {
         let debug = format!("{err:?}");
         assert!(debug.contains("RecordNotFound"));
     }
+
+    // ── AsyncIndexStore default impls: contains_xorb / insert_xorb ─────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_index_store_contains_xorb_delegates_to_contains_object() {
+        use crate::AsyncIndexStore;
+        let store = MemoryIndexStore::new();
+        let hash = ShardlineHash::from_bytes([99; 32]);
+        let object_id = StoredObjectId::new(hash);
+        let xorb_id = XorbId::new(hash);
+
+        // Before insert: neither contains_object nor contains_xorb should find it.
+        assert!(!AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
+        assert!(!AsyncIndexStore::contains_xorb(&store, &xorb_id).await.unwrap());
+
+        // Insert via insert_object.
+        AsyncIndexStore::insert_object(&store, &object_id).await.unwrap();
+
+        // After insert: both should find it.
+        assert!(AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
+        assert!(AsyncIndexStore::contains_xorb(&store, &xorb_id).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_index_store_insert_xorb_delegates_to_insert_object() {
+        use crate::AsyncIndexStore;
+        let store = MemoryIndexStore::new();
+        let hash = ShardlineHash::from_bytes([88; 32]);
+        let object_id = StoredObjectId::new(hash);
+        let xorb_id = XorbId::new(hash);
+
+        // Insert via insert_xorb (which defaults to insert_object).
+        AsyncIndexStore::insert_xorb(&store, &xorb_id).await.unwrap();
+
+        // Both contains_object and contains_xorb should find it.
+        assert!(AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
+        assert!(AsyncIndexStore::contains_xorb(&store, &xorb_id).await.unwrap());
+    }
 }

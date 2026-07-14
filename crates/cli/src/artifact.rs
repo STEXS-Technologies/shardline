@@ -109,7 +109,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{render_completion, render_manpage};
+    use super::{render_completion, render_manpage, write_completion, CliArtifactError};
     use crate::command::CompletionShell;
 
     #[test]
@@ -133,5 +133,68 @@ mod tests {
         assert!(rendered.contains(".TH shardline"));
         assert!(rendered.contains("gc"));
         assert!(rendered.contains("bench"));
+    }
+
+    // ── All completion shells via write_completion ─────────────────────────
+
+    fn write_completion_to_string(shell: CompletionShell) -> String {
+        let mut buf = Vec::new();
+        write_completion(&mut buf, shell);
+        String::from_utf8(buf).expect("completion output must be valid UTF-8")
+    }
+
+    #[test]
+    fn elvish_completion_contains_shardline() {
+        let output = write_completion_to_string(CompletionShell::Elvish);
+        assert!(output.contains("shardline"), "Elvish completion should mention shardline");
+        assert!(output.contains("edit:"), "Elvish completion should contain edit: namespace");
+    }
+
+    #[test]
+    fn fish_completion_contains_shardline() {
+        let output = write_completion_to_string(CompletionShell::Fish);
+        assert!(output.contains("shardline"), "Fish completion should mention shardline");
+        assert!(output.contains("complete"), "Fish completion should contain complete statement");
+    }
+
+    #[test]
+    fn powershell_completion_contains_shardline() {
+        let output = write_completion_to_string(CompletionShell::PowerShell);
+        assert!(output.contains("shardline"), "PowerShell completion should mention shardline");
+        assert!(output.contains("Register-ArgumentCompleter"), "PowerShell should register an argument completer");
+    }
+
+    #[test]
+    fn zsh_completion_contains_shardline() {
+        let output = write_completion_to_string(CompletionShell::Zsh);
+        assert!(output.contains("shardline"), "Zsh completion should mention shardline");
+        assert!(output.contains("#compdef"), "Zsh completion should have compdef directive");
+    }
+
+    // ── CliArtifactError Display / Debug ──────────────────────────────────
+
+    #[test]
+    fn cli_artifact_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "write denied");
+        let err = CliArtifactError::Io(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("write denied"));
+    }
+
+    #[test]
+    fn cli_artifact_error_utf8_display() {
+        let invalid = vec![0xff, 0xfe];
+        let utf8_err = String::from_utf8(invalid).unwrap_err();
+        let err = CliArtifactError::Utf8(utf8_err);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid utf-8"));
+    }
+
+    #[test]
+    fn cli_artifact_error_debug() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let err = CliArtifactError::Io(io_err);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Io("));
     }
 }

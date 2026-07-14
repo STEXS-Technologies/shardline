@@ -558,8 +558,60 @@ mod tests {
         assert_eq!(target.logical_path(), parent_path.join("data.txt"));
     }
 
-    // ── open_anchored_target ─────────────────────────────────────────────
+    // ── open_anchored_target creates root when missing ─────────────────────
 
+    #[test]
+    fn open_anchored_target_creates_missing_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("nonexistent-root");
+        assert!(!root.exists());
+        let path = root.join("file.txt");
+
+        let result = open_anchored_target(
+            &root,
+            &path,
+            AnchoredPathOptions::new(None, None),
+            invalid_path_error,
+        );
+        assert!(result.is_ok());
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn open_anchored_target_no_parent_returns_invalid_path_error() {
+        let dir = tempdir().unwrap();
+        // A path with just a filename has no parent
+        let path = PathBuf::from("just_a_file.txt");
+
+        let result = open_anchored_target(
+            dir.path(),
+            &path,
+            AnchoredPathOptions::new(None, None),
+            invalid_path_error,
+        );
+        // parent_path.strip_prefix(root) should fail since just_a_file.txt
+        // is not under dir.path()
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_anchored_target_with_mode_creates_directories() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("moded-root");
+        let path = root.join("sub/dir/file.txt");
+
+        let result = open_anchored_target(
+            &root,
+            &path,
+            AnchoredPathOptions::new(Some(0o755), Some(0o644)),
+            invalid_path_error,
+        );
+        assert!(result.is_ok());
+        assert!(root.join("sub/dir").exists());
+    }
+
+    // ── open_anchored_target ─────────────────────────────────────────────
+    
     #[test]
     fn open_anchored_target_nested_path() {
         let root = tempdir().unwrap();
@@ -670,6 +722,15 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn open_directory_chain_with_file_mode() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("new-dir");
+        let result = open_directory_chain(&sub, true, Some(0o755), invalid_path_error);
+        assert!(result.is_ok());
+        assert!(sub.exists());
+    }
+
     // ── open_or_create_child_directory ────────────────────────────────────
 
     #[test]
@@ -736,6 +797,21 @@ mod tests {
         );
 
         // File content should match
+        let contents = fs::read(&tmp_path).unwrap();
+        assert_eq!(contents, payload);
+    }
+
+    #[test]
+    fn write_anchored_temporary_file_with_file_mode() {
+        let dir = tempdir().unwrap();
+        let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
+        let target = AnchoredTarget::new(parent, dir.path().to_path_buf(), "moded.txt".into());
+        let payload = b"mode test";
+
+        let result = write_anchored_temporary_file(&target, payload, Some(0o600));
+        assert!(result.is_ok());
+        let tmp_path = result.unwrap();
+        assert!(tmp_path.exists());
         let contents = fs::read(&tmp_path).unwrap();
         assert_eq!(contents, payload);
     }
@@ -922,6 +998,16 @@ mod tests {
         assert_eq!(result.unwrap_err().kind(), ErrorKind::AlreadyExists);
     }
 
+    #[test]
+    fn create_directory_with_mode() {
+        let dir = tempdir().unwrap();
+        let new_dir = dir.path().join("with-mode");
+
+        let result = create_directory(&new_dir, Some(0o755));
+        assert!(result.is_ok());
+        assert!(new_dir.is_dir());
+    }
+
     // ── create_directory_all ──────────────────────────────────────────────
 
     #[test]
@@ -940,6 +1026,27 @@ mod tests {
 
         assert!(create_directory_all(&nested, None).is_ok());
         assert!(create_directory_all(&nested, None).is_ok());
+    }
+
+    #[test]
+    fn create_directory_all_with_mode() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("p/q/r");
+
+        assert!(create_directory_all(&nested, Some(0o755)).is_ok());
+        assert!(nested.is_dir());
+    }
+
+    // ── open_new_file with mode ──────────────────────────────────────────
+
+    #[test]
+    fn open_new_file_with_file_mode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("moded-new.txt");
+
+        let result = open_new_file(&path, Some(0o600));
+        assert!(result.is_ok());
+        assert!(path.exists());
     }
 
     // ── fd_child_path ────────────────────────────────────────────────────

@@ -727,6 +727,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     #[cfg(unix)]
+    use std::sync::{LazyLock, Mutex};
+    #[cfg(unix)]
     use std::{io::ErrorKind as IoErrorKind, path::PathBuf};
 
     use shardline_protocol::ByteRange;
@@ -738,6 +740,10 @@ mod tests {
         DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore,
         PutOutcome,
     };
+
+    /// Serializes hook-based race tests so they don't clobber each other's global hook state.
+    #[cfg(unix)]
+    static HOOK_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn local_object_store_roundtrips_metadata_ranges_inventory_and_delete() {
@@ -1221,6 +1227,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_put_overwrite_rejects_parent_swap_race() {
+        let _guard = HOOK_TEST_MUTEX.lock().unwrap();
         let storage = shardline_test_support::TempStorage::new();
         let outside = tempfile::tempdir();
         assert!(outside.is_ok());
@@ -1263,6 +1270,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn local_object_store_rejects_parent_swap_race() {
+        let _guard = HOOK_TEST_MUTEX.lock().unwrap();
         let storage = shardline_test_support::TempStorage::new();
         let outside = tempfile::tempdir();
         assert!(outside.is_ok());
@@ -1665,6 +1673,85 @@ mod tests {
         assert_eq!(store.root(), root);
     }
 
+    // ── list_flat_namespace_page with non-existent prefix ─────────────────---
+
+    #[test]
+    fn local_object_store_list_flat_namespace_empty_prefix_returns_empty() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let prefix = ObjectPrefix::parse("zz/").unwrap();
+        let result = store.list_flat_namespace_page(&prefix, None, 10).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── open_object_file successfully reads existing object ──────────────────
+
+    #[test]
+    fn local_object_store_open_object_file_reads_content() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("ab/readable").unwrap();
+        let body = b"data for file open";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), body.len() as u64);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        let mut file = store.open_object_file(&key).unwrap();
+        use std::io::Read;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, body);
+    }
+
+    // ── put_temporary_file_if_absent rejects wrong length ────────────────────
+
+    #[test]
+    fn local_object_store_temporary_file_wrong_length_rejected() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("ab/wrong-len-tmp").unwrap();
+        let tmp = storage.path().join("wrong.tmp");
+        std::fs::write(&tmp, b"actual-body").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"actual-body"), 999);
+        let result = store.put_temporary_file_if_absent(&key, &tmp, &integrity);
+        assert!(matches!(result, Err(LocalObjectStoreError::IntegrityLengthMismatch)));
+        assert!(tmp.exists(), "temporary file should not be removed on rejected integrity");
+    }
+
+    // ── put_temporary_file_if_absent rejects wrong hash ─────────────────────
+
+    #[test]
+    fn local_object_store_temporary_file_wrong_hash_rejected() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("ab/wrong-hash-tmp").unwrap();
+        let tmp = storage.path().join("wrong-hash.tmp");
+        std::fs::write(&tmp, b"actual-body").unwrap();
+        let wrong_hash = super::chunk_hash(b"different-body");
+        let integrity = ObjectIntegrity::new(wrong_hash, 11);
+        let result = store.put_temporary_file_if_absent(&key, &tmp, &integrity);
+        assert!(matches!(result, Err(LocalObjectStoreError::IntegrityHashMismatch)));
+        assert!(tmp.exists());
+    }
+
+    // ── put_temporary_file_if_absent with non-existent parent dir ------------
+
+    #[test]
+    fn local_object_store_temporary_file_link_error_retains_temp() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("ab/integrity-mismatch").unwrap();
+        // Use a file whose integrity doesn't match what we claim — the verify step fails
+        let tmp = storage.path().join("mismatch.tmp");
+        std::fs::write(&tmp, b"actual-content").unwrap();
+        let wrong_hash = super::chunk_hash(b"different-content");
+        let integrity = ObjectIntegrity::new(wrong_hash, 4);
+        let result = store.put_temporary_file_if_absent(&key, &tmp, &integrity);
+        // Integrity verification should fail (length and hash both wrong)
+        assert!(result.is_err());
+        // Temp file should still exist after error
+        assert!(tmp.exists());
+    }
+
     // ── path_for_key with various keys ──────────────────────────────────────
 
     #[test]
@@ -1760,6 +1847,209 @@ mod tests {
     fn local_store_error_display_invalid_start_after() {
         let err = LocalObjectStoreError::InvalidStartAfter;
         assert_eq!(err.to_string(), "start_after key is outside the requested prefix");
+    }
+
+    // ── chunk_hash ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn local_chunk_hash_consistent() {
+        let a = super::chunk_hash(b"test data");
+        let b = super::chunk_hash(b"test data");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn local_chunk_hash_differs_for_different_inputs() {
+        let a = super::chunk_hash(b"abc");
+        let b = super::chunk_hash(b"xyz");
+        assert_ne!(a, b);
+    }
+
+    // ── verify_integrity locally ─────────────────────────────────────────────
+
+    #[test]
+    fn local_verify_integrity_accepts_matching() {
+        let bytes = b"hello";
+        let integrity = crate::ObjectIntegrity::new(super::chunk_hash(bytes), 5);
+        assert!(super::verify_integrity(bytes, &integrity).is_ok());
+    }
+
+    #[test]
+    fn local_verify_integrity_rejects_length_mismatch() {
+        let bytes = b"hello";
+        let integrity = crate::ObjectIntegrity::new(super::chunk_hash(bytes), 99);
+        assert!(matches!(
+            super::verify_integrity(bytes, &integrity),
+            Err(LocalObjectStoreError::IntegrityLengthMismatch)
+        ));
+    }
+
+    #[test]
+    fn local_verify_integrity_rejects_hash_mismatch() {
+        let bytes = b"hello";
+        let wrong_hash = super::chunk_hash(b"wrong");
+        let integrity = crate::ObjectIntegrity::new(wrong_hash, 5);
+        assert!(matches!(
+            super::verify_integrity(bytes, &integrity),
+            Err(LocalObjectStoreError::IntegrityHashMismatch)
+        ));
+    }
+
+    // ── verify_file_integrity directly ───────────────────────────────────────
+
+    #[test]
+    fn local_verify_file_integrity_accepts_correct_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("verify.bin");
+        std::fs::write(&path, b"file content").unwrap();
+        let integrity = crate::ObjectIntegrity::new(super::chunk_hash(b"file content"), 12);
+        assert!(super::verify_file_integrity(&path, &integrity).is_ok());
+    }
+
+    #[test]
+    fn local_verify_file_integrity_rejects_missing_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("notexist.bin");
+        let integrity = crate::ObjectIntegrity::new(super::chunk_hash(b""), 0);
+        let result = super::verify_file_integrity(&path, &integrity);
+        assert!(result.is_err());
+    }
+
+    // ── object_file_metadata with various paths ──────────────────────────────
+
+    #[test]
+    fn local_object_file_metadata_missing_returns_none() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("ghost.bin");
+        let result = super::object_file_metadata(&path);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn local_object_file_metadata_regular_file_returns_metadata() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("present.bin");
+        std::fs::write(&path, b"data").unwrap();
+        let result = super::object_file_metadata(&path);
+        assert!(matches!(result, Ok(Some(_))));
+    }
+
+    // ── read_dir_if_exists with non-existent path ────────────────────────────
+
+    #[test]
+    fn local_read_dir_if_exists_missing_returns_none() {
+        let storage = shardline_test_support::TempStorage::new();
+        let dir = storage.path().join("does/not/exist");
+        let result = super::read_dir_if_exists(&dir);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    // ─── ensure_file_matches_bytes with length mismatch ──────────────────────
+
+    #[test]
+    fn local_ensure_file_matches_bytes_same_content_ok() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("match-me.bin");
+        std::fs::write(&path, b"matching bytes").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let result = super::ensure_file_matches_bytes(file, b"matching bytes");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn local_ensure_file_matches_bytes_different_content_rejected() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("diff.bin");
+        std::fs::write(&path, b"actual content").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let result = super::ensure_file_matches_bytes(file, b"expected different");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_ensure_file_matches_bytes_longer_file_than_expected_rejected() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("longer.bin");
+        std::fs::write(&path, b"longer file content").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let result = super::ensure_file_matches_bytes(file, b"short");
+        assert!(result.is_err());
+    }
+
+    // ── ensure_files_match with identical and different files ────────────────
+
+    #[test]
+    fn local_ensure_files_match_identical() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path_a = storage.path().join("a.bin");
+        let path_b = storage.path().join("b.bin");
+        std::fs::write(&path_a, b"same data").unwrap();
+        std::fs::write(&path_b, b"same data").unwrap();
+        let a = std::fs::File::open(&path_a).unwrap();
+        let b = std::fs::File::open(&path_b).unwrap();
+        let result = super::ensure_files_match(a, b);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn local_ensure_files_match_different_sizes_rejected() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path_a = storage.path().join("long.bin");
+        let path_b = storage.path().join("short.bin");
+        std::fs::write(&path_a, b"longer content").unwrap();
+        std::fs::write(&path_b, b"short").unwrap();
+        let a = std::fs::File::open(&path_a).unwrap();
+        let b = std::fs::File::open(&path_b).unwrap();
+        let result = super::ensure_files_match(a, b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_ensure_files_match_different_content_same_size_rejected() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path_a = storage.path().join("x.bin");
+        let path_b = storage.path().join("y.bin");
+        std::fs::write(&path_a, b"aaaa bbbb").unwrap();
+        std::fs::write(&path_b, b"bbbb aaaa").unwrap();
+        let a = std::fs::File::open(&path_a).unwrap();
+        let b = std::fs::File::open(&path_b).unwrap();
+        let result = super::ensure_files_match(a, b);
+        assert!(result.is_err());
+    }
+
+    // ── map_directory_path_error covers all variants ─────────────────────────
+
+    #[test]
+    fn local_map_directory_path_error_symlink_variant() {
+        let result = super::map_directory_path_error(
+            crate::DirectoryPathError::SymlinkedComponent(PathBuf::from("/link"))
+        );
+        assert!(matches!(result, LocalObjectStoreError::InvalidObjectPath));
+    }
+
+    #[test]
+    fn local_map_directory_path_error_non_dir_variant() {
+        let result = super::map_directory_path_error(
+            crate::DirectoryPathError::NonDirectoryComponent(PathBuf::from("/file"))
+        );
+        assert!(matches!(result, LocalObjectStoreError::InvalidObjectPath));
+    }
+
+    #[test]
+    fn local_map_directory_path_error_unsupported_prefix_variant() {
+        let result = super::map_directory_path_error(
+            crate::DirectoryPathError::UnsupportedPrefix
+        );
+        assert!(matches!(result, LocalObjectStoreError::InvalidObjectPath));
+    }
+
+    #[test]
+    fn local_map_directory_path_error_io_variant() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let result = super::map_directory_path_error(
+            crate::DirectoryPathError::Io(io_err)
+        );
+        assert!(matches!(result, LocalObjectStoreError::Io(_)));
     }
 
     // ── remove_empty_ancestors ─────────────────────────────────────────────

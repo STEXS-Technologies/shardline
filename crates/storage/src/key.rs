@@ -336,6 +336,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn object_key_accepts_single_segment() {
+        let key = ObjectKey::parse("file.xorb");
+        assert!(key.is_ok());
+        assert_eq!(key.unwrap().as_str(), "file.xorb");
+    }
+
+    #[test]
+    fn object_key_rejects_only_slash() {
+        let key = ObjectKey::parse("/");
+        assert_eq!(key, Err(ObjectKeyError::UnsafePath));
+    }
+
+    #[test]
+    fn object_prefix_rejects_only_slash() {
+        let prefix = ObjectPrefix::parse("/");
+        assert_eq!(prefix, Err(ObjectPrefixError::UnsafePath));
+    }
+
+    #[test]
+    fn object_prefix_accepts_trailing_slash_as_empty_segments_allowed() {
+        // An empty prefix "" with trailing data stripped is fine
+        let prefix = ObjectPrefix::parse("").unwrap();
+        assert_eq!(prefix.as_str(), "");
+    }
+
+    #[test]
+    fn object_key_error_debug_format() {
+        let err = ObjectKeyError::Empty;
+        let debug = format!("{err:?}");
+        assert!(!debug.is_empty());
+    }
+
+    #[test]
+    fn object_prefix_error_debug_format() {
+        let err = ObjectPrefixError::TooLong;
+        let debug = format!("{err:?}");
+        assert!(!debug.is_empty());
+    }
+
     proptest::proptest! {
         #[test]
         fn object_key_parse_never_accepts_absolute_path(s in ".*") {

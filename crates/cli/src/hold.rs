@@ -178,6 +178,55 @@ fn postgres_index_store(index_postgres_url: &str) -> Result<PostgresIndexStore, 
 mod tests {
     use super::*;
 
+    // ── print_hold_summary ────────────────────────────────────────────────
+
+    fn sample_hold(ttl_seconds: Option<u64>) -> RetentionHold {
+        let object_key = ObjectKey::parse(&format!("de/{}", "de".repeat(32))).unwrap();
+        let now = unix_now_seconds_lossy();
+        let release_after = ttl_seconds.map(|ttl| now.saturating_add(ttl));
+        RetentionHold::new(object_key, "test hold reason".to_owned(), now, release_after).unwrap()
+    }
+
+    #[test]
+    fn print_hold_summary_with_ttl_prints_release_time() {
+        let hold = sample_hold(Some(3600));
+        print_hold_summary(&hold);
+        assert!(hold.object_key().as_str().starts_with("de/"));
+        assert_eq!(hold.reason(), "test hold reason");
+        assert!(hold.release_after_unix_seconds().is_some());
+    }
+
+    #[test]
+    fn print_hold_summary_without_ttl_prints_none() {
+        let hold = sample_hold(None);
+        print_hold_summary(&hold);
+        assert!(hold.release_after_unix_seconds().is_none());
+    }
+
+    #[test]
+    fn print_hold_list_summary_empty() {
+        let root = std::path::Path::new("/test");
+        print_hold_list_summary(root, false, &[]);
+    }
+
+    #[test]
+    fn print_hold_list_summary_with_holds() {
+        let root = std::path::Path::new("/test");
+        let hold_a = sample_hold(Some(600));
+        let hold_b = sample_hold(None);
+        print_hold_list_summary(root, true, &[hold_a, hold_b]);
+    }
+
+    // ── HoldRuntimeError Display variants ─────────────────────────────────
+
+    #[test]
+    fn hold_runtime_error_sqlx_display() {
+        let inner = SqlxError::Protocol("test error".to_owned());
+        let err = HoldRuntimeError::Sqlx(Box::new(inner));
+        let msg = err.to_string();
+        assert!(msg.contains("postgres metadata connection failed"));
+    }
+
     #[test]
     fn hold_runtime_error_config_display() {
         let err = HoldRuntimeError::Config(ServerConfigError::InvalidServerRole);

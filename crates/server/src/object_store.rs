@@ -332,8 +332,10 @@ mod tests {
     use shardline_storage::{ObjectKey, ObjectPrefix};
 
     use super::{
-        read_full_object, read_open_local_object_append, reconstruct_chunk_file_bytes,
-        reconstruct_file_record_bytes, reconstruct_local_file_bytes, set_before_local_object_read_hook,
+        read_full_object, read_open_local_object_append,
+        reconstruct_chunk_file_bytes, reconstruct_file_record_bytes,
+        reconstruct_local_file_bytes, set_before_local_object_read_hook,
+
         visit_object_prefix,
     };
     use crate::ServerError;
@@ -800,5 +802,214 @@ mod tests {
                 crate::error::ObjectStoreError::Local(_)
             )
         ));
+    }
+
+    // ── read_open_local_object (standalone, not via append) ─────────────
+
+    #[test]
+    fn read_open_local_object_reads_exact_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.bin");
+        let data = b"exact-length-content";
+        std::fs::write(&path, data).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+
+        let result = super::read_open_local_object(&path, file, data.len() as u64);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), data);
+    }
+
+    #[test]
+    fn read_open_local_object_rejects_trailing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trailing2.bin");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+
+        // Claim only 5 bytes — file has 8
+        let result = super::read_open_local_object(&path, file, 5);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    #[test]
+    fn read_open_local_object_rejects_shorter_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short2.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+
+        // Claim 10 bytes — file has 3
+        let result = super::read_open_local_object(&path, file, 10);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    // ── validate_local_object_length ────────────────────────────────────
+
+    #[test]
+    fn validate_local_object_length_exact_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact_len.bin");
+        std::fs::write(&path, b"12345").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let result = super::validate_local_object_length(&file, 5);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
+    }
+
+    #[test]
+    fn validate_local_object_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mismatch_len.bin");
+        std::fs::write(&path, b"12345").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let result = super::validate_local_object_length(&file, 10);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    // ── reconstruct_referenced_object_file_bytes (ReferencedObjectTerms) ─
+
+    #[test]
+    fn reconstruct_referenced_object_file_bytes_rejects_non_contiguous_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+        let record = shardline_index::FileRecord {
+            file_id: "ref.bin".to_owned(),
+            content_hash: "aa".repeat(32),
+            total_bytes: 10,
+            chunk_size: 0, // ReferencedObjectTerms layout
+            repository_scope: None,
+            chunks: vec![shardline_index::FileChunkRecord {
+                hash: "cc".repeat(32),
+                offset: 10, // non-contiguous (should start at 0)
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+        // With no frontends, append_referenced_term_bytes will attempt to
+        // find the term object and fail. The offset check happens first.
+        let result = super::reconstruct_file_record_bytes(&store, &[], &record);
+        assert!(result.is_err());
+    }
+
+    // ── reconstruct_chunk_file_bytes general fallback path ───────────────
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_non_local_store_uses_read_full_object() {
+        // Using blackhole as non-local store — read_full_object will return NotFound
+        let store = ServerObjectStore::blackhole();
+        let hash = "11".repeat(32);
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }];
+        let result = reconstruct_chunk_file_bytes(&store, &chunks, 4);
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    // ── visit_object_prefix with local store ────────────────────────────
+
+    #[test]
+    fn visit_object_prefix_with_local_store_lists_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+        let key = ObjectKey::parse("prefix/obj").unwrap();
+        let path = dir.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"data").unwrap();
+
+        let prefix = ObjectPrefix::parse("prefix").unwrap();
+        let mut count = 0;
+        visit_object_prefix(&store, &prefix, |_meta| {
+            count += 1;
+            Ok(())
+        }).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // ── object_store_from_config S3 adapter with s3 config ───────────────
+
+    #[test]
+    fn object_store_from_config_s3_with_config_returns_s3_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s3_config = shardline_storage::S3ObjectStoreConfig::new(
+            "bucket".to_owned(),
+            "us-east-1".to_owned(),
+        );
+        let config = crate::ServerConfig::new(
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                8080,
+            ),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
+        )
+        .with_object_storage(crate::ObjectStorageAdapter::S3, Some(s3_config));
+        let store = super::object_store_from_config(&config);
+        assert!(store.is_ok());
+        assert!(store.unwrap().local_root().is_none());
+    }
+
+    // ── read_full_object with local store (read_open_local_object path) ─
+
+    #[test]
+    fn read_full_object_local_store_rejects_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+        let key = ObjectKey::parse("mismatch-obj").unwrap();
+        let object_path = dir.path().join(key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_path, b"short").unwrap();
+        // Claim 100 bytes — file has 5
+        let result = read_full_object(&store, &key, 100);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
+    #[test]
+    fn read_full_object_local_store_zero_length_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+        let key = ObjectKey::parse("empty-obj").unwrap();
+        let object_path = dir.path().join(key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_path, b"").unwrap();
+        let result = read_full_object(&store, &key, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"");
+    }
+
+    // ── take_local_object_read_hook_for_path ────────────────────────────
+
+    #[test]
+    fn take_local_object_read_hook_for_path_returns_none_for_mismatched_path() {
+        let result = super::take_local_object_read_hook_for_path(
+            &mut None,
+            std::path::Path::new("/nonexistent"),
+        );
+        assert!(result.is_none());
     }
 }

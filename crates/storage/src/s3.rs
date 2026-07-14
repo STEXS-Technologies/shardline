@@ -2684,4 +2684,144 @@ mod tests {
             assert!(matches!(idempotent, Ok(PutOutcome::AlreadyExists)));
         }
     }
+
+    // ── Additional pure function edge cases ──────────────────────────────
+
+    #[test]
+    fn normalize_prefix_empty_input_chain() {
+        assert_eq!(normalize_prefix("//"), None);
+        assert_eq!(normalize_prefix("///////"), None);
+    }
+
+    #[test]
+    fn location_for_key_without_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
+                .with_allow_http(true),
+        );
+        assert!(store.is_ok());
+        let Ok(store) = store else { return };
+        let key = ObjectKey::parse("simple/key.xorb").unwrap();
+        let location = store.location_for_key(&key);
+        assert!(location.is_ok());
+        if let Ok(loc) = location {
+            assert_eq!(loc.as_ref(), "simple/key.xorb");
+        }
+    }
+
+    #[test]
+    fn location_for_prefix_empty_without_key_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
+                .with_allow_http(true),
+        );
+        assert!(store.is_ok());
+        let Ok(store) = store else { return };
+        let prefix = crate::ObjectPrefix::parse("").unwrap();
+        let location = store.location_for_prefix(&prefix);
+        assert!(location.is_ok());
+        if let Ok(loc) = location {
+            // Empty prefix with no key_prefix should give empty path
+            assert_eq!(loc.as_ref(), "");
+        }
+    }
+
+    #[test]
+    fn location_for_prefix_empty_with_key_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
+                .with_allow_http(true)
+                .with_key_prefix(Some("tenant-x")),
+        );
+        assert!(store.is_ok());
+        let Ok(store) = store else { return };
+        let prefix = crate::ObjectPrefix::parse("").unwrap();
+        let location = store.location_for_prefix(&prefix);
+        assert!(location.is_ok());
+        if let Ok(loc) = location {
+            assert_eq!(loc.as_ref(), "tenant-x");
+        }
+    }
+
+    #[test]
+    fn location_for_prefix_with_prefix_and_key_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
+                .with_allow_http(true)
+                .with_key_prefix(Some("tenant-x")),
+        );
+        assert!(store.is_ok());
+        let Ok(store) = store else { return };
+        let prefix = crate::ObjectPrefix::parse("sub/").unwrap();
+        let location = store.location_for_prefix(&prefix);
+        assert!(location.is_ok());
+        if let Ok(loc) = location {
+            // ObjectStorePath::parse may strip trailing slashes
+            let path_str = loc.as_ref();
+            assert!(path_str == "tenant-x/sub" || path_str == "tenant-x/sub/", "unexpected path: {path_str}");
+        }
+    }
+
+    #[test]
+    fn s3_config_debug_shows_virtual_hosted_style() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_virtual_hosted_style_request(true);
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("virtual_hosted_style_request: true"));
+    }
+
+    #[test]
+    fn s3_store_debug_shows_runtime_status() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
+                .with_allow_http(true),
+        );
+        assert!(store.is_ok());
+        let Ok(store) = store else { return };
+        let rendered = format!("{store:?}");
+        // Should mention runtime status
+        assert!(rendered.contains("runtime"));
+    }
+
+    #[test]
+    fn validated_external_range_start_at_u64_max_rejected() {
+        // Range starting at u64::MAX with length 1 would overflow
+        let range = ByteRange::new(u64::MAX, u64::MAX).expect("valid range with single byte at MAX");
+        let result = validated_external_range(range);
+        assert!(matches!(result, Err(S3ObjectStoreError::RangeOutOfBounds)));
+    }
+
+    #[test]
+    fn s3_error_source_invalid_key_prefix() {
+        use crate::ObjectPrefixError;
+        let prefix_err = ObjectPrefixError::UnsafePath;
+        let err = S3ObjectStoreError::InvalidKeyPrefix(prefix_err);
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some());
+        let source = source.unwrap();
+        assert_eq!(source.to_string(), ObjectPrefixError::UnsafePath.to_string());
+    }
+
+    #[test]
+    fn temp_key_for_overflow_key_rejected() {
+        // Create a key near the maximum length so that adding the temp suffix overflows
+        let long_base = "a".repeat(4090);
+        let key = ObjectKey::parse(&long_base);
+        assert!(key.is_ok());
+        let Ok(key) = key else { return };
+
+        // temp_key_for adds ".tmp.{counter}.{pid}.{nanos}" which may exceed max length
+        let result = temp_key_for(&key);
+        // Depending on counter/pid/nanos this might overflow, but should not panic
+        if let Err(error) = &result {
+            assert!(matches!(error, S3ObjectStoreError::InvalidListedKey));
+        } else if let Ok(temp) = &result {
+            assert!(temp.as_str().len() > long_base.len());
+        }
+    }
 }

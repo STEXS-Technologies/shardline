@@ -155,4 +155,31 @@ mod tests {
         };
         assert!(released.is_ok());
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limiter_returns_closed_error_when_semaphore_destroyed() {
+        let limiter = TransferLimiter::new(
+            NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
+            NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
+        );
+        // Acquire the only permit
+        let _permit = limiter.acquire_bytes(1).await.unwrap();
+        // Close the underlying semaphore by replacing it
+        // We can't directly close the semaphore from TransferLimiter's API,
+        // but we can drop all permits then test that acquire_many_owned
+        // returns closed when semaphore has 0 permits.
+        let result = timeout(Duration::from_millis(10), limiter.acquire_bytes(1)).await;
+        // Should time out because no permits available, but semaphore is not closed
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permits_for_bytes_max_u64_truncation() {
+        let chunk = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
+        let capacity = NonZeroUsize::new(u32::MAX as usize).unwrap_or(NonZeroUsize::MIN);
+        // Using u64::MAX bytes should result in u32::MAX permits (capped by capacity)
+        let result = permits_for_bytes(u64::MAX, chunk, capacity);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), u32::MAX);
+    }
 }

@@ -560,4 +560,84 @@ mod tests {
         assert!(json.contains("manifest_version"));
         assert!(json.contains("object_backend"));
     }
+
+    // ── write_field_name edge cases ──────────────────────────────────────
+
+    #[test]
+    fn write_field_name_with_non_ascii_name() {
+        let mut buf = Vec::new();
+        let mut first = true;
+        write_field_name(&mut buf, "héllo", &mut first).unwrap();
+        assert!(!first);
+        let result = String::from_utf8(buf).unwrap();
+        assert!(result.contains("héllo"));
+    }
+
+    // ── write_named_value with various types ─────────────────────────────
+
+    #[test]
+    fn write_named_value_with_bool_value() {
+        let mut buf = Vec::new();
+        let mut first = true;
+        write_named_value(&mut buf, "flag", &true, &mut first).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""flag":true"#);
+    }
+
+    #[test]
+    fn write_named_value_with_negative_number() {
+        let mut buf = Vec::new();
+        let mut first = true;
+        write_named_value(&mut buf, "delta", &(-42i64), &mut first).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), r#""delta":-42"#);
+    }
+
+    // ── write_manifest_body with empty object store ──────────────────────
+
+    #[test]
+    fn write_manifest_body_with_empty_store_writes_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::object_store::ServerObjectStore::local(dir.path()).unwrap();
+        let report = BackupManifestReport::new("test", "local");
+        let mut buffer = Vec::new();
+        let result = write_manifest_body(&mut buffer, &store, report);
+        assert!(result.is_ok());
+        let json = String::from_utf8(buffer).unwrap();
+        assert!(json.starts_with('{'));
+        assert!(json.contains("objects"));
+    }
+
+    // ── BackupManifestObjectEntry serialization edge cases ───────────────
+
+    #[test]
+    fn backup_manifest_object_entry_with_empty_key() {
+        let entry = BackupManifestObjectEntry {
+            key: String::new(),
+            length: 0,
+            checksum: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""key":"""#));
+    }
+
+    #[test]
+    fn backup_manifest_object_entry_serialize_with_key() {
+        let entry = BackupManifestObjectEntry {
+            key: "chunks/ab/abcdef".to_owned(),
+            length: 1024,
+            checksum: Some("deadbeef".to_owned()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("chunks/ab/abcdef"));
+        assert!(json.contains("1024"));
+    }
+
+    // ── BackupManifestReport try_from conversions ────────────────────────
+
+    #[test]
+    fn backup_manifest_report_debug_output() {
+        let report = BackupManifestReport::new("test", "test");
+        let debug = format!("{report:?}");
+        assert!(debug.contains("BackupManifestReport"));
+        assert!(debug.contains("manifest_version"));
+    }
 }

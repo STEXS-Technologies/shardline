@@ -185,8 +185,10 @@ mod tests {
     use std::path::Path;
 
     use shardline_server::{
-        DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairReport, LocalFsckReport,
-        LocalIndexRebuildReport, ServerConfigError,
+        DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, FsckIssueDetail, FsckIssueKind,
+        IndexRebuildIssueDetail, LifecycleRepairReport, LocalFsckIssue, LocalFsckReport,
+        LocalIndexRebuildIssue, LocalIndexRebuildIssueKind, LocalIndexRebuildReport,
+        ServerConfigError,
     };
 
     use super::{LifecycleRepairOptions, RepairReport, RepairRuntimeError};
@@ -270,6 +272,57 @@ mod tests {
         }
     }
 
+    fn report_with_issues() -> RepairReport {
+        RepairReport {
+            index_rebuild: LocalIndexRebuildReport {
+                scanned_version_records: 10,
+                scanned_retained_shards: 5,
+                rebuilt_latest_records: 3,
+                unchanged_latest_records: 6,
+                removed_stale_latest_records: 1,
+                scanned_reconstructions: 8,
+                unchanged_reconstructions: 6,
+                removed_stale_reconstructions: 2,
+                rebuilt_dedupe_shard_mappings: 4,
+                unchanged_dedupe_shard_mappings: 10,
+                removed_stale_dedupe_shard_mappings: 1,
+                issues: vec![LocalIndexRebuildIssue {
+                    kind: LocalIndexRebuildIssueKind::InvalidVersionRecordJson,
+                    location: "records/abc".to_owned(),
+                    detail: IndexRebuildIssueDetail::RecordJsonInvalid,
+                }],
+            },
+            lifecycle_repair: LifecycleRepairReport {
+                scanned_records: 100,
+                referenced_objects: 50,
+                scanned_quarantine_candidates: 20,
+                removed_missing_quarantine_candidates: 2,
+                removed_reachable_quarantine_candidates: 5,
+                removed_held_quarantine_candidates: 1,
+                scanned_retention_holds: 10,
+                removed_expired_retention_holds: 3,
+                removed_missing_retention_holds: 1,
+                scanned_webhook_deliveries: 200,
+                removed_stale_webhook_deliveries: 50,
+                removed_future_webhook_deliveries: 5,
+            },
+            fsck: LocalFsckReport {
+                latest_records: 100,
+                version_records: 200,
+                inspected_chunk_references: 1500,
+                inspected_dedupe_shard_mappings: 50,
+                inspected_reconstructions: 25,
+                inspected_webhook_deliveries: 10,
+                inspected_provider_repository_states: 5,
+                issues: vec![LocalFsckIssue {
+                    kind: FsckIssueKind::MissingChunk,
+                    location: "chunks/xyz".to_owned(),
+                    detail: FsckIssueDetail::RecordJsonInvalid,
+                }],
+            },
+        }
+    }
+
     #[test]
     fn repair_report_constructs_defaults() {
         let report = empty_repair_report();
@@ -279,8 +332,25 @@ mod tests {
     }
 
     #[test]
+    fn repair_report_with_data_reports_correct_counts() {
+        let report = report_with_issues();
+        assert_eq!(report.index_rebuild.scanned_version_records, 10);
+        assert_eq!(report.index_rebuild.issue_count(), 1);
+        assert_eq!(report.lifecycle_repair.scanned_records, 100);
+        assert_eq!(report.fsck.issue_count(), 1);
+        assert!(!report.fsck.is_clean());
+        assert!(!report.index_rebuild.is_clean());
+    }
+
+    #[test]
     fn repair_report_print_summary_runs() {
         let report = empty_repair_report();
+        report.print_summary();
+    }
+
+    #[test]
+    fn repair_report_print_summary_with_data_runs() {
+        let report = report_with_issues();
         report.print_summary();
     }
 
@@ -291,7 +361,13 @@ mod tests {
     }
 
     #[test]
-    fn repair_report_print_issues_runs() {
+    fn repair_report_print_issues_with_data() {
+        let report = report_with_issues();
+        report.print_issues();
+    }
+
+    #[test]
+    fn repair_report_print_issues_empty() {
         let report = empty_repair_report();
         report.print_issues();
     }
