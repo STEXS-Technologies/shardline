@@ -13,3 +13,4 @@ e2e_plan.md
 opencode-todo.md
 tarpaulin-report.json
 lcov*.info
+*.profraw
