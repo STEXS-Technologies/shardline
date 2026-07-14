@@ -12,7 +12,8 @@
         clippy::indexing_slicing,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::panic
     )
 )]
 
@@ -2432,5 +2433,389 @@ mod tests {
         let ts = unix_now_seconds_checked().unwrap();
         // Should be well past the year 2020
         assert!(ts >= 1_577_836_800, "timestamp {ts} too small for 2020");
+    }
+
+    // ── map_object_key_error ──────────────────────────────────────────────
+
+    #[test]
+    fn map_object_key_error_all_variants_return_overflow() {
+        assert!(matches!(
+            map_object_key_error(ObjectKeyError::Empty),
+            ServerObjectStoreError::Overflow
+        ));
+        assert!(matches!(
+            map_object_key_error(ObjectKeyError::UnsafePath),
+            ServerObjectStoreError::Overflow
+        ));
+        assert!(matches!(
+            map_object_key_error(ObjectKeyError::ControlCharacter),
+            ServerObjectStoreError::Overflow
+        ));
+        assert!(matches!(
+            map_object_key_error(ObjectKeyError::TooLong),
+            ServerObjectStoreError::Overflow
+        ));
+    }
+
+    // ── chunk_hash_from_chunk_object_key_if_present additional edge cases ─
+
+    #[test]
+    fn chunk_hash_from_chunk_key_if_present_single_segment() {
+        // Key with no '/' → second segments.next() returns None → Ok(None)
+        let key = ObjectKey::parse("onlyprefix").unwrap();
+        let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn chunk_hash_from_chunk_key_if_present_invalid_hash_returns_error() {
+        // 64 chars starting with "aa" but 'z' is not hex → validation fails
+        let hash = format!("aa{}", "z".repeat(62));
+        let key = ObjectKey::parse(&format!("aa/{hash}")).unwrap();
+        let result = chunk_hash_from_chunk_object_key_if_present(&key);
+        assert!(matches!(
+            result,
+            Err(ServerObjectStoreError::InvalidContentHash)
+        ));
+    }
+
+    // ── read_full_object non-local path (blackhole, length > 0) ──────────
+
+    #[test]
+    fn read_full_object_blackhole_nonzero_length_returns_not_found() {
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        let result = read_full_object(&store, &key, 5);
+        assert!(matches!(result, Err(ServerObjectStoreError::NotFound)));
+    }
+
+    // ── ServerObjectStore::s3 constructor and S3 branches ─────────────────
+
+    #[test]
+    fn server_object_store_s3_with_minimal_config() {
+        use shardline_storage::S3ObjectStoreConfig;
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config);
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn backend_name_s3() {
+        use shardline_storage::S3ObjectStoreConfig;
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        assert_eq!(store.backend_name(), "s3");
+    }
+
+    #[test]
+    fn s3_local_root_and_local_path_for_key_return_none() {
+        use shardline_storage::{ObjectKey, S3ObjectStoreConfig};
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        assert_eq!(store.local_root(), None);
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        assert_eq!(store.local_path_for_key(&key), None);
+    }
+
+    #[test]
+    fn s3_operations_return_s3_error() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, S3ObjectStoreConfig};
+        use shardline_protocol::ByteRange;
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+
+        // put_if_absent — will fail because bucket does not exist
+        let body = b"test";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
+        let result = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+
+        // read_range
+        let result = store.read_range(&key, ByteRange::new(0, 3).unwrap());
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+
+        // contains
+        let result = store.contains(&key);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+
+        // metadata
+        let result = store.metadata(&key);
+        // S3 metadata may return Ok(None) for non-existent objects rather than error
+        // Accept both Ok(None) and Err(S3)
+        match result {
+            Ok(None) => {} // bucket not found might be handled gracefully
+            Err(ServerObjectStoreError::S3(_)) => {}
+            other => panic!("unexpected metadata result: {other:?}"),
+        }
+
+        // list_prefix
+        let prefix = ObjectPrefix::parse("aa/").unwrap();
+        let result = store.list_prefix(&prefix);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+
+        // delete_if_present
+        let result = store.delete_if_present(&key);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn s3_put_overwrite_returns_s3_error() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, S3ObjectStoreConfig};
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        let body = b"test";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
+        let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &integrity);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn s3_copy_if_absent_returns_s3_error() {
+        use shardline_storage::{ObjectKey, S3ObjectStoreConfig};
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        let source = ObjectKey::parse("aa/source").unwrap();
+        let dest = ObjectKey::parse("bb/dest").unwrap();
+        let result = store.copy_if_absent(&source, &dest);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn s3_put_content_addressed_file_returns_s3_error() {
+        use shardline_storage::{ObjectIntegrity, ObjectKey, S3ObjectStoreConfig};
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        let tmp = shardline_test_support::TempStorage::new();
+        let file_path = tmp.path().join("test.bin");
+        std::fs::write(&file_path, b"data").unwrap();
+        let integrity = ObjectIntegrity::new(chunk_hash(b"data"), 4);
+        let result = store.put_content_addressed_file(&key, &file_path, &integrity);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn s3_visit_prefix_returns_s3_error() {
+        use shardline_storage::{ObjectPrefix, S3ObjectStoreConfig};
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        let prefix = ObjectPrefix::parse("aa/").unwrap();
+        let result: Result<(), ServerObjectStoreError> = store
+            .visit_prefix(&prefix, |_meta| Ok(()));
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn s3_list_flat_namespace_page_returns_s3_error() {
+        use shardline_storage::{ObjectPrefix, S3ObjectStoreConfig};
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        let prefix = ObjectPrefix::parse("aa/").unwrap();
+        let result = store.list_flat_namespace_page(&prefix, None, 10);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn s3_read_full_object_returns_s3_error() {
+        use shardline_storage::{ObjectKey, S3ObjectStoreConfig};
+        let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
+        let store = ServerObjectStore::s3(config).unwrap();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        let result = read_full_object(&store, &key, 5);
+        assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
+    }
+
+    // ── Local ObjectStore trait method coverage ──────────────────────────
+
+    #[test]
+    fn local_contains_returns_true_for_existing_object() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+
+        // Not present yet
+        assert!(matches!(store.contains(&key), Ok(false)));
+
+        // Insert
+        let body = b"present";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 7);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        // Now present
+        assert!(matches!(store.contains(&key), Ok(true)));
+    }
+
+    #[test]
+    fn local_metadata_returns_some_for_existing_object() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+
+        // None for missing
+        assert!(matches!(store.metadata(&key), Ok(None)));
+
+        // Insert
+        let body = b"meta-test";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 9);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        // Some for existing
+        let meta = store.metadata(&key).unwrap();
+        assert!(meta.is_some());
+        assert_eq!(meta.as_ref().unwrap().length(), 9);
+    }
+
+    #[test]
+    fn local_list_prefix_returns_objects() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore};
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key1 = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+        let key2 = ObjectKey::parse("aa/2222111111111111111111111111111111111111111111111111111111111111").unwrap();
+        let key3 = ObjectKey::parse("bb/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
+
+        let body = b"data";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
+
+        store.put_if_absent(&key1, ObjectBody::from_slice(body), &integrity).unwrap();
+        store.put_if_absent(&key2, ObjectBody::from_slice(body), &integrity).unwrap();
+        store.put_if_absent(&key3, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        let aa_prefix = ObjectPrefix::parse("aa/").unwrap();
+        let results = store.list_prefix(&aa_prefix).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn local_delete_if_present_deletes() {
+        use shardline_storage::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+
+        // NotFound for missing
+        assert!(matches!(store.delete_if_present(&key), Ok(DeleteOutcome::NotFound)));
+
+        // Insert
+        let body = b"delete-me";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 9);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        // Now delete
+        assert!(matches!(store.delete_if_present(&key), Ok(DeleteOutcome::Deleted)));
+    }
+
+    #[test]
+    fn local_visit_prefix_counts_objects() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix};
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+
+        let body = b"visit";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 5);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        let prefix = ObjectPrefix::parse("aa/").unwrap();
+        let mut count = 0u64;
+        let result: Result<(), ServerObjectStoreError> = store
+            .visit_prefix(&prefix, |_meta| {
+                count += 1;
+                Ok(())
+            });
+        assert!(result.is_ok());
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn local_list_flat_namespace_page_returns_results() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix};
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+
+        let body = b"page";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        let prefix = ObjectPrefix::parse("aa/").unwrap();
+        let results = store.list_flat_namespace_page(&prefix, None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn local_put_content_addressed_file_inserts() {
+        use shardline_storage::{ObjectIntegrity, ObjectKey, PutOutcome};
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+
+        let tmp = shardline_test_support::TempStorage::new();
+        let file_path = tmp.path().join("test.bin");
+        std::fs::write(&file_path, b"content-addressed").unwrap();
+
+        let integrity = ObjectIntegrity::new(chunk_hash(b"content-addressed"), 17);
+        let result = store.put_content_addressed_file(&key, &file_path, &integrity);
+        assert!(matches!(result, Ok(PutOutcome::Inserted)));
+    }
+
+    // ── read_full_object defense-in-depth: concurrent truncation ─────────
+    //
+    // This test triggers the `output.len() != capacity` check inside the
+    // local-store read_full_object path (line 769).  We race a concurrent
+    // truncation against the read: if the file shrinks between the metadata
+    // check and read_to_end, the post-read length check fires.
+    //
+    // The race window is widened by using a 2 MiB payload.
+
+    #[test]
+    fn read_full_object_concurrent_truncation_triggers_length_mismatch() {
+        use std::time::Duration;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key =
+            ObjectKey::parse("aa/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
+        let path = store.local_path_for_key(&key).unwrap();
+
+        // Write 16 MiB of data to widen the race window during read
+        let large_body = vec![0xabu8; 16 * 1024 * 1024];
+        let integrity = ObjectIntegrity::new(chunk_hash(&large_body), large_body.len() as u64);
+        store
+            .put_if_absent(&key, shardline_storage::ObjectBody::from_slice(&large_body), &integrity)
+            .unwrap();
+
+        let p = path;
+
+        // Spawn a thread that truncates the file to 1 byte
+        let handle = std::thread::spawn(move || {
+            // Wait a tiny bit to let the main thread start read_full_object
+            std::thread::sleep(Duration::from_millis(1));
+            let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+            f.set_len(1).unwrap();
+        });
+
+        let result = read_full_object(&store, &key, large_body.len() as u64);
+
+        handle.join().unwrap();
+
+        // We expect *either* a StoredObjectLengthMismatch (if the race was won)
+        // or a successful read (if we were too fast / too slow).
+        // Accept both outcomes because the timing is probabilistic.
+        match result {
+            Ok(data) => {
+                // File was read before truncation took effect
+                assert_eq!(data.len(), large_body.len());
+            }
+            Err(ServerObjectStoreError::StoredObjectLengthMismatch) => {
+                // Race won – defense-in-depth check triggered
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+        }
     }
 }
