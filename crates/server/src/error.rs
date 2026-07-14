@@ -1422,4 +1422,16 @@ mod tests {
         let err = ServerError::HashParse(HashParseError::InvalidLength);
         assert_eq!(err.to_string(), "invalid content hash");
     }
+
+    #[test]
+    fn server_error_display_expected_body_hash_mismatch() {
+        let err = ServerError::ExpectedBodyHashMismatch;
+        assert_eq!(err.to_string(), "uploaded body hash did not match the expected sha256");
+    }
+
+    #[test]
+    fn server_error_display_not_found() {
+        let err = ServerError::NotFound;
+        assert_eq!(err.to_string(), "content not found");
+    }
 }

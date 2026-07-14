@@ -1518,6 +1518,233 @@ mod tests {
         assert!(!msg.is_empty());
     }
 
+    // ── unix_now_seconds_checked ────────────────────────────────────
+
+    #[test]
+    fn unix_now_seconds_checked_returns_ok() {
+        let result = unix_now_seconds_checked();
+        assert!(result.is_ok());
+        let seconds = result.unwrap();
+        assert!(seconds > 1_700_000_000, "timestamp should be plausible");
+    }
+
+    // ── object_location_display ─────────────────────────────────────
+
+    #[test]
+    fn object_location_display_with_local_store() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_root = storage.path().join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+        let key = ObjectKey::parse("ab/cdef1234").unwrap();
+        let display = object_location_display(&object_root, &object_store, &key);
+        assert!(!display.is_empty());
+        assert!(
+            display.contains("ab"),
+            "expected display to contain 'ab', got: {display}"
+        );
+        assert!(
+            display.contains("cdef1234"),
+            "expected display to contain 'cdef1234', got: {display}"
+        );
+    }
+
+    // ── run_local_fsck ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_local_fsck_with_temp_dir_returns_clean() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let report = run_local_fsck(root).await.unwrap();
+        assert!(report.is_clean());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_local_fsck_with_non_existent_dir_errors() {
+        let root = PathBuf::from("/nonexistent/fsck-test-dir-12345");
+        let result = run_local_fsck(root).await;
+        assert!(result.is_err());
+    }
+
+    // ── run_fsck_with_stores with LocalRecordStore ──────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_memory_index_store_returns_clean() {
+        use shardline_index::MemoryIndexStore;
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(report.latest_records, 0);
+        assert_eq!(report.version_records, 0);
+    }
+
+    // ── FsckIssue Debug ─────────────────────────────────────────────
+
+    #[test]
+    fn fsck_issue_debug_format() {
+        let issue = FsckIssue {
+            kind: FsckIssueKind::MissingChunk,
+            location: "test/location".to_owned(),
+            detail: FsckIssueDetail::RecordJsonInvalid,
+        };
+        let debug = format!("{issue:?}");
+        assert!(debug.contains("MissingChunk"), "debug: {debug}");
+        assert!(debug.contains("test/location"), "debug: {debug}");
+    }
+
+    #[test]
+    fn fsck_issue_debug_with_detailed_variant() {
+        let issue = FsckIssue {
+            kind: FsckIssueKind::ChunkHashMismatch,
+            location: "chunk/loc".to_owned(),
+            detail: FsckIssueDetail::HashMismatch {
+                expected_hash: "abc".to_owned(),
+                observed_hash: "def".to_owned(),
+            },
+        };
+        let debug = format!("{issue:?}");
+        assert!(debug.contains("ChunkHashMismatch"), "debug: {debug}");
+        assert!(debug.contains("abc"), "debug: {debug}");
+    }
+
+    // ── Additional FsckIssueDetail Display variants ─────────────────
+
+    #[test]
+    fn fsck_issue_detail_display_invalid_quarantine_timeline() {
+        let detail = FsckIssueDetail::InvalidQuarantineTimeline {
+            delete_after_unix_seconds: 10,
+            first_seen_unreachable_at_unix_seconds: 100,
+        };
+        let msg = detail.to_string();
+        assert!(msg.contains("10"), "msg: {msg}");
+        assert!(msg.contains("100"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_invalid_retention_timeline() {
+        let detail = FsckIssueDetail::InvalidRetentionTimeline {
+            release_after_unix_seconds: 50,
+            held_at_unix_seconds: 100,
+        };
+        let msg = detail.to_string();
+        assert!(msg.contains("50"), "msg: {msg}");
+        assert!(msg.contains("100"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_active_retention_hold_reason() {
+        let detail = FsckIssueDetail::ActiveRetentionHoldReason {
+            reason: "legal hold".to_owned(),
+        };
+        let msg = detail.to_string();
+        assert!(msg.contains("legal hold"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_active_retention_hold_quarantined() {
+        let detail = FsckIssueDetail::ActiveRetentionHoldQuarantined;
+        let msg = detail.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_webhook_delivery_timestamp_exceeded() {
+        let detail = FsckIssueDetail::WebhookDeliveryTimestampExceeded {
+            processed_at_unix_seconds: 2000,
+            max_allowed_unix_seconds: 1000,
+        };
+        let msg = detail.to_string();
+        assert!(msg.contains("2000"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_provider_repository_identity_invalid() {
+        let detail = FsckIssueDetail::ProviderRepositoryIdentityInvalid;
+        let msg = detail.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_provider_state_timestamp_exceeded() {
+        let detail = FsckIssueDetail::ProviderRepositoryStateTimestampExceeded {
+            field: ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
+            timestamp: 2000,
+            max_allowed_unix_seconds: 1000,
+        };
+        let msg = detail.to_string();
+        assert!(msg.contains("2000"), "msg: {msg}");
+        assert!(
+            msg.contains("last_access_changed_at_unix_seconds"),
+            "msg: {msg}"
+        );
+    }
+
+    // ── Extra FsckError Display coverage ─────────────────────────────
+
+    #[test]
+    fn fsck_error_display_numeric_conversion() {
+        let err = FsckError::NumericConversion(u64::try_from(-1i32).unwrap_err());
+        let msg = err.to_string();
+        assert!(msg.contains("numeric conversion"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_error_display_local_object_store() {
+        use shardline_storage::LocalObjectStoreError;
+        let err = FsckError::LocalObjectStore(LocalObjectStoreError::Io(std::io::Error::other(
+            "disk error",
+        )));
+        let msg = err.to_string();
+        assert!(msg.contains("local storage"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_error_display_s3_object_store() {
+        use shardline_storage::S3ObjectStoreError;
+        let err =
+            FsckError::S3ObjectStore(S3ObjectStoreError::IncompleteCredentials);
+        let msg = err.to_string();
+        assert!(msg.contains("s3 object"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_error_display_xet_adapter() {
+        use shardline_xet_adapter::XetAdapterError;
+        let err = FsckError::XetAdapter(XetAdapterError::NotFound);
+        let msg = err.to_string();
+        assert!(msg.contains("xet adapter"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_error_display_memory_index_store() {
+        use shardline_index::MemoryIndexStoreError;
+        let err = FsckError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned);
+        let msg = err.to_string();
+        assert!(msg.contains("memory index"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_error_display_memory_record_store() {
+        use shardline_index::MemoryRecordStoreError;
+        let err = FsckError::MemoryRecordStore(MemoryRecordStoreError::RecordNotFound);
+        let msg = err.to_string();
+        assert!(msg.contains("memory record"), "msg: {msg}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn run_fsck_with_missing_reconstruction_detected() {
         use shardline_index::{

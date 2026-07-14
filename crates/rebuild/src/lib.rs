@@ -950,6 +950,114 @@ mod tests {
         assert_eq!(report.removed_stale_reconstructions, 0);
     }
 
+    // ---- run_index_rebuild_with_stores integration ----
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_index_rebuild_with_empty_stores_returns_clean_report() {
+        use shardline_index::MemoryIndexStore;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let object_root = root.join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+
+        let report = run_index_rebuild_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+        assert_eq!(report.scanned_version_records, 0);
+        assert_eq!(report.scanned_retained_shards, 0);
+        assert_eq!(report.rebuilt_latest_records, 0);
+        assert_eq!(report.unchanged_latest_records, 0);
+        assert_eq!(report.removed_stale_latest_records, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_index_rebuild_with_single_version_record_produces_latest() {
+        use shardline_index::{MemoryIndexStore, RecordMutation};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let object_root = root.join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+
+        // Write a valid version record
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_version_record(&record).await.unwrap();
+
+        let report = run_index_rebuild_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+        assert_eq!(report.scanned_version_records, 1);
+        assert_eq!(report.rebuilt_latest_records, 1);
+        assert_eq!(report.unchanged_latest_records, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_index_rebuild_with_existing_latest_unchanged() {
+        use shardline_index::{MemoryIndexStore, RecordMutation};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let object_root = root.join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file-id".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_version_record(&record).await.unwrap();
+        record_store.write_latest_record(&record).await.unwrap();
+
+        let report = run_index_rebuild_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+        assert_eq!(report.scanned_version_records, 1);
+        assert_eq!(report.rebuilt_latest_records, 0);
+        assert_eq!(report.unchanged_latest_records, 1);
+    }
+
     // ---- desired_reconstruction_file_ids preserves dirty report state ----
 
     #[test]
