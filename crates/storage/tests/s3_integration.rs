@@ -403,4 +403,111 @@ async fn minio_put_overwrite_integrity_rejects_bad_hash() {
     assert!(result.is_ok() || result.is_err());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn minio_content_addressed_upload_roundtrip() {
+    let Some(stack) = DockerLocalStack::builder()
+        .with_minio()
+        .start()
+        .unwrap()
+    else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-ca-upload")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let canonical_key = ObjectKey::parse("ca/final-key").unwrap();
+    let body = b"content addressed upload test data";
+
+    // Step 1: begin content-addressed upload
+    let result = store.begin_content_addressed_upload(&canonical_key).await.unwrap();
+    let (mut writer, temp_key) = match result {
+        shardline_storage::BeginMultipartUploadResult::AlreadyExists => {
+            // Already exists is fine — the content is the same
+            return;
+        }
+        shardline_storage::BeginMultipartUploadResult::Upload(writer, temp_key) => {
+            (writer, temp_key)
+        }
+    };
+
+    // Step 2: write data through the multipart writer
+    writer.wait_for_capacity(1).await.unwrap();
+    writer.write(body);
+
+    // Step 3: finish — finalize multipart and promote temp to canonical
+    let outcome = store.finish_content_addressed_upload(writer, &temp_key, &canonical_key).await.unwrap();
+    assert!(matches!(outcome, PutOutcome::Inserted));
+
+    // Step 4: verify content
+    assert!(store.contains(&canonical_key).unwrap());
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    let data = store.read_range(&canonical_key, range).unwrap();
+    assert_eq!(data, body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn minio_content_addressed_upload_already_exists_idempotent() {
+    let Some(stack) = DockerLocalStack::builder()
+        .with_minio()
+        .start()
+        .unwrap()
+    else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-ca-exists")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ca/existing-key").unwrap();
+    let body = b"existing content";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    // First, put the content directly
+    store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+    // Then begin a content-addressed upload — should return AlreadyExists
+    let result = store.begin_content_addressed_upload(&key).await.unwrap();
+    assert!(matches!(result, shardline_storage::BeginMultipartUploadResult::AlreadyExists));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn minio_put_content_addressed_file_stores_and_verifies() {
+    let Some(stack) = DockerLocalStack::builder()
+        .with_minio()
+        .start()
+        .unwrap()
+    else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-ca-file")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ca/file-key").unwrap();
+    let body = b"file content for content-addressed put";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let file_path = dir.path().join("source.bin");
+    std::fs::write(&file_path, body).unwrap();
+
+    let outcome = store.put_content_addressed_file(&key, &file_path, &integrity).unwrap();
+    assert!(matches!(outcome, PutOutcome::Inserted));
+
+    // Verify content
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    let data = store.read_range(&key, range).unwrap();
+    assert_eq!(data, body);
+
+    // Second call should return AlreadyExists
+    let outcome2 = store.put_content_addressed_file(&key, &file_path, &integrity).unwrap();
+    assert!(matches!(outcome2, PutOutcome::AlreadyExists));
+}
+
 
