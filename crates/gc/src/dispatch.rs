@@ -237,4 +237,95 @@ mod tests {
         let result = managed_protocol_object_identity(&[ServerFrontend::Xet], &chunk_key).unwrap();
         assert_eq!(result, None, "chunk key is not an xorb or shard");
     }
+
+    // ── visit_protocol_object_member_chunks tests ────────────────────────
+
+    #[test]
+    fn visit_protocol_object_member_chunks_without_xet_returns_ok() {
+        // When the frontend list doesn't include Xet, the function should
+        // return Ok(()) without calling the visitor.
+        let object_store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("some/key").unwrap();
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(
+            &[ServerFrontend::Lfs],
+            &object_store,
+            &key,
+            |_hash| {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!visited, "visitor should not be called without Xet frontend");
+    }
+
+    #[test]
+    fn visit_protocol_object_member_chunks_with_non_xorb_key_returns_ok() {
+        // When the key is not an xorb, the function should return Ok(())
+        // without calling the visitor.
+        let object_store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("some/key").unwrap();
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(
+            &[ServerFrontend::Xet],
+            &object_store,
+            &key,
+            |_hash| {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!visited, "visitor should not be called for non-xorb key");
+    }
+
+    #[test]
+    fn visit_protocol_object_member_chunks_with_empty_frontends_returns_ok() {
+        let object_store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("some/key").unwrap();
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(
+            &[],
+            &object_store,
+            &key,
+            |_hash| {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!visited);
+    }
+
+    #[test]
+    fn visit_protocol_object_member_chunks_multiple_frontends_xet_first() {
+        // With multiple frontends including Xet, and a non-xorb key,
+        // the function should still complete without error.
+        let object_store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("some/key").unwrap();
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(
+            &[ServerFrontend::Xet, ServerFrontend::Lfs],
+            &object_store,
+            &key,
+            |_hash| {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!visited);
+    }
+
+    // ── optional_chunk_container_keys additional coverage ───────────────
+
+    #[test]
+    fn optional_chunk_container_keys_with_duplicate_xet_key_dedup() {
+        // When Xet appears twice in the frontend list, the result should
+        // still contain only one xorb key (deduplication via contains check).
+        let frontends = [ServerFrontend::Xet, ServerFrontend::Xet];
+        let keys = optional_chunk_container_keys(&frontends, VALID_HASH).unwrap();
+        assert_eq!(keys.len(), 1, "duplicate Xet frontends must not produce duplicates");
+    }
 }

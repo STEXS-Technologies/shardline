@@ -7,7 +7,12 @@
         clippy::indexing_slicing,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::vec_init_then_push,
+        clippy::useless_format,
+        clippy::same_item_push,
+        clippy::useless_vec,
+        clippy::str_to_string
     )
 )]
 

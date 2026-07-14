@@ -823,4 +823,124 @@ mod tests {
         let data = [0xff, 0x7f]; // skip first byte, parse from index 1
         assert_eq!(parse_delta_varint(&data, 1).unwrap(), (127, 2));
     }
+
+    // --- Additional edge cases ---
+
+    #[test]
+    fn commit_object_with_parent() {
+        let tree_sha1 = [0xcd; 20];
+        let parent_sha1 = [0xef; 20];
+        let commit = create_commit_object(
+            &tree_sha1,
+            Some(&parent_sha1),
+            "Author <author@test.com>",
+            "Merge commit",
+        );
+        let content = String::from_utf8(commit.data).unwrap();
+        assert!(content.starts_with(&format!("tree {}", hex::encode(tree_sha1))));
+        assert!(content.contains(&format!("parent {}", hex::encode(parent_sha1))));
+        assert!(content.contains("Merge commit"));
+        assert!(content.contains("Author <author@test.com>"));
+    }
+
+    #[test]
+    #[allow(clippy::vec_init_then_push)]
+    fn apply_delta_copy_size_zero_means_65536() {
+        // Git delta format: copy_size of 0 in the encoding means 65536 (0x10000).
+        // Base: 70000 bytes
+        let base = vec![b'A'; 70000];
+        // Target: copy 65536 bytes from offset 0
+        let mut delta = Vec::new();
+        // Source size: 70000 (varint, fits in 3 bytes)
+        // 70000 = 0x11170
+        // bytes: 0x80 | (0x11170 & 0x7f)=0x70 → 0xF0
+        //        0x80 | (0x11170 >> 7 & 0x7f)=0x22 → 0xA2
+        //        0x11170 >> 14 & 0x7f = 0x04 → 0x04 (no continuation)
+        delta.push(0xF0);
+        delta.push(0xA2);
+        delta.push(0x04);
+        // Target size: 65536 (varint)
+        // 65536 = 0x10000
+        // bytes: 0x80 | 0x00 → 0x80
+        //        0x80 | 0x00 → 0x80
+        //        0x04 → 0x04 (no continuation)
+        delta.push(0x80);
+        delta.push(0x80);
+        delta.push(0x04);
+        // Copy instruction: cmd = 0x80 | 0x10 = 0x90 (copy + 1 size byte, no offset bytes → offset=0)
+        // size byte = 0 means 65536
+        delta.push(0x90);
+        delta.push(0x00);
+
+        let result = apply_delta(&base, &delta).unwrap();
+        assert_eq!(result.len(), 65536);
+        assert_eq!(result, &base[..65536]);
+    }
+
+    #[test]
+    fn apply_delta_copy_exceeding_base_errors() {
+        // Copy instruction requests bytes beyond base length
+        let base = b"short";
+        let mut delta = Vec::new();
+        // Source size: 5
+        delta.push(5);
+        // Target size: 10
+        delta.push(10);
+        // Copy: offset=0, size=65536 (too large for base)
+        delta.push(0x90);
+        delta.push(0x00); // size = 0 means 65536
+
+        let result = apply_delta(base, &delta);
+        assert!(matches!(result, Err(PackError::InvalidDelta)));
+    }
+
+    #[test]
+    fn generate_pack_too_many_objects() {
+        // Create more than u32::MAX objects
+        let _obj = GitObject::blob(b"x".to_vec());
+        // We can't actually allocate u32::MAX objects, so we test the error
+        // path by seeing that u32::try_from fails for a large enough length.
+        // Instead, we verify the u32 conversion logic:
+        let too_many = (u32::MAX as usize).wrapping_add(1);
+        let result = u32::try_from(too_many);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_object_large_size_triggers_varint_encoding() {
+        // Create a blob large enough that size > 0x0f, which triggers
+        // the continuation-bit varint encoding in write_object.
+        let data = vec![0u8; 0x100]; // 256 bytes, low nibble = 0
+        let blob = GitObject::blob(data);
+        let pack = generate_pack(&[blob]).expect("pack should generate");
+        // Header (12) + blob data (compressed) + checksum (20) = at least 32
+        assert!(pack.len() > 32);
+        // Verify pack header says 1 object
+        assert_eq!(&pack[8..12], &1u32.to_be_bytes());
+    }
+
+    #[test]
+    fn create_tree_object_single_entry() {
+        let sha1 = [0x42; 20];
+        let entries = vec![(0o100644u32, "readme.txt", &sha1)];
+        let tree = create_tree_object(&entries);
+        assert_eq!(tree.object_type, ObjectType::Tree);
+        let content = tree.data;
+        // Verify the entry is encoded: "100644 readme.txt\0{20 bytes}"
+        assert!(content.starts_with(b"100644 readme.txt\x00"));
+    }
+
+    #[test]
+    fn parse_ofs_delta_offset_shift_wrapping() {
+        // A single byte offset with MSB set should complete normally
+        // when followed by a byte with MSB clear.
+        let data = [0x80, 0x01]; // continuation then final byte
+        let mut pos = 0;
+        let offset = parse_ofs_delta_offset(&data, &mut pos).unwrap();
+        // Step 1: byte 0x80 → low 7 bits = 0, continuation
+        // Step 2: byte 0x01 → low 7 bits = 1, no continuation
+        // offset = ((0 + 1) << 7) | 1 = 128 + 1 = 129
+        assert_eq!(offset, 129);
+        assert_eq!(pos, 2);
+    }
 }

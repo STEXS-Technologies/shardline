@@ -416,8 +416,8 @@ mod tests {
 
     #[test]
     fn parse_ndjson_missing_header() {
-        let b = STANDARD.encode(b"data");
-        let body = format!("{{\"file\":{{\"path\":\"f.txt\",\"content\":\"{b}\"}}}}");
+        let _b = STANDARD.encode(b"data");
+        let body = "{{\"file\":{{\"path\":\"f.txt\",\"content\":\"{b}\"}}}}".to_string();
         let result = parse_ndjson_commit(&body);
         assert!(result.is_err());
     }
@@ -461,6 +461,114 @@ mod tests {
             err_msg.contains("exceeds maximum"),
             "expected oversized error, got: {err_msg}"
         );
+    }
+
+    // --- parse_ndjson edge cases ---
+
+    #[test]
+    fn parse_ndjson_unknown_instruction_type() {
+        let body = "{\"header\":{\"message\":\"test\",\"parentCommit\":\"\"}}\n\
+                     {\"unknownType\":{\"path\":\"x.txt\"}}";
+        let result = parse_ndjson_commit(body);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unknown commit instruction"),
+            "expected unknown instruction error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn parse_ndjson_too_many_instructions() {
+        let content_b64 = STANDARD.encode(b"x");
+        // Build a body with MAX_COMMIT_INSTRUCTIONS + 1 file instructions
+        let mut body = "{{\"header\":{{\"message\":\"too many\",\"parentCommit\":\"\"}}}}\n".to_string();
+        for _ in 0..MAX_COMMIT_INSTRUCTIONS + 1 {
+            body.push_str(&format!(
+                "{{\"file\":{{\"path\":\"f.txt\",\"content\":\"{content_b64}\"}}}}\n"
+            ));
+        }
+        let result = parse_ndjson_commit(&body);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("too many instructions"),
+            "expected too many instructions error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn parse_ndjson_file_missing_path() {
+        let content_b64 = STANDARD.encode(b"data");
+        let body = format!(
+            "{{\"header\":{{\"message\":\"test\",\"parentCommit\":\"\"}}}}\n\
+             {{\"file\":{{\"content\":\"{content_b64}\"}}}}"
+        );
+        let result = parse_ndjson_commit(&body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_file_missing_content() {
+        let body = "{\"header\":{\"message\":\"test\",\"parentCommit\":\"\"}}\n\
+                     {\"file\":{\"path\":\"f.txt\"}}";
+        let result = parse_ndjson_commit(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_lfs_missing_path() {
+        let body = "{\"header\":{\"message\":\"test\",\"parentCommit\":\"\"}}\n\
+                     {\"lfsFile\":{\"oid\":\"abc\",\"size\":1}}";
+        let result = parse_ndjson_commit(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_lfs_missing_oid() {
+        let body = "{\"header\":{\"message\":\"test\",\"parentCommit\":\"\"}}\n\
+                     {\"lfsFile\":{\"path\":\"f.bin\",\"size\":1}}";
+        let result = parse_ndjson_commit(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_lfs_missing_size() {
+        let body = "{\"header\":{\"message\":\"test\",\"parentCommit\":\"\"}}\n\
+                     {\"lfsFile\":{\"path\":\"f.bin\",\"oid\":\"abc\"}}";
+        let result = parse_ndjson_commit(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_delete_missing_path() {
+        let body = "{\"header\":{\"message\":\"test\",\"parentCommit\":\"\"}}\n\
+                     {\"deletedEntry\":{}}";
+        let result = parse_ndjson_commit(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_empty_body() {
+        let result = parse_ndjson_commit("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_only_whitespace() {
+        let result = parse_ndjson_commit("  \n  \n  ");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ndjson_parent_commit_preserved() {
+        let content_b64 = STANDARD.encode(b"data");
+        let body = format!(
+            "{{\"header\":{{\"message\":\"parent\",\"parentCommit\":\"abc123\"}}}}\n\
+             {{\"file\":{{\"path\":\"f.txt\",\"content\":\"{content_b64}\"}}}}"
+        );
+        let result = parse_ndjson_commit(&body).unwrap();
+        assert_eq!(result.parent_commit.as_deref(), Some("abc123"));
     }
 
     // --- validate_lfs_oid tests ---

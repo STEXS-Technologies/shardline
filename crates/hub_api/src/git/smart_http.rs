@@ -2201,4 +2201,437 @@ mod tests {
         let result = decompress_zlib(b"x");
         assert!(result.is_err() || result.unwrap().0.is_empty());
     }
+
+    // --- parse_pack_data round-trip ---
+
+    #[test]
+    fn parse_pack_data_roundtrip_blob() {
+        // Generate a pack with one blob, then parse it back
+        let blob = super::super::pack::create_blob_object(b"hello world");
+        let pack = super::super::pack::generate_pack(&[blob]).unwrap();
+        let objects = parse_pack_data(&pack).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].object_type, ObjectType::Blob);
+        assert_eq!(objects[0].data, b"hello world");
+    }
+
+    #[test]
+    fn parse_pack_data_roundtrip_commit_and_tree() {
+        // Build a tree and commit, generate pack, parse it back
+        let blob = super::super::pack::create_blob_object(b"file content");
+        let blob_sha = blob.sha1();
+        let tree_entries = vec![(0o100644, "f.txt", &blob_sha)];
+        let tree = super::super::pack::create_tree_object(&tree_entries);
+        let tree_sha = tree.sha1();
+        let commit = super::super::pack::create_commit_object(
+            &tree_sha, None, "Test <test@test.com>", "Initial",
+        );
+        let pack = super::super::pack::generate_pack(&[blob, tree, commit]).unwrap();
+        let objects = parse_pack_data(&pack).unwrap();
+        assert_eq!(objects.len(), 3);
+        let blob_count = objects.iter().filter(|o| o.object_type == ObjectType::Blob).count();
+        let tree_count = objects.iter().filter(|o| o.object_type == ObjectType::Tree).count();
+        let commit_count = objects.iter().filter(|o| o.object_type == ObjectType::Commit).count();
+        assert_eq!(blob_count, 1);
+        assert_eq!(tree_count, 1);
+        assert_eq!(commit_count, 1);
+    }
+
+    #[test]
+    fn parse_pack_data_unknown_object_type_breaks() {
+        // A pack with an object of type 5 (reserved, not 1..4 or 6..7)
+        // should stop parsing and return whatever was parsed (empty).
+        let mut data = b"PACK".to_vec();
+        data.extend_from_slice(&2u32.to_be_bytes()); // version 2
+        data.extend_from_slice(&1u32.to_be_bytes()); // 1 object
+        // Object header byte: type=5, size=0, no continuation
+        // type 5 = (5 << 4) | 0 = 0x50
+        data.push(0x50);
+        // No compressed data follows, parser will break on zlib decompression
+        let objects = parse_pack_data(&data).unwrap();
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn parse_pack_data_with_ref_delta_stops_gracefully() {
+        // A pack with a REF_DELTA object (type 7) but no base object in the index
+        // should produce an error since the base SHA won't be found.
+        // We need at least a valid compressed stream after the REF_DELTA header.
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"delta data").unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let mut data = b"PACK".to_vec();
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes()); // 1 object
+        // Object header: type=7, size=0, no continuation
+        // type 7 = (7 << 4) | 0 = 0x70
+        data.push(0x70);
+        // REF_DELTA needs 20 bytes of base SHA
+        data.extend_from_slice(&[0u8; 20]);
+        // Valid zlib data
+        data.extend_from_slice(&compressed);
+        let result = parse_pack_data(&data);
+        assert!(result.is_err(), "expected error for REF_DELTA with missing base");
+    }
+
+    #[test]
+    fn parse_pack_data_shift_overflow_detected() {
+        // Create a pack with a varint size that keeps shifting past 63 bits
+        let mut data = b"PACK".to_vec();
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes()); // 1 object
+        // Object header byte: type=3 (blob), size continues in following bytes
+        // Start with continuation bit set, size low nibble = 0
+        data.push(0x80 | (3 << 4) | 0x0f); // type=3, continuation, low 4 bits=0x0f
+        // Add more continuation bytes to keep shifting
+        for _ in 0..10 {
+            data.push(0x80); // continuation, 7 bits of zero
+        }
+        // Try to parse - should detect shift >= 64
+        let result = parse_pack_data(&data);
+        // The parser may either return empty (if it breaks early) or return an error
+        assert!(result.is_ok() || matches!(result, Err(PackError::ShiftOverflow)));
+        if let Ok(objects) = result {
+            assert!(objects.is_empty(), "expected empty objects on shift overflow");
+        }
+    }
+
+    // --- decompress_zlib with real data ---
+
+    #[test]
+    fn decompress_zlib_roundtrip() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let original = b"Hello, World! This is test data for zlib roundtrip.";
+        let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(original).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let (decompressed, bytes_used) = decompress_zlib(&compressed).unwrap();
+        assert_eq!(decompressed, original);
+        assert_eq!(bytes_used, compressed.len());
+    }
+
+    #[test]
+    fn decompress_zlib_trailing_bytes_still_decompresses() {
+        // decompress_zlib should consume only the bytes it needs, leaving
+        // trailing data unconsumed. It returns the number of bytes consumed.
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"hello").unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // Append trailing data
+        let mut with_trailing = compressed.clone();
+        with_trailing.extend_from_slice(b"TRAILER");
+
+        let (decompressed, bytes_used) = decompress_zlib(&with_trailing).unwrap();
+        assert_eq!(decompressed, b"hello");
+        assert_eq!(bytes_used, compressed.len());
+    }
+
+    // --- parse_commit_object edge cases ---
+
+    #[test]
+    fn parse_commit_object_no_blank_line_no_message() {
+        // Commit with no blank line (no message section)
+        let data = b"tree abcdef0123456789abcdef0123456789abcdef01\n\
+                      author Test <test@test.com> 1234567890 +0000\n";
+        let (tree, parent, message) = parse_commit_object(data).unwrap();
+        assert_eq!(tree, "abcdef0123456789abcdef0123456789abcdef01");
+        assert!(parent.is_none());
+        assert_eq!(message, "");
+    }
+
+    #[test]
+    fn parse_commit_object_message_with_trailing_newline() {
+        let data = b"tree abcdef0123456789abcdef0123456789abcdef01\n\
+                      \n\
+                      My message\n";
+        let (tree, parent, message) = parse_commit_object(data).unwrap();
+        assert_eq!(tree, "abcdef0123456789abcdef0123456789abcdef01");
+        assert!(parent.is_none());
+        assert_eq!(message, "My message");
+    }
+
+    #[test]
+    fn parse_commit_object_not_utf8() {
+        let data = b"\xff\xfe\x00";
+        let result = parse_commit_object(data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid commit encoding"));
+    }
+
+    // --- walk_git_tree with invalid/non-standard entries ---
+
+    #[test]
+    fn walk_git_tree_skips_symlinks_and_submodules() {
+        // Build a tree with a symlink (120000) and a submodule (160000) entry
+        // These should be skipped, returning only the regular file.
+        let file_blob = super::super::pack::create_blob_object(b"content");
+        let file_sha = file_blob.sha1();
+
+        let mut tree_data = Vec::new();
+        // Regular file
+        tree_data.extend_from_slice(b"100644 f\0");
+        tree_data.extend_from_slice(&file_sha);
+        // Symlink
+        tree_data.extend_from_slice(b"120000 link\0");
+        tree_data.extend_from_slice(&[0xaa; 20]);
+        // Submodule
+        tree_data.extend_from_slice(b"160000 sub\0");
+        tree_data.extend_from_slice(&[0xbb; 20]);
+
+        let tree = super::super::pack::GitObject::tree(tree_data);
+        let tree_sha = tree.sha1();
+
+        let owned = vec![file_blob, tree];
+        let objects: std::collections::HashMap<[u8; 20], &super::super::pack::GitObject> =
+            owned.iter().map(|o| (o.sha1(), o)).collect();
+
+        let entries = walk_git_tree(&tree_sha, &objects, "").unwrap();
+        assert_eq!(entries.len(), 1, "should only find the regular file");
+        assert_eq!(entries[0].path, "f");
+    }
+
+    #[test]
+    fn walk_git_tree_wrong_object_type_errors() {
+        // Point a tree entry to a blob instead of a sub-tree
+        let blob = super::super::pack::create_blob_object(b"not a tree");
+        let blob_sha = blob.sha1();
+
+        let mut tree_data = Vec::new();
+        tree_data.extend_from_slice(b"40000 dir\0");
+        tree_data.extend_from_slice(&blob_sha);
+
+        let tree = super::super::pack::GitObject::tree(tree_data);
+        let tree_sha = tree.sha1();
+
+        let owned = vec![blob, tree];
+        let objects: std::collections::HashMap<[u8; 20], &super::super::pack::GitObject> =
+            owned.iter().map(|o| (o.sha1(), o)).collect();
+
+        let result = walk_git_tree(&tree_sha, &objects, "");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expected tree object"));
+    }
+
+    // --- build_gitattributes_blob with multiple LFS files ---
+
+    #[test]
+    fn build_gitattributes_blob_multiple_lfs_files() {
+        let files = vec![
+            HubFileEntry {
+                path: "z.bin".to_owned(),
+                size: 200,
+                sha: "oid_z".to_owned(),
+                is_lfs: true,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "a.bin".to_owned(),
+                size: 100,
+                sha: "oid_a".to_owned(),
+                is_lfs: true,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "m.bin".to_owned(),
+                size: 300,
+                sha: "oid_m".to_owned(),
+                is_lfs: true,
+                inline_content: None,
+            },
+        ];
+        let blob = build_gitattributes_blob(&files);
+        assert!(blob.is_some());
+        let content = String::from_utf8(blob.unwrap().data).unwrap();
+        // Should be sorted: a.bin, m.bin, z.bin
+        let lines: Vec<&str> = content.lines().collect();
+        assert!(lines[0].starts_with("a.bin"));
+        assert!(lines[1].starts_with("m.bin"));
+        assert!(lines[2].starts_with("z.bin"));
+    }
+
+    // --- parse_lfs_pointer_field edge cases ---
+
+    #[test]
+    fn parse_lfs_pointer_field_oid_no_sha256_prefix() {
+        // OID without "sha256:" prefix should return None
+        let text = "oid abc123\n";
+        let oid = parse_lfs_pointer_field(text, "oid");
+        assert!(oid.is_none());
+    }
+
+    #[test]
+    fn parse_lfs_pointer_field_empty_lines() {
+        let text = "";
+        assert!(parse_lfs_pointer_field(text, "oid").is_none());
+        assert!(parse_lfs_pointer_field(text, "size").is_none());
+    }
+
+    #[test]
+    fn parse_lfs_pointer_field_trailing_whitespace() {
+        let text = "size 100  \n";
+        let size = parse_lfs_pointer_field(text, "size");
+        assert_eq!(size.as_deref(), Some("100"));
+    }
+
+    // --- parse_receive_pack_request with valid non-UTF8 pkt-lines ---
+
+    #[test]
+    fn parse_receive_pack_request_skips_non_utf8_and_finds_pack() {
+        let mut body = Vec::new();
+        // Skip non-UTF8: 0005\xff\x00 (length 5, 2 bytes payload after 4 hex prefix)
+        // Actually length 5 total means 5 - 4 = 1 byte payload. Let's fix:
+        // 0005\xff = 4 hex + 1 payload byte (non-UTF8)
+        body.extend_from_slice(b"0005\xff");
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(b"PACK");
+        body.extend_from_slice(&[0, 0, 0, 2]);
+        body.extend_from_slice(&[0, 0, 0, 0]);
+        let (updates, pack_data) = parse_receive_pack_request(&body);
+        assert!(updates.is_empty());
+        assert!(!pack_data.is_empty());
+        assert!(pack_data.starts_with(b"PACK"));
+    }
+
+    // --- authorize with auth configured (error paths) ---
+
+    #[test]
+    fn authorize_read_with_auth_rejects_missing_token() {
+        use shardline_server_core::{AuthProvider, AuthError};
+        use shardline_protocol::{TokenClaims, RepositoryScope, RepositoryProvider, TokenScope as TS};
+
+        let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
+        let _claims = TokenClaims::new("iss", "sub", TS::Read, repo, u64::MAX).unwrap();
+        struct MockAuth;
+        impl AuthProvider for MockAuth {
+            fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+                Err(AuthError::InvalidToken)
+            }
+            fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+                Err(AuthError::ProviderError("nope".into()))
+            }
+        }
+        let state = HubState {
+            store: make_hub_state().1.store,
+            auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
+            http_client: None,
+        };
+        let headers = axum::http::HeaderMap::new();
+        let result = authorize_read(&state, &headers);
+        assert!(result.is_err());
+    }
+
+    // --- info_refs with nonexistent repo ---
+
+    #[tokio::test]
+    async fn info_refs_nonexistent_repo_returns_empty_advertisement() {
+        let (_tmp, state) = make_hub_state();
+        let headers = axum::http::HeaderMap::new();
+        let result = info_refs(
+            State(state),
+            Path(("models".to_owned(), "no".to_owned(), "repo".to_owned())),
+            Query(InfoRefsQuery {
+                service: Some("git-upload-pack".to_owned()),
+            }),
+            headers,
+        )
+        .await;
+        // A nonexistent repo returns a valid info/refs response with
+        // a null-SHA capabilities advertisement (no refs to advertise).
+        let response = result.expect("nonexistent repo should return a valid response");
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body.contains("capabilities"), "response should contain capabilities: {body}");
+        assert!(body.contains("0000000000000000000000000000000000000000"),
+            "response should contain zero SHA: {body}");
+    }
+
+    // --- parse_pack_data with OFS_DELTA ---
+
+    #[test]
+    fn parse_pack_data_ofs_delta_two_objects() {
+        // Build a valid pack with 2 objects: a base blob and an OFS_DELTA
+        // that copies from it. We'll construct the raw pack bytes.
+        let base_content = b"Hello, World!";
+        let target_content = b"Hello there, World!";
+
+        // Compress both
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let compress = |data: &[u8]| -> Vec<u8> {
+            let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(data).unwrap();
+            enc.finish().unwrap()
+        };
+
+        let base_compressed = compress(base_content);
+
+        // Build delta: source=13, target=19, copy(0,5), insert(" there,"), copy(5,8)
+        let mut delta = Vec::new();
+        delta.push(13); // source size
+        delta.push(19); // target size
+        // copy(0,5): no offset bytes, 1 size byte
+        delta.push(0x90);
+        delta.push(5);
+        // insert(" there")
+        delta.push(6);
+        delta.extend_from_slice(b" there");
+        // copy(5,8): 1 offset byte, 1 size byte
+        delta.push(0x91);
+        delta.push(5);
+        delta.push(8);
+        let delta_compressed = compress(&delta);
+
+        // Build the pack:
+        // Header: PACK + version(4) + num_objects(4)
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        pack.extend_from_slice(&2u32.to_be_bytes()); // version 2
+        pack.extend_from_slice(&2u32.to_be_bytes()); // 2 objects
+
+        // Object 1: base blob (type=3), size=13
+        // First byte: type (3) << 4 | low 4 bits of size (13 = 0xd)
+        // size > 0x0f? 13 <= 15, so no continuation
+        pack.push((3 << 4) | 13); // type=3, size=13
+        pack.extend_from_slice(&base_compressed);
+
+        // Object 2: OFS_DELTA (type=6), size delta
+        let delta_size = delta.len();
+        if delta_size <= 0x0f {
+            pack.push((6 << 4) | delta_size as u8);
+        } else {
+            // Need varint encoding for size
+            // Size = delta.len(), encode as varint
+            pack.push((6 << 4) | (delta_size & 0x0f) as u8 | 0x80); // continuation
+            let mut remaining = delta_size >> 4;
+            while remaining > 0 {
+                let mut byte = (remaining & 0x7f) as u8;
+                remaining >>= 7;
+                if remaining > 0 {
+                    byte |= 0x80;
+                }
+                pack.push(byte);
+            }
+        }
+        // OFS_DELTA offset: negative offset of 1 (the base object is 1 before this one)
+        // Offset 1 → single byte: 0x01 (MSB clear, value=1)
+        pack.push(0x01);
+        pack.extend_from_slice(&delta_compressed);
+
+        let objects = parse_pack_data(&pack).unwrap();
+        assert_eq!(objects.len(), 2, "should parse both objects");
+        assert_eq!(objects[0].object_type, ObjectType::Blob);
+        assert_eq!(objects[0].data, base_content);
+        assert_eq!(objects[1].data, target_content,
+            "OFS_DELTA should resolve to produce the target content"
+        );
+    }
 }

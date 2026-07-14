@@ -483,4 +483,58 @@ mod tests {
         assert!(pack.is_empty());
         assert!(msgs.is_empty());
     }
+
+    #[test]
+    fn decode_lines_with_delimiter_packet() {
+        // Delimiter packet 0001 has len=1 which is < 4, so decode_lines treats it
+        // as a break. Data before it should still be decoded.
+        let data = b"0005h\x000001";
+        let lines = decode_lines(data);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], b"h");
+    }
+
+    #[test]
+    fn decode_lines_with_response_end_packet() {
+        // Response-end packet 0002 should break like a flush packet
+        let data = b"0005hi\x000002";
+        let lines = decode_lines(data);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn encode_line_bytes_max_payload_size() {
+        // MAX_PAYLOAD = 65516. This should just fit
+        let data = vec![b'x'; 65516];
+        let result = encode_line_bytes(&data).expect("max payload should fit");
+        // Length prefix is 4 hex chars + 65516 bytes of string (as UTF-8 lossy)
+        // Total string length: 4 + 65516 = 65520
+        // len = 65516 + 4 = 65520 = 0xFFF0
+        assert_eq!(result.len(), 65520);
+        assert!(result.starts_with("fff0"), "expected 'fff0' prefix, got start of: {result}");
+    }
+
+    #[test]
+    fn decode_sideband_channel_3_non_utf8_skipped() {
+        // Channel 3 with invalid UTF-8 — should not be collected as message
+        let len = 7u16; // 4 prefix + 1 channel + 2 payload
+        let mut packet = format!("{len:04x}").into_bytes();
+        packet.push(b'3');
+        packet.extend_from_slice(b"\xff\xfe");
+        let (pack, msgs) = decode_sideband(&packet);
+        assert!(pack.is_empty());
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn encode_line_with_newline() {
+        let encoded = encode_line("data\n").expect("line with newline should encode");
+        assert_eq!(encoded, "0009data\n");
+    }
+
+    #[test]
+    fn encode_line_empty() {
+        let encoded = encode_line("").expect("empty string should encode");
+        assert_eq!(encoded, "0004");
+    }
 }
