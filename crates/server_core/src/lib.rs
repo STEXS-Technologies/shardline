@@ -1720,6 +1720,16 @@ mod tests {
     // ── AuthError Display ────────────────────────────────────────────────
 
     #[test]
+    fn auth_error_display_invalid_token() {
+        assert_eq!(AuthError::InvalidToken.to_string(), "invalid token");
+    }
+
+    #[test]
+    fn auth_error_display_expired_token() {
+        assert_eq!(AuthError::ExpiredToken.to_string(), "expired token");
+    }
+
+    #[test]
     fn auth_error_display_insufficient_scope() {
         let msg = AuthError::InsufficientScope.to_string();
         assert_eq!(msg, "insufficient scope");
@@ -1744,8 +1754,33 @@ mod tests {
     }
 
     #[test]
+    fn auth_error_from_token_codec_error_invalid_format() {
+        let err: AuthError = TokenCodecError::InvalidFormat.into();
+        assert!(matches!(err, AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn auth_error_from_token_codec_error_invalid_hex() {
+        let hex_err = hex::FromHexError::InvalidStringLength;
+        let err: AuthError = TokenCodecError::InvalidHex(hex_err).into();
+        assert!(matches!(err, AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn auth_error_from_token_codec_error_claims() {
+        let err: AuthError = TokenCodecError::Claims(shardline_protocol::TokenClaimsError::EmptyIssuer).into();
+        assert!(matches!(err, AuthError::InvalidToken));
+    }
+
+    #[test]
     fn auth_error_from_token_codec_error_empty_key() {
         let err: AuthError = TokenCodecError::EmptySigningKey.into();
+        assert!(matches!(err, AuthError::ProviderError(_)));
+    }
+
+    #[test]
+    fn auth_error_from_token_codec_error_key_too_short() {
+        let err: AuthError = TokenCodecError::SigningKeyTooShort { actual_bytes: 4 }.into();
         assert!(matches!(err, AuthError::ProviderError(_)));
     }
 
@@ -2016,5 +2051,386 @@ mod tests {
         let key = ObjectKey::parse("aa/bbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc").unwrap();
         let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
         assert_eq!(result, None);
+    }
+
+    // ── InvalidSerializedShardError Display ────────────────────────────────
+
+    #[test]
+    fn invalid_serialized_shard_error_parser_rejected() {
+        assert_eq!(
+            InvalidSerializedShardError::ParserRejectedMetadata.to_string(),
+            "shard parser rejected metadata"
+        );
+    }
+
+    #[test]
+    fn invalid_serialized_shard_error_native_xet_empty_range() {
+        assert_eq!(
+            InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange.to_string(),
+            "native xet term had an empty or inverted chunk range"
+        );
+    }
+
+    #[test]
+    fn invalid_serialized_shard_error_native_xet_range_exceeded() {
+        assert_eq!(
+            InvalidSerializedShardError::NativeXetTermRangeExceededXorbChunkCount.to_string(),
+            "native xet term range exceeded xorb chunk count"
+        );
+    }
+
+    #[test]
+    fn invalid_serialized_shard_error_shard_file_term_empty_range() {
+        assert_eq!(
+            InvalidSerializedShardError::ShardFileTermEmptyOrInvertedChunkRange.to_string(),
+            "shard file term had an empty or inverted chunk range"
+        );
+    }
+
+    #[test]
+    fn invalid_serialized_shard_error_xorb_cache_insertion_failed() {
+        assert_eq!(
+            InvalidSerializedShardError::XorbMetadataCacheInsertionFailed.to_string(),
+            "xorb metadata cache insertion failed"
+        );
+    }
+
+    #[test]
+    fn invalid_serialized_shard_error_shard_term_started_past() {
+        assert_eq!(
+            InvalidSerializedShardError::ShardTermRangeStartedPastXorbChunkList.to_string(),
+            "shard term chunk range started past the xorb chunk list"
+        );
+    }
+
+    #[test]
+    fn invalid_serialized_shard_error_shard_term_ended_past() {
+        assert_eq!(
+            InvalidSerializedShardError::ShardTermRangeEndedPastXorbChunkList.to_string(),
+            "shard term chunk range ended past the xorb chunk list"
+        );
+    }
+
+    #[test]
+    fn invalid_serialized_shard_error_retained_hashes_not_ordered() {
+        assert_eq!(
+            InvalidSerializedShardError::RetainedShardChunkHashesNotStrictlyOrdered.to_string(),
+            "retained shard chunk hashes were not strictly ordered"
+        );
+    }
+
+    // ── InvalidReconstructionResponseError Display ─────────────────────────
+
+    #[test]
+    fn invalid_reconstruction_response_error_record_store_global_latest() {
+        assert_eq!(
+            InvalidReconstructionResponseError::RecordStoreGlobalLatestWalkAttempted.to_string(),
+            "global latest-record walk attempted"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_record_not_found() {
+        assert_eq!(
+            InvalidReconstructionResponseError::RecordStoreRecordNotFound.to_string(),
+            "record not found"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_term_count_exceeded() {
+        assert_eq!(
+            InvalidReconstructionResponseError::TermCountExceededRecordChunkCount.to_string(),
+            "response term count exceeded record chunk count"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_term_zero_unpacked() {
+        assert_eq!(
+            InvalidReconstructionResponseError::TermHadZeroUnpackedLength.to_string(),
+            "response term had zero unpacked length"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_term_empty_chunk_range() {
+        assert_eq!(
+            InvalidReconstructionResponseError::TermHadEmptyChunkRange.to_string(),
+            "response term had an empty chunk range"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_term_missing_fetch_info() {
+        assert_eq!(
+            InvalidReconstructionResponseError::TermMissingFetchInfo.to_string(),
+            "response term did not have matching fetch info"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_empty_fetch_list() {
+        assert_eq!(
+            InvalidReconstructionResponseError::EmptyFetchList.to_string(),
+            "response fetch info contained an empty fetch list"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_fetch_url_hash_mismatch() {
+        assert_eq!(
+            InvalidReconstructionResponseError::FetchUrlHashMismatch.to_string(),
+            "response fetch URL did not match its xorb hash"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_fetch_entry_empty_chunk_range() {
+        assert_eq!(
+            InvalidReconstructionResponseError::FetchEntryEmptyChunkRange.to_string(),
+            "response fetch entry had an empty chunk range"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_fetch_entry_inverted_byte_range() {
+        assert_eq!(
+            InvalidReconstructionResponseError::FetchEntryInvertedByteRange.to_string(),
+            "response fetch entry had an inverted byte range"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_fetch_entry_missing_term() {
+        assert_eq!(
+            InvalidReconstructionResponseError::FetchEntryMissingTerm.to_string(),
+            "response fetch entry did not have a matching term"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_changed_offset() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2ChangedOffsetIntoFirstRange.to_string(),
+            "v2 response changed offset_into_first_range"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_changed_terms() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2ChangedTerms.to_string(),
+            "v2 response changed reconstruction terms"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_changed_xorb_cardinality() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2ChangedXorbFetchInfoCardinality.to_string(),
+            "v2 response changed xorb fetch-info cardinality"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_hash_absent_from_v1() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2FetchHashAbsentFromV1.to_string(),
+            "v2 response emitted a fetch hash absent from v1"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_empty_fetch_list() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2EmptyFetchList.to_string(),
+            "v2 response emitted an empty fetch list"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_fetch_entry_without_ranges() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2FetchEntryWithoutRanges.to_string(),
+            "v2 response emitted a fetch entry without ranges"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_empty_chunk_range() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2EmptyChunkRange.to_string(),
+            "v2 response emitted an empty chunk range"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_inverted_byte_range() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2InvertedByteRange.to_string(),
+            "v2 response emitted an inverted byte range"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_fetch_count_disagreed() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2FetchCountDisagreedWithV1.to_string(),
+            "v2 response fetch count disagreed with v1"
+        );
+    }
+
+    #[test]
+    fn invalid_reconstruction_response_error_v2_range_count_disagreed() {
+        assert_eq!(
+            InvalidReconstructionResponseError::V2RangeCountDisagreedWithV1.to_string(),
+            "v2 response range count disagreed with v1"
+        );
+    }
+
+    // ── ServerObjectStoreError Display for all variants ──────────────────
+
+    #[test]
+    fn server_object_store_error_display_all_variants() {
+        assert_eq!(ServerObjectStoreError::NotFound.to_string(), "content not found");
+        assert_eq!(ServerObjectStoreError::Overflow.to_string(), "arithmetic overflow");
+        assert_eq!(ServerObjectStoreError::InvalidContentHash.to_string(), "content hash must be 64 hexadecimal characters");
+        assert_eq!(ServerObjectStoreError::StoredObjectLengthMismatch.to_string(), "stored object length did not match indexed metadata");
+    }
+
+    // ── InvalidLifecycleMetadataError Display all variants ───────────────
+
+    #[test]
+    fn invalid_lifecycle_metadata_display_active_retention_hold_quarantined() {
+        let err = InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined {
+            object_key: "obj".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("coexisted with quarantine"));
+    }
+
+    // ── provider_directory all variants ─────────────────────────────────
+
+    #[test]
+    fn provider_directory_all_variants() {
+        use shardline_protocol::RepositoryProvider;
+        assert_eq!(provider_directory(RepositoryProvider::GitHub), "github");
+        assert_eq!(provider_directory(RepositoryProvider::GitLab), "gitlab");
+        assert_eq!(provider_directory(RepositoryProvider::Gitea), "gitea");
+        assert_eq!(provider_directory(RepositoryProvider::Codeberg), "codeberg");
+        assert_eq!(provider_directory(RepositoryProvider::Generic), "generic");
+    }
+
+    // ── OpsRecordStore impl edge cases ─────────────────────────────────
+
+    #[test]
+    fn ops_locator_content_hash_version_without_content_hash_returns_none() {
+        use crate::OpsRecordStore;
+        use shardline_index::{LocalRecordStore, RecordTraversal};
+
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalRecordStore::new(storage.path().join("index")).unwrap();
+        let mut record = sample_file_record();
+        record.content_hash = String::new();
+        let locator = store.latest_record_locator(&record);
+
+        let result = store.locator_content_hash(&locator, crate::OpsRecordKind::Version);
+        assert_eq!(result, None);
+    }
+
+    // ── ParseStoredFileRecordError Display ───────────────────────────────
+
+    #[test]
+    fn parse_stored_file_record_error_stored_file_metadata_too_large_display() {
+        let err = ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+            observed_bytes: 1024,
+            maximum_bytes: 512,
+        };
+        let msg = err.to_string();
+        assert_eq!(msg, "stored file metadata exceeded the bounded parser ceiling");
+    }
+
+    #[test]
+    fn parse_stored_file_record_error_json_display_message() {
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = ParseStoredFileRecordError::Json(json_err);
+        assert_eq!(err.to_string(), "json operation failed");
+    }
+
+    // ── content_hash edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn content_hash_empty_chunks() {
+        let hash = content_hash(0, 0, &[]);
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn content_hash_different_total_bytes_produces_different_hash() {
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: "aabbccdd".to_owned(),
+            offset: 0,
+            length: 100,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 100,
+        }];
+
+        let hash1 = content_hash(100, 10, &chunks);
+        let hash2 = content_hash(200, 10, &chunks);
+        assert_ne!(hash1, hash2);
+    }
+
+    // ── ServerObjectStore constructors ─────────────────────────────────
+
+    #[test]
+    fn server_object_store_local_with_root_path() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects"));
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn server_object_store_put_overwrite_blackhole() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        let body = b"test";
+        let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
+        let result = store.put_overwrite(&key, ObjectBody::from_slice(body), &integrity);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn server_object_store_local_path_for_key_format() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
+        let key = ObjectKey::parse("ab/abcdef123456").unwrap();
+        let path = store.local_path_for_key(&key);
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert!(path.to_string_lossy().contains("ab"));
+    }
+
+    // ── read_full_object blackhole edge case ────────────────────────────
+
+    #[test]
+    fn read_full_object_blackhole_zero_length() {
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("aa/hash").unwrap();
+        let result = read_full_object(&store, &key, 0);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // ── unix_now_seconds_checked ────────────────────────────────────────
+
+    #[test]
+    fn unix_now_seconds_checked_is_recent() {
+        let ts = unix_now_seconds_checked().unwrap();
+        // Should be well past the year 2020
+        assert!(ts >= 1_577_836_800, "timestamp {ts} too small for 2020");
     }
 }

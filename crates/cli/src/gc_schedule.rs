@@ -741,7 +741,7 @@ mod tests {
     use std::{
         fs::{OpenOptions, write as write_file},
         io::Write,
-        path::Path,
+        path::{Path, PathBuf},
     };
 
     use super::{
@@ -1115,5 +1115,166 @@ mod tests {
             result,
             Err(GcScheduleError::Io(error)) if error.kind() == ErrorKind::InvalidInput
         ));
+    }
+
+    // ── GcScheduleError Display ───────────────────────────────────────────
+
+    #[test]
+    fn gc_schedule_error_empty_value_display() {
+        let err = GcScheduleError::EmptyValue { field: "unit-prefix" };
+        assert_eq!(err.to_string(), "invalid unit-prefix: value must not be empty");
+    }
+
+    #[test]
+    fn gc_schedule_error_control_characters_display() {
+        let err = GcScheduleError::ControlCharacters { field: "calendar" };
+        assert_eq!(
+            err.to_string(),
+            "invalid calendar: control characters are not allowed"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_invalid_output_directory_display() {
+        let err = GcScheduleError::InvalidOutputDirectory(PathBuf::from("/bad/dir"));
+        assert_eq!(err.to_string(), "invalid output directory: /bad/dir");
+    }
+
+    #[test]
+    fn gc_schedule_error_non_absolute_path_display() {
+        let err = GcScheduleError::NonAbsolutePath {
+            field: "env-file",
+            path: PathBuf::from("relative.env"),
+        };
+        assert_eq!(
+            err.to_string(),
+            "env-file must be an absolute path: relative.env"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_binary_display() {
+        let err = GcScheduleError::MissingBinary(PathBuf::from("/usr/local/bin/shardline"));
+        assert_eq!(
+            err.to_string(),
+            "shardline binary was not found at /usr/local/bin/shardline"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_env_file_display() {
+        let err = GcScheduleError::MissingEnvFile(PathBuf::from("/etc/shardline/shardline.env"));
+        assert!(err.to_string().contains("environment file was not found"));
+    }
+
+    #[test]
+    fn gc_schedule_error_local_file_too_large_display() {
+        let err = GcScheduleError::LocalFileTooLarge {
+            field: "environment file",
+            path: PathBuf::from("/env"),
+            observed_bytes: 70000,
+            maximum_bytes: 65536,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("exceeded supported size"));
+        assert!(msg.contains("environment file"));
+    }
+
+    #[test]
+    fn gc_schedule_error_local_file_length_mismatch_display() {
+        let err = GcScheduleError::LocalFileLengthMismatch {
+            field: "environment file",
+            path: PathBuf::from("/env"),
+            expected_bytes: 100,
+            observed_bytes: 105,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("changed during bounded read"));
+    }
+
+    #[test]
+    fn gc_schedule_error_invalid_env_file_line_display() {
+        let err = GcScheduleError::InvalidEnvFileLine {
+            line: 5,
+            detail: "expected KEY=VALUE",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("line 5"));
+        assert!(msg.contains("expected KEY=VALUE"));
+    }
+
+    #[test]
+    fn gc_schedule_error_root_directory_conflict_display() {
+        let err = GcScheduleError::RootDirectoryConflict {
+            working_directory: "/var/lib/shardline".to_owned(),
+            configured_root: "/opt/shardline".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/var/lib/shardline"));
+        assert!(msg.contains("/opt/shardline"));
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_referenced_path_display() {
+        let err = GcScheduleError::MissingReferencedPath {
+            field: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+            path: PathBuf::from("/run/secrets/token.key"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("points to a missing path"));
+        assert!(msg.contains("SHARDLINE_TOKEN_SIGNING_KEY_FILE"));
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_user_display() {
+        let err = GcScheduleError::MissingUser("nobody".to_owned());
+        assert_eq!(
+            err.to_string(),
+            "service user was not found on the host: nobody"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_group_display() {
+        let err = GcScheduleError::MissingGroup("nogroup".to_owned());
+        assert_eq!(
+            err.to_string(),
+            "service group was not found on the host: nogroup"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+        let err = GcScheduleError::Io(io_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn gc_schedule_error_debug() {
+        let err = GcScheduleError::EmptyValue { field: "test" };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("EmptyValue"));
+    }
+
+    // ── render_service_unit / render_timer_unit (non-linux) ──────────────
+
+    #[test]
+    fn install_gc_schedule_on_non_linux_returns_unsupported_error() {
+        // On non-Linux platforms, install_gc_schedule returns an Unsupported Io error.
+        let options = super::GcScheduleInstallOptions::default();
+        let result = super::install_gc_schedule(&options);
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(result.is_err());
+            let Err(err) = result else { return };
+            assert!(matches!(err, GcScheduleError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::Unsupported));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // On Linux, it will try to validate paths which don't exist.
+            let _ = result;
+        }
     }
 }

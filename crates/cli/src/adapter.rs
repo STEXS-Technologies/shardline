@@ -79,7 +79,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint;
+    use super::{CliRuntimeError, endpoint};
 
     #[test]
     fn endpoint_joins_base_url_and_path() {
@@ -87,5 +87,52 @@ mod tests {
             endpoint("http://127.0.0.1:8080/", "/v1/stats"),
             "http://127.0.0.1:8080/v1/stats"
         );
+    }
+
+    // ── CliRuntimeError Display / Debug ─────────────────────────────────
+
+    #[test]
+    fn cli_runtime_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err = CliRuntimeError::Io(io_err);
+        assert!(err.to_string().contains("standard io failed"));
+    }
+
+    #[test]
+    fn cli_runtime_error_json_display() {
+        let json_err = serde_json::from_str::<()>("invalid").unwrap_err();
+        let err = CliRuntimeError::Json(json_err);
+        assert!(err.to_string().contains("json operation failed"));
+    }
+
+    #[test]
+    fn cli_runtime_error_server_status_display() {
+        let err = CliRuntimeError::ServerStatus {
+            status: 500,
+            body: "internal error".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("500"));
+        assert!(msg.contains("internal error"));
+    }
+
+    #[test]
+    fn cli_runtime_error_unhealthy_display() {
+        let err = CliRuntimeError::Unhealthy {
+            status: "degraded".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("degraded"));
+        assert!(msg.contains("health status"));
+    }
+
+    #[test]
+    fn cli_runtime_error_debug() {
+        let err = CliRuntimeError::ServerStatus {
+            status: 404,
+            body: "not found".to_owned(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("ServerStatus"));
     }
 }

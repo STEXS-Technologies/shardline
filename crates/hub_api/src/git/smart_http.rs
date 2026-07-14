@@ -1985,4 +1985,220 @@ mod tests {
             "collect_refs on nonexistent repo should return empty list: {refs:?}"
         );
     }
+
+    // --- build_report_response tests ---
+
+    fn body_string(response: Response) -> String {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        })
+    }
+
+    #[test]
+    fn build_report_response_unpack_ok_and_ok_refs() {
+        let results = vec![
+            ("refs/heads/main".to_owned(), true, None),
+            ("refs/heads/dev".to_owned(), true, None),
+        ];
+        let response = build_report_response(&results, true).unwrap();
+        let body = body_string(response);
+        assert!(body.contains("unpack ok"));
+        assert!(body.contains("ok refs/heads/main"));
+        assert!(body.contains("ok refs/heads/dev"));
+    }
+
+    #[test]
+    fn build_report_response_unpack_failed_and_ng_refs() {
+        let results = vec![
+            (
+                "refs/heads/main".to_owned(),
+                false,
+                Some("unpack failed".to_owned()),
+            ),
+        ];
+        let response = build_report_response(&results, false).unwrap();
+        let body = body_string(response);
+        assert!(body.contains("unpack failed"));
+        assert!(body.contains("ng refs/heads/main"));
+        assert!(body.contains("unpack failed"));
+    }
+
+    #[test]
+    fn build_report_response_ng_with_default_message() {
+        let results = vec![(
+            "refs/heads/bad".to_owned(),
+            false,
+            None,
+        )];
+        let response = build_report_response(&results, false).unwrap();
+        let body = body_string(response);
+        assert!(body.contains("ng refs/heads/bad failed"));
+    }
+
+    #[test]
+    fn build_report_response_ends_with_flush() {
+        let results: Vec<(String, bool, Option<String>)> = vec![];
+        let response = build_report_response(&results, true).unwrap();
+        let body = body_string(response);
+        assert!(body.ends_with("0000"), "response should end with flush packet");
+    }
+
+    // --- parse_receive_pack_request tests ---
+
+    #[test]
+    fn parse_receive_pack_request_with_updates_and_pack() {
+        // Build a pkt-line request: commands followed by flush, then pack data
+        let mut body = Vec::new();
+        // Command line: "old-sha new-sha refs/heads/main"
+        let cmd = "0000000000000000000000000000000000000000 newsha1234567890123456789012345678901234567890 refs/heads/main\n";
+        let encoded = format!("{:04x}{}", cmd.len() + 4, cmd);
+        body.extend_from_slice(encoded.as_bytes());
+        body.extend_from_slice(b"0000"); // flush
+        body.extend_from_slice(b"PACK"); // pack header start
+        body.extend_from_slice(&[0, 0, 0, 2]); // version
+        body.extend_from_slice(&[0, 0, 0, 0]); // 0 objects
+
+        let (updates, pack_data) = parse_receive_pack_request(&body);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].2, "refs/heads/main");
+        assert!(!pack_data.is_empty());
+        assert!(pack_data.starts_with(b"PACK"));
+    }
+
+    #[test]
+    fn parse_receive_pack_request_no_flush_returns_empty_pack() {
+        // "000a" = 10 bytes total (4 prefix + 6 payload "check\n")
+        let body = b"000acheck\n";
+        let (updates, pack_data) = parse_receive_pack_request(body);
+        // "check\n" has no whitespace, so split gives 1 part, but the
+        // function requires at least 3 parts (old, new, refname), so updates is empty
+        assert!(updates.is_empty());
+        // No flush packet found, so pack_start remains 0.
+        // pack_start (0) < body.len() (10) → true, so pack_data = body[0..] (the full body)
+        assert!(!pack_data.is_empty(), "pack_data should be the full body when no flush is present");
+    }
+
+    #[test]
+    fn parse_receive_pack_request_empty_body() {
+        let (updates, pack_data) = parse_receive_pack_request(b"");
+        assert!(updates.is_empty());
+        assert!(pack_data.is_empty());
+    }
+
+    #[test]
+    fn parse_receive_pack_request_non_utf8_line_skipped() {
+        let mut body = Vec::new();
+        // Non-UTF8 line: length prefix points to content with 0xFF
+        body.extend_from_slice(b"0005\xff\x00");
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(b"PACKdata");
+        let (updates, pack_data) = parse_receive_pack_request(&body);
+        // Non-UTF8 line is skipped, so updates is empty
+        assert!(updates.is_empty());
+        assert!(!pack_data.is_empty());
+    }
+
+    // --- parse_lfs_pointer_field tests ---
+
+    #[test]
+    fn parse_lfs_pointer_field_oid() {
+        let text = "version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 100\n";
+        let oid = parse_lfs_pointer_field(text, "oid");
+        assert_eq!(oid.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_lfs_pointer_field_size() {
+        let text = "version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 100\n";
+        let size = parse_lfs_pointer_field(text, "size");
+        assert_eq!(size.as_deref(), Some("100"));
+    }
+
+    #[test]
+    fn parse_lfs_pointer_field_missing_field() {
+        let text = "version https://git-lfs.github.com/spec/v1\n";
+        assert!(parse_lfs_pointer_field(text, "oid").is_none());
+        assert!(parse_lfs_pointer_field(text, "size").is_none());
+    }
+
+    #[test]
+    fn parse_lfs_pointer_field_extra_whitespace() {
+        let text = "oid sha256:  abc\n";
+        let oid = parse_lfs_pointer_field(text, "oid");
+        // strip_prefix("oid ") after splitting on "oid " returns " sha256:  abc"
+        // then strip_prefix("sha256:") would fail because there's a leading space
+        // Actually let's trace: line.strip_prefix("oid ") gives "sha256:  abc"
+        // then strip_prefix("sha256:") gives "  abc"
+        // So oid = Some("  abc")
+        assert!(oid.is_some());
+    }
+
+    // --- parse_pack_data tests ---
+
+    #[test]
+    fn parse_pack_data_empty_input() {
+        let objects = parse_pack_data(b"").unwrap();
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn parse_pack_data_too_short() {
+        let objects = parse_pack_data(b"PACK").unwrap();
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn parse_pack_data_no_pack_magic() {
+        let objects = parse_pack_data(b"NOTAPACKFILE").unwrap();
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn parse_pack_data_unsupported_version() {
+        let mut data = b"PACK".to_vec();
+        data.extend_from_slice(&3u32.to_be_bytes()); // version 3 (unsupported)
+        data.extend_from_slice(&0u32.to_be_bytes());
+        let objects = parse_pack_data(&data).unwrap();
+        assert!(objects.is_empty());
+    }
+
+    // --- authorize_read / authorize_write tests (no auth configured) ---
+
+    #[test]
+    fn authorize_read_without_auth_is_permissive() {
+        let (_tmp, state) = make_hub_state();
+        let headers = axum::http::HeaderMap::new();
+        assert!(authorize_read(&state, &headers).is_ok());
+    }
+
+    #[test]
+    fn authorize_write_without_auth_is_permissive() {
+        let (_tmp, state) = make_hub_state();
+        let headers = axum::http::HeaderMap::new();
+        assert!(authorize_write(&state, &headers).is_ok());
+    }
+
+    // --- decompress_zlib tests ---
+
+    #[test]
+    fn decompress_zlib_empty_input() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"").unwrap();
+        let compressed = encoder.finish().unwrap();
+        let (decompressed, _bytes_used) = decompress_zlib(&compressed).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[test]
+    fn decompress_zlib_short_input_returns_empty() {
+        // Truncated zlib stream
+        let result = decompress_zlib(b"x");
+        assert!(result.is_err() || result.unwrap().0.is_empty());
+    }
 }

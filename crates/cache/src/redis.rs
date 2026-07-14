@@ -410,4 +410,76 @@ mod tests {
         let result = RedisReconstructionCache::new("   ", ttl_seconds);
         assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
     }
+
+    #[test]
+    fn redis_cache_rejects_url_with_only_newline() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("\n", ttl_seconds);
+        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+    }
+
+    #[test]
+    fn redis_cache_rejects_url_with_tabs() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("\t\t", ttl_seconds);
+        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+    }
+
+    #[test]
+    fn redis_cache_accepts_valid_redis_url() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("redis://127.0.0.1:6379", ttl_seconds);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn redis_cache_accepts_unix_socket_url() {
+        let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
+        let result = RedisReconstructionCache::new("redis+unix:///tmp/redis.sock", ttl_seconds);
+        assert!(result.is_ok());
+    }
+
+    // ── encode_component ───────────────────────────────────────────────────
+
+    #[test]
+    fn encode_component_hex_encodes_input() {
+        assert_eq!(super::encode_component("hello"), hex::encode("hello"));
+    }
+
+    #[test]
+    fn encode_component_handles_special_characters() {
+        assert_eq!(super::encode_component("file name!"), hex::encode("file name!"));
+        assert_eq!(super::encode_component("a/b:c"), hex::encode("a/b:c"));
+    }
+
+    #[test]
+    fn encode_component_handles_unicode() {
+        assert_eq!(super::encode_component("héllo"), hex::encode("héllo"));
+    }
+
+    #[test]
+    fn encode_component_empty_string() {
+        assert_eq!(super::encode_component(""), hex::encode(""));
+    }
+
+    #[test]
+    fn encode_component_handles_control_characters_in_string() {
+        // encode_component takes &str so we can pass strings with escaped chars
+        assert_eq!(super::encode_component("a\tb"), hex::encode("a\tb"));
+        assert_eq!(super::encode_component("line1\nline2"), hex::encode("line1\nline2"));
+    }
+
+    // ── RedisReconstructionCache::new edge cases ─────────────────────────
+
+    #[test]
+    fn redis_cache_new_with_redis_scheme() {
+        let ttl = NonZeroU64::new(60).unwrap();
+        assert!(RedisReconstructionCache::new("redis://localhost", ttl).is_ok());
+    }
+
+    #[test]
+    fn redis_cache_new_with_unix_scheme() {
+        let ttl = NonZeroU64::new(60).unwrap();
+        assert!(RedisReconstructionCache::new("redis+unix:///run/redis.sock", ttl).is_ok());
+    }
 }

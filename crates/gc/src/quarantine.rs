@@ -545,4 +545,254 @@ mod tests {
             assert!(found, "expired hold should not be pruned");
         });
     }
+
+    // ── sweep_quarantine_entries tests ────────────────────────────────────
+
+    #[test]
+    fn sweep_removes_expired_orphan() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let object_store = shardline_server_core::ServerObjectStore::blackhole();
+
+            let now = 1_000_000_u64;
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                512,
+            );
+
+            // Pre-populate orphan objects
+            let mut orphan_objects = HashMap::new();
+            orphan_objects.insert(orphan.hash.clone(), orphan.clone());
+
+            // Create an expired quarantine candidate
+            let candidate = QuarantineCandidate::new(
+                orphan.object_key.clone(),
+                orphan.bytes,
+                now - 200_000,   // first seen long ago
+                now - 1,          // expired before now
+            )
+            .unwrap();
+            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+
+            let mut quarantine_entries = HashMap::new();
+            quarantine_entries.insert(orphan.hash.clone(), candidate);
+
+            let mut report = LocalGcReport {
+                scanned_records: 0,
+                referenced_chunks: 0,
+                orphan_chunks: 1,
+                orphan_chunk_bytes: 512,
+                active_quarantine_candidates: 0,
+                new_quarantine_candidates: 0,
+                retained_quarantine_candidates: 0,
+                released_quarantine_candidates: 0,
+                deleted_chunks: 0,
+                deleted_bytes: 0,
+            };
+
+            sweep_quarantine_entries(
+                &object_store,
+                &index_store,
+                &orphan_objects,
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(report.deleted_chunks, 1);
+            assert_eq!(report.deleted_bytes, 512);
+            assert_eq!(report.released_quarantine_candidates, 1);
+            assert!(quarantine_entries.is_empty());
+
+            // Verify candidate was removed from index
+            let mut found = false;
+            index_store
+                .visit_quarantine_candidates(|_c| {
+                    found = true;
+                    Ok::<(), GcError>(())
+                })
+                .await
+                .unwrap();
+            assert!(!found);
+        });
+    }
+
+    #[test]
+    fn sweep_skips_non_expired_orphan() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let object_store = shardline_server_core::ServerObjectStore::blackhole();
+
+            let now = 1_000_000_u64;
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                256,
+            );
+            let mut orphan_objects = HashMap::new();
+            orphan_objects.insert(orphan.hash.clone(), orphan.clone());
+
+            // Non-expired candidate
+            let candidate = QuarantineCandidate::new(
+                orphan.object_key.clone(),
+                orphan.bytes,
+                now,
+                now + 3600,
+            ).unwrap();
+            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+
+            let mut quarantine_entries = HashMap::new();
+            quarantine_entries.insert(orphan.hash.clone(), candidate);
+
+            let mut report = LocalGcReport {
+                scanned_records: 0,
+                referenced_chunks: 0,
+                orphan_chunks: 1,
+                orphan_chunk_bytes: 256,
+                active_quarantine_candidates: 0,
+                new_quarantine_candidates: 0,
+                retained_quarantine_candidates: 0,
+                released_quarantine_candidates: 0,
+                deleted_chunks: 0,
+                deleted_bytes: 0,
+            };
+
+            sweep_quarantine_entries(
+                &object_store,
+                &index_store,
+                &orphan_objects,
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(report.deleted_chunks, 0);
+            assert_eq!(report.deleted_bytes, 0);
+            assert_eq!(quarantine_entries.len(), 1);
+        });
+    }
+
+    #[test]
+    fn sweep_releases_entry_for_missing_orphan() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let object_store = shardline_server_core::ServerObjectStore::blackhole();
+
+            let now = 1_000_000_u64;
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                128,
+            );
+
+            // Create a quarantine entry but don't add orphan to orphan_objects
+            let candidate = QuarantineCandidate::new(
+                orphan.object_key.clone(),
+                orphan.bytes,
+                now - 100,
+                now - 1,
+            ).unwrap();
+            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+
+            let mut quarantine_entries = HashMap::new();
+            quarantine_entries.insert(orphan.hash.clone(), candidate);
+
+            let mut report = LocalGcReport {
+                scanned_records: 0,
+                referenced_chunks: 0,
+                orphan_chunks: 0,
+                orphan_chunk_bytes: 0,
+                active_quarantine_candidates: 0,
+                new_quarantine_candidates: 0,
+                retained_quarantine_candidates: 0,
+                released_quarantine_candidates: 0,
+                deleted_chunks: 0,
+                deleted_bytes: 0,
+            };
+
+            sweep_quarantine_entries(
+                &object_store,
+                &index_store,
+                &HashMap::new(), // empty orphan_objects
+                now,
+                &mut quarantine_entries,
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(report.released_quarantine_candidates, 1);
+            assert_eq!(report.deleted_chunks, 0);
+            assert!(quarantine_entries.is_empty());
+        });
+    }
+
+    #[test]
+    fn read_active_retention_holds_with_prune_expired() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                100,
+            );
+            // Expired hold
+            let hold = shardline_index::RetentionHold::new(
+                orphan.object_key.clone(),
+                "expired".to_owned(),
+                900_000,
+                Some(950_000),
+            ).unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            // prune_expired = true → expired hold should be pruned
+            let holds = read_active_retention_hold_object_keys(&index_store, 1_000_000, true)
+                .await
+                .unwrap();
+            assert!(!holds.contains(orphan.object_key.as_str()));
+
+            // Verify hold was removed from index
+            let mut found = false;
+            index_store
+                .visit_retention_holds(|h| {
+                    if h.object_key() == &orphan.object_key {
+                        found = true;
+                    }
+                    Ok::<(), GcError>(())
+                })
+                .await
+                .unwrap();
+            assert!(!found, "expired hold should have been pruned");
+        });
+    }
+
+    #[test]
+    fn sweep_non_expired_retention_hold_not_in_hold_set() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let index_store = MemoryIndexStore::new();
+            let orphan = make_orphan(
+                "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233",
+                100,
+            );
+            // Active hold (not expired)
+            let hold = shardline_index::RetentionHold::new(
+                orphan.object_key.clone(),
+                "active".to_owned(),
+                1_000_000,
+                Some(2_000_000),
+            ).unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            let holds = read_active_retention_hold_object_keys(&index_store, 1_500_000, true)
+                .await
+                .unwrap();
+            assert!(holds.contains(orphan.object_key.as_str()));
+        });
+    }
 }

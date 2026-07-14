@@ -488,6 +488,37 @@ mod tests {
         assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
+    // ── read_open_local_object_append trailing-byte rejection ──────────────
+
+    #[test]
+    fn read_open_local_object_append_rejects_trailing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trailing.bin");
+        // Write 6 bytes but claim only 4
+        std::fs::write(&path, b"abcdef").unwrap();
+        let file = File::open(&path).unwrap();
+        let mut output = Vec::new();
+        let result = read_open_local_object_append(&path, file, 4, &mut output);
+        assert!(matches!(
+            result,
+            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ), "expected StoredLengthMismatch for trailing bytes, got {result:?}");
+    }
+
+    #[test]
+    fn read_open_local_object_append_rejects_shorter_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let file = File::open(&path).unwrap();
+        let mut output = Vec::new();
+        let result = read_open_local_object_append(&path, file, 5, &mut output);
+        assert!(matches!(
+            result,
+            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+        ));
+    }
+
     // ── reconstruct_chunk_file_bytes ───────────────────────────────────────
 
     #[test]

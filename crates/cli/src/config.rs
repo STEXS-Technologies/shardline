@@ -122,8 +122,43 @@ mod tests {
     use shardline_server::ServerConfigError;
 
     use super::{
-        default_project_root, discover_project_root, is_deployment_root, resolve_root_dir,
+        ConfigRuntimeError, default_project_root, discover_project_root, is_deployment_root,
+        resolve_root_dir,
     };
+
+    // ── ConfigRuntimeError Display / Debug ─────────────────────────────
+
+    #[test]
+    fn config_runtime_error_config_display() {
+        let err = ConfigRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid server role"));
+    }
+
+    #[test]
+    fn config_runtime_error_server_display() {
+        use shardline_server::ServerError;
+        let err = ConfigRuntimeError::Server(ServerError::NotFound);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn config_runtime_error_providerless_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
+        let err = ConfigRuntimeError::Providerless(
+            crate::providerless::ProviderlessRuntimeError::Io(io_err),
+        );
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn config_runtime_error_debug() {
+        let err = ConfigRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Config("));
+    }
 
     #[test]
     fn deployment_root_detection_accepts_sqlite_metadata_layout() {

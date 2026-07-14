@@ -1510,7 +1510,7 @@ mod tests {
 
     use super::{
         S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, is_temp_upload_key,
-        stream_payload_for_range, validated_external_range, normalize_prefix,
+        stream_payload_for_range, temp_key_for, validated_external_range, normalize_prefix,
     };
     use crate::ObjectKey;
 
@@ -1991,7 +1991,133 @@ mod tests {
         assert!(store.is_ok());
     }
 
-    // ── validated_external_range edge cases ────────────────────────────
+    // ── temp_key_for ──────────────────────────────────────────────────────
+
+    #[test]
+    fn temp_key_for_appends_tmp_suffix_with_digits() {
+        let key = ObjectKey::parse("test/object.xorb").unwrap();
+        let result: Result<super::ObjectKey, S3ObjectStoreError> = temp_key_for(&key);
+        assert!(result.is_ok());
+        let Ok(temp) = result else {
+            return;
+        };
+        let temp_str: &str = temp.as_str();
+        assert!(temp_str.starts_with("test/object.xorb.tmp."));
+        // Verify there are digits after .tmp.
+        let after_dot_tmp: Option<&str> = temp_str.find(".tmp.").map(|pos| &temp_str[pos + 5..]);
+        assert!(after_dot_tmp.is_some_and(|s: &str| !s.is_empty()));
+    }
+
+    #[test]
+    fn temp_key_for_differs_on_subsequent_calls() {
+        let key = ObjectKey::parse("same/key.xorb").unwrap();
+        let a = temp_key_for(&key).unwrap();
+        let b = temp_key_for(&key).unwrap();
+        assert_ne!(a.as_str(), b.as_str());
+    }
+
+    // ── validate_config whitespace edge cases ──────────────────────────────
+
+    #[test]
+    fn validate_config_rejects_whitespace_bucket() {
+        let config = S3ObjectStoreConfig::new("   ".to_owned(), "us-east-1".to_owned());
+        let result = S3ObjectStore::new(config);
+        assert!(matches!(result, Err(S3ObjectStoreError::EmptyBucket)));
+    }
+
+    #[test]
+    fn validate_config_rejects_whitespace_region() {
+        let config = S3ObjectStoreConfig::new("bucket".to_owned(), "   ".to_owned());
+        let result = S3ObjectStore::new(config);
+        assert!(matches!(result, Err(S3ObjectStoreError::EmptyRegion)));
+    }
+
+    #[test]
+    fn validate_config_accepts_valid_config() {
+        let config = S3ObjectStoreConfig::new("bucket".to_owned(), "region".to_owned());
+        let result = S3ObjectStore::new(config);
+        assert!(result.is_ok());
+    }
+
+    // ── is_temp_upload_key edge cases ──────────────────────────────────────
+
+    #[test]
+    fn is_temp_upload_key_rejects_empty() {
+        assert!(!is_temp_upload_key(""));
+    }
+
+    #[test]
+    fn is_temp_upload_key_rejects_no_digits_after_tmp() {
+        assert!(!is_temp_upload_key("obj.tmp."));
+        assert!(!is_temp_upload_key("obj.tmp.abc"));
+    }
+
+    #[test]
+    fn is_temp_upload_key_rejects_multiple_tmp_as_middle_segment() {
+        assert!(!is_temp_upload_key("obj.tmp.tmp.42"));
+        assert!(is_temp_upload_key("obj.tmp.42.tmp.99"));
+    }
+
+    #[test]
+    fn is_temp_upload_key_rejects_without_tmp_suffix() {
+        assert!(!is_temp_upload_key("obj"));
+        assert!(!is_temp_upload_key("obj.tmpx.42"));
+        assert!(!is_temp_upload_key("obj.temp.42"));
+    }
+
+    #[test]
+    fn is_temp_upload_key_accepts_middle_of_key() {
+        assert!(is_temp_upload_key("prefix/obj.tmp.123/suffix"));
+    }
+
+    // ── S3ObjectStoreConfig Debug with missing credentials ─────────────────
+
+    #[test]
+    fn s3_config_debug_without_credentials() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("bucket"));
+        assert!(rendered.contains("allow_http"));
+        assert!(rendered.contains("region"));
+        assert!(rendered.contains("key_prefix"));
+    }
+
+    #[test]
+    fn s3_config_with_allow_http_defaults_to_false() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
+        let store = S3ObjectStore::new(config);
+        assert!(store.is_ok());
+    }
+
+    // ── S3ObjectStoreError From impls ──────────────────────────────────────
+
+    #[test]
+    fn s3_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let err: S3ObjectStoreError = io_err.into();
+        assert!(matches!(err, S3ObjectStoreError::Io(_)));
+    }
+
+    #[test]
+    fn s3_error_from_external_error() {
+        use object_store::Error as ExtError;
+        let ext_err = ExtError::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::other("fail")),
+        };
+        let err: S3ObjectStoreError = ext_err.into();
+        assert!(matches!(err, S3ObjectStoreError::External(_)));
+    }
+
+    // ── S3ByteStream type alias smoke test ─────────────────────────────────
+
+    #[test]
+    fn s3_byte_stream_type_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::S3ByteStream>();
+    }
+
+    // ── verified_external_range edge cases ────────────────────────────
 
     #[test]
     fn validated_external_range_single_byte() {

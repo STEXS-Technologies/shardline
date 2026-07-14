@@ -137,4 +137,82 @@ mod tests {
         });
         let _wrapped: MetricsService<_> = layer.layer(svc);
     }
+
+    #[tokio::test]
+    async fn metrics_service_call_records_metrics() {
+        use std::sync::Arc;
+        use axum::body::Body;
+        use axum::http::Request;
+        use prometheus::{Encoder, Registry, TextEncoder};
+        use tower::Service;
+        use tower::ServiceExt;
+
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+
+        let svc = tower::service_fn(|_req: Request<Body>| {
+            async {
+                Ok::<_, std::convert::Infallible>(
+                    axum::response::Response::builder()
+                        .status(200)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let mut wrapped = layer.layer(svc);
+
+        let req = Request::get("/health").body(Body::empty()).unwrap();
+        let response = wrapped.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(response.status(), 200);
+
+        // Verify metrics were recorded
+        let encoder = TextEncoder::new();
+        let families = registry.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&families, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("shardline_active_connections"));
+        assert!(output.contains("shardline_upload_duration_seconds_count"));
+        assert!(output.contains("shardline_download_duration_seconds_count"));
+    }
+
+    #[tokio::test]
+    async fn metrics_service_call_with_error_status_still_records() {
+        use std::sync::Arc;
+        use axum::body::Body;
+        use axum::http::Request;
+        use prometheus::{Encoder, Registry, TextEncoder};
+        use tower::Service;
+        use tower::ServiceExt;
+
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+
+        let svc = tower::service_fn(|_req: Request<Body>| {
+            async {
+                Ok::<_, std::convert::Infallible>(
+                    axum::response::Response::builder()
+                        .status(404)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let mut wrapped = layer.layer(svc);
+
+        let req = Request::get("/missing").body(Body::empty()).unwrap();
+        let response = wrapped.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(response.status(), 404);
+
+        // Metrics still recorded
+        let encoder = TextEncoder::new();
+        let families = registry.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&families, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("shardline_active_connections"));
+    }
 }

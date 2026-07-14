@@ -1252,6 +1252,164 @@ mod tests {
     }
 
     #[test]
+    fn server_error_display_invalid_serialized_shard() {
+        use shardline_server_core::InvalidSerializedShardError;
+        let err = ServerError::InvalidSerializedShard(
+            InvalidSerializedShardError::RetainedShardChunkHashesNotStrictlyOrdered,
+        );
+        assert_eq!(err.to_string(), "shard body was not a valid serialized shard object");
+    }
+
+    #[test]
+    fn server_error_display_too_many_batch_reconstruction_file_ids() {
+        let err = ServerError::TooManyBatchReconstructionFileIds;
+        assert_eq!(
+            err.to_string(),
+            "batch reconstruction requested too many file identifiers"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_token() {
+        let err = ServerError::InvalidToken(
+            shardline_protocol::TokenCodecError::Expired,
+        );
+        assert_eq!(err.to_string(), "bearer token was invalid");
+    }
+
+    #[test]
+    fn server_error_display_provider() {
+        let err = ServerError::Provider(
+            crate::provider::ProviderServiceError::EmptyApiKey,
+        );
+        assert_eq!(err.to_string(), "provider token issuance failed");
+    }
+
+    #[test]
+    fn server_error_display_reconstruction_cache() {
+        let err = ServerError::ReconstructionCache(
+            shardline_cache::ReconstructionCacheError::Operation,
+        );
+        assert_eq!(err.to_string(), "reconstruction cache adapter operation failed");
+    }
+
+    #[test]
+    fn server_error_display_config() {
+        let err = ServerError::Config(
+            crate::config::ServerConfigError::MissingTokenSigningKeyForServedRoutes,
+        );
+        assert_eq!(err.to_string(), "server configuration was invalid");
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn server_error_display_blocking_task() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        #[allow(clippy::panic)]
+        let task = rt.spawn(async { panic!("test panic") });
+        let join_err = rt.block_on(async { task.await.unwrap_err() });
+        let err = ServerError::BlockingTask(join_err);
+        assert!(err.to_string().contains("blocking worker task failed"));
+    }
+
+    #[test]
+    fn server_error_display_overflow() {
+        let err = ServerError::Overflow;
+        assert_eq!(err.to_string(), "arithmetic overflow");
+    }
+
+    #[test]
+    fn server_error_display_unauthorized_challenge() {
+        let err = ServerError::UnauthorizedChallenge("Bearer realm=\"test\"".to_owned());
+        assert_eq!(err.to_string(), "authorization challenge required");
+    }
+
+    #[test]
+    fn server_error_display_too_many_registry_token_requests() {
+        let err = ServerError::TooManyRegistryTokenRequests;
+        assert_eq!(
+            err.to_string(),
+            "too many active oci registry token requests"
+        );
+    }
+
+    #[test]
+    fn server_error_display_missing_provider_webhook_authentication() {
+        let err = ServerError::MissingProviderWebhookAuthentication;
+        assert_eq!(
+            err.to_string(),
+            "provider webhook authentication is missing"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_provider_webhook_authentication() {
+        let err = ServerError::InvalidProviderWebhookAuthentication;
+        assert_eq!(
+            err.to_string(),
+            "provider webhook authentication is invalid"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_provider_webhook_payload() {
+        let err = ServerError::InvalidProviderWebhookPayload;
+        assert_eq!(
+            err.to_string(),
+            "provider webhook payload was invalid"
+        );
+    }
+
+    #[test]
+    fn server_error_display_unknown_provider() {
+        let err = ServerError::UnknownProvider;
+        assert_eq!(err.to_string(), "provider is not configured");
+    }
+
+    #[test]
+    fn server_error_display_provider_denied() {
+        let err = ServerError::ProviderDenied;
+        assert_eq!(
+            err.to_string(),
+            "provider denied requested repository access"
+        );
+    }
+
+    #[test]
+    fn server_error_display_invalid_provider_token_request() {
+        let err = ServerError::InvalidProviderTokenRequest;
+        assert_eq!(err.to_string(), "provider token request was invalid");
+    }
+
+    #[test]
+    fn server_error_status_code_for_missing_provider_webhook_authentication() {
+        assert_eq!(
+            status_for(&ServerError::MissingProviderWebhookAuthentication),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn server_error_status_code_for_invalid_provider_api_key() {
+        assert_eq!(
+            status_for(&ServerError::InvalidProviderApiKey),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_unauthorized() {
+        let err = ServerError::MissingAuthorization;
+        assert_eq!(err.oci_error_code(), "UNAUTHORIZED");
+    }
+
+    #[test]
+    fn server_error_oci_error_code_for_denied() {
+        let err = ServerError::InsufficientScope;
+        assert_eq!(err.oci_error_code(), "DENIED");
+    }
+
+    #[test]
     fn server_error_debug_output() {
         let err = ServerError::NotFound;
         let debug = format!("{err:?}");

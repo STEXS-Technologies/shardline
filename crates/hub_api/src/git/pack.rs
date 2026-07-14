@@ -394,6 +394,7 @@ pub fn parse_ofs_delta_offset(data: &[u8], pos: &mut usize) -> Result<usize, Pac
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use std::error::Error;
 
     #[test]
     fn blob_sha1_matches_git() {
@@ -695,5 +696,131 @@ mod tests {
         let mut pos = 1; // already past end
         let result = parse_ofs_delta_offset(&data, &mut pos);
         assert!(result.is_err(), "pos past end should be an error");
+    }
+
+    // --- PackError Display tests ---
+
+    #[test]
+    fn pack_error_display_zlib() {
+        let io_err = std::io::Error::other("compression failed");
+        let err = PackError::Zlib(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("zlib compression failed"));
+        assert!(msg.contains("compression failed"));
+    }
+
+    #[test]
+    fn pack_error_display_too_many_objects() {
+        let err = PackError::TooManyObjects;
+        assert_eq!(err.to_string(), "too many objects for pack file");
+    }
+
+    #[test]
+    fn pack_error_display_shift_overflow() {
+        let err = PackError::ShiftOverflow;
+        assert_eq!(
+            err.to_string(),
+            "variable-length integer shift overflow"
+        );
+    }
+
+    #[test]
+    fn pack_error_display_invalid_delta() {
+        let err = PackError::InvalidDelta;
+        assert_eq!(err.to_string(), "invalid or missing delta base");
+    }
+
+    #[test]
+    fn pack_error_display_excessive_decompressed_size() {
+        let err = PackError::ExcessiveDecompressedSize;
+        assert_eq!(
+            err.to_string(),
+            "total decompressed size exceeds allowed limit"
+        );
+    }
+
+    #[test]
+    fn pack_error_source_zlib_returns_inner() {
+        let io_err = std::io::Error::other("compress fail");
+        let err = PackError::Zlib(io_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn pack_error_source_non_zlib_returns_none() {
+        assert!(PackError::TooManyObjects.source().is_none());
+        assert!(PackError::ShiftOverflow.source().is_none());
+        assert!(PackError::InvalidDelta.source().is_none());
+        assert!(PackError::ExcessiveDecompressedSize.source().is_none());
+    }
+
+    // --- ObjectType tests ---
+
+    #[test]
+    fn object_type_name_matches_git_conventions() {
+        assert_eq!(ObjectType::Commit.name(), "commit");
+        assert_eq!(ObjectType::Tree.name(), "tree");
+        assert_eq!(ObjectType::Blob.name(), "blob");
+        assert_eq!(ObjectType::Tag.name(), "tag");
+    }
+
+    // --- GitObject constructors ---
+
+    #[test]
+    fn git_object_commit_constructor_sets_type() {
+        let obj = GitObject::commit(b"test".to_vec());
+        assert_eq!(obj.object_type, ObjectType::Commit);
+        assert_eq!(obj.data, b"test");
+    }
+
+    #[test]
+    fn git_object_tree_constructor_sets_type() {
+        let obj = GitObject::tree(b"tree-data".to_vec());
+        assert_eq!(obj.object_type, ObjectType::Tree);
+    }
+
+    #[test]
+    fn git_object_blob_constructor_sets_type() {
+        let obj = GitObject::blob(b"blob-data".to_vec());
+        assert_eq!(obj.object_type, ObjectType::Blob);
+    }
+
+    // --- parse_delta_varint tests ---
+
+    #[test]
+    fn parse_delta_varint_single_byte_zero() {
+        assert_eq!(parse_delta_varint(&[0x00], 0).unwrap(), (0, 1));
+    }
+
+    #[test]
+    fn parse_delta_varint_single_byte_max() {
+        assert_eq!(parse_delta_varint(&[0x7f], 0).unwrap(), (127, 1));
+    }
+
+    #[test]
+    fn parse_delta_varint_two_bytes() {
+        // Byte 0: 0x81 (MSB set, value=1)
+        // Byte 1: 0x0a (MSB clear, value=10)
+        // result = 1 | (10 << 7) = 1 + 1280 = 1281
+        assert_eq!(parse_delta_varint(&[0x81, 0x0a], 0).unwrap(), (1281, 2));
+    }
+
+    #[test]
+    fn parse_delta_varint_empty_data() {
+        let result = parse_delta_varint(&[], 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_delta_varint_truncated() {
+        // Continuation byte but no more data
+        let result = parse_delta_varint(&[0x80], 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_delta_varint_with_offset() {
+        let data = [0xff, 0x7f]; // skip first byte, parse from index 1
+        assert_eq!(parse_delta_varint(&data, 1).unwrap(), (127, 2));
     }
 }

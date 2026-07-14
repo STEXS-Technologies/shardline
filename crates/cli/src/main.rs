@@ -595,6 +595,8 @@ fn print_error_chain(error: &dyn Error) {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::gc_mode_name;
 
     #[test]
@@ -615,5 +617,56 @@ mod tests {
     #[test]
     fn gc_mode_name_mark_and_sweep() {
         assert_eq!(gc_mode_name(true, true), "mark-and-sweep");
+    }
+
+    // ── print_error_chain ───────────────────────────────────────────────
+
+    #[derive(Debug)]
+    struct TestError(&'static str);
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl Error for TestError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    struct ChainedError {
+        message: &'static str,
+        source: Option<Box<dyn Error>>,
+    }
+
+    impl std::fmt::Display for ChainedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl Error for ChainedError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.source.as_ref().map(|e| e.as_ref())
+        }
+    }
+
+    #[test]
+    fn print_error_chain_single_error() {
+        let err = TestError("simple error");
+        super::print_error_chain(&err);
+    }
+
+    #[test]
+    fn print_error_chain_chained_error() {
+        let inner = TestError("inner cause");
+        let outer = ChainedError {
+            message: "outer error",
+            source: Some(Box::new(inner)),
+        };
+        super::print_error_chain(&outer);
     }
 }

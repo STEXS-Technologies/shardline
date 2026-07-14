@@ -74,6 +74,7 @@ mod tests {
     };
     use crate::OciAdapterError;
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_server_core::protocol_support::ProtocolValidation;
 
     #[test]
     fn sha256_digest_parser_requires_prefixed_lowercase_hex() {
@@ -231,5 +232,87 @@ mod tests {
     #[test]
     fn object_key_invalid_unsafe_path() {
         assert!(super::object_key("../unsafe").is_err());
+    }
+
+    #[test]
+    fn protocol_validation_invalid_digest() {
+        let err = OciAdapterError::invalid_digest();
+        assert!(matches!(err, OciAdapterError::InvalidDigest));
+    }
+
+    #[test]
+    fn protocol_validation_invalid_content_hash() {
+        let err = OciAdapterError::invalid_content_hash();
+        assert!(matches!(err, OciAdapterError::InvalidContentHash));
+    }
+
+    #[test]
+    fn protocol_validation_invalid_repository_name() {
+        let err = OciAdapterError::invalid_repository_name();
+        assert!(matches!(err, OciAdapterError::InvalidRepositoryName));
+    }
+
+    #[test]
+    fn protocol_validation_not_found() {
+        let err = OciAdapterError::not_found();
+        assert!(matches!(err, OciAdapterError::NotFound));
+    }
+
+    #[test]
+    fn protocol_validation_invalid_manifest_reference() {
+        let err = OciAdapterError::invalid_manifest_reference();
+        assert!(matches!(err, OciAdapterError::InvalidManifestReference));
+    }
+
+    #[test]
+    fn protocol_validation_invalid_upload_session() {
+        let err = OciAdapterError::invalid_upload_session();
+        assert!(matches!(err, OciAdapterError::InvalidUploadSession));
+    }
+
+    #[test]
+    fn shared_sha256_object_key_invalid_digest_errors() {
+        assert!(shared_sha256_object_key("not-64-chars").is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_scope_none_scope_ok() {
+        assert!(validate_oci_repository_scope("any/repo", None).is_ok());
+    }
+
+    #[test]
+    fn validate_upload_session_id_too_long_errors() {
+        let long = "a".repeat(65);
+        assert!(matches!(
+            validate_upload_session_id(&long),
+            Err(OciAdapterError::InvalidUploadSession)
+        ));
+    }
+
+    #[test]
+    fn validate_oci_tag_valid_tags() {
+        assert!(validate_oci_tag("v1.0.0").is_ok());
+        assert!(validate_oci_tag("latest").is_ok());
+        assert!(validate_oci_tag("build-2026-04-23").is_ok());
+    }
+
+    #[test]
+    fn validate_oci_tag_invalid_tags() {
+        assert!(matches!(
+            validate_oci_tag("contains spaces"),
+            Err(OciAdapterError::InvalidManifestReference)
+        ));
+        assert!(matches!(
+            validate_oci_tag("tag/with/slashes"),
+            Err(OciAdapterError::InvalidManifestReference)
+        ));
+        assert!(matches!(
+            validate_oci_tag("-starts-with-hyphen"),
+            Err(OciAdapterError::InvalidManifestReference)
+        ));
+        assert!(matches!(
+            validate_oci_tag(".starts-with-dot"),
+            Err(OciAdapterError::InvalidManifestReference)
+        ));
     }
 }
