@@ -1370,6 +1370,24 @@ mod tests {
         assert!(!msg.is_empty());
     }
 
+    // ── object_location_display: blackhole fallback ────────────────────
+
+    #[test]
+    fn object_location_display_with_blackhole_falls_back_to_storage_path() {
+        let object_root = PathBuf::from("/tmp/test-root");
+        let object_store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("ab/cdef1234").unwrap();
+        let display = object_location_display(&object_root, &object_store, &key);
+        assert!(
+            display.contains("ab/cdef1234"),
+            "expected key in display, got: {display}"
+        );
+        assert!(
+            display.contains("/tmp/test-root"),
+            "expected root in display, got: {display}"
+        );
+    }
+
     // ── run_fsck_with_stores: missing dedupe shard object ────────────
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1405,6 +1423,56 @@ mod tests {
         assert!(
             report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingDedupeShardObject),
             "expected MissingDedupeShardObject issue, got: {:#?}",
+            report.issues
+        );
+    }
+
+    // ── run_fsck_with_stores: invalid retained shard ──────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_invalid_retained_shard_detected() {
+        use shardline_index::{DedupeShardMapping, MemoryIndexStore};
+        use shardline_protocol::ShardlineHash;
+        use shardline_storage::ObjectKey;
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+        let _object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Insert a dedupe shard mapping pointing to a shard key
+        let chunk_hash = ShardlineHash::from_bytes([42; 32]);
+        let shard_key = ObjectKey::parse("shards/aa/invalid.shard").unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, shard_key.clone());
+        index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
+
+        // Create an object at the shard key with garbage bytes (not a valid shard).
+        // Write directly to the local filesystem.
+        let shard_path = object_root.join(shard_key.as_str());
+        if let Some(parent) = shard_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&shard_path, b"not a valid shard").unwrap();
+
+        // Re-create the object store so it picks up the written file
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean(), "expected issues for invalid retained shard");
+        assert_eq!(report.inspected_dedupe_shard_mappings, 1);
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidRetainedShard),
+            "expected InvalidRetainedShard issue, got: {:#?}",
             report.issues
         );
     }
@@ -1691,6 +1759,20 @@ mod tests {
             msg.contains("last_access_changed_at_unix_seconds"),
             "msg: {msg}"
         );
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_quarantine_referenced_missing_object() {
+        let detail = FsckIssueDetail::QuarantineReferencedMissingObject;
+        let msg = detail.to_string();
+        assert!(msg.contains("missing object"), "msg: {msg}");
+    }
+
+    #[test]
+    fn fsck_issue_detail_display_quarantine_targeted_reachable_object() {
+        let detail = FsckIssueDetail::QuarantineTargetedReachableObject;
+        let msg = detail.to_string();
+        assert!(msg.contains("reachable"), "msg: {msg}");
     }
 
     // ── Extra FsckError Display coverage ─────────────────────────────

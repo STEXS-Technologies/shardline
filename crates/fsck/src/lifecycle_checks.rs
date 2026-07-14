@@ -488,4 +488,78 @@ mod tests {
             .count();
         assert_eq!(count, 1);
     }
+
+    #[tokio::test]
+    async fn expired_retention_hold_does_not_trigger_missing_object() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+        // A hold that expires immediately (release_after = 1) is inactive at
+        // any realistic current timestamp.
+        let hold = shardline_index::RetentionHold::new(
+            obj_key.clone(),
+            "short hold".to_owned(),
+            0,
+            Some(1), // release_after = 1 → inactive at current time
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
+        // Even though the object doesn't exist, the hold is inactive so no issue.
+        let report = run_lifecycle_check(&store, None).await;
+        assert!(report.is_clean(), "expected no issues for expired hold, got: {report:?}");
+    }
+
+    #[tokio::test]
+    async fn quarantine_length_mismatch_detected() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+
+        // Create the object at the expected key with a specific length
+        let content = b"actual object content that is 27 bytes";
+        let object_storage_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_storage_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_storage_path, content).unwrap();
+
+        // Create the object store after writing the file
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a quarantine candidate with a DIFFERENT observed_length (10 instead of 27)
+        let candidate = shardline_index::QuarantineCandidate::new(
+            obj_key.clone(),
+            10,   // observed_length (different from actual 27)
+            100,  // first_seen
+            200,  // delete_after
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&index_store, &candidate).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean(), "expected issues");
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            FsckIssueKind::QuarantineLengthMismatch,
+            "expected QuarantineLengthMismatch, got: {:#?}",
+            report.issues
+        );
+    }
 }
