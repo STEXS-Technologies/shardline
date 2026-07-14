@@ -3344,6 +3344,7 @@ dependencies = [
 name = "shardline-rebuild"
 version = "1.0.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "shardline-index",

@@ -1430,4 +1430,137 @@ mod tests {
             "record total byte count did not match chunks"
         );
     }
+
+    // ---- run_index_rebuild_with_stores stale latest records ----
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_index_rebuild_removes_stale_latest_records() {
+        use shardline_index::{MemoryIndexStore, RecordMutation};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let object_root = root.join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+
+        // Write a version record that will produce a candidate
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-file".to_owned(),
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_version_record(&record).await.unwrap();
+
+        // Write a latest record for a different file that has NO version record
+        let stale_record = shardline_index::FileRecord {
+            file_id: "stale-file".to_owned(),
+            content_hash: "b".repeat(64),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: Vec::new(),
+        };
+        record_store.write_latest_record(&stale_record).await.unwrap();
+
+        let report = run_index_rebuild_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+        assert_eq!(report.scanned_version_records, 1);
+        assert_eq!(report.removed_stale_latest_records, 1);
+        assert_eq!(report.rebuilt_latest_records, 1);
+        assert_eq!(report.unchanged_latest_records, 0);
+    }
+
+    // ---- prune_stale_reconstructions full path ----
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_stale_reconstructions_removes_undesired() {
+        use shardline_index::{
+            FileId, FileReconstruction, MemoryIndexStore, ReconstructionTerm, XorbId,
+        };
+        use shardline_protocol::{ChunkRange, ShardlineHash};
+
+        let index_store = MemoryIndexStore::new();
+
+        // Insert a reconstruction that we will later treat as stale
+        let hash = ShardlineHash::from_bytes([1; 32]);
+        let xorb_id = XorbId::new(hash);
+        let range = ChunkRange::new(0, 1).unwrap();
+        let terms = vec![ReconstructionTerm::new(xorb_id, range, 64)];
+        let reconstruction = FileReconstruction::new(terms);
+        let file_id = FileId::new(ShardlineHash::from_bytes([2; 32]));
+        index_store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .unwrap();
+
+        // desired set is empty, so the reconstruction above is stale
+        let desired = HashSet::new();
+        let mut report = empty_report();
+
+        prune_stale_reconstructions(&index_store, &desired, &mut report)
+            .await
+            .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(report.scanned_reconstructions, 1);
+        assert_eq!(report.removed_stale_reconstructions, 1);
+        assert_eq!(report.unchanged_reconstructions, 0);
+
+        // Verify the reconstruction was deleted
+        let remaining = index_store.list_reconstruction_file_ids().await.unwrap();
+        assert!(remaining.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prune_stale_reconstructions_preserves_desired() {
+        use shardline_index::{
+            FileId, FileReconstruction, MemoryIndexStore, ReconstructionTerm, XorbId,
+        };
+        use shardline_protocol::{ChunkRange, ShardlineHash};
+
+        let index_store = MemoryIndexStore::new();
+
+        // Insert a reconstruction whose file_id hex matches the desired set
+        let file_id = FileId::new(ShardlineHash::from_bytes([3; 32]));
+        let hash = ShardlineHash::from_bytes([4; 32]);
+        let xorb_id = XorbId::new(hash);
+        let range = ChunkRange::new(0, 1).unwrap();
+        let terms = vec![ReconstructionTerm::new(xorb_id, range, 64)];
+        let reconstruction = FileReconstruction::new(terms);
+        index_store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .unwrap();
+        // file_id_hex for ShardlineHash::from_bytes([3; 32])
+        let file_id_hex = format!("{:02x}", 3).repeat(64 / 2);
+        let mut desired = HashSet::new();
+        desired.insert(file_id_hex.clone());
+
+        let mut report = empty_report();
+
+        prune_stale_reconstructions(&index_store, &desired, &mut report)
+            .await
+            .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(report.scanned_reconstructions, 1);
+        assert_eq!(report.unchanged_reconstructions, 1);
+        assert_eq!(report.removed_stale_reconstructions, 0);
+
+        // Verify the reconstruction is still present
+        let remaining = index_store.list_reconstruction_file_ids().await.unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
 }

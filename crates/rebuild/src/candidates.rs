@@ -223,6 +223,7 @@ const fn reconstruction_plan_error_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shardline_index::{LocalRecordStore, RecordMutation, RecordTraversal};
     use shardline_protocol::{HashParseError, RepositoryProvider, RepositoryScope};
     use std::time::Duration;
 
@@ -258,6 +259,510 @@ mod tests {
 
     fn make_scope() -> RepositoryScope {
         RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", Some("main")).unwrap()
+    }
+
+    // ---- collect_candidate tests ----
+
+    fn empty_report() -> IndexRebuildReport {
+        IndexRebuildReport {
+            scanned_version_records: 0,
+            scanned_retained_shards: 0,
+            rebuilt_latest_records: 0,
+            unchanged_latest_records: 0,
+            removed_stale_latest_records: 0,
+            scanned_reconstructions: 0,
+            unchanged_reconstructions: 0,
+            removed_stale_reconstructions: 0,
+            rebuilt_dedupe_shard_mappings: 0,
+            unchanged_dedupe_shard_mappings: 0,
+            removed_stale_dedupe_shard_mappings: 0,
+            issues: Vec::new(),
+        }
+    }
+
+    fn open_db(root: &std::path::Path) -> rusqlite::Connection {
+        rusqlite::Connection::open(root.join("metadata.sqlite3"))
+            .expect("failed to open metadata sqlite3 database")
+    }
+
+    /// Compute the length-prefixed record key for a scope-less version record.
+    fn version_record_key(file_id: &str, content_hash: &str) -> String {
+        // Each component is stored as "len:value"
+        format!(
+            "7:version8:6:global{len_fid}:{fid}{len_ch}:{ch}",
+            len_fid = file_id.len(),
+            fid = file_id,
+            len_ch = content_hash.len(),
+            ch = content_hash,
+        )
+    }
+
+    /// Write a raw version record (bypassing the store) for error-path testing.
+    /// Takes JSON bytes for the `record` column.
+    fn write_raw_version_record(
+        conn: &rusqlite::Connection,
+        record_key: &str,
+        file_id: &str,
+        content_hash_val: &str,
+        record_json: &[u8],
+    ) {
+        // scope_key for None (global)
+        let scope_key = "6:global";
+        conn.execute(
+            "INSERT INTO shardline_file_records
+                (record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds)
+             VALUES (?1, 'version', ?2, ?3, ?4, ?5, 1000)
+             ON CONFLICT (record_key) DO UPDATE SET
+                record = excluded.record",
+            rusqlite::params![record_key, scope_key, file_id, content_hash_val, record_json],
+        )
+        .expect("failed to insert raw version record");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_valid_record_adds_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+        let record = make_file_record("test.txt", &valid_hex_hash());
+
+        // Write a valid version record
+        store.write_version_record(&record).await.unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(candidates.len(), 1);
+        // Verify the candidate fields match
+        let candidate = candidates.values().next().unwrap();
+        assert_eq!(candidate.record.file_id, "test.txt");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_invalid_file_id_reports_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+        // file_id with path traversal fails validate_identifier
+        let record = make_file_record("../etc/passwd", &valid_hex_hash());
+        store.write_version_record(&record).await.unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(report.issues[0].kind, IndexRebuildIssueKind::InvalidVersionFileId);
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_invalid_content_hash_reports_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+        // Non-hex content hash fails validate_content_hash
+        let record = make_file_record("test.txt", "not-a-valid-content-hash!!!");
+        store.write_version_record(&record).await.unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            IndexRebuildIssueKind::InvalidVersionContentHash
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_invalid_repository_scope_reports_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+
+        // Write a valid record first to initialize the database
+        let record = make_file_record("init.txt", &valid_hex_hash());
+        store.write_version_record(&record).await.unwrap();
+
+        // Now open the DB directly and insert a version record with an
+        // invalid repository scope (empty owner).
+        // The JSON deserialization will produce a RepositoryScope with
+        // empty owner, which fails validate_repository_scope.
+        let conn = open_db(&root);
+        let invalid_json = br#"{
+            "file_id": "scoped.txt",
+            "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "total_bytes": 0,
+            "chunk_size": 0,
+            "repository_scope": {
+                "provider": "GitHub",
+                "owner": "",
+                "name": "repo"
+            },
+            "chunks": []
+        }"#;
+        // record_key format: length-prefixed kind:scope_key:file_id
+        // kind="version"(7), scope_key="6:global", file_id="scoped.txt"(10)
+        write_raw_version_record(
+            &conn,
+            "7:version6:global10:scoped.txt",
+            "scoped.txt",
+            &valid_hex_hash(),
+            invalid_json,
+        );
+
+        // Also delete the init record so only our test record is visited
+        conn.execute(
+            "DELETE FROM shardline_file_records WHERE file_id = 'init.txt'",
+            [],
+        )
+        .unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            IndexRebuildIssueKind::InvalidVersionRepositoryScope
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_path_mismatch_reports_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+
+        // Write a valid record to initialize the database
+        let record = make_file_record("init.txt", &valid_hex_hash());
+        store.write_version_record(&record).await.unwrap();
+
+        // Insert a version record whose record_key doesn't match what
+        // version_record_locator would compute for the same record.
+        // We use a different record_key to trigger the path mismatch.
+        let conn = open_db(&root);
+        let valid_json = serde_json::json!({
+            "file_id": "mismatch.txt",
+            "content_hash": valid_hex_hash(),
+            "total_bytes": 0,
+            "chunk_size": 0,
+            "chunks": []
+        });
+        let json_bytes = serde_json::to_vec(&valid_json).unwrap();
+        // Compute the correct key for this record, then pass a deliberately
+        // different key to trigger path mismatch
+        let correct_key = version_record_key("mismatch.txt", &valid_hex_hash());
+        let wrong_key = correct_key.replace("mismatch.txt", "WRONG_____");
+        write_raw_version_record(&conn, &wrong_key, "mismatch.txt", &valid_hex_hash(), &json_bytes);
+
+        // Delete the init record
+        conn.execute(
+            "DELETE FROM shardline_file_records WHERE file_id = 'init.txt'",
+            [],
+        )
+        .unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            IndexRebuildIssueKind::VersionPathMismatch
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_invalid_reconstruction_plan_reports_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+        // EmptyChunk in the plan fails validate_reconstruction_plan
+        use shardline_index::FileChunkRecord;
+        let record = FileRecord {
+            file_id: "test.txt".to_owned(),
+            content_hash: valid_hex_hash(),
+            total_bytes: 100,
+            chunk_size: 100,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "b".repeat(64),
+                offset: 0,
+                length: 0, // zero-length chunk => EmptyChunk error
+                range_start: 0,
+                range_end: 0,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        store.write_version_record(&record).await.unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            IndexRebuildIssueKind::InvalidVersionReconstructionPlan
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_newer_version_replaces_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+
+        // Create first record (older timestamp)
+        let record1 = make_file_record("replace.txt", &valid_hex_hash());
+        store.write_version_record(&record1).await.unwrap();
+
+        // Create second record with SAME file_id but different content hash (newer)
+        // Use a different file_id approach: write a separate version record
+        // that rebuild_key maps to the same key, by having the same file_id
+        let record2 = make_file_record("replace.txt", &"b".repeat(64));
+        store.write_version_record(&record2).await.unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(candidates.len(), 1);
+        // The candidate should have the newer content_hash ("b" > "a")
+        let candidate = candidates.values().next().unwrap();
+        // Both have the same file_id, same modified_since_epoch (same second),
+        // so the tiebreaker is content_hash: "b".repeat(64) > valid_hex_hash()
+        assert_eq!(
+            candidate.record.content_hash,
+            "b".repeat(64),
+            "expected the lexicographically larger content hash to win"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_older_version_does_not_replace_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+
+        // First write a record with content_hash "b"
+        let record_newer = make_file_record("older.txt", &"b".repeat(64));
+        store.write_version_record(&record_newer).await.unwrap();
+
+        // Then write a record with content_hash "a" (older tiebreaker)
+        let record_older = make_file_record("older.txt", &valid_hex_hash());
+        store.write_version_record(&record_older).await.unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(candidates.len(), 1);
+        // The candidate should have content_hash "b" because it was seen first
+        // and "a" doesn't beat "b" in the tiebreaker
+        let candidate = candidates.values().next().unwrap();
+        assert_eq!(
+            candidate.record.content_hash,
+            "b".repeat(64),
+            "expected the first-seen record with higher content hash to remain"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_older_record_does_not_replace_newer_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+
+        // Write a valid record to initialize the database
+        let record = make_file_record("init.txt", &valid_hex_hash());
+        store.write_version_record(&record).await.unwrap();
+
+        // Insert two records with the same file_id but different timestamps.
+        // Record "a" has epoch 100 (processed first due to lower content_hash in key),
+        // Record "b" has epoch 1 (processed second due to higher content_hash in key).
+        // Since "a" is processed first and has higher epoch, it wins.
+        // When "b" is processed second, it's NOT newer so we hit the Some(_) => {} arm.
+        let conn = open_db(&root);
+        let json_a = serde_json::json!({
+            "file_id": "collide.txt",
+            "content_hash": "a".repeat(64),
+            "total_bytes": 0,
+            "chunk_size": 0,
+            "chunks": []
+        });
+        let json_b = serde_json::json!({
+            "file_id": "collide.txt",
+            "content_hash": "b".repeat(64),
+            "total_bytes": 0,
+            "chunk_size": 0,
+            "chunks": []
+        });
+
+        // Remove the init record
+        conn.execute("DELETE FROM shardline_file_records", []).unwrap();
+
+        // The record_key is built from length-prefixed components:
+        //   push_length_prefixed("version")    = "7:version"
+        //   push_length_prefixed("6:global")   = "8:6:global" (scope_key is 8 chars)
+        //   push_length_prefixed("collide.txt") = "11:collide.txt"
+        //   push_length_prefixed(content_hash)  = "64:aaaa..."
+        let record_key_a = format!("7:version8:6:global11:collide.txt64:{}", "a".repeat(64));
+        conn.execute(
+            "INSERT INTO shardline_file_records
+                (record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds)
+             VALUES (?1, 'version', '6:global', 'collide.txt', ?2, ?3, 100)",
+            rusqlite::params![
+                &record_key_a,
+                &"a".repeat(64),
+                &serde_json::to_vec(&json_a).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        // Insert record "b" with low epoch (1 second) - but higher content_hash
+        // so it sorts later in the listing
+        let record_key_b = format!("7:version8:6:global11:collide.txt64:{}", "b".repeat(64));
+        conn.execute(
+            "INSERT INTO shardline_file_records
+                (record_key, record_kind, scope_key, file_id, content_hash, record, updated_at_unix_seconds)
+             VALUES (?1, 'version', '6:global', 'collide.txt', ?2, ?3, 1)",
+            rusqlite::params![
+                &record_key_b,
+                &"b".repeat(64),
+                &serde_json::to_vec(&json_b).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(report.is_clean(), "report: {report:?}");
+        assert_eq!(candidates.len(), 1);
+        // The candidate should have content_hash "a" (the one with higher epoch)
+        let candidate = candidates.values().next().unwrap();
+        assert_eq!(candidate.record.content_hash, "a".repeat(64));
+
+        // Verify that the newer content_hash record "b" was NOT selected
+        // (because epoch 1 < epoch 100). This confirms the Some(_) => {} arm
+        // fired for the second record (not newer, not replaced).
+        assert_ne!(
+            candidate.record.content_hash,
+            "b".repeat(64),
+            "content_hash 'b' should have been rejected due to lower epoch"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collect_candidate_bad_json_reports_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = LocalRecordStore::open(root.clone());
+
+        // Write a valid record to initialize the database
+        let record = make_file_record("init.txt", &valid_hex_hash());
+        store.write_version_record(&record).await.unwrap();
+
+        // Insert non-JSON bytes directly
+        let conn = open_db(&root);
+        let bad_bytes = b"this is not valid json at all {{}}";
+        write_raw_version_record(
+            &conn,
+            "7:version6:global8:bad.json",
+            "bad.json",
+            "a".repeat(64).as_str(),
+            bad_bytes,
+        );
+
+        // Delete the init record
+        conn.execute(
+            "DELETE FROM shardline_file_records WHERE file_id = 'init.txt'",
+            [],
+        )
+        .unwrap();
+
+        let mut candidates = HashMap::new();
+        let mut report = empty_report();
+
+        RecordTraversal::visit_version_records(&store, |entry| {
+            collect_candidate(&store, entry, &mut candidates, &mut report)
+        })
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            IndexRebuildIssueKind::InvalidVersionRecordJson
+        );
+        assert!(candidates.is_empty());
     }
 
     // ---- rebuild_key tests ----
