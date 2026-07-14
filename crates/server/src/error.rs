@@ -2463,4 +2463,166 @@ mod tests {
         let response = oci.into_response();
         assert!(response.headers().get(axum::http::header::WWW_AUTHENTICATE).is_none());
     }
+
+    // ---- Additional From implementation tests for uncovered variants ----
+
+    #[test]
+    fn from_xet_adapter_error_object_store() {
+        let err: ServerError = crate::xet_adapter::XetAdapterError::ObjectStore(
+            crate::object_store::ServerObjectStoreError::NotFound,
+        ).into();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn from_provider_events_error_xet_adapter_proxies() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::XetAdapter(
+            shardline_xet_adapter::XetAdapterError::NotFound,
+        ).into();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn from_provider_events_error_object_store_proxies() {
+        use shardline_provider_events::ProviderEventsError;
+        let err: ServerError = ProviderEventsError::ObjectStore(
+            crate::object_store::ServerObjectStoreError::Overflow,
+        ).into();
+        assert!(matches!(err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_gc_error_object_store_proxies() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::ObjectStore(
+            crate::object_store::ServerObjectStoreError::NotFound,
+        ).into();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn from_gc_error_xet_adapter_proxies() {
+        use shardline_gc::GcError;
+        let err: ServerError = GcError::XetAdapter(
+            shardline_xet_adapter::XetAdapterError::InvalidContentHash,
+        ).into();
+        assert!(matches!(err, ServerError::InvalidContentHash));
+    }
+
+    // ---- OciAdapterError From implementation tests ----
+
+    #[test]
+    fn from_oci_adapter_error_io() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::Io(
+            std::io::Error::other("oci io"),
+        ).into();
+        assert!(matches!(err, ServerError::Io(_)));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_json() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::Json(
+            serde_json::from_str::<()>("x").unwrap_err(),
+        ).into();
+        assert!(matches!(err, ServerError::Json(_)));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_numeric_conversion() {
+        let huge = 1_000_000_000_000u64;
+        let try_err = i32::try_from(huge).unwrap_err();
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::NumericConversion(try_err).into();
+        assert!(matches!(err, ServerError::NumericConversion(_)));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_object_store_proxies() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::ObjectStore(
+            crate::object_store::ServerObjectStoreError::Overflow,
+        ).into();
+        assert!(matches!(err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_s3_object_store() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::S3ObjectStore(
+            shardline_storage::S3ObjectStoreError::IncompleteCredentials,
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::S3(_))));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_local_object_store() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::LocalObjectStore(
+            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local")),
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Local(_))));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_object_prefix() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::ObjectPrefix(
+            shardline_storage::ObjectPrefixError::UnsafePath,
+        ).into();
+        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Prefix(_))));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_not_found() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::NotFound.into();
+        assert!(matches!(err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_overflow() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::Overflow.into();
+        assert!(matches!(err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_invalid_content_hash() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::InvalidContentHash.into();
+        assert!(matches!(err, ServerError::InvalidContentHash));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_invalid_repository_name() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::InvalidRepositoryName.into();
+        assert!(matches!(err, ServerError::InvalidRepositoryName));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_invalid_manifest_reference() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::InvalidManifestReference.into();
+        assert!(matches!(err, ServerError::InvalidManifestReference));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_invalid_upload_session() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::InvalidUploadSession.into();
+        assert!(matches!(err, ServerError::InvalidUploadSession));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_too_many_upload_sessions() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::TooManyUploadSessions.into();
+        assert!(matches!(err, ServerError::TooManyUploadSessions));
+    }
+
+    #[test]
+    fn from_oci_adapter_error_expected_body_hash_mismatch() {
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::ExpectedBodyHashMismatch.into();
+        assert!(matches!(err, ServerError::ExpectedBodyHashMismatch));
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn from_oci_adapter_error_blocking_task() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let task = rt.spawn(async { panic!("oci task panic") });
+        let join_err = rt.block_on(async { task.await.unwrap_err() });
+        let err: ServerError = shardline_oci_adapter::OciAdapterError::BlockingTask(join_err).into();
+        assert!(matches!(err, ServerError::BlockingTask(_)));
+    }
 }

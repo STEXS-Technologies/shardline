@@ -451,6 +451,26 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_ready_with_blackhole_store_hits_non_local_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blackhole = crate::object_store::ServerObjectStore::blackhole();
+        // The blackhole store has no local_root, so ready() goes through the
+        // else branch (ObjectKey::parse + metadata probe).
+        // Blackhole returns Ok(None) for metadata, not an error, so ready() continues
+        // to the record store checks and eventually succeeds.
+        let backend = LocalBackend::new_with_object_store(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+            blackhole,
+        )
+        .await
+        .unwrap();
+        let result = backend.ready().await;
+        assert!(result.is_ok(), "ready() with blackhole store should succeed since metadata returns Ok(None), got: {:?}", result.err());
+    }
+
     #[test]
     fn content_hash_with_single_chunk() {
         let chunks = [FileChunkRecord {

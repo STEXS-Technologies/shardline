@@ -1071,6 +1071,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_object_store_put_if_absent_with_symlink_target_returns_error() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path().join("objects")).unwrap();
+
+        let key = ObjectKey::parse("xorbs/default/ff/hash.xorb").unwrap();
+        let path = store.path_for_key(&key);
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+
+        // Create a regular file first, then replace it with a symlink
+        let outside = storage.path().join("outside-target");
+        std::fs::write(&outside, b"real data").unwrap();
+        std::fs::write(&path, b"existing").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&outside, &path).unwrap();
+
+        let body = b"new data";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 8);
+        let result = store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity);
+        // Should fail because existing path is a symlink
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_object_store_rejects_symlinked_object_path() {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path().join("objects"));
@@ -2052,6 +2077,181 @@ mod tests {
         assert!(matches!(result, LocalObjectStoreError::Io(_)));
     }
 
+    // ── LocalObjectStoreError Display variants ─────────────────────────────
+
+    #[test]
+    fn local_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "disk error");
+        let err = LocalObjectStoreError::Io(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("local object store operation failed"));
+    }
+
+    #[test]
+    fn local_error_display_integrity_length_mismatch() {
+        let err = LocalObjectStoreError::IntegrityLengthMismatch;
+        assert_eq!(err.to_string(), "object body length did not match expected integrity");
+    }
+
+    #[test]
+    fn local_error_display_integrity_hash_mismatch() {
+        let err = LocalObjectStoreError::IntegrityHashMismatch;
+        assert_eq!(err.to_string(), "object body hash did not match expected integrity");
+    }
+
+    #[test]
+    fn local_error_display_existing_object_conflict() {
+        let err = LocalObjectStoreError::ExistingObjectConflict;
+        assert_eq!(err.to_string(), "object key already exists with conflicting bytes");
+    }
+
+    #[test]
+    fn local_error_display_range_out_of_bounds() {
+        let err = LocalObjectStoreError::RangeOutOfBounds;
+        assert_eq!(err.to_string(), "requested byte range exceeded stored object length");
+    }
+
+    #[test]
+    fn local_error_display_invalid_stored_key() {
+        let err = LocalObjectStoreError::InvalidStoredKey;
+        assert_eq!(err.to_string(), "stored object path could not be represented as a valid object key");
+    }
+
+    #[test]
+    fn local_error_display_invalid_object_path() {
+        let err = LocalObjectStoreError::InvalidObjectPath;
+        assert_eq!(err.to_string(), "validated object key could not be mapped to a local path");
+    }
+
+    #[test]
+    fn local_error_display_invalid_start_after() {
+        let err = LocalObjectStoreError::InvalidStartAfter;
+        assert_eq!(err.to_string(), "start_after key is outside the requested prefix");
+    }
+
+    #[test]
+    fn local_error_source_io() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test");
+        let err = LocalObjectStoreError::Io(io_err);
+        let source = Error::source(&err);
+        assert!(source.is_some());
+    }
+
+    #[test]
+    fn local_error_source_other_variants_return_none() {
+        use std::error::Error;
+        assert!(Error::source(&LocalObjectStoreError::IntegrityLengthMismatch).is_none());
+        assert!(Error::source(&LocalObjectStoreError::IntegrityHashMismatch).is_none());
+        assert!(Error::source(&LocalObjectStoreError::ExistingObjectConflict).is_none());
+        assert!(Error::source(&LocalObjectStoreError::RangeOutOfBounds).is_none());
+        assert!(Error::source(&LocalObjectStoreError::InvalidStoredKey).is_none());
+        assert!(Error::source(&LocalObjectStoreError::InvalidObjectPath).is_none());
+        assert!(Error::source(&LocalObjectStoreError::InvalidStartAfter).is_none());
+    }
+
+    // ── list_flat_namespace_page with start_after outside prefix ──────────────
+
+    #[test]
+    fn local_list_flat_namespace_rejects_start_after_outside_prefix() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let prefix = ObjectPrefix::parse("ns1/").unwrap();
+        let bad_key = ObjectKey::parse("ns2/outside").unwrap();
+        let result = store.list_flat_namespace_page(&prefix, Some(&bad_key), 10);
+        assert!(matches!(result, Err(LocalObjectStoreError::InvalidStartAfter)));
+    }
+
+    // ── existing_object_outcome with temporary_bytes ──────────────────────────
+
+    #[test]
+    fn local_existing_object_outcome_with_temporary_bytes_matches() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("target.bin");
+        std::fs::write(&path, b"exact match").unwrap();
+        let temp = storage.path().join("temp.bin");
+        std::fs::write(&temp, b"temp data").unwrap();
+        let result = super::existing_object_outcome(&path, &temp, Some(b"exact match"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn local_existing_object_outcome_with_temporary_bytes_mismatch() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("target2.bin");
+        std::fs::write(&path, b"exact match").unwrap();
+        let temp = storage.path().join("temp2.bin");
+        std::fs::write(&temp, b"temp data").unwrap();
+        let result = super::existing_object_outcome(&path, &temp, Some(b"wrong bytes"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_existing_object_outcome_without_temporary_bytes_matches() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("target3.bin");
+        std::fs::write(&path, b"same content").unwrap();
+        let temp = storage.path().join("temp3.bin");
+        std::fs::write(&temp, b"same content").unwrap();
+        let result = super::existing_object_outcome(&path, &temp, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn local_existing_object_outcome_without_temporary_bytes_mismatch() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("target4.bin");
+        std::fs::write(&path, b"existing data").unwrap();
+        let temp = storage.path().join("temp4.bin");
+        std::fs::write(&temp, b"different data").unwrap();
+        let result = super::existing_object_outcome(&path, &temp, None);
+        assert!(result.is_err());
+    }
+
+    // ── remove_temporary_file with non-existent file ──────────────────────────
+
+    #[test]
+    fn local_remove_temporary_file_nonexistent_does_not_error() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("ghost.tmp");
+        let result = super::remove_temporary_file(&path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn local_remove_temporary_file_existing_succeeds() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("real.tmp");
+        std::fs::write(&path, b"data").unwrap();
+        assert!(path.exists());
+        let result = super::remove_temporary_file(&path);
+        assert!(result.is_ok());
+        assert!(!path.exists());
+    }
+
+    // ── verify_open_file_integrity directly ────────────────────────────────────
+
+    #[test]
+    fn local_verify_open_file_integrity_accepts_correct() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("open_verify.bin");
+        std::fs::write(&path, b"verify me").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let integrity = crate::ObjectIntegrity::new(super::chunk_hash(b"verify me"), 9);
+        assert!(super::verify_open_file_integrity(file, &integrity).is_ok());
+    }
+
+    #[test]
+    fn local_verify_open_file_integrity_rejects_wrong_hash() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("open_verify_bad.bin");
+        std::fs::write(&path, b"wrong hash").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let wrong_hash = super::chunk_hash(b"different");
+        let integrity = crate::ObjectIntegrity::new(wrong_hash, 10);
+        assert!(super::verify_open_file_integrity(file, &integrity).is_err());
+    }
+
     // ── remove_empty_ancestors ─────────────────────────────────────────────
 
     #[test]
@@ -2088,5 +2288,155 @@ mod tests {
 
         // Root should still exist (it's the store root)
         assert!(storage.path().exists());
+    }
+
+    // ── list_flat_namespace_page skips non-file entries ──────────────────────
+
+    #[test]
+    fn local_list_flat_namespace_skips_subdirectories() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        // Create a file and a subdirectory under the prefix
+        let file_key = ObjectKey::parse("ns/afile.xorb").unwrap();
+        store.put_if_absent(
+            &file_key,
+            ObjectBody::from_slice(b"data"),
+            &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
+        ).unwrap();
+        // Create a subdirectory entry via the filesystem
+        let dir = storage.path().join("ns").join("subdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = ObjectPrefix::parse("ns/").unwrap();
+        let result = store.list_flat_namespace_page(&prefix, None, 10).unwrap();
+        assert_eq!(result.len(), 1, "subdirectory should be skipped");
+        assert_eq!(result[0].key().as_str(), "ns/afile.xorb");
+    }
+
+    // ── read_range with overflow range ───────────────────────────────────────
+
+    #[test]
+    fn local_read_range_overflow_len_returns_out_of_bounds() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("test/small.xorb").unwrap();
+        store.put_if_absent(
+            &key,
+            ObjectBody::from_slice(b"abc"),
+            &ObjectIntegrity::new(super::chunk_hash(b"abc"), 3),
+        ).unwrap();
+        // ByteRange(0, u64::MAX) is valid, but len() returns None due to overflow
+        let range = ByteRange::new(0, u64::MAX).unwrap();
+        let result = store.read_range(&key, range);
+        assert!(matches!(result, Err(LocalObjectStoreError::RangeOutOfBounds)));
+    }
+
+    // ── read_range past end of file returns RangeOutOfBounds ─────────────────
+
+    // ── list_prefix on non-existent root returns empty ───────────────────────
+
+    #[test]
+    fn local_list_prefix_nonexistent_root_returns_empty() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::open(storage.path().join("nonexistent"));
+        let prefix = ObjectPrefix::parse("").unwrap();
+        let result = store.list_prefix(&prefix);
+        assert!(matches!(result, Ok(list) if list.is_empty()));
+    }
+
+    // ── read_dir_if_exists with non-directory path returns error ─────────────
+
+    #[test]
+    fn local_read_dir_if_exists_on_file_returns_error() {
+        let storage = shardline_test_support::TempStorage::new();
+        let file_path = storage.path().join("a_regular_file");
+        std::fs::write(&file_path, b"content").unwrap();
+        let result = super::read_dir_if_exists(&file_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_read_range_beyond_file_returns_out_of_bounds() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("test/short.xorb").unwrap();
+        store.put_if_absent(
+            &key,
+            ObjectBody::from_slice(b"abc"),
+            &ObjectIntegrity::new(super::chunk_hash(b"abc"), 3),
+        ).unwrap();
+        // Request more bytes than the file contains
+        let range = ByteRange::new(1, 10).unwrap();
+        let result = store.read_range(&key, range);
+        assert!(matches!(result, Err(LocalObjectStoreError::RangeOutOfBounds)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_delete_if_present_parent_without_write_permission_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("locked_dir/file.xorb").unwrap();
+        let body = b"data";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        // Remove write permission from the parent directory
+        let parent = storage.path().join("locked_dir");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = store.delete_if_present(&key);
+        // Restore permissions so cleanup works
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_read_dir_if_exists_restricted_directory_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let storage = shardline_test_support::TempStorage::new();
+        let dir = storage.path().join("restricted_dir");
+        std::fs::create_dir(&dir).unwrap();
+        // Remove read permission so read_dir fails with PermissionDenied
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = super::read_dir_if_exists(&dir);
+        // Restore permissions so cleanup works
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_visit_prefix_skips_non_file_entries() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        // Create a regular file in the prefix
+        let file_key = ObjectKey::parse("pfx/regular.xorb").unwrap();
+        store.put_if_absent(
+            &file_key,
+            ObjectBody::from_slice(b"data"),
+            &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
+        ).unwrap();
+
+        // Create a FIFO (named pipe) in the prefix directory - not a regular file
+        let fifo_path = storage.path().join("pfx/fifo_entry");
+        // Use nix::unistd::mkfifo or raw syscall
+        let result = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status();
+        // It's OK if mkfifo is not available
+        if result.map(|s| s.success()).unwrap_or(false) {
+            let prefix = ObjectPrefix::parse("pfx/").unwrap();
+            let mut visited = Vec::new();
+            let result: Result<(), LocalObjectStoreError> = store.visit_prefix(&prefix, |meta| {
+                visited.push(meta.key().clone());
+                Ok(())
+            });
+            assert!(result.is_ok());
+            assert_eq!(visited.len(), 1, "FIFO entries should be skipped");
+            assert_eq!(visited[0].as_str(), "pfx/regular.xorb");
+            // Clean up the FIFO
+            let _ = std::fs::remove_file(&fifo_path);
+        }
     }
 }

@@ -355,4 +355,82 @@ mod tests {
         let result = backend.file_total_bytes("../invalid-id", None, None).await;
         assert!(matches!(result, Err(crate::ServerError::InvalidFileId)));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_and_chunk_length_happy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        // Upload a file, then verify chunk length and read_chunk work.
+        let uploaded = backend
+            .upload_file("test.bin", axum::body::Bytes::from_static(b"hello-chunk-data"), None)
+            .await
+            .unwrap();
+        let chunk = uploaded.chunks.first().unwrap();
+        let hash = &chunk.hash;
+
+        let length = backend.chunk_length(hash).await.unwrap();
+        assert_eq!(length, chunk.length);
+
+        let data = backend.read_chunk(hash).await.unwrap();
+        assert!(!data.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_for_file_version_happy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let content = b"version-specific-data";
+        let uploaded = backend
+            .upload_file("versioned.bin", axum::body::Bytes::from_static(content), None)
+            .await
+            .unwrap();
+        let chunk = uploaded.chunks.first().unwrap();
+        let hash = &chunk.hash;
+
+        let result = backend
+            .read_chunk_for_file_version(hash, "versioned.bin", &uploaded.content_hash, None)
+            .await;
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.as_slice(), content);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_for_file_version_rejects_unreferenced_chunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let content = b"some-content";
+        let uploaded = backend
+            .upload_file("a.bin", axum::body::Bytes::from_static(content), None)
+            .await
+            .unwrap();
+
+        // A hash that is valid hex but not referenced by the file version
+        let unreferenced_hash = "ff".repeat(32);
+        let result = backend
+            .read_chunk_for_file_version(&unreferenced_hash, "a.bin", &uploaded.content_hash, None)
+            .await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
 }

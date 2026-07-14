@@ -490,4 +490,74 @@ mod tests {
         let result = super::object_byte_range_stream(store, object_key, 10, range).await;
         assert!(matches!(result, Err(crate::ServerError::NotFound)));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_rejects_zero_length_with_nonempty_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/not-empty").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"data").await.unwrap();
+
+        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let result = super::object_byte_stream(store, object_key, 0).await;
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(
+                crate::error::ObjectStoreError::StoredLengthMismatch
+            ))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_store_byte_range_stream_reads_exact_chunks() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/exact-chunks").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        // Write enough data to require two read iterations (STREAM_READ_BUFFER_BYTES + extra)
+        let data = vec![0xABu8; (super::STREAM_READ_BUFFER_BYTES as usize) + 100];
+        tokio::fs::write(&path, &data).await.unwrap();
+
+        let total = data.len() as u64;
+        let range = ByteRange::new(0, total - 1).unwrap();
+        let result = local_object_byte_range_stream(object_store, object_key, total, range).await;
+        assert!(result.is_ok());
+        let mut stream = result.unwrap();
+        let mut observed = Vec::new();
+        while let Some(item) = stream.next().await {
+            observed.extend_from_slice(&item.unwrap());
+        }
+        assert_eq!(observed.len(), data.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_via_public_fn_with_local_store() {
+        // Test the public object_byte_stream function via the localstore path.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/stream-full-2").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        let content = b"stream-payload-data";
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let result = super::object_byte_stream(store.clone(), object_key.clone(), content.len() as u64).await;
+        assert!(result.is_ok(), "object_byte_stream failed: {:?}", result.err());
+        let mut stream = result.unwrap();
+        let mut observed = Vec::new();
+        while let Some(item) = stream.next().await {
+            observed.extend_from_slice(&item.unwrap());
+        }
+        assert_eq!(observed, content);
+    }
 }

@@ -255,4 +255,69 @@ mod tests {
         .unwrap();
         assert!(!result);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_returns_true_for_matching_record_in_latest() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let chunk_hash = "fedcba0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let record = make_record(&scope, chunk_hash);
+        shardline_index::RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let result = repository_references_xorb(&store, chunk_hash, &scope)
+            .await
+            .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_returns_true_for_matching_record_in_version() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let chunk_hash = "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let record = make_record(&scope, chunk_hash);
+        shardline_index::RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+
+        let result = repository_references_xorb(&store, chunk_hash, &scope)
+            .await
+            .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_false_for_wrong_hash() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let record = make_record(&scope, "1111aaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff0000");
+        shardline_index::RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let different_hash = "2222aaaabbbbccccddddeeeeffff00002222aaaabbbbccccddddeeeeffff0000";
+        let result = repository_references_xorb(&store, different_hash, &scope)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_false_for_wrong_scope() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let other_scope = make_other_scope();
+        let chunk_hash = "3333aaaabbbbccccddddeeeeffff00003333aaaabbbbccccddddeeeeffff0000";
+        let record = make_record(&scope, chunk_hash);
+        shardline_index::RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let result = repository_references_xorb(&store, chunk_hash, &other_scope)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
 }

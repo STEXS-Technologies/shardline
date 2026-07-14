@@ -535,6 +535,44 @@ fn all_compression_schemes_roundtrip() {
     }
 }
 
+#[test]
+fn compression_scheme_from_static_str() {
+    let s: &'static str = CompressionScheme::LZ4.into();
+    assert_eq!(s, "lz4");
+    let s: &'static str = CompressionScheme::None.into();
+    assert_eq!(s, "none");
+    let s: &'static str = CompressionScheme::ByteGrouping4LZ4.into();
+    assert_eq!(s, "bg4-lz4");
+    let s: &'static str = CompressionScheme::Auto.into();
+    assert_eq!(s, "auto");
+}
+
+#[test]
+fn compression_scheme_decompress_from_reader_roundtrips() {
+    use std::io::{Cursor, Read, Write};
+    let data = b"reader-based decompression test data for verification";
+    for scheme in &[
+        CompressionScheme::None,
+        CompressionScheme::LZ4,
+        CompressionScheme::ByteGrouping4LZ4,
+    ] {
+        let compressed = scheme.compress_from_slice(data).unwrap();
+        let mut reader = Cursor::new(&*compressed);
+        let mut writer = Vec::new();
+        scheme.decompress_from_reader(&mut reader, &mut writer).unwrap();
+        assert_eq!(&writer, data, "decompress_from_reader {scheme:?} failed");
+    }
+}
+
+#[test]
+fn compression_scheme_decompress_from_reader_auto_errors_v2() {
+    use std::io::{Cursor, Write};
+    let mut reader = Cursor::new(b"some data");
+    let mut writer = Vec::new();
+    let result = CompressionScheme::Auto.decompress_from_reader(&mut reader, &mut writer);
+    assert!(result.is_err());
+}
+
 // ============================================================================
 // XorbChunkHeader tests
 // ============================================================================
@@ -1535,6 +1573,50 @@ fn mdb_xorb_info_view_from_data_too_small() {
     assert!(
         MDBXorbInfoView::from_data_and_header(metadata, bytes::Bytes::from(vec![0u8; 10])).is_err()
     );
+}
+
+#[test]
+fn mdb_xorb_info_view_header_accessor() {
+    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"test-hash"), 3u32, 300u32);
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    let e1 = XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u32, 0u32);
+    let e2 = XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 100u32, 100u32);
+    let e3 = XorbChunkSequenceEntry::new(compute_data_hash(b"c3"), 100u32, 200u32);
+    e1.serialize(&mut buf).unwrap();
+    e2.serialize(&mut buf).unwrap();
+    e3.serialize(&mut buf).unwrap();
+    let view = MDBXorbInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    assert_eq!(view.header().xorb_hash, header.xorb_hash);
+    assert_eq!(view.header().num_entries, header.num_entries);
+}
+
+#[test]
+fn mdb_xorb_info_view_into_mdb_xorb_info() {
+    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"convert"), 2u32, 150u32);
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    let e1 = XorbChunkSequenceEntry::new(compute_data_hash(b"x1"), 50u32, 0u32);
+    let e2 = XorbChunkSequenceEntry::new(compute_data_hash(b"x2"), 100u32, 50u32);
+    e1.serialize(&mut buf).unwrap();
+    e2.serialize(&mut buf).unwrap();
+    let view = MDBXorbInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    let info: MDBXorbInfo = (&view).into();
+    assert_eq!(info.metadata.num_entries, 2);
+    assert_eq!(info.chunks.len(), 2);
+    assert_eq!(info.chunks[0].unpacked_segment_bytes, 50);
+    assert_eq!(info.chunks[1].unpacked_segment_bytes, 100);
+}
+
+#[test]
+fn mdb_xorb_info_view_into_mdb_xorb_info_empty() {
+    let header = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u32, 0u32);
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    let view = MDBXorbInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    let info: MDBXorbInfo = (&view).into();
+    assert_eq!(info.metadata.num_entries, 0);
+    assert!(info.chunks.is_empty());
 }
 
 // ============================================================================
@@ -2578,6 +2660,39 @@ fn deserialize_chunks_to_writer_multiple_chunks() {
 }
 
 // ============================================================================
+// deserialize_chunk decompressed length mismatch
+// ============================================================================
+
+#[test]
+fn deserialize_chunk_rejects_uncompressed_length_mismatch() {
+    // Manually construct a chunk with None compression header that lies
+    // about the uncompressed length.
+    use crate::xorb_object::xorb_chunk_format::XORB_CHUNK_HEADER_LENGTH;
+    let data = b"real data";
+    let mut buf = Vec::new();
+    // Write header with wrong uncompressed_length
+    let header = XorbChunkHeader::new(CompressionScheme::None, data.len() as u32, 9999);
+    buf.push(header.version);
+    buf.extend_from_slice(&header.get_compressed_length().to_le_bytes()[0..3]);
+    buf.push(header.get_compression_scheme().unwrap() as u8);
+    buf.extend_from_slice(&9999u32.to_le_bytes()[0..3]); // lie
+    buf.extend_from_slice(data);
+    let mut reader = std::io::Cursor::new(buf);
+    let result = crate::xorb_object::xorb_chunk_format::deserialize_chunk(&mut reader);
+    assert!(result.is_err());
+}
+
+#[test]
+fn deserialize_chunks_to_writer_partial_header_errors() {
+    // Only provide 3 bytes (incomplete header)
+    let partial_data = [1u8, 2, 3];
+    let mut reader = std::io::Cursor::new(partial_data);
+    let mut writer = Vec::new();
+    let result = deserialize_chunks_to_writer(&mut reader, &mut writer);
+    assert!(result.is_err());
+}
+
+// ============================================================================
 // CompressionScheme decompress_from_reader tests
 // ============================================================================
 
@@ -2769,6 +2884,52 @@ fn mdb_shard_info_read_all_xorb_blocks_full_multiple() {
 }
 
 // ============================================================================
+// MDBShardInfo read_all_file_info_sections / read_all_xorb_blocks_full partial error tests
+// ============================================================================
+
+#[test]
+fn mdb_shard_info_read_all_file_info_sections_breaks_on_partial_error() {
+    let file1 = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
+        segments: vec![FileDataSequenceEntry::new(
+            MerkleHash::default(), 100u32, 0u32, 50u32,
+        )],
+        verification: vec![],
+        metadata_ext: None,
+    };
+    let mut buf = Vec::new();
+    file1.serialize(&mut buf).unwrap();
+    // Append corrupted data instead of a valid second entry
+    buf.extend_from_slice(b"CORRUPTED DATA THAT WONT PARSE AS FILE INFO");
+
+    let info = MDBShardInfo::default();
+    let mut cursor = std::io::Cursor::new(buf);
+    let files = info.read_all_file_info_sections(&mut cursor).unwrap();
+    assert_eq!(files.len(), 1, "should return the first valid file info");
+    assert_eq!(files[0].segments[0].unpacked_segment_bytes, 100);
+}
+
+#[test]
+fn mdb_shard_info_read_all_xorb_blocks_full_breaks_on_partial_error() {
+    let xorb1 = MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x1"), 1u32, 100u32),
+        chunks: vec![XorbChunkSequenceEntry::new(
+            compute_data_hash(b"c1"), 100u32, 0u32,
+        )],
+    };
+    let mut buf = Vec::new();
+    xorb1.serialize(&mut buf).unwrap();
+    // Append corrupted data instead of a valid second entry
+    buf.extend_from_slice(b"CORRUPTED XOrb INFO THAT WONT PARSE");
+
+    let info = MDBShardInfo::default();
+    let mut cursor = std::io::Cursor::new(buf);
+    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor).unwrap();
+    assert_eq!(xorb_infos.len(), 1, "should return the first valid xorb info");
+    assert_eq!(xorb_infos[0].chunks.len(), 1);
+}
+
+// ============================================================================
 // MDBFileInfoView accessor tests
 // ============================================================================
 
@@ -2830,6 +2991,103 @@ fn mdb_file_info_view_byte_size_with_verification() {
         view.byte_size(false),
         (1 + 2) * MDB_FILE_INFO_ENTRY_SIZE
     );
+}
+
+// ============================================================================
+// DataHashBytesParseError / DataHashHexParseError tests
+// ============================================================================
+
+#[test]
+fn data_hash_hex_parse_error_display() {
+    let err = DataHashHexParseError;
+    assert_eq!(err.to_string(), "Invalid hex input for DataHash");
+}
+
+#[test]
+fn data_hash_hex_parse_error_from_parse_int() {
+    let parse_err = "invalid".parse::<u64>().unwrap_err();
+    let err: DataHashHexParseError = parse_err.into();
+    assert_eq!(err.to_string(), "Invalid hex input for DataHash");
+}
+
+#[test]
+fn data_hash_bytes_parse_error_display() {
+    let err = DataHashBytesParseError;
+    assert_eq!(err.to_string(), "Invalid bytes input for DataHash");
+}
+
+#[test]
+fn data_hash_error_impl_source() {
+    use std::error::Error;
+    let err = DataHashHexParseError;
+    assert!(Error::source(&err).is_none());
+    let err = DataHashBytesParseError;
+    assert!(Error::source(&err).is_none());
+}
+
+#[test]
+fn data_hash_hash_impl() {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    let a = DataHash::from([1u64, 2, 3, 4]);
+    let b = DataHash::from([1u64, 2, 3, 4]);
+    let mut ha = DefaultHasher::new();
+    let mut hb = DefaultHasher::new();
+    a.hash(&mut ha);
+    b.hash(&mut hb);
+    assert_eq!(ha.finish(), hb.finish());
+}
+
+#[test]
+fn data_hash_deref_mut() {
+    let mut h = DataHash::from([0u64; 4]);
+    h[0] = 42;
+    assert_eq!(h[0], 42);
+}
+
+// ============================================================================
+// xorb_hash / aggregated hashes — edge-case paths
+// ============================================================================
+
+#[test]
+fn xorb_hash_three_chunks_no_mod_condition_triggers_end_fallback() {
+    // Three hashes where NONE has h[3] % 4 == 0 → triggers line-20 fallback
+    let h1 = MerkleHash::from([0u64, 0, 0, 1]); // 1 % 4 = 1
+    let h2 = MerkleHash::from([0u64, 0, 0, 2]); // 2 % 4 = 2
+    let h3 = MerkleHash::from([0u64, 0, 0, 3]); // 3 % 4 = 3
+    let chunks = vec![(h1, 1), (h2, 2), (h3, 3)];
+    let result = xorb_hash(&chunks);
+    assert_ne!(result, MerkleHash::default());
+}
+
+#[test]
+fn xorb_hash_three_chunks_with_mod_condition_triggers_early_return() {
+    // Three hashes where the third (index 2) has h[3] % 4 == 0 → triggers early return
+    let h1 = MerkleHash::from([0u64, 0, 0, 1]); // 1 % 4 = 1
+    let h2 = MerkleHash::from([0u64, 0, 0, 2]); // 2 % 4 = 2
+    let h3 = MerkleHash::from([0u64, 0, 0, 4]); // 4 % 4 = 0 → triggers early return
+    let chunks = vec![(h1, 1), (h2, 2), (h3, 3)];
+    let result = xorb_hash(&chunks);
+    assert_ne!(result, MerkleHash::default());
+}
+
+#[test]
+fn xorb_hash_many_chunks_exercises_multiple_merge_rounds() {
+    // 10 chunks forces multiple merge rounds and all next_merge_cut paths
+    let mut chunks = Vec::new();
+    for i in 0u64..10 {
+        let h = MerkleHash::from([i, i * 2, i * 3, i * 4]);
+        chunks.push((h, i + 1));
+    }
+    let result = xorb_hash(&chunks);
+    assert_ne!(result, MerkleHash::default());
+}
+
+#[test]
+fn file_hash_with_salt_empty() {
+    let salt = [0xABu8; 32];
+    let result = file_hash_with_salt(&[], &salt);
+    assert_eq!(result, MerkleHash::default());
 }
 
 // ============================================================================
@@ -2900,4 +3158,57 @@ fn try_read_chunk_header_empty_reader_returns_none() {
     let (compressed, indices) = deserialize_chunks_to_writer(&mut reader, &mut writer).unwrap();
     assert_eq!(compressed, 0);
     assert_eq!(indices, vec![0]);
+}
+
+// ============================================================================
+// MDBFileInfoView header / verification accessors with verification data
+// ============================================================================
+
+#[test]
+fn mdb_file_info_view_header_accessor() {
+    use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"hdr-test"), 2u32, true, false);
+    let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32);
+    let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32);
+    let v1 = FileVerificationEntry::new(compute_data_hash(b"v1"));
+    let v2 = FileVerificationEntry::new(compute_data_hash(b"v2"));
+
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    e1.serialize(&mut buf).unwrap();
+    e2.serialize(&mut buf).unwrap();
+    v1.serialize(&mut buf).unwrap();
+    v2.serialize(&mut buf).unwrap();
+    let expected_size = (1 + 2 + 2) * MDB_FILE_INFO_ENTRY_SIZE;
+    buf.resize(expected_size, 0);
+
+    let view = MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    assert_eq!(view.header().file_hash, header.file_hash);
+    assert_eq!(view.header().num_entries, header.num_entries);
+
+    let v_entry = view.verification(0);
+    assert_eq!(v_entry.range_hash, compute_data_hash(b"v1"));
+    let v_entry2 = view.verification(1);
+    assert_eq!(v_entry2.range_hash, compute_data_hash(b"v2"));
+}
+
+#[test]
+fn mdb_file_info_view_into_with_verification() {
+    use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, false);
+    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+    let ver = FileVerificationEntry::new(compute_data_hash(b"v"));
+
+    let mut buf = Vec::new();
+    header.serialize(&mut buf).unwrap();
+    entry.serialize(&mut buf).unwrap();
+    ver.serialize(&mut buf).unwrap();
+    let expected_size = (1 + 1 + 1) * MDB_FILE_INFO_ENTRY_SIZE;
+    buf.resize(expected_size, 0);
+
+    let view = MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
+    let info: MDBFileInfo = (&view).into();
+    assert_eq!(info.segments.len(), 1);
+    assert_eq!(info.verification.len(), 1);
+    assert_eq!(info.verification[0].range_hash, compute_data_hash(b"v"));
 }
