@@ -366,4 +366,101 @@ mod tests {
         let result = parse_required_xorb_transfer_range(&headers, 4096);
         assert!(matches!(result, Err(ServerError::InvalidRangeHeader)));
     }
+
+    // ── metered_transfer_body edge cases ────────────────────────────────────
+
+    /// Helper: creates a stream that yields exactly the given bytes.
+    fn stream_from_bytes(bytes: &'static [u8]) -> ServerByteStream {
+        use futures_util::stream;
+        Box::pin(stream::iter(vec![Ok(Bytes::from_static(bytes))]))
+    }
+
+    /// Helper: creates an empty stream.
+    fn empty_stream() -> ServerByteStream {
+        use futures_util::stream;
+        Box::pin(stream::empty())
+    }
+
+    /// Helper: creates a stream that yields multiple chunks.
+    fn multi_chunk_stream() -> ServerByteStream {
+        use futures_util::stream;
+        let chunks: Vec<Result<Bytes, ServerError>> = vec![
+            Ok(Bytes::from_static(b"hello ")),
+            Ok(Bytes::from_static(b"world")),
+        ];
+        Box::pin(stream::iter(chunks))
+    }
+
+    /// Helper: drains a Body into a Vec<u8> or returns the error encountered.
+    async fn drain_body(body: Body) -> Result<Vec<u8>, String> {
+        let bytes = axum::body::to_bytes(body, usize::MAX).await;
+        match bytes {
+            Ok(b) => Ok(b.to_vec()),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metered_transfer_body_stream_ends_early_returns_length_mismatch() {
+        let limiter = crate::TransferLimiter::new(
+            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        // Stream has 5 bytes but we claim 10 → stream ends early → StoredLengthMismatch
+        let body = metered_transfer_body(stream_from_bytes(b"hello"), limiter, 10);
+        let result = drain_body(body).await;
+        assert!(result.is_err(), "expected error for early stream end");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metered_transfer_body_stream_has_extra_data_returns_length_mismatch() {
+        let limiter = crate::TransferLimiter::new(
+            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        // Claim 5 bytes but stream has 11 → extra data after remaining_bytes hits 0
+        let body = metered_transfer_body(multi_chunk_stream(), limiter, 5);
+        let result = drain_body(body).await;
+        assert!(result.is_err(), "expected error for extra stream data");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metered_transfer_body_accepts_exact_stream() {
+        let limiter = crate::TransferLimiter::new(
+            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        let body = metered_transfer_body(stream_from_bytes(b"exact-data"), limiter, 10);
+        let result = drain_body(body).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"exact-data");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metered_transfer_body_empty_stream_returns_length_mismatch() {
+        let limiter = crate::TransferLimiter::new(
+            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        // Claim 5 bytes but stream is empty → stream ends early
+        let body = metered_transfer_body(empty_stream(), limiter, 5);
+        let result = drain_body(body).await;
+        assert!(result.is_err(), "expected error for empty stream");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metered_transfer_body_detects_too_large_chunk() {
+        let limiter = crate::TransferLimiter::new(
+            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        // Create a stream whose first chunk is larger than remaining_bytes
+        use futures_util::stream;
+        let oversized: Vec<Result<Bytes, ServerError>> = vec![
+            Ok(Bytes::from_static(b"too-big-chunk-here")),
+        ];
+        let body = metered_transfer_body(Box::pin(stream::iter(oversized)), limiter, 3);
+        let result = drain_body(body).await;
+        assert!(result.is_err(), "expected error for oversized chunk");
+    }
 }

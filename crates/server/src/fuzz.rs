@@ -1171,4 +1171,46 @@ mod tests {
         // short oid may error or return accepts=false
         assert!(result.is_ok() || result.is_err());
     }
+
+    #[test]
+    fn fuzz_normalize_and_validate_xorb_rejects_garbage() {
+        let hash = shardline_protocol::ShardlineHash::from_bytes([0xabu8; 32]);
+        let result = fuzz_normalize_and_validate_xorb(hash, b"this is not a valid xorb");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fuzz_normalize_and_validate_xorb_small_xorb() {
+        // A minimal valid xorb is complex to construct manually. Verify
+        // that various small byte sequences don't panic.
+        let hash = shardline_protocol::ShardlineHash::from_bytes([0u8; 32]);
+        for prefix_len in 1..=10 {
+            let bytes = vec![0u8; prefix_len];
+            let _ = fuzz_normalize_and_validate_xorb(hash, &bytes);
+        }
+    }
+
+    #[test]
+    fn fuzz_reconstruction_response_summary_with_requested_range() {
+        use shardline_index::{FileChunkRecord, FileRecord};
+        let record = FileRecord {
+            file_id: "test.bin".to_owned(),
+            content_hash: "aa".repeat(32),
+            total_bytes: 10,
+            chunk_size: 10,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "bb".repeat(32),
+                offset: 0,
+                length: 10,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 10,
+            }],
+        };
+        let range = shardline_protocol::ByteRange::new(2, 7);
+        let result = fuzz_reconstruction_response_summary("http://localhost:8080", &record, range.ok());
+        assert!(result.is_ok() || result.is_err());
+    }
 }

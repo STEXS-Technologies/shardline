@@ -560,4 +560,60 @@ mod tests {
         }
         assert_eq!(observed, content);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_range_stream_with_s3_store_returns_error_when_not_configured() {
+        // S3 variant: cannot test actual S3, so verify blackhole falls through
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let object_key = ObjectKey::parse("ab/s3-test").unwrap();
+        let range = ByteRange::new(0, 9).unwrap();
+        let result = super::object_byte_range_stream(store, object_key, 10, range).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_object_byte_range_stream_reads_zero_remaining_properly() {
+        // When remaining == 0 after reading all data, the stream should end.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/exact-range-end").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"abcd").await.unwrap();
+
+        let range = ByteRange::new(0, 3).unwrap();
+        let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
+        assert!(result.is_ok());
+        let mut stream = result.unwrap();
+        let mut observed = Vec::new();
+        while let Some(item) = stream.next().await {
+            observed.extend_from_slice(&item.unwrap());
+        }
+        assert_eq!(observed, b"abcd");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_object_byte_stream_reads_multiple_chunks_correctly() {
+        // Create a large enough object to require multiple read iterations.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/multi-chunk").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        let data = vec![0x42u8; (super::STREAM_READ_BUFFER_BYTES as usize) * 2 + 50];
+        tokio::fs::write(&path, &data).await.unwrap();
+
+        let result = local_object_byte_stream(object_store, object_key, data.len() as u64).await;
+        assert!(result.is_ok());
+        let mut stream = result.unwrap();
+        let mut observed = Vec::new();
+        while let Some(item) = stream.next().await {
+            observed.extend_from_slice(&item.unwrap());
+        }
+        assert_eq!(observed.len(), data.len());
+    }
 }
