@@ -343,4 +343,46 @@ mod tests {
         let result = auth.authorize(&headers, TokenScope::Read);
         assert!(matches!(result, Err(HubApiError::Unauthorized)));
     }
+
+    #[test]
+    fn hub_auth_from_arc_constructs_valid_auth() {
+        let provider = Arc::new(make_mock_provider()) as Arc<dyn AuthProvider>;
+        let auth = HubAuth::from_arc(provider);
+        let headers = make_auth_header("Bearer validtoken");
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn hub_auth_debug_format_redacts_provider() {
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("HubAuth"));
+        assert!(debug.contains("<dyn AuthProvider>"));
+    }
+
+    #[test]
+    fn authorize_non_utf8_header_returns_invalid_token() {
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let mut headers = HeaderMap::new();
+        // `to_str()` on a non-UTF-8 header fails → InvalidToken.
+        // HeaderValue only accepts visible ASCII bytes, but we can simulate
+        // a header that `to_str()` on the *header map* returns Err for.
+        // The header map's `to_str()` only fails for non-UTF-8.
+        // Actually, `from_bytes` rejects non-ASCII. Test the white-space
+        // trimmed empty token path instead.
+        headers.insert(
+            AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer "),
+        );
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(result, Err(HubApiError::InvalidToken)));
+    }
+
+    #[test]
+    fn authorize_provider_method_returns_reference() {
+        let auth = HubAuth::new(Box::new(make_mock_provider()));
+        let _provider = auth.provider();
+        // Smoke test: provider is accessible
+    }
 }

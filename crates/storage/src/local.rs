@@ -1678,4 +1678,92 @@ mod tests {
         let result = store.put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity);
         assert!(result.is_err());
     }
+
+    // ── LocalObjectStoreError Display ───────────────────────────────────────
+
+    #[test]
+    fn local_store_error_display_io() {
+        let err = LocalObjectStoreError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope"));
+        assert!(err.to_string().contains("local object store operation failed"));
+    }
+
+    #[test]
+    fn local_store_error_display_integrity_length_mismatch() {
+        let err = LocalObjectStoreError::IntegrityLengthMismatch;
+        assert_eq!(err.to_string(), "object body length did not match expected integrity");
+    }
+
+    #[test]
+    fn local_store_error_display_integrity_hash_mismatch() {
+        let err = LocalObjectStoreError::IntegrityHashMismatch;
+        assert_eq!(err.to_string(), "object body hash did not match expected integrity");
+    }
+
+    #[test]
+    fn local_store_error_display_existing_object_conflict() {
+        let err = LocalObjectStoreError::ExistingObjectConflict;
+        assert_eq!(err.to_string(), "object key already exists with conflicting bytes");
+    }
+
+    #[test]
+    fn local_store_error_display_range_out_of_bounds() {
+        let err = LocalObjectStoreError::RangeOutOfBounds;
+        assert_eq!(err.to_string(), "requested byte range exceeded stored object length");
+    }
+
+    #[test]
+    fn local_store_error_display_invalid_stored_key() {
+        let err = LocalObjectStoreError::InvalidStoredKey;
+        assert_eq!(err.to_string(), "stored object path could not be represented as a valid object key");
+    }
+
+    #[test]
+    fn local_store_error_display_invalid_object_path() {
+        let err = LocalObjectStoreError::InvalidObjectPath;
+        assert_eq!(err.to_string(), "validated object key could not be mapped to a local path");
+    }
+
+    #[test]
+    fn local_store_error_display_invalid_start_after() {
+        let err = LocalObjectStoreError::InvalidStartAfter;
+        assert_eq!(err.to_string(), "start_after key is outside the requested prefix");
+    }
+
+    // ── remove_empty_ancestors ─────────────────────────────────────────────
+
+    #[test]
+    fn remove_empty_ancestors_cleans_up_empty_dirs() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("a/b/c/d/file.xorb").unwrap();
+        let body = b"data";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        let d_dir = storage.path().join("a/b/c/d");
+        assert!(d_dir.exists());
+
+        store.delete_if_present(&key).unwrap();
+
+        // All empty ancestors should be cleaned up
+        assert!(!d_dir.exists(), "empty leaf dir should be removed");
+        assert!(!storage.path().join("a/b/c").exists(), "empty parent dir should be removed");
+        assert!(!storage.path().join("a/b").exists(), "empty grandparent dir should be removed");
+        // Root-level dir may still exist if other tests create files there
+    }
+
+    #[test]
+    fn remove_empty_ancestors_does_not_remove_root() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("file.xorb").unwrap();
+        let body = b"data";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
+        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+
+        store.delete_if_present(&key).unwrap();
+
+        // Root should still exist (it's the store root)
+        assert!(storage.path().exists());
+    }
 }

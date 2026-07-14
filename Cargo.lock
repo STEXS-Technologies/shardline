@@ -3268,6 +3268,7 @@ dependencies = [
  "axum",
  "futures-util",
  "prometheus",
+ "tokio",
  "tower",
  "tracing",
 ]

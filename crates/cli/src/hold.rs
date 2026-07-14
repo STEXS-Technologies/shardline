@@ -220,4 +220,31 @@ mod tests {
         let msg = err.to_string();
         assert!(!msg.is_empty());
     }
+
+    #[test]
+    fn hold_runtime_error_postgres_display() {
+        use shardline_index::PostgresMetadataStoreError;
+        let err = HoldRuntimeError::Postgres(PostgresMetadataStoreError::Json(
+            serde_json::from_str::<()>("invalid").unwrap_err(),
+        ));
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn hold_runtime_error_sqlx_from_conversion() {
+        // Verify the From<SqlxError> impl works
+        use sqlx::Error as SqlxError;
+        let _err: HoldRuntimeError = SqlxError::Protocol("test".to_owned()).into();
+    }
+
+    #[test]
+    fn hold_runtime_error_debug_postgres() {
+        use shardline_index::PostgresMetadataStoreError;
+        let err = HoldRuntimeError::Postgres(PostgresMetadataStoreError::Json(
+            serde_json::from_str::<()>("invalid").unwrap_err(),
+        ));
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Postgres("));
+    }
 }

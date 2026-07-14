@@ -441,4 +441,102 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn provider_token_issuer_accessors() {
+        let issuer = ProviderTokenIssuer::new(
+            "test-issuer",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(3600).unwrap(),
+        ).unwrap();
+        assert_eq!(issuer.issuer(), "test-issuer");
+        assert_eq!(issuer.ttl_seconds().get(), 3600);
+    }
+
+    #[test]
+    fn provider_token_issuer_rejects_empty_key() {
+        let result = ProviderTokenIssuer::new("issuer", b"", NonZeroU64::MIN);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provider_token_issuer_issue_with_current_time() {
+        let issuer = ProviderTokenIssuer::new(
+            "issuer",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(3600).unwrap(),
+        ).unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let token = issuer.issue(&grant).unwrap();
+        assert!(!token.token().is_empty());
+        assert_eq!(token.claims().issuer(), "issuer");
+        assert_eq!(token.claims().subject(), "user-1");
+    }
+
+    #[test]
+    fn provider_token_issuer_issue_write_scope() {
+        let issuer = ProviderTokenIssuer::new(
+            "issuer",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(3600).unwrap(),
+        ).unwrap();
+        let subject = ProviderSubject::new("user-2").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Write,
+        };
+        let token = issuer.issue_at(&grant, 100).unwrap();
+        assert_eq!(token.claims().scope(), shardline_protocol::TokenScope::Write);
+        assert_eq!(token.claims().expires_at_unix_seconds(), 100 + 3600);
+    }
+
+    #[test]
+    fn granted_access_repository_and_revision_accessors() {
+        let subject = ProviderSubject::new("subject-1").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/develop").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject: subject.clone(),
+            repository: repository.clone(),
+            revision: revision.clone(),
+            access: RepositoryAccess::Write,
+        };
+        assert_eq!(grant.subject(), &subject);
+        assert_eq!(grant.repository(), &repository);
+        assert_eq!(grant.revision(), &revision);
+        assert_eq!(grant.access(), RepositoryAccess::Write);
+    }
+
+    #[test]
+    fn provider_issued_token_accessors() {
+        let issuer = ProviderTokenIssuer::new(
+            "test",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::MIN,
+        ).unwrap();
+        let subject = ProviderSubject::new("sub").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Generic, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let token = issuer.issue_at(&grant, 0).unwrap();
+        assert!(!token.token().is_empty());
+        assert_eq!(token.claims().issuer(), "test");
+    }
 }

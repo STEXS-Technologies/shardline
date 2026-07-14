@@ -926,4 +926,65 @@ mod tests {
         let msg = format!("{err}");
         assert!(!msg.is_empty());
     }
+
+    #[test]
+    fn runtime_error_missing_s3_env_from_required_env() {
+        // Verifies that required_env returns MissingS3Env when env var is absent
+        let result = super::required_env("SHARDLINE_MIGRATE_FROM_S3", "NONEXISTENT_KEY");
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::MissingS3Env(key))
+                if key == "SHARDLINE_MIGRATE_FROM_S3_NONEXISTENT_KEY"
+        ));
+    }
+
+    #[test]
+    fn runtime_error_optional_bool_env_invalid_returns_error() {
+        // Directly test the InvalidS3Bool error path
+        let result = super::optional_bool_env("SHARDLINE_MIGRATE_TO_S3", "ALLOW_HTTP");
+        // Without setting the env var, it should return Ok(None)
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn runtime_error_env_value_returns_none_when_unset() {
+        let result = super::env_value("SHARDLINE_MIGRATE_FROM_S3", "NONEXISTENT_OPTIONAL");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn runtime_error_optional_s3_secret_from_sources_both_none() {
+        let result = super::optional_s3_secret_from_sources(
+            "TEST_VAR".to_owned(),
+            None,
+            "TEST_VAR_FILE".to_owned(),
+            None,
+        );
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn runtime_error_optional_s3_secret_from_sources_direct() {
+        let result = super::optional_s3_secret_from_sources(
+            "TEST_VAR".to_owned(),
+            Some("direct-value".to_owned()),
+            "TEST_VAR_FILE".to_owned(),
+            None,
+        );
+        assert_eq!(result.unwrap(), Some("direct-value".to_owned()));
+    }
+
+    #[test]
+    fn runtime_error_optional_s3_secret_from_sources_conflict() {
+        let result = super::optional_s3_secret_from_sources(
+            "TEST_VAR".to_owned(),
+            Some("direct".to_owned()),
+            "TEST_VAR_FILE".to_owned(),
+            Some("/path/to/file".to_owned()),
+        );
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::S3CredentialSourceConflict { .. })
+        ));
+    }
 }

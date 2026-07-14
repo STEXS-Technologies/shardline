@@ -259,10 +259,26 @@ mod tests {
         );
         assert!(HubApiError::Io(std::io::Error::other("disk full"))
             .to_string()
-            .contains("io error"));
+            .contains("io error: disk full"));
         assert!(HubApiError::Json(serde_json::from_str::<()>("bad").unwrap_err())
             .to_string()
             .contains("json error"));
+    }
+
+    #[test]
+    fn io_error_display_includes_detail() {
+        let err = HubApiError::Io(std::io::Error::other("disk full"));
+        let msg = err.to_string();
+        assert!(msg.contains("io error"), "expected io error, got: {msg}");
+        assert!(msg.contains("disk full"), "expected detail, got: {msg}");
+    }
+
+    #[test]
+    fn json_error_display_includes_detail() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{broken").unwrap_err();
+        let err = HubApiError::Json(json_err);
+        let msg = err.to_string();
+        assert!(msg.contains("json error"), "expected json error, got: {msg}");
     }
 
     // -----------------------------------------------------------------------
@@ -293,5 +309,28 @@ mod tests {
         let json_err = serde_json::from_str::<()>("bad").unwrap_err();
         let err: HubApiError = json_err.into();
         assert!(matches!(err, HubApiError::Json(_)));
+    }
+
+    #[test]
+    fn debug_format_includes_variant_names() {
+        let cases = [
+            (HubApiError::NotFound, "NotFound"),
+            (HubApiError::Unauthorized, "Unauthorized"),
+            (HubApiError::Forbidden, "Forbidden"),
+            (HubApiError::InvalidToken, "InvalidToken"),
+            (HubApiError::RepoNotFound, "RepoNotFound"),
+            (HubApiError::RevisionNotFound, "RevisionNotFound"),
+            (HubApiError::PathValidation("x".into()), "PathValidation"),
+            (HubApiError::CasError("y".into()), "CasError"),
+            (HubApiError::Conflict("z".into()), "Conflict"),
+            (HubApiError::SigningKeyError("k".into()), "SigningKeyError"),
+        ];
+        for (error, expected_variant) in &cases {
+            let debug = format!("{error:?}");
+            assert!(
+                debug.contains(expected_variant),
+                "expected Debug output to contain '{expected_variant}', got: {debug}"
+            );
+        }
     }
 }

@@ -496,4 +496,233 @@ mod tests {
             Err(BuiltInProviderError::InvalidWebhookAuthentication)
         );
     }
+
+    #[test]
+    fn gitlab_adapter_no_webhook_token_skips_verification() {
+        let mut catalog = BuiltInProviderCatalog::new("gitlab-token").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://gitlab.example/group/assets.git",
+        ).unwrap();
+        catalog.register(ProviderRepositoryPolicy::new(
+            metadata,
+            HashSet::from([subject]),
+            HashSet::new(),
+        )).unwrap();
+        let adapter = GitLabAdapter::new(catalog, None);
+
+        let body = br#"{"ref":"refs/heads/main","project":{"path_with_namespace":"group/assets"}}"#;
+        let request = WebhookRequest::new("Push Hook", "delivery-1", None, body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn gitlab_adapter_no_webhook_token_skips_verification_with_push_hook_name() {
+        let mut catalog = BuiltInProviderCatalog::new("gitlab-token").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://gitlab.example/group/assets.git",
+        ).unwrap();
+        catalog.register(ProviderRepositoryPolicy::new(
+            metadata,
+            HashSet::from([subject]),
+            HashSet::new(),
+        )).unwrap();
+        let adapter = GitLabAdapter::new(catalog, None);
+
+        let body = br#"{
+            "event_name":"push",
+            "ref":"refs/heads/main",
+            "project":{"path_with_namespace":"group/assets"}
+        }"#;
+        let request = WebhookRequest::new("Push Hook", "delivery-1", None, body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn gitlab_adapter_project_create_returns_access_changed() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "event_name":"project_create",
+            "path_with_namespace":"group/assets"
+        }"#;
+        let request = WebhookRequest::new("Project Hook", "delivery-create", Some("token"), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn gitlab_adapter_system_hook_project_create_returns_access_changed() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "event_name":"project_create",
+            "path_with_namespace":"group/assets"
+        }"#;
+        let request = WebhookRequest::new("System Hook", "delivery-sys-create", Some("token"), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn gitlab_adapter_system_hook_unknown_event_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"event_name":"unknown_event","path_with_namespace":"group/assets"}"#;
+        let request = WebhookRequest::new("System Hook", "delivery-unk", Some("token"), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitlab_adapter_unknown_hook_with_unknown_event_name_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"event_name":"unknown","path_with_namespace":"group/assets"}"#;
+        let request = WebhookRequest::new("Some Random Hook", "delivery-rand", Some("token"), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitlab_adapter_push_hook_missing_project_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"ref":"refs/heads/main"}"#;
+        let request = WebhookRequest::new("Push Hook", "delivery-no-proj", Some("token"), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+    }
+
+    #[test]
+    fn gitlab_adapter_system_hook_project_destroy_returns_deleted() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "event_name":"project_destroy",
+            "path_with_namespace":"group/assets"
+        }"#;
+        let request = WebhookRequest::new("System Hook", "delivery-destroy", Some("token"), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
+    }
+
+    #[test]
+    fn gitlab_adapter_system_hook_project_transfer_returns_rename() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "event_name":"project_transfer",
+            "path_with_namespace":"group/new-assets",
+            "old_path_with_namespace":"group/assets"
+        }"#;
+        let request = WebhookRequest::new("System Hook", "delivery-transfer", Some("token"), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert!(matches!(event.kind(), RepositoryWebhookEventKind::RepositoryRenamed { .. }));
+    }
+
+    #[test]
+    fn gitlab_adapter_system_hook_repository_update_multiple_refs_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "event_name":"repository_update",
+            "project":{"path_with_namespace":"group/assets"},
+            "refs":["refs/heads/main", "refs/heads/feature"]
+        }"#;
+        let request = WebhookRequest::new("System Hook", "delivery-multi", Some("token"), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitlab_system_hook_repository_update_missing_project_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"event_name":"repository_update","refs":["refs/heads/main"]}"#;
+        let request = WebhookRequest::new("System Hook", "delivery-no-proj", Some("token"), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+    }
+
+    #[test]
+    fn gitlab_system_hook_repository_update_invalid_refs_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"event_name":"repository_update","project":{"path_with_namespace":"group/assets"},"refs":[""]}"#;
+        let request = WebhookRequest::new("System Hook", "delivery-bad-ref", Some("token"), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(event, Err(BuiltInProviderError::InvalidRevisionPayload)));
+    }
+
+    #[test]
+    fn gitlab_metadata_parser_uses_flat_payload_fields() {
+        let payload = serde_json::json!({
+            "path_with_namespace": "group/assets",
+            "default_branch": "main",
+            "http_url": "https://gitlab.example/group/assets.git",
+            "visibility_level": 10
+        });
+        let metadata = metadata_from_project_payload(&payload).unwrap();
+        assert_eq!(metadata.repository().owner(), "group");
+        assert_eq!(metadata.default_revision().as_str(), "refs/heads/main");
+    }
+
+    #[test]
+    fn gitlab_metadata_parser_falls_back_to_git_http_url() {
+        let payload = serde_json::json!({
+            "project": {
+                "path_with_namespace": "group/assets",
+                "default_branch": "main",
+                "git_http_url": "https://gitlab.example/group/assets.git",
+                "visibility_level": 10
+            }
+        });
+        let metadata = metadata_from_project_payload(&payload).unwrap();
+        assert!(metadata.clone_url().as_str().contains("gitlab.example"));
+    }
+
+    #[test]
+    fn gitlab_metadata_parser_missing_visibility_errors() {
+        let payload = serde_json::json!({
+            "project": {
+                "path_with_namespace": "group/assets",
+                "default_branch": "main",
+                "http_url": "https://gitlab.example/group/assets.git"
+            }
+        });
+        let result = metadata_from_project_payload(&payload);
+        assert!(matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+    }
+
+    #[test]
+    fn gitlab_metadata_parser_missing_clone_url_errors() {
+        let payload = serde_json::json!({
+            "project": {
+                "path_with_namespace": "group/assets",
+                "default_branch": "main",
+                "visibility_level": 10
+            }
+        });
+        let result = metadata_from_project_payload(&payload);
+        assert!(matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+    }
+
+    #[test]
+    fn gitlab_metadata_parser_missing_default_branch_errors() {
+        let payload = serde_json::json!({
+            "project": {
+                "path_with_namespace": "group/assets",
+                "http_url": "https://gitlab.example/group/assets.git",
+                "visibility_level": 10
+            }
+        });
+        let result = metadata_from_project_payload(&payload);
+        assert!(matches!(result, Err(BuiltInProviderError::InvalidRevisionPayload)));
+    }
 }

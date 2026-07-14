@@ -298,4 +298,80 @@ mod tests {
             assert_eq!(scope_key.revision(), None, "revision should be None for {provider:?}");
         }
     }
+
+    #[test]
+    fn repository_scope_cache_key_from_scope_with_all_providers() {
+        for provider in &[
+            RepositoryProvider::GitHub,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Gitea,
+            RepositoryProvider::Codeberg,
+            RepositoryProvider::Generic,
+        ] {
+            let scope = RepositoryScope::new(*provider, "owner", "repo", Some("main"));
+            assert!(scope.is_ok(), "scope creation failed for {provider:?}");
+            let Ok(scope) = scope else {
+                continue;
+            };
+            let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
+            assert_eq!(scope_key.owner(), "owner");
+            assert_eq!(scope_key.repo(), "repo");
+            assert_eq!(scope_key.revision(), Some("main"));
+        }
+    }
+
+    #[test]
+    fn repository_scope_cache_key_from_scope_without_revision() {
+        for provider in &[
+            RepositoryProvider::GitHub,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Gitea,
+            RepositoryProvider::Codeberg,
+            RepositoryProvider::Generic,
+        ] {
+            let scope = RepositoryScope::new(*provider, "own", "proj", None);
+            assert!(scope.is_ok(), "scope creation failed for {provider:?}");
+            let Ok(scope) = scope else {
+                continue;
+            };
+            let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
+            assert_eq!(scope_key.owner(), "own");
+            assert_eq!(scope_key.repo(), "proj");
+            assert_eq!(scope_key.revision(), None);
+        }
+    }
+
+    #[test]
+    fn cache_key_latest_with_special_chars_in_file_id() {
+        let key = ReconstructionCacheKey::latest("file with spaces!@#.bin", None);
+        assert_eq!(key.file_id(), "file with spaces!@#.bin");
+        assert_eq!(key.content_hash(), None);
+    }
+
+    #[test]
+    fn cache_key_version_with_special_chars_in_hash() {
+        let key = ReconstructionCacheKey::version("f", "hash/with/slashes?", None);
+        assert_eq!(key.content_hash(), Some("hash/with/slashes?"));
+    }
+
+    #[test]
+    fn cache_key_latest_long_file_id() {
+        let long_id = "a".repeat(1000);
+        let key = ReconstructionCacheKey::latest(&long_id, None);
+        assert_eq!(key.file_id().len(), 1000);
+    }
+
+    #[test]
+    fn cache_key_repository_scope_accessors() {
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("dev"));
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+        let scope_key = RepositoryScopeCacheKey::from_scope(&scope);
+        assert_eq!(scope_key.provider(), "github");
+        assert_eq!(scope_key.owner(), "org");
+        assert_eq!(scope_key.repo(), "repo");
+        assert_eq!(scope_key.revision(), Some("dev"));
+    }
 }

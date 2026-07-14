@@ -1447,6 +1447,77 @@ mod tests {
         );
     }
 
+    // ── FsckError From impls for store errors ───────────────────────────
+
+    #[test]
+    fn fsck_error_from_local_object_store_error() {
+        use shardline_storage::LocalObjectStoreError;
+        let io_err = std::io::Error::other("test");
+        let err = FsckError::from(LocalObjectStoreError::Io(io_err));
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_error_from_s3_object_store_error() {
+        use shardline_storage::S3ObjectStoreError;
+        let s3_err = S3ObjectStoreError::IncompleteCredentials;
+        let err = FsckError::from(s3_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_error_from_server_object_store_error() {
+        use shardline_server_core::ServerObjectStoreError;
+        let err = FsckError::from(ServerObjectStoreError::NotFound);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_error_from_xet_adapter_error() {
+        use shardline_xet_adapter::XetAdapterError;
+        let io_err = std::io::Error::other("test");
+        let err = FsckError::from(XetAdapterError::Io(io_err));
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_error_from_local_index_store_error() {
+        use shardline_index::LocalIndexStoreError;
+        let io_err = std::io::Error::other("test");
+        let err = FsckError::from(LocalIndexStoreError::Io(io_err));
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_error_from_memory_index_store_error() {
+        use shardline_index::MemoryIndexStoreError;
+        let err = FsckError::from(MemoryIndexStoreError::LockPoisoned);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_error_from_memory_record_store_error() {
+        use shardline_index::MemoryRecordStoreError;
+        let err = FsckError::from(MemoryRecordStoreError::RecordNotFound);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn fsck_error_from_postgres_metadata_store_error() {
+        use shardline_index::PostgresMetadataStoreError;
+        let json_err = serde_json::from_str::<()>("invalid").unwrap_err();
+        let err = FsckError::from(PostgresMetadataStoreError::Json(json_err));
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn run_fsck_with_missing_reconstruction_detected() {
         use shardline_index::{

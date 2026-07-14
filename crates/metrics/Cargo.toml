@@ -14,5 +14,8 @@ tower = { workspace = true }
 tracing = { workspace = true }
 futures-util.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
 [lints]
 workspace = true

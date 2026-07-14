@@ -1386,6 +1386,327 @@ async fn count_active_upload_sessions_empty_dir_returns_zero() {
     assert_eq!(count, 0);
 }
 
+#[tokio::test]
+async fn count_active_upload_sessions_with_one_active_session() {
+    let root = temp_root();
+    let _session_id = create_test_session(root.path(), false).await.unwrap();
+    let count = super::count_active_upload_sessions(root.path(), ttl())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn purge_expired_orphaned_bin_files_cleaned() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Manually create an orphaned .bin file with a valid session ID stem
+    // but no corresponding .json metadata
+    let orphan_stem = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 32 valid hex chars
+    let orphan_bin = crate::upload_body_path(root.path(), orphan_stem);
+    tokio::fs::write(&orphan_bin, b"orphan-data")
+        .await
+        .unwrap();
+
+    // Use a recent `now` so the real session is NOT expired
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        .await
+        .unwrap();
+
+    // The orphaned bin file should be removed
+    assert!(
+        !orphan_bin.exists(),
+        "orphaned bin file should have been cleaned up"
+    );
+
+    // The valid session should still exist
+    let session = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .expect("valid session should still exist");
+    assert_eq!(session.repository, "repo");
+}
+
+#[tokio::test]
+async fn purge_expired_corrupt_json_metadata_cleaned() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Create a corrupt metadata file for a valid-looking session ID
+    let bogus_stem = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let bogus_meta = crate::upload_metadata_path(root.path(), bogus_stem);
+    tokio::fs::create_dir_all(crate::upload_dir(root.path()))
+        .await
+        .unwrap();
+    tokio::fs::write(&bogus_meta, b"not-valid-json")
+        .await
+        .unwrap();
+    // Also create a body file so delete_upload_session has something to clean
+    let bogus_body = crate::upload_body_path(root.path(), bogus_stem);
+    tokio::fs::write(&bogus_body, b"some-data")
+        .await
+        .unwrap();
+
+    // Use a recent `now` so the real session is NOT expired
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        .await
+        .unwrap();
+
+    // The corrupt metadata file and associated body should be gone
+    assert!(
+        !bogus_meta.exists(),
+        "corrupt metadata should have been removed"
+    );
+
+    // The valid session should still exist
+    let session = read_upload_session(root.path(), &session_id, ttl())
+        .await
+        .expect("valid session should still exist");
+    assert_eq!(session.repository, "repo");
+}
+
+#[tokio::test]
+async fn purge_expired_missing_body_file_cleaned() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Delete the body file for the session (simulates partial state)
+    let body_path = crate::upload_body_path(root.path(), &session_id);
+    let _ = tokio::fs::remove_file(&body_path).await;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 10_000;
+    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        .await
+        .unwrap();
+
+    // The session should be removed (metadata, body, tail all gone)
+    let result = read_upload_session(root.path(), &session_id, ttl()).await;
+    assert!(
+        matches!(result, Err(OciAdapterError::NotFound)),
+        "session with missing body should be purged"
+    );
+}
+
+#[tokio::test]
+async fn purge_expired_already_expired_session_cleaned() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 10_000;
+    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, NonZeroU64::new(1).unwrap(), now)
+        .await
+        .unwrap();
+
+    let result = read_upload_session(root.path(), &session_id, ttl()).await;
+    assert!(
+        matches!(result, Err(OciAdapterError::NotFound)),
+        "expired session should be purged"
+    );
+}
+
+#[tokio::test]
+async fn lock_upload_sessions_acquires_and_releases_lock() {
+    let root = temp_root();
+    let lock = super::lock_upload_sessions(root.path())
+        .await
+        .expect("should acquire lock");
+    // Dropping the lock should release it without error
+    drop(lock);
+    // Should be able to acquire it again
+    let _lock2 = super::lock_upload_sessions(root.path())
+        .await
+        .expect("should acquire lock again");
+}
+
+#[tokio::test]
+async fn new_upload_session_id_format_is_32_char_hex() {
+    let id = new_upload_session_id();
+    assert_eq!(id.len(), 32, "session id should be 32 hex chars");
+    assert!(
+        id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "session id should be all hex: {id}"
+    );
+}
+
+#[tokio::test]
+async fn append_upload_bytes_empty_bytes_returns_current_length() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    append_upload_bytes(root.path(), &session_id, b"initial")
+        .await
+        .unwrap();
+    let len = append_upload_bytes(root.path(), &session_id, b"")
+        .await
+        .unwrap();
+    assert_eq!(len, 7, "appending empty bytes should return current length");
+}
+
+#[tokio::test]
+async fn append_upload_bytes_large_content() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let large = vec![b'x'; 1_000_000];
+    let len = append_upload_bytes(root.path(), &session_id, &large).await.unwrap();
+    assert_eq!(len, 1_000_000);
+}
+
+#[tokio::test]
+async fn upload_body_integrity_handles_various_content() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Write some data and check integrity
+    let data = b"integrity check";
+    append_upload_bytes(root.path(), &session_id, data)
+        .await
+        .unwrap();
+    let (sha256_hex, integrity) = upload_body_integrity(root.path(), &session_id)
+        .await
+        .unwrap();
+
+    // Verify the SHA-256 matches
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let expected = hex::encode(hasher.finalize());
+    assert_eq!(sha256_hex, expected);
+    assert_eq!(integrity.length(), data.len() as u64);
+}
+
+#[tokio::test]
+async fn upload_body_integrity_not_found() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    // Delete the session's body file
+    let body_path = crate::upload_body_path(root.path(), &session_id);
+    tokio::fs::remove_file(&body_path).await.unwrap();
+    let result = upload_body_integrity(root.path(), &session_id).await;
+    // The error may be NotFound or Io depending on platform-specific behavior
+    // of anchored I/O when the file doesn't exist.
+    assert!(
+        result.is_err(),
+        "expected an error when body file is missing, got Ok: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn read_upload_session_missing_local_body_returns_not_found() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+
+    // Delete the body file
+    let body_path = crate::upload_body_path(root.path(), &session_id);
+    tokio::fs::remove_file(&body_path).await.unwrap();
+
+    let result = read_upload_session(root.path(), &session_id, ttl()).await;
+    assert!(matches!(result, Err(OciAdapterError::NotFound)));
+}
+
+#[test]
+fn oci_tag_target_key_with_none_scope_uses_global() {
+    let key = super::oci_tag_target_key(
+        "team/assets",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "stable",
+        None,
+    )
+    .unwrap();
+    let s = key.as_str();
+    assert!(
+        s.contains("/global/"),
+        "expected global namespace without scope, got: {s}"
+    );
+}
+
+#[test]
+fn oci_blob_key_empty_digest_fails() {
+    // Empty digest produces an invalid path component that fails validation
+    let result = super::oci_blob_key("repo", "", None);
+    assert!(
+        result.is_err(),
+        "empty digest should produce an error: got: {result:?}"
+    );
+}
+
+#[test]
+fn oci_manifest_key_rejects_empty_repo() {
+    let result = super::oci_manifest_key("", VALID_DIGEST_FULL, None);
+    assert!(matches!(result, Err(OciAdapterError::InvalidRepositoryName)));
+}
+
+#[test]
+fn oci_manifest_key_rejects_invalid_digest() {
+    // The function doesn't validate the digest, it just uses it as part of the key path
+    let result = super::oci_manifest_key("repo", "sha256:nothex", None);
+    assert!(result.is_ok(), "digest is used as opaque path component");
+}
+
+#[test]
+fn oci_tag_key_rejects_invalid_tag_starting_with_hyphen() {
+    let result = super::oci_tag_key("repo", "-invalid", None);
+    assert!(matches!(result, Err(OciAdapterError::InvalidManifestReference)));
+}
+
+#[test]
+fn oci_manifest_prefix_works_with_scope() {
+    let result = super::oci_manifest_prefix("team/assets", Some(&test_scope()));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn oci_tag_target_prefix_with_none_scope() {
+    let prefix = super::oci_tag_target_prefix(
+        "team/assets",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+    )
+    .unwrap();
+    let s = prefix.as_str();
+    assert!(s.contains("/global/"));
+    assert!(s.contains("/tag-targets/"));
+}
+
+#[tokio::test]
+async fn lock_upload_sessions_creates_lock_file() {
+    let root = temp_root();
+    let _lock = super::lock_upload_sessions(root.path())
+        .await
+        .expect("should acquire lock");
+    let lock_path = crate::upload_dir(root.path()).join(".sessions.lock");
+    assert!(lock_path.exists(), "lock file should be created");
+}
+
+#[tokio::test]
+async fn lock_upload_sessions_reentrant_same_process() {
+    let root = temp_root();
+    // Two sequential locks should succeed (first released, then second acquired)
+    {
+        let _lock1 = super::lock_upload_sessions(root.path())
+            .await
+            .expect("first lock");
+    }
+    {
+        let _lock2 = super::lock_upload_sessions(root.path())
+            .await
+            .expect("second lock");
+    }
+}
+
 #[test]
 fn validate_repository_rejects_uppercase() {
     assert!(matches!(

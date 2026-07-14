@@ -135,4 +135,22 @@ mod tests {
         // The Debug format includes the variant name, not the enum name
         assert!(debug.contains("Io(") || debug.starts_with("Io("));
     }
+
+    #[test]
+    fn backup_runtime_error_config_display() {
+        use shardline_server::ServerConfigError;
+        let config_err = ServerConfigError::InvalidServerRole;
+        let err = BackupRuntimeError::Config(config_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn backup_runtime_error_server_display() {
+        use shardline_server::ServerError;
+        let server_err = ServerError::NotFound;
+        let err = BackupRuntimeError::Server(server_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
 }

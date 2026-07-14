@@ -840,4 +840,70 @@ mod tests {
         assert_eq!(json["timestamp"], 42);
         assert_eq!(json["data"]["key"], "value");
     }
+
+    // -----------------------------------------------------------------------
+    // WebhookEventPayload default data
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn webhook_event_payload_default_data_is_null() {
+        let payload: WebhookEventPayload = serde_json::from_str(
+            r#"{"event":"push","repository":"org/repo","revision":"abc123","timestamp":1}"#,
+        )
+        .unwrap();
+        // Default for serde_json::Value is Null, not an empty object
+        assert_eq!(payload.data, serde_json::Value::Null);
+    }
+
+    // -----------------------------------------------------------------------
+    // RepoResponse security_status default
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_response_security_status_default_is_empty_object() {
+        let resp: RepoResponse = serde_json::from_str(r#"{"id":"r","type":"model","private":false,"url":"/models/r"}"#).unwrap();
+        assert_eq!(resp.security_status, serde_json::json!({}));
+    }
+
+    // -----------------------------------------------------------------------
+    // WhoamiResponse defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn whoami_response_defaults() {
+        let resp: WhoamiResponse = serde_json::from_str(
+            r#"{"name":"testuser","auth":{"identity":{"account":{"name":"testuser"}}}}"#,
+        )
+        .unwrap();
+        assert!(!resp.is_admin);
+        assert_eq!(resp.user_type, "user");
+        assert_eq!(resp.auth.auth_type, "token");
+    }
+
+    // -----------------------------------------------------------------------
+    // LfsObjectAction serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lfs_object_action_roundtrip() {
+        let action = LfsObjectAction {
+            href: "/lfs/objects/abc".into(),
+            header: None,
+            ssh: None,
+        };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(json["href"], "/lfs/objects/abc");
+        assert!(json.get("header").is_none());
+        assert!(json.get("ssh").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // RepoType from_api_str case sensitivity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_str_case_sensitive() {
+        assert_eq!(RepoType::from_api_str("Model"), None);
+        assert_eq!(RepoType::from_api_str("MODEL"), None);
+    }
 }

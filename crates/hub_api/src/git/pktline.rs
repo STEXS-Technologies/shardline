@@ -375,4 +375,112 @@ mod tests {
         assert_eq!(DELIMITER, "0001");
         assert_eq!(RESPONSE_END, "0002");
     }
+
+    #[test]
+    fn encode_line_bytes_binary_non_utf8() {
+        // \xff is not valid UTF-8; from_utf8_lossy replaces it with U+FFFD (3 UTF-8 bytes)
+        // Input: 4 bytes, length prefix = 4 + 4 = 8 → "0008"
+        // Lossy output: "\x00\x01\x02\u{FFFD}" = 6 UTF-8 bytes
+        // Total string: "0008" (4) + 6 = 10
+        let encoded = encode_line_bytes(b"\x00\x01\x02\xff").expect("binary bytes should encode");
+        assert!(encoded.starts_with("0008"), "expected '0008' prefix, got: {encoded}");
+        assert_eq!(encoded.len(), 10, "expected 10 total chars, got: {encoded} (len={})", encoded.len());
+    }
+
+    #[test]
+    fn encode_line_bytes_empty() {
+        let encoded = encode_line_bytes(b"").expect("empty should encode");
+        assert_eq!(encoded, "0004");
+    }
+
+    #[test]
+    fn decode_lines_with_non_utf8_in_payload() {
+        // Length prefix 0006 = 6 bytes total (4 prefix + 2 payload)
+        let data = b"0006\xff\x00";
+        let lines = decode_lines(data);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], b"\xff\x00");
+    }
+
+    #[test]
+    fn decode_lines_invalid_length_prefix_too_small() {
+        // Length prefix says 3 bytes, but minimum is 4
+        let data = b"0003ab";
+        let lines = decode_lines(data);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn decode_lines_partial_length_prefix() {
+        // Only 2 bytes of length prefix available
+        let data = b"00";
+        let lines = decode_lines(data);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn sideband_data_single_chunk() {
+        let data = b"small data";
+        let multiplexed = sideband_data(data);
+        assert!(multiplexed.len() > data.len());
+        let (decoded, _) = decode_sideband(&multiplexed);
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn sideband_data_exactly_chunk_boundary() {
+        let data = vec![b'x'; 65516]; // exactly one chunk
+        let multiplexed = sideband_data(&data);
+        let (decoded, _) = decode_sideband(&multiplexed);
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn sideband_fatal_is_channel_3_and_parseable() {
+        let msg = sideband_fatal("fatal error occurred");
+        assert_eq!(msg[4], b'3');
+        let (pack, msgs) = decode_sideband(&msg);
+        assert!(pack.is_empty());
+        assert_eq!(msgs, vec!["fatal error occurred"]);
+    }
+
+    #[test]
+    fn decode_sideband_truncated_packet() {
+        // Length says 10 but we only provide 7 bytes
+        let data = b"000a123";
+        let (pack, msgs) = decode_sideband(data);
+        assert!(pack.is_empty());
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn decode_sideband_unknown_channel_is_ignored() {
+        let len = 8u16; // 4 prefix + 1 channel + 3 payload
+        let mut packet = format!("{len:04x}").into_bytes();
+        packet.push(b'9'); // unknown channel
+        packet.extend_from_slice(b"abc");
+        let (pack, msgs) = decode_sideband(&packet);
+        assert!(pack.is_empty());
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn decode_sideband_channel_2_non_utf8_still_collected() {
+        // Channel 2 with invalid UTF-8 — should not be collected as message string
+        let len = 7u16; // 4 prefix + 1 channel + 2 payload
+        let mut packet = format!("{len:04x}").into_bytes();
+        packet.push(b'2');
+        packet.extend_from_slice(b"\xff\xfe");
+        let (pack, msgs) = decode_sideband(&packet);
+        assert!(pack.is_empty());
+        assert!(msgs.is_empty()); // non-UTF8 content not collected
+    }
+
+    #[test]
+    fn decode_sideband_malformed_hex_length() {
+        let data = b"zzzz";
+        let (pack, msgs) = decode_sideband(data);
+        assert!(pack.is_empty());
+        assert!(msgs.is_empty());
+    }
 }

@@ -295,4 +295,170 @@ mod tests {
             "protocols/shared/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
     }
+
+    #[test]
+    fn scope_namespace_global_when_no_repository_scope() {
+        let ns = scope_namespace(None);
+        assert_eq!(ns, "global");
+    }
+
+    #[test]
+    fn scope_namespace_with_repository_scope() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+        let ns = scope_namespace(Some(&scope));
+        // Should be a 64-char hex string (SHA-256)
+        assert_eq!(ns.len(), 64);
+        assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn scope_namespace_without_revision() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let ns = scope_namespace(Some(&scope));
+        assert_eq!(ns.len(), 64);
+    }
+
+    #[test]
+    fn object_key_valid_path() {
+        let key = object_key::<ValidateContentHashError>("aa/abcdef");
+        assert!(key.is_ok());
+        assert_eq!(key.unwrap().as_str(), "aa/abcdef");
+    }
+
+    #[test]
+    fn object_key_invalid_path() {
+        let key = object_key::<ValidateContentHashError>("");
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn shared_sha256_key_rejects_bad_hash() {
+        let key = shared_sha256_object_key::<ValidateContentHashError>("bad");
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_scope_no_scope_is_noop() {
+        let result = validate_oci_repository_scope::<ValidateContentHashError>("any/repo", None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_oci_repository_scope_rejects_non_matching() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let result = validate_oci_repository_scope::<ValidateContentHashError>(
+            "other/repo",
+            Some(&scope),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_tag_rejects_empty() {
+        let result = validate_oci_tag::<ValidateContentHashError>("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_tag_rejects_invalid_start_char() {
+        let result = validate_oci_tag::<ValidateContentHashError>(".tag");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_tag_rejects_oversized() {
+        let result = validate_oci_tag::<ValidateContentHashError>(&"a".repeat(129));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_upload_session_id_rejects_empty() {
+        let result = validate_upload_session_id::<ValidateContentHashError>("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_upload_session_id_accepts_hex() {
+        let result = validate_upload_session_id::<ValidateContentHashError>("a1b2c3d4e5f6");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_upload_session_id_rejects_special_chars() {
+        let result = validate_upload_session_id::<ValidateContentHashError>("session@123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_empty() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_leading_slash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("/repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_trailing_slash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("repo/");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_backslash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team\\repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_double_slash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team//repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_dot_segment() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team/./repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_dot_dot() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team/../repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_uppercase() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("Team/Repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_invalid_chars() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team/repo!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_sha256_digest_missing_prefix() {
+        let result = parse_sha256_digest::<ValidateContentHashError>(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_sha256_digest_bad_hex() {
+        let result = parse_sha256_digest::<ValidateContentHashError>(
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        );
+        assert!(result.is_err());
+    }
 }

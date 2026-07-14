@@ -64,4 +64,14 @@ mod tests {
         let err = FsckRuntimeError::Config(ServerConfigError::MissingServerFrontends);
         assert!(!err.to_string().is_empty());
     }
+
+    #[test]
+    fn fsck_runtime_error_server_display() {
+        use shardline_server::ServerError;
+        let err = FsckRuntimeError::Server(ServerError::NotFound);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Server("));
+    }
 }

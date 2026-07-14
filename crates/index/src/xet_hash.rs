@@ -96,6 +96,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_xet_hash_hex_rejects_short_string() {
+        assert_eq!(
+            parse_xet_hash_hex("abc"),
+            Err(shardline_protocol::HashParseError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_long_string() {
+        assert_eq!(
+            parse_xet_hash_hex(&"a".repeat(65)),
+            Err(shardline_protocol::HashParseError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_uppercase() {
+        let hex = "A".repeat(64);
+        assert_eq!(
+            parse_xet_hash_hex(&hex),
+            Err(shardline_protocol::HashParseError::InvalidCharacter)
+        );
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_non_hex_characters() {
+        let hex = format!("{}z{}", "a".repeat(32), "b".repeat(31));
+        assert_eq!(
+            parse_xet_hash_hex(&hex),
+            Err(shardline_protocol::HashParseError::InvalidCharacter)
+        );
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_empty_string() {
+        assert_eq!(
+            parse_xet_hash_hex(""),
+            Err(shardline_protocol::HashParseError::InvalidLength)
+        );
+    }
+
+    #[test]
     fn xet_hash_vectors_round_trip_each_xet_byte_group_independently() {
         let cases = [
             (

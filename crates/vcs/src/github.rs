@@ -387,4 +387,138 @@ mod tests {
             Err(BuiltInProviderError::InvalidWebhookAuthentication)
         );
     }
+
+    #[test]
+    fn github_adapter_no_webhook_secret_skips_verification() {
+        let mut catalog = BuiltInProviderCatalog::new("github-app").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://github.example/team/assets.git",
+        ).unwrap();
+        catalog.register(ProviderRepositoryPolicy::new(
+            metadata,
+            HashSet::from([subject]),
+            HashSet::new(),
+        )).unwrap();
+        let adapter = GitHubAdapter::new(catalog, None);
+
+        let body = br#"{"ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#;
+        let request = WebhookRequest::new("push", "delivery-1", None, body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn github_adapter_ping_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("ping", "delivery-ping", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn github_adapter_unknown_event_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("issues", "delivery-issues", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn github_adapter_push_without_ref_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"repository":{"full_name":"team/assets"}}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-noref", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(event, Err(BuiltInProviderError::InvalidRevisionPayload)));
+    }
+
+    #[test]
+    fn github_adapter_repository_edited_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"edited",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn github_adapter_repository_privatized_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"privatized",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn github_adapter_repository_publicized_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"publicized",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-pub", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn github_adapter_repository_unknown_action_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"unknown_action",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-unk", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn github_adapter_repository_rename_with_changes_name_fallback() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"renamed",
+            "repository":{"full_name":"team/new-assets"},
+            "changes":{"name":{"from":"assets"}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-alt", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return; };
+        assert_eq!(event.repository().name(), "assets");
+    }
+
+    #[test]
+    fn github_repository_missing_full_name_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"ref":"refs/heads/main","repository":{}}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-no-name", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+    }
 }

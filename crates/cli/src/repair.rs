@@ -182,9 +182,14 @@ pub async fn run_repair(
 
 #[cfg(test)]
 mod tests {
-    use shardline_server::DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS;
+    use std::path::Path;
 
-    use super::LifecycleRepairOptions;
+    use shardline_server::{
+        DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairReport, LocalFsckReport,
+        LocalIndexRebuildReport, ServerConfigError,
+    };
+
+    use super::{LifecycleRepairOptions, RepairReport, RepairRuntimeError};
 
     #[test]
     fn lifecycle_repair_default_retention_matches_server_default() {
@@ -194,5 +199,100 @@ mod tests {
             options.webhook_retention_seconds,
             DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS
         );
+    }
+
+    // ── RepairRuntimeError Display / Debug ──────────────────────────────
+
+    #[test]
+    fn repair_runtime_error_config_display() {
+        let err = RepairRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid server role"));
+    }
+
+    #[test]
+    fn repair_runtime_error_server_display() {
+        use shardline_server::ServerError;
+        let err = RepairRuntimeError::Server(ServerError::NotFound);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn repair_runtime_error_debug() {
+        let err = RepairRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Config("));
+    }
+
+    // ── RepairReport smoke tests ────────────────────────────────────────
+
+    fn empty_repair_report() -> RepairReport {
+        RepairReport {
+            index_rebuild: LocalIndexRebuildReport {
+                scanned_version_records: 0,
+                scanned_retained_shards: 0,
+                rebuilt_latest_records: 0,
+                unchanged_latest_records: 0,
+                removed_stale_latest_records: 0,
+                scanned_reconstructions: 0,
+                unchanged_reconstructions: 0,
+                removed_stale_reconstructions: 0,
+                rebuilt_dedupe_shard_mappings: 0,
+                unchanged_dedupe_shard_mappings: 0,
+                removed_stale_dedupe_shard_mappings: 0,
+                issues: vec![],
+            },
+            lifecycle_repair: LifecycleRepairReport {
+                scanned_records: 0,
+                referenced_objects: 0,
+                scanned_quarantine_candidates: 0,
+                removed_missing_quarantine_candidates: 0,
+                removed_reachable_quarantine_candidates: 0,
+                removed_held_quarantine_candidates: 0,
+                scanned_retention_holds: 0,
+                removed_expired_retention_holds: 0,
+                removed_missing_retention_holds: 0,
+                scanned_webhook_deliveries: 0,
+                removed_stale_webhook_deliveries: 0,
+                removed_future_webhook_deliveries: 0,
+            },
+            fsck: LocalFsckReport {
+                latest_records: 0,
+                version_records: 0,
+                inspected_chunk_references: 0,
+                inspected_dedupe_shard_mappings: 0,
+                inspected_reconstructions: 0,
+                inspected_webhook_deliveries: 0,
+                inspected_provider_repository_states: 0,
+                issues: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn repair_report_constructs_defaults() {
+        let report = empty_repair_report();
+        assert_eq!(report.index_rebuild.scanned_version_records, 0);
+        assert_eq!(report.lifecycle_repair.scanned_records, 0);
+        assert_eq!(report.fsck.latest_records, 0);
+    }
+
+    #[test]
+    fn repair_report_print_summary_runs() {
+        let report = empty_repair_report();
+        report.print_summary();
+    }
+
+    #[test]
+    fn repair_report_print_cli_summary_runs() {
+        let report = empty_repair_report();
+        report.print_cli_summary(Path::new("/root"), 3600);
+    }
+
+    #[test]
+    fn repair_report_print_issues_runs() {
+        let report = empty_repair_report();
+        report.print_issues();
     }
 }

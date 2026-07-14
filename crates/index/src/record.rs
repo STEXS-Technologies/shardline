@@ -734,4 +734,107 @@ mod tests {
             Err(FileRecordInvariantError::NonContiguousChunkOffsets)
         );
     }
+
+    // ── FileRecordInvariantError Display ─────────────────────────────────
+
+    #[test]
+    fn file_record_invariant_error_chunk_hash_display() {
+        let err = FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
+        assert_eq!(err.to_string(), "file record chunk hash is invalid");
+    }
+
+    #[test]
+    fn file_record_invariant_error_empty_chunk_display() {
+        let err = FileRecordInvariantError::EmptyChunk;
+        assert_eq!(err.to_string(), "file record chunk length must be greater than zero");
+    }
+
+    #[test]
+    fn file_record_invariant_error_non_contiguous_display() {
+        let err = FileRecordInvariantError::NonContiguousChunkOffsets;
+        assert_eq!(err.to_string(), "file record chunk offsets must be contiguous");
+    }
+
+    #[test]
+    fn file_record_invariant_error_invalid_chunk_range_display() {
+        let err = FileRecordInvariantError::InvalidChunkRange;
+        assert_eq!(err.to_string(), "file record chunk range must be non-empty and ordered");
+    }
+
+    #[test]
+    fn file_record_invariant_error_invalid_packed_range_display() {
+        let err = FileRecordInvariantError::InvalidPackedRange;
+        assert_eq!(err.to_string(), "file record packed byte range must be non-empty and ordered");
+    }
+
+    #[test]
+    fn file_record_invariant_error_length_overflow_display() {
+        let err = FileRecordInvariantError::LengthOverflow;
+        assert_eq!(err.to_string(), "file record chunk lengths overflowed");
+    }
+
+    #[test]
+    fn file_record_invariant_error_total_bytes_mismatch_display() {
+        let err = FileRecordInvariantError::TotalBytesMismatch;
+        assert_eq!(err.to_string(), "file record total bytes did not match chunk lengths");
+    }
+
+    #[test]
+    fn file_record_reconstruction_plan_rejects_length_overflow() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![
+                FileChunkRecord {
+                    hash: "a".repeat(64),
+                    offset: 0,
+                    length: u64::MAX,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 1,
+                },
+                FileChunkRecord {
+                    hash: "b".repeat(64),
+                    offset: u64::MAX,
+                    length: 1,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 1,
+                },
+            ],
+        };
+        assert_eq!(
+            record.validate_reconstruction_plan(),
+            Err(FileRecordInvariantError::LengthOverflow)
+        );
+    }
+
+    #[test]
+    fn file_record_reconstruction_plan_rejects_total_bytes_mismatch() {
+        let record = FileRecord {
+            file_id: "a".repeat(64),
+            content_hash: "c".repeat(64),
+            total_bytes: 10,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 8,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 8,
+            }],
+        };
+        assert_eq!(
+            record.validate_reconstruction_plan(),
+            Err(FileRecordInvariantError::TotalBytesMismatch)
+        );
+    }
 }

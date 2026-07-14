@@ -211,6 +211,36 @@ mod error_display_tests {
         let msg = error.to_string();
         assert!(!msg.is_empty());
     }
+
+    #[test]
+    fn provider_events_error_postgres_metadata_display() {
+        let error = ProviderEventsError::PostgresMetadata(
+            shardline_index::PostgresMetadataStoreError::HashParse(
+                shardline_protocol::HashParseError::InvalidCharacter,
+            ),
+        );
+        let msg = error.to_string();
+        assert_eq!(msg, "postgres metadata adapter operation failed");
+    }
+
+    #[test]
+    fn provider_events_error_xet_adapter_display_nonempty() {
+        let error = ProviderEventsError::XetAdapter(
+            shardline_xet_adapter::XetAdapterError::NotFound,
+        );
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("xet"));
+    }
+
+    #[test]
+    fn provider_events_error_index_store_display_nonempty() {
+        let error = ProviderEventsError::IndexStore(
+            shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
+        );
+        let msg = error.to_string();
+        assert!(!msg.is_empty());
+    }
 }
 
 fn duplicate_webhook_outcome(event: &RepositoryWebhookEvent) -> ProviderWebhookOutcome {

@@ -727,4 +727,89 @@ mod tests {
         let result = verify_constant_time_secret("expected", Some("expected"));
         assert_eq!(result, Ok(()));
     }
+
+    #[test]
+    fn verify_prefixed_hmac_sha256_valid() {
+        let body = br#"{"hello":"world"}"#;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+        mac.update(body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let result = super::verify_prefixed_hmac_sha256("secret", Some(&format!("sha256={signature}")), "sha256=", body);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn verify_prefixed_hmac_sha256_wrong_secret() {
+        let body = br#"{"hello":"world"}"#;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"correct").unwrap();
+        mac.update(body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let result = super::verify_prefixed_hmac_sha256("wrong", Some(&format!("sha256={signature}")), "sha256=", body);
+        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+    }
+
+    #[test]
+    fn verify_hex_hmac_sha256_wrong_secret() {
+        let body = br#"{"hello":"world"}"#;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"correct").unwrap();
+        mac.update(body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let result = super::verify_hex_hmac_sha256("wrong", &signature, body);
+        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+    }
+
+    #[test]
+    fn parse_revision_rejects_control_characters() {
+        let result = super::parse_revision("main\n");
+        assert_eq!(result, Err(BuiltInProviderError::InvalidRevisionPayload));
+    }
+
+    #[test]
+    fn normalize_default_revision_accepts_empty_as_refs_heads() {
+        let result = super::normalize_default_revision("");
+        assert!(result.is_ok());
+        if let Ok(rev) = result {
+            assert_eq!(rev.as_str(), "refs/heads/");
+        }
+    }
+
+    #[test]
+    fn parse_gitlab_visibility_all_variants() {
+        assert_eq!(super::parse_gitlab_visibility(0), RepositoryVisibility::Public);
+        assert_eq!(super::parse_gitlab_visibility(10), RepositoryVisibility::Private);
+        assert_eq!(super::parse_gitlab_visibility(20), RepositoryVisibility::Internal);
+        assert_eq!(super::parse_gitlab_visibility(30), RepositoryVisibility::Public);
+    }
+
+    #[test]
+    fn parse_visibility_name_all_variants() {
+        assert_eq!(parse_visibility_name("public"), RepositoryVisibility::Public);
+        assert_eq!(parse_visibility_name("private"), RepositoryVisibility::Private);
+        assert_eq!(parse_visibility_name("internal"), RepositoryVisibility::Internal);
+        assert_eq!(parse_visibility_name("unknown"), RepositoryVisibility::Public);
+    }
+
+    #[test]
+    fn configured_metadata_rejects_invalid_revision() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let result = configured_metadata(
+            repo,
+            RepositoryVisibility::Public,
+            "\t",
+            "https://example.invalid/team/assets.git",
+        );
+        assert_eq!(result, Err(BuiltInProviderError::InvalidDefaultRevision));
+    }
+
+    #[test]
+    fn catalog_integration_subject_accessible() {
+        let catalog = BuiltInProviderCatalog::new("my-bot").unwrap();
+        assert_eq!(catalog.integration_subject().as_str(), "my-bot");
+    }
+
+    #[test]
+    fn catalog_rejects_empty_integration_subject() {
+        let catalog = BuiltInProviderCatalog::new("   ");
+        assert!(catalog.is_err());
+    }
 }

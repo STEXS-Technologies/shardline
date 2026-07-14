@@ -1191,4 +1191,135 @@ mod tests {
             assert!(!msg.is_empty(), "display message was empty for: {error:?}");
         }
     }
+
+    #[test]
+    fn rebuild_error_display_postgres_metadata() {
+        let err = RebuildError::PostgresMetadata(
+            shardline_index::PostgresMetadataStoreError::IntegerOutOfRange,
+        );
+        let msg = err.to_string();
+        assert_eq!(msg, "postgres metadata adapter operation failed");
+    }
+
+    #[test]
+    fn rebuild_error_display_io_contains_detail() {
+        let err = RebuildError::Io(std::io::Error::other("disk full"));
+        let msg = err.to_string();
+        assert_eq!(msg, "local storage operation failed");
+    }
+
+    #[test]
+    fn rebuild_error_display_json_contains_detail() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{broken}").unwrap_err();
+        let err = RebuildError::Json(json_err);
+        let msg = err.to_string();
+        assert_eq!(msg, "json operation failed");
+    }
+
+    #[test]
+    fn rebuild_error_display_numeric_conversion() {
+        let int_err = u64::try_from(-1i32).unwrap_err();
+        let err = RebuildError::NumericConversion(int_err);
+        let msg = err.to_string();
+        assert_eq!(msg, "numeric conversion exceeded supported bounds");
+    }
+
+    #[test]
+    fn rebuild_error_display_invalid_content_hash() {
+        let msg = RebuildError::InvalidContentHash.to_string();
+        assert_eq!(msg, "content hash must be 64 hexadecimal characters");
+    }
+
+    #[test]
+    fn rebuild_error_display_invalid_file_id() {
+        let msg = RebuildError::InvalidFileId.to_string();
+        assert_eq!(
+            msg,
+            "file identifier must be relative and must not contain traversal or control characters"
+        );
+    }
+
+    #[test]
+    fn rebuild_error_display_overflow() {
+        let msg = RebuildError::Overflow.to_string();
+        assert_eq!(msg, "arithmetic overflow");
+    }
+
+    #[test]
+    fn rebuild_error_display_object_prefix() {
+        let err = RebuildError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath);
+        assert_eq!(err.to_string(), "object storage prefix validation failed");
+    }
+
+    #[test]
+    fn rebuild_error_display_hash_parse() {
+        let err = RebuildError::HashParse(shardline_protocol::HashParseError::InvalidLength);
+        assert_eq!(err.to_string(), "hash parsing failed");
+    }
+
+    #[test]
+    fn rebuild_error_display_xet_adapter() {
+        let err = RebuildError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
+        assert_eq!(err.to_string(), "xet adapter operation failed");
+    }
+
+    #[test]
+    fn rebuild_error_display_stored_file_metadata_too_large() {
+        let err = RebuildError::StoredFileMetadataTooLarge {
+            observed_bytes: 999,
+            maximum_bytes: 100,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("stored file metadata exceeded the bounded parser ceiling"));
+    }
+
+    // ---- IndexRebuildReconstructionPlanDetail Display tests ----
+
+    #[test]
+    fn reconstruction_plan_detail_display_chunk_hash_invalid() {
+        let detail = IndexRebuildReconstructionPlanDetail::ChunkHashInvalid;
+        assert_eq!(detail.to_string(), "record chunk hash is invalid");
+    }
+
+    #[test]
+    fn reconstruction_plan_detail_display_empty_chunk() {
+        let detail = IndexRebuildReconstructionPlanDetail::EmptyChunk;
+        assert_eq!(detail.to_string(), "record contains an empty chunk");
+    }
+
+    #[test]
+    fn reconstruction_plan_detail_display_non_contiguous() {
+        let detail = IndexRebuildReconstructionPlanDetail::NonContiguousChunkOffsets;
+        assert_eq!(
+            detail.to_string(),
+            "record chunks are not contiguous"
+        );
+    }
+
+    #[test]
+    fn reconstruction_plan_detail_display_invalid_chunk_range() {
+        let detail = IndexRebuildReconstructionPlanDetail::InvalidChunkRange;
+        assert_eq!(detail.to_string(), "record chunk range is invalid");
+    }
+
+    #[test]
+    fn reconstruction_plan_detail_display_invalid_packed_range() {
+        let detail = IndexRebuildReconstructionPlanDetail::InvalidPackedRange;
+        assert_eq!(detail.to_string(), "record packed range is invalid");
+    }
+
+    #[test]
+    fn reconstruction_plan_detail_display_length_overflow() {
+        let detail = IndexRebuildReconstructionPlanDetail::LengthOverflow;
+        assert_eq!(detail.to_string(), "record length overflowed");
+    }
+
+    #[test]
+    fn reconstruction_plan_detail_display_total_bytes_mismatch() {
+        let detail = IndexRebuildReconstructionPlanDetail::TotalBytesMismatch;
+        assert_eq!(
+            detail.to_string(),
+            "record total byte count did not match chunks"
+        );
+    }
 }
