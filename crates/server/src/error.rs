@@ -1415,4 +1415,11 @@ mod tests {
         let debug = format!("{err:?}");
         assert!(debug.contains("NotFound"));
     }
+
+    #[test]
+    fn server_error_display_hash_parse() {
+        use shardline_protocol::HashParseError;
+        let err = ServerError::HashParse(HashParseError::InvalidLength);
+        assert_eq!(err.to_string(), "invalid content hash");
+    }
 }

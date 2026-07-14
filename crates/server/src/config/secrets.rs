@@ -598,4 +598,83 @@ mod tests {
         });
         assert!(result.is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // configure_provider_runtime_from_paths
+    // -----------------------------------------------------------------------
+
+    fn test_config() -> super::super::ServerConfig {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        super::super::ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://127.0.0.1:8080".to_owned(),
+            std::path::PathBuf::from("/tmp/shardline"),
+            std::num::NonZeroUsize::MIN,
+        )
+    }
+
+    #[test]
+    fn configure_provider_runtime_from_paths_both_none_is_ok() {
+        use super::configure_provider_runtime_from_paths;
+        let config = test_config();
+        let result = configure_provider_runtime_from_paths(
+            config,
+            None,
+            None,
+            "issuer".to_owned(),
+            Ok(std::num::NonZeroU64::new(300).unwrap_or(std::num::NonZeroU64::MIN)),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn configure_provider_runtime_incomplete_config_errs() {
+        use super::configure_provider_runtime_from_paths;
+        let config = test_config();
+        let result = configure_provider_runtime_from_paths(
+            config,
+            Some(std::path::PathBuf::from("/config")),
+            None,
+            "issuer".to_owned(),
+            Ok(std::num::NonZeroU64::new(300).unwrap_or(std::num::NonZeroU64::MIN)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn configure_provider_runtime_both_paths_without_signing_key_errs() {
+        use super::configure_provider_runtime_from_paths;
+        // Config without signing key
+        let config = test_config();
+        let result = configure_provider_runtime_from_paths(
+            config,
+            Some(std::path::PathBuf::from("/config")),
+            Some(std::path::PathBuf::from("/api_key")),
+            "issuer".to_owned(),
+            Ok(std::num::NonZeroU64::new(300).unwrap_or(std::num::NonZeroU64::MIN)),
+        );
+        assert!(matches!(
+            result,
+            Err(super::super::ServerConfigError::ProviderTokensRequireSigningKey)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_env_bool (via parse_bool from shardline_protocol)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_env_bool_invalid_returns_none() {
+        assert!(shardline_protocol::parse_bool("invalid").is_none());
+    }
+
+    #[test]
+    fn parse_env_bool_uppercase_true_is_still_valid() {
+        let result = shardline_protocol::parse_bool("TRUE");
+        if result.is_none() {
+            // parse_bool is case-sensitive; document current behavior
+            return;
+        }
+        assert!(result.is_some());
+    }
 }

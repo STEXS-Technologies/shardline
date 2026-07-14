@@ -1511,8 +1511,9 @@ mod tests {
     use super::{
         S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, is_temp_upload_key,
         stream_payload_for_range, temp_key_for, validated_external_range, normalize_prefix,
+        verify_integrity, verify_file_length, temporary_upload_location, chunk_hash,
     };
-    use crate::ObjectKey;
+    use crate::{ObjectIntegrity, ObjectKey};
 
     #[test]
     fn s3_config_normalizes_key_prefix() {
@@ -1738,6 +1739,106 @@ mod tests {
         // without needing any external endpoint.
         let store = S3ObjectStore::new(config);
         assert!(store.is_ok());
+    }
+
+    // ── verify_integrity ───────────────────────────────────────────────────
+
+    #[test]
+    fn verify_integrity_accepts_matching_hash_and_length() {
+        let bytes = b"hello world";
+        let integrity = ObjectIntegrity::new(chunk_hash(bytes), 11);
+        assert!(verify_integrity(bytes, &integrity).is_ok());
+    }
+
+    #[test]
+    fn verify_integrity_rejects_length_mismatch() {
+        let bytes = b"hello world";
+        let integrity = ObjectIntegrity::new(chunk_hash(bytes), 99);
+        assert!(matches!(
+            verify_integrity(bytes, &integrity),
+            Err(S3ObjectStoreError::IntegrityLengthMismatch)
+        ));
+    }
+
+    #[test]
+    fn verify_integrity_rejects_hash_mismatch() {
+        let bytes = b"hello world";
+        let other_hash = chunk_hash(b"different bytes");
+        let integrity = ObjectIntegrity::new(other_hash, 11);
+        assert!(matches!(
+            verify_integrity(bytes, &integrity),
+            Err(S3ObjectStoreError::IntegrityHashMismatch)
+        ));
+    }
+
+    #[test]
+    fn verify_integrity_rejects_empty_bytes_with_nonzero_length() {
+        let bytes = b"";
+        let integrity = ObjectIntegrity::new(chunk_hash(b"x"), 1);
+        assert!(matches!(
+            verify_integrity(bytes, &integrity),
+            Err(S3ObjectStoreError::IntegrityLengthMismatch)
+        ));
+    }
+
+    // ── verify_file_length ─────────────────────────────────────────────────
+
+    #[test]
+    fn verify_file_length_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.bin");
+        std::fs::write(&path, b"exactly this long").unwrap();
+        let integrity = ObjectIntegrity::new(chunk_hash(b"exactly this long"), 17);
+        assert!(verify_file_length(&path, &integrity).is_ok());
+    }
+
+    #[test]
+    fn verify_file_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.bin");
+        std::fs::write(&path, b"short").unwrap();
+        let integrity = ObjectIntegrity::new(chunk_hash(b"short"), 99);
+        assert!(matches!(
+            verify_file_length(&path, &integrity),
+            Err(S3ObjectStoreError::IntegrityLengthMismatch)
+        ));
+    }
+
+    // ── temporary_upload_location ─────────────────────────────────────────
+
+    #[test]
+    fn temporary_upload_location_with_prefix() {
+        let prefix = Some("tenant-a".to_owned());
+        let location = temporary_upload_location(&prefix);
+        let path_str = location.as_ref();
+        assert!(path_str.starts_with("tenant-a/__tmp/shardline-stream-upload/"));
+        assert!(path_str.len() > "tenant-a/__tmp/shardline-stream-upload/".len());
+    }
+
+    #[test]
+    fn temporary_upload_location_without_prefix() {
+        let prefix: Option<String> = None;
+        let location = temporary_upload_location(&prefix);
+        let path_str = location.as_ref();
+        assert!(path_str.starts_with("__tmp/shardline-stream-upload/"));
+        assert!(path_str.len() > "__tmp/shardline-stream-upload/".len());
+    }
+
+    // ── normalize_prefix edge cases ───────────────────────────────────────
+
+    #[test]
+    fn normalize_prefix_multi_slash() {
+        assert_eq!(normalize_prefix("///a///b///"), Some("a///b".to_owned()));
+    }
+
+    #[test]
+    fn normalize_prefix_already_clean() {
+        assert_eq!(normalize_prefix("a/b/c"), Some("a/b/c".to_owned()));
+    }
+
+    #[test]
+    fn normalize_prefix_preserves_single_component() {
+        assert_eq!(normalize_prefix("prefix"), Some("prefix".to_owned()));
     }
 
     // ── normalize_prefix ─────────────────────────────────────────────────
@@ -2070,6 +2171,26 @@ mod tests {
         assert!(is_temp_upload_key("prefix/obj.tmp.123/suffix"));
     }
 
+    #[test]
+    fn is_temp_upload_key_accepts_tmp_at_start_of_key() {
+        assert!(is_temp_upload_key(".tmp.42"));
+    }
+
+    #[test]
+    fn is_temp_upload_key_accepts_tmp_at_start_of_segment() {
+        assert!(is_temp_upload_key("a/.tmp.42"));
+    }
+
+    #[test]
+    fn is_temp_upload_key_accepts_when_digit_followed_by_extra() {
+        assert!(is_temp_upload_key("obj.tmp.42extra"));
+    }
+
+    #[test]
+    fn is_temp_upload_key_rejects_tmp_alone_after_prefix() {
+        assert!(!is_temp_upload_key("prefix.tmp."));
+    }
+
     // ── S3ObjectStoreConfig Debug with missing credentials ─────────────────
 
     #[test]
@@ -2115,6 +2236,15 @@ mod tests {
     fn s3_byte_stream_type_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<super::S3ByteStream>();
+    }
+
+    #[test]
+    fn validated_external_range_rejects_len_overflow() {
+        // ByteRange(0, u64::MAX) is valid (start <= end) but len()
+        // returns None because (MAX - 0) + 1 overflows u64.
+        let range = ByteRange::new(0, u64::MAX).expect("valid range");
+        let result = validated_external_range(range);
+        assert!(matches!(result, Err(S3ObjectStoreError::RangeOutOfBounds)));
     }
 
     // ── verified_external_range edge cases ────────────────────────────
@@ -2212,6 +2342,21 @@ mod tests {
         // wait_for_capacity with 0 permits is valid when no parts are queued
         let wait = multipart.wait_for_capacity(0).await;
         assert!(wait.is_ok());
+    }
+
+    #[test]
+    fn s3_config_endpoint_defaults_to_none() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned());
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("endpoint: None"));
+    }
+
+    #[test]
+    fn s3_config_with_endpoint_sets_endpoint() {
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+            .with_endpoint(Some("http://s3.example.com:9000".to_owned()));
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("endpoint: Some(\"http://s3.example.com:9000\")"));
     }
 
     // ── S3ObjectStoreConfig builder methods ────────────────────────────────
