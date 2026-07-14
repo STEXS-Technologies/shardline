@@ -542,6 +542,97 @@ mod tests {
     }
 
     #[test]
+    fn response_with_metrics_propagates_validation_error() {
+        let record = FileRecord {
+            file_id: "bad-metrics.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 1,
+                range_end: 0, // inverted => invariant error
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+
+        let response = super::build_reconstruction_response_with_metrics(
+            "http://127.0.0.1:8080",
+            &record,
+            None,
+        );
+
+        assert!(matches!(response, Err(XetAdapterError::FileRecordInvariant(_))));
+    }
+
+    #[test]
+    fn response_skips_chunks_outside_requested_range() {
+        // File with chunks at offsets 0-3 and 12-15, but range 4-11 covers
+        // an empty space between them (the middle chunk is missing).
+        // Actually, the range must be contiguous in FileRecord validation.
+        // Instead, test a range that covers only some chunks.
+        let record = FileRecord {
+            file_id: "partial.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 12,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: vec![
+                FileChunkRecord {
+                    hash: "a".repeat(64),
+                    offset: 0,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 4,
+                },
+                FileChunkRecord {
+                    hash: "b".repeat(64),
+                    offset: 4,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 4,
+                    packed_end: 8,
+                },
+                FileChunkRecord {
+                    hash: "c".repeat(64),
+                    offset: 8,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 8,
+                    packed_end: 12,
+                },
+            ],
+        };
+        // Range covering only the middle chunk (byte 4-7).
+        let range = ByteRange::new(4, 7);
+        assert!(range.is_ok());
+        let Ok(range) = range else {
+            return;
+        };
+
+        let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
+
+        assert!(response.is_ok());
+        let Ok(response) = response else {
+            return;
+        };
+        assert_eq!(response.terms.len(), 1);
+        assert_eq!(response.offset_into_first_range, 0);
+        assert_eq!(
+            response.terms.first().map(|t| t.hash.as_str()),
+            Some("b".repeat(64).as_str())
+        );
+    }
+
+    #[test]
     fn batch_reconstruction_response_merges_fetch_info_across_files() {
         let first = build_batch_reconstruction_response([
             ("a".repeat(64), {
