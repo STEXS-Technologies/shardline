@@ -14,3 +14,4 @@ opencode-todo.md
 tarpaulin-report.json
 lcov*.info
 *.profraw
+coverage_report/
