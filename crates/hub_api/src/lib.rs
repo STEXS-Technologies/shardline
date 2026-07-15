@@ -30,7 +30,7 @@
 //! use shardline_hub_api::routes::HubState;
 //!
 //! # fn example(state: HubState) {
-//! let app: Router = hub_routes(state);
+//! let app: Router = hub_routes(state, true);
 //! # }
 //! ```
 
