@@ -383,4 +383,39 @@ mod tests {
         collect_digest_refs(&doc, &mut refs);
         assert!(refs.is_empty());
     }
+
+    #[test]
+    fn collect_digest_refs_handles_primitive_values() {
+        // Line 280: Null, Bool, Number, String values should be no-ops.
+        let doc = serde_json::json!([
+            null,
+            true,
+            false,
+            42,
+            3.5,
+            "just a string",
+            [{"digest": DIGEST_A, "size": 1}]
+        ]);
+        let mut refs = Vec::new();
+        collect_digest_refs(&doc, &mut refs);
+        // Only the nested object with a "digest" field should be collected.
+        assert_eq!(refs.len(), 1);
+        assert!(refs.contains(&DIGEST_A));
+    }
+
+    #[test]
+    fn collect_digest_refs_skips_object_with_digest_returns_early() {
+        // Line 269: when an object has a "digest" field, collect it and return
+        // early without recursing into other fields.
+        let doc = serde_json::json!({
+            "digest": DIGEST_A,
+            "annotations": { "digest": DIGEST_B }
+        });
+        let mut refs = Vec::new();
+        collect_digest_refs(&doc, &mut refs);
+        // Only DIGEST_A should be found because the function returns early
+        // after the first "digest" key in an object.
+        assert_eq!(refs.len(), 1);
+        assert!(refs.contains(&DIGEST_A));
+    }
 }

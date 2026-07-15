@@ -378,6 +378,7 @@ fn ensure_manifest_representation_is_acceptable(
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Bytes;
     use axum::http::{HeaderMap, HeaderValue};
     use serde_json::json;
 
@@ -732,5 +733,109 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // ── validate_oci_schema_version ────────────────────────────────────
+
+    // Already covered above. Add missing schema version edges.
+
+    #[test]
+    fn schema_version_negative_number() {
+        let doc = json!({"schemaVersion": -2});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── validate_oci_descriptor additional edges ────────────────────────
+
+    #[test]
+    fn descriptor_with_non_string_digest() {
+        let desc = json!({
+            "digest": null,
+            "size": 100
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── normalize_media_type without '/' (line 345) ────────────────────
+
+    #[test]
+    fn media_type_without_slash_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        assert!(matches!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "applicationjson"
+            ),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── ensure_manifest_representation_is_acceptable: header value split ──
+
+    #[test]
+    fn accept_header_value_without_slash_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("bogus, application/json"));
+        assert!(
+            ensure_manifest_representation_is_acceptable(&headers, "application/json").is_ok()
+        );
+    }
+
+    // ── validate_oci_descriptor: subject field (line 221) ──────────────
+
+    #[test]
+    fn manifest_with_invalid_subject_descriptor_rejected() {
+        let doc = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "subject": { "size": 100 },  // missing digest
+            "config": { "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "size": 100 },
+            "layers": []
+        });
+        // validate_oci_descriptor is called on subject at line 221.
+        let subject = doc.get("subject").unwrap();
+        assert!(matches!(
+            validate_oci_descriptor(subject),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn manifest_with_valid_subject_descriptor_accepted() {
+        let doc = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "subject": { "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "size": 100 },
+            "config": { "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "size": 100 },
+            "layers": []
+        });
+        let subject = doc.get("subject").unwrap();
+        assert!(validate_oci_descriptor(subject).is_ok());
+    }
+
+    // ── ensure_manifest_representation_is_acceptable additional edges ──
+
+    #[test]
+    fn accept_header_valid_utf8_rejects_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_maybe_shared(Bytes::from_static(b"\xff\xfe\xfd"))
+                .unwrap(),
+        );
+        assert!(matches!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            ),
+            Err(ServerError::NotAcceptable)
+        ));
     }
 }

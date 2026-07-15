@@ -321,4 +321,25 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         assert!(response.headers().get("Docker-Content-Digest").is_none());
     }
+
+    // ── validate_oci_tag in tags list (line 37) ──────────────────────────
+
+    #[test]
+    fn validate_oci_tag_accepts_valid_rejects_invalid() {
+        use crate::protocol_support::validate_oci_tag;
+        assert!(validate_oci_tag("valid-tag").is_ok());
+        assert!(validate_oci_tag("v1.0.0").is_ok());
+        assert!(validate_oci_tag("").is_err());
+        assert!(validate_oci_tag("tag with spaces").is_err());
+        assert!(validate_oci_tag("tag\nnewline").is_err());
+    }
+
+    // ── oci_tags_list_next_link ─────────────────────────────────────────
+
+    #[test]
+    fn next_link_encodes_last_parameter() {
+        let header = oci_tags_list_next_link("team/assets", 10, "v1.0").unwrap();
+        let value = header.to_str().unwrap();
+        assert!(value.contains("last=v1.0"));
+    }
 }

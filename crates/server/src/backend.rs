@@ -941,14 +941,39 @@ fn count_repository_reference_probe_for_tests(hash_hex: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, path::PathBuf};
+    use std::{
+        num::NonZeroUsize,
+        path::PathBuf,
+        sync::atomic::Ordering,
+    };
 
     use super::{
-        BenchmarkBackend, ServerBackend, compose_benchmark_object_key_prefix,
+        BenchmarkBackend, REPOSITORY_REFERENCE_PROBE_COUNT, REPOSITORY_REFERENCE_PROBE_FILTER,
+        ServerBackend, compose_benchmark_object_key_prefix,
         clear_repository_reference_probe_filter, count_repository_reference_probe_for_tests,
         lock_repository_reference_probe_test, repository_reference_probe_count,
         reset_repository_reference_probe_count_for_hash, server_error_to_oci,
     };
+
+    /// Poison the static probe-filter mutex by panicking in a helper thread
+    /// that is holding the lock.
+    ///
+    /// After this call returns, every subsequent `lock()` on the static will
+    /// produce `Err(PoisonError)`.
+    #[allow(clippy::panic)]
+    fn poison_probe_filter_mutex() {
+        // Handle initial poison if a previous test left the mutex poisoned.
+        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
+        let handle = std::thread::spawn(|| {
+            // Acquire the lock; if already poisoned, recover first.
+            let _guard = match REPOSITORY_REFERENCE_PROBE_FILTER.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            panic!("intentional panic to poison the probe filter mutex");
+        });
+        let _ = handle.join();
+    }
     use crate::ServerConfig;
     use crate::ServerError;
     use crate::error::ObjectStoreError;
@@ -1040,6 +1065,63 @@ mod tests {
         // without a full backend. Instead verify that reset/clear round-trip.
         assert_eq!(repository_reference_probe_count(), 0);
         clear_repository_reference_probe_filter();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn poisoned_mutex_reset_repository_reference_probe_count_recovers() {
+        poison_probe_filter_mutex();
+
+        // The recovery path (line 902) should still reset the filter without
+        // propagating the poison error.
+        reset_repository_reference_probe_count_for_hash("recovered");
+
+        // After recovery the mutex is still poisoned; lock() returns Err,
+        // but we can retrieve the value via into_inner.
+        let val = match REPOSITORY_REFERENCE_PROBE_FILTER.lock() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        assert_eq!(val, Some("recovered".to_owned()));
+        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
+        *REPOSITORY_REFERENCE_PROBE_FILTER.lock().unwrap() = None;
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn poisoned_mutex_clear_repository_reference_probe_filter_recovers() {
+        poison_probe_filter_mutex();
+
+        // The recovery path (line 914) should clear the filter.
+        clear_repository_reference_probe_filter();
+
+        let val = match REPOSITORY_REFERENCE_PROBE_FILTER.lock() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        assert!(val.is_none());
+        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn poisoned_mutex_count_repository_reference_probe_recovers() {
+        // First set a normal value so we can verify the poisoned-path read.
+        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
+        *REPOSITORY_REFERENCE_PROBE_FILTER.lock().unwrap() = Some("target".to_owned());
+        REPOSITORY_REFERENCE_PROBE_COUNT.store(0, Ordering::Relaxed);
+
+        poison_probe_filter_mutex();
+
+        // After poisoning, count_repository_reference_probe_for_tests enters
+        // the Err(poisoned) => poisoned.into_inner() path (lines 931-934).
+        count_repository_reference_probe_for_tests("target");
+        assert_eq!(repository_reference_probe_count(), 1);
+
+        // Clean up.
+        REPOSITORY_REFERENCE_PROBE_FILTER.clear_poison();
+        *REPOSITORY_REFERENCE_PROBE_FILTER.lock().unwrap() = None;
+        REPOSITORY_REFERENCE_PROBE_COUNT.store(0, Ordering::Relaxed);
     }
 
     // ── server_error_to_oci conversion ─────────────────────────────────────
