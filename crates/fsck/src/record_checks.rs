@@ -2458,4 +2458,195 @@ mod tests {
             "expected RecordContentHashPathMismatch, got: {report:?}"
         );
     }
+
+    // ── Native Xet term: invalid hash → validate_reconstruction_plan rejects ─
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_native_xet_invalid_hash_rejected_by_validation() {
+        use shardline_index::RecordMutation;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // An invalid hash (not 64 hex chars) causes validate_reconstruction_plan
+        // to reject it with ChunkHash before inspect_chunks is called.
+        let invalid_hash = "not-64-hex-chars";
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: invalid_hash.to_owned(),
+            offset: 0,
+            length: 100,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 100,
+        }];
+        let total_bytes = 100_u64;
+        let chunk_size = 0_u64;
+        let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-bad-hash".to_owned(),
+            content_hash,
+            total_bytes,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+        assert_eq!(report.latest_records, 1);
+
+        // validate_reconstruction_plan rejects the record with InvalidContentHash
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidContentHash),
+            "expected InvalidContentHash issue (from validate_reconstruction_plan), got: {report:?}"
+        );
+        // inspect_chunks was never called, so inspected_chunk_references is 0
+        assert_eq!(report.inspected_chunk_references, 0);
+    }
+
+    // ── Native Xet term: xorb with valid inner chunks ─────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scan_record_tree_latest_native_xet_with_inner_chunks_tracks_reachability() {
+        use shardline_index::RecordMutation;
+        use shardline_protocol::ShardlineHash;
+        use shardline_xet_adapter::xorb_object_key;
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
+        use shardline_xet_core::merklehash::compute_data_hash;
+        use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a xorb with 1 chunk
+        let chunk_data = b"inner-chunk-data-for-reachability";
+        let chunk_hash = compute_data_hash(chunk_data);
+        let chunk_len = chunk_data.len() as u64;
+
+        let xorb_pairs = vec![(chunk_hash, chunk_len)];
+        let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
+
+        let serialized = serialized_xorb_object_from_components(
+            &xorb_merkle_hash,
+            chunk_data.to_vec(),
+            vec![(chunk_hash, chunk_data.len() as u32)],
+            CompressionScheme::None,
+        )
+        .unwrap();
+
+        let shardline_xorb_hash = {
+            let bytes: [u8; 32] = xorb_merkle_hash.into();
+            ShardlineHash::from_bytes(bytes)
+        };
+        let xorb_hash_hex = xet_hash_hex_string(shardline_xorb_hash);
+
+        // Write the xorb object
+        let xorb_key = xorb_object_key(&xorb_hash_hex).unwrap();
+        let xorb_path = object_root.join(xorb_key.as_str());
+        if let Some(parent) = xorb_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&xorb_path, &serialized.serialized_data).unwrap();
+
+        // Write the inner chunk object
+        let inner_chunk_hash_hex = xet_hash_hex_string({
+            let bytes: [u8; 32] = chunk_hash.into();
+            ShardlineHash::from_bytes(bytes)
+        });
+        let inner_chunk_key = shardline_server_core::chunk_object_key(&inner_chunk_hash_hex).unwrap();
+        let inner_path = object_root.join(inner_chunk_key.as_str());
+        if let Some(parent) = inner_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&inner_path, chunk_data).unwrap();
+
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: xorb_hash_hex,
+            offset: 0,
+            length: chunk_len,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: chunk_len,
+        }];
+        let chunk_size = 0_u64;
+        let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "test-native-xet-reach".to_owned(),
+            content_hash,
+            total_bytes: chunk_len,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+
+        let mut reachability = FsckReachability::default();
+        let mut report = FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        };
+
+        let result = scan_record_tree(
+            &record_store,
+            RecordKind::Latest,
+            &object_root,
+            &object_store,
+            &mut reachability,
+            &mut report,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(report.latest_records, 1);
+
+        // The xorb key should be in reachability
+        assert!(
+            reachability.referenced_object_keys.contains(xorb_key.as_str()),
+            "xorb key should be in reachability"
+        );
+        // The inner chunk key should also be in reachability
+        assert!(
+            reachability.referenced_object_keys.contains(inner_chunk_key.as_str()),
+            "inner chunk key should be in reachability"
+        );
+        // Should have MissingVersionRecord
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            "expected MissingVersionRecord"
+        );
+    }
 }

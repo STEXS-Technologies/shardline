@@ -640,4 +640,139 @@ mod tests {
         assert!(debug.contains("BackupManifestReport"));
         assert!(debug.contains("manifest_version"));
     }
+
+    // ── write_manifest_body with actual objects ─────────────────────────
+
+    #[test]
+    fn write_manifest_body_with_objects_counts_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::object_store::ServerObjectStore::local(dir.path()).unwrap();
+
+        // Write two objects directly at the store root
+        let key1 = ObjectKey::parse("obj_a").unwrap();
+        let key2 = ObjectKey::parse("obj_b").unwrap();
+        let path1 = dir.path().join(key1.as_str());
+        let path2 = dir.path().join(key2.as_str());
+        if let Some(parent) = path1.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        if let Some(parent) = path2.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path1, b"hello").unwrap();
+        std::fs::write(&path2, b"world!").unwrap();
+
+        let report = BackupManifestReport::new("test", "local");
+        let mut buffer = Vec::new();
+        let result = write_manifest_body(&mut buffer, &store, report);
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.object_count, 2);
+        assert_eq!(report.object_bytes, 11); // "hello" (5) + "world!" (6)
+
+        let json = String::from_utf8(buffer).unwrap();
+        assert!(json.contains("\"object_count\":2"));
+        assert!(json.contains("\"object_bytes\":11"));
+        assert!(json.contains("\"key\":\"obj_a\""));
+        assert!(json.contains("\"key\":\"obj_b\""));
+    }
+
+    #[test]
+    fn write_manifest_body_with_single_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::object_store::ServerObjectStore::local(dir.path()).unwrap();
+
+        // Write a single object
+        let key = ObjectKey::parse("single_obj").unwrap();
+        let path = dir.path().join(key.as_str());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, b"data").unwrap();
+
+        let report = BackupManifestReport::new("test", "local");
+        let mut buffer = Vec::new();
+        let result = write_manifest_body(&mut buffer, &store, report);
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.object_count, 1);
+        assert_eq!(report.object_bytes, 4);
+
+        let json = String::from_utf8(buffer).unwrap();
+        // Verify the first_object path (no leading comma for the single entry)
+        assert!(json.contains("\"objects\":[{\"key\":\"single_obj\""));
+        assert!(json.contains(",\"length\":4"));
+    }
+
+    #[test]
+    fn write_manifest_body_three_objects_exercises_separator_between_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::object_store::ServerObjectStore::local(dir.path()).unwrap();
+
+        for i in 0..3u64 {
+            let key = ObjectKey::parse(&format!("multi_obj_{i}")).unwrap();
+            let path = dir.path().join(key.as_str());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, b"x").unwrap();
+        }
+
+        let report = BackupManifestReport::new("test", "local");
+        let mut buffer = Vec::new();
+        let result = write_manifest_body(&mut buffer, &store, report);
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.object_count, 3);
+        assert_eq!(report.object_bytes, 3);
+
+        let json = String::from_utf8(buffer).unwrap();
+        assert!(json.contains("\"object_count\":3"));
+        assert!(json.contains("\"object_bytes\":3"));
+    }
+
+    #[test]
+    fn write_manifest_body_each_object_has_valid_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::object_store::ServerObjectStore::local(dir.path()).unwrap();
+
+        let key_a = ObjectKey::parse("alpha").unwrap();
+        let key_b = ObjectKey::parse("beta").unwrap();
+        for key in [&key_a, &key_b] {
+            let path = dir.path().join(key.as_str());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, b"p").unwrap();
+        }
+
+        let report = BackupManifestReport::new("test", "local");
+        let mut buffer = Vec::new();
+        write_manifest_body(&mut buffer, &store, report).unwrap();
+        let json = String::from_utf8(buffer).unwrap();
+        // Both object keys must appear somewhere in the output
+        assert!(json.contains("\"alpha\""), "JSON should contain alpha key");
+        assert!(json.contains("\"beta\""), "JSON should contain beta key");
+    }
+
+    #[test]
+    fn write_manifest_body_serializes_entry_with_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::object_store::ServerObjectStore::local(dir.path()).unwrap();
+        use shardline_storage::ObjectKey;
+
+        let key = ObjectKey::parse("ckobj").unwrap();
+        let path = dir.path().join(key.as_str());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, b"check").unwrap();
+
+        let report = BackupManifestReport::new("test", "local");
+        let mut buffer = Vec::new();
+        write_manifest_body(&mut buffer, &store, report).unwrap();
+        let json = String::from_utf8(buffer).unwrap();
+        // Local store visit_prefix does not attach checksums, so check for null
+        assert!(json.contains("\"checksum\":null"));
+    }
 }

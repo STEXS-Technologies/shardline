@@ -2354,4 +2354,131 @@ mod tests {
         // One shard was scanned before the error occurred
         assert_eq!(report.scanned_retained_shards, 1);
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebuild_dedupe_shard_mappings_early_return_when_issues_present() {
+        // Test the early return at lines 535-537 of rebuild_dedupe_shard_mappings.
+        // When there are already issues in the report, the function skips
+        // the mapping reconciliation entirely.
+        use shardline_index::DedupeStore;
+        use shardline_protocol::ShardlineHash;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = storage.path().join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+
+        // Insert a stale dedupe mapping
+        let chunk_hash = ShardlineHash::from_bytes([42; 32]);
+        let shard_key = shardline_storage::ObjectKey::parse("shards/ab/stale.shard").unwrap();
+        let mapping = shardline_index::DedupeShardMapping::new(chunk_hash, shard_key);
+        index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
+
+        // Write an invalid shard to trigger an issue during scan.
+        use shardline_storage::{ObjectBody, ObjectIntegrity};
+        let bad_key = shardline_storage::ObjectKey::parse("shards/ab/garbage.shard").unwrap();
+        object_store
+            .put_overwrite(
+                &bad_key,
+                ObjectBody::from_slice(b"not a shard"),
+                &ObjectIntegrity::new(
+                    shardline_server_core::chunk_hash(b"not a shard"),
+                    11,
+                ),
+            )
+            .unwrap();
+
+        let mut report = empty_report();
+        rebuild_dedupe_shard_mappings(
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        // Issue was created for the invalid shard
+        assert!(!report.is_clean());
+        assert_eq!(report.scanned_retained_shards, 1);
+        assert_eq!(report.issue_count(), 1);
+
+        // The stale dedupe mapping should NOT have been removed because the
+        // function returned early due to issues.
+        let remaining = DedupeStore::list_dedupe_shard_mappings(&index_store).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "stale mapping should not be removed when early-returning due to issues"
+        );
+    }
+
+    // ---- run_index_rebuild_with_stores through reconstruction path ----
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_index_rebuild_reconstruction_preserved_when_file_id_is_hash() {
+        use shardline_index::{
+            FileId, FileReconstruction, MemoryIndexStore, ReconstructionTerm, RecordMutation,
+        };
+        use shardline_protocol::{ChunkRange, ShardlineHash};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let object_root = root.join("chunks");
+        std::fs::create_dir_all(&object_root).unwrap();
+        let object_store = ServerObjectStore::local(&object_root).unwrap();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+
+        // Use a consistent ShardlineHash for both file_id and reconstruction.
+        let record_file_id_hash = ShardlineHash::from_bytes([0x0a; 32]);
+        let file_id_hex = shardline_index::xet_hash_hex_string(record_file_id_hash);
+        let chunks = Vec::new();
+        let content_hash = shardline_server_core::content_hash(0, 0, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: file_id_hex,
+            content_hash,
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_version_record(&record).await.unwrap();
+
+        // Also insert a reconstruction with the same file_id hex
+        // so it should be preserved (not stale).
+        let file_id_obj = FileId::new(record_file_id_hash);
+        let xorb_id = shardline_index::XorbId::new(ShardlineHash::from_bytes([0x0b; 32]));
+        let range = ChunkRange::new(0, 1).unwrap();
+        let term = ReconstructionTerm::new(xorb_id, range, 64);
+        let reconstruction = FileReconstruction::new(vec![term]);
+        index_store
+            .insert_reconstruction(&file_id_obj, &reconstruction)
+            .unwrap();
+
+        let report = run_index_rebuild_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+        assert!(report.is_clean(), "report: {report:?}");
+        assert_eq!(report.scanned_version_records, 1);
+        assert_eq!(report.rebuilt_latest_records, 1);
+
+        // The reconstruction should have been preserved (unchanged) because
+        // the file_id hex matches the desired set.
+        assert_eq!(
+            report.scanned_reconstructions, 1,
+            "should scan one reconstruction"
+        );
+        assert_eq!(
+            report.unchanged_reconstructions, 1,
+            "reconstruction with matching file_id should be unchanged"
+        );
+        assert_eq!(report.removed_stale_reconstructions, 0);
+    }
 }

@@ -1660,6 +1660,46 @@ mod tests {
         assert_eq!(report.version_records, 0);
     }
 
+    // ── record_path ─────────────────────────────────────────────────
+
+    #[test]
+    fn record_path_latest_returns_latest_record_locator() {
+        use shardline_index::RecordTraversal;
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root);
+        let record = FileRecord {
+            file_id: "test-file".to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: Vec::new(),
+        };
+        let locator = record_path(&record_store, RecordKind::Latest, &record);
+        let expected = record_store.latest_record_locator(&record);
+        assert_eq!(locator, expected);
+    }
+
+    #[test]
+    fn record_path_version_returns_version_record_locator() {
+        use shardline_index::RecordTraversal;
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root);
+        let record = FileRecord {
+            file_id: "test-file".to_owned(),
+            content_hash: "b".repeat(64),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: Vec::new(),
+        };
+        let locator = record_path(&record_store, RecordKind::Version, &record);
+        let expected = record_store.version_record_locator(&record);
+        assert_eq!(locator, expected);
+    }
+
     // ── FsckIssue Debug ─────────────────────────────────────────────
 
     #[test]
@@ -1865,6 +1905,223 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.kind == FsckIssueKind::MissingReconstructionXorb));
+    }
+
+    // ── run_fsck_with_invalid_dedupe_shard_mapping (hash not in shard) ─
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_invalid_dedupe_shard_mapping_detected() {
+        use shardline_index::{DedupeShardMapping, MemoryIndexStore};
+        use shardline_protocol::ShardlineHash;
+        use shardline_storage::ObjectKey;
+        use shardline_xet_core::{
+            merklehash::{compute_data_hash, file_hash, xorb_hash},
+            metadata_shard::{
+                file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
+                shard_in_memory::MDBInMemoryShard,
+                xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+            },
+        };
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+
+        // Build a valid minimal shard with one global-dedup chunk
+        let chunk_data = b"valid shard chunk content";
+        let chunk_hash = compute_data_hash(chunk_data);
+        let xorb_val = xorb_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+        let file_hash_val = file_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+        let mut shard = MDBInMemoryShard::default();
+        shard
+            .add_file_reconstruction_info(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb_val,
+                    chunk_data.len() as u32,
+                    0_u32,
+                    1_u32,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+        shard
+            .add_xorb_block(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u32, chunk_data.len() as u32),
+                chunks: vec![XorbChunkSequenceEntry::new(
+                    chunk_hash,
+                    chunk_data.len() as u32,
+                    0_u32,
+                )
+                .with_global_dedup_flag(true)],
+            })
+            .unwrap();
+        let shard_bytes = shard.to_bytes().unwrap();
+        let shard_chunk_hash_hex = chunk_hash.hex();
+
+        // Store the shard in object storage
+        let shard_key_str = format!("shards/{}/{}", &shard_chunk_hash_hex[..2], shard_chunk_hash_hex);
+        let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
+        let shard_path = object_root.join(shard_key.as_str());
+        if let Some(parent) = shard_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&shard_path, &shard_bytes).unwrap();
+
+        // Re-create the object store after writing
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Insert a dedupe mapping for a DIFFERENT chunk hash (not in the shard)
+        let missing_chunk_hash = ShardlineHash::from_bytes([99; 32]);
+        let mapping = DedupeShardMapping::new(missing_chunk_hash, shard_key);
+        index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean(), "expected issues for invalid dedupe shard mapping");
+        assert_eq!(report.inspected_dedupe_shard_mappings, 1);
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidDedupeShardMapping),
+            "expected InvalidDedupeShardMapping, got: {:#?}",
+            report.issues
+        );
+    }
+
+    // ── run_fsck_with_dedupe_shard_added_to_reachability ─────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_dedupe_shard_added_to_reachability() {
+        use shardline_index::{DedupeShardMapping, MemoryIndexStore, RecordMutation};
+        use shardline_storage::ObjectKey;
+        use shardline_xet_core::{
+            merklehash::{compute_data_hash, file_hash, xorb_hash},
+            metadata_shard::{
+                file_structs::{FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo},
+                shard_in_memory::MDBInMemoryShard,
+                xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+            },
+        };
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Build a valid minimal shard
+        let chunk_data = b"shard data for reachability test";
+        let chunk_hash = compute_data_hash(chunk_data);
+        let xorb_val = xorb_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+        let file_hash_val = file_hash(&[(chunk_hash, chunk_data.len() as u64)]);
+        let mut shard = MDBInMemoryShard::default();
+        shard
+            .add_file_reconstruction_info(MDBFileInfo {
+                metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+                segments: vec![FileDataSequenceEntry::new(
+                    xorb_val,
+                    chunk_data.len() as u32,
+                    0_u32,
+                    1_u32,
+                )],
+                verification: Vec::new(),
+                metadata_ext: None,
+            })
+            .unwrap();
+        shard
+            .add_xorb_block(MDBXorbInfo {
+                metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u32, chunk_data.len() as u32),
+                chunks: vec![XorbChunkSequenceEntry::new(
+                    chunk_hash,
+                    chunk_data.len() as u32,
+                    0_u32,
+                )
+                .with_global_dedup_flag(true)],
+            })
+            .unwrap();
+        let shard_bytes = shard.to_bytes().unwrap();
+        let chunk_hash_hex = chunk_hash.hex();
+
+        // Store the shard in object storage
+        let shard_key_str = format!("shards/{}/{}", &chunk_hash_hex[..2], chunk_hash_hex);
+        let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
+        let shard_path = object_root.join(shard_key.as_str());
+        if let Some(parent) = shard_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&shard_path, &shard_bytes).unwrap();
+
+        // Write a latest record whose chunk hash matches the shard's chunk hash
+        // so live_dedupe_chunk_hashes contains it.
+        let chunks = vec![shardline_index::FileChunkRecord {
+            hash: chunk_hash_hex.clone(),
+            offset: 0,
+            length: chunk_data.len() as u64,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: chunk_data.len() as u64,
+        }];
+        let total_bytes = chunk_data.len() as u64;
+        let chunk_size = 4096_u64;
+        let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+        let record = shardline_index::FileRecord {
+            file_id: "reachable-file".to_owned(),
+            content_hash,
+            total_bytes,
+            chunk_size,
+            repository_scope: None,
+            chunks,
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+
+        // Also need to write the chunk object so the latest record scans cleanly
+        let chunk_key = shardline_server_core::chunk_object_key(&chunk_hash_hex).unwrap();
+        let chunk_path = object_root.join(chunk_key.as_str());
+        if let Some(parent) = chunk_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&chunk_path, chunk_data).unwrap();
+
+        // Insert a dedupe mapping matching the same chunk hash
+        let shardline_chunk_hash = shardline_index::parse_xet_hash_hex(&chunk_hash_hex).unwrap();
+        let mapping = DedupeShardMapping::new(shardline_chunk_hash, shard_key);
+        index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        // The dedupe shard should be cleanly scanned and the mapping valid
+        assert_eq!(report.inspected_dedupe_shard_mappings, 1);
+        // No InvalidDedupeShardMapping issues
+        assert!(
+            !report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidDedupeShardMapping),
+            "unexpected InvalidDedupeShardMapping: {:#?}",
+            report.issues
+        );
+        // Should have MissingVersionRecord since no version was written
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            "expected MissingVersionRecord"
+        );
     }
 }
 
