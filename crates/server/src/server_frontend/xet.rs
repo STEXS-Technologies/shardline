@@ -234,4 +234,56 @@ mod tests {
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
+
+    // -----------------------------------------------------------------------
+    // append_referenced_term_bytes — early error paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_referenced_term_bytes_empty_range_returns_error() {
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let term = FileChunkRecord {
+            hash: "ab".repeat(32),
+            offset: 0,
+            length: 1024,
+            range_start: 10,
+            range_end: 10,  // empty range: range_end == range_start
+            packed_start: 0,
+            packed_end: 1024,
+        };
+        let mut output = Vec::new();
+        let result = append_referenced_term_bytes(&store, &term, &mut output);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            ServerError::InvalidSerializedShard(
+                crate::InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange
+            )
+        ));
+    }
+
+    #[test]
+    fn append_referenced_term_bytes_inverted_range_returns_error() {
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let term = FileChunkRecord {
+            hash: "ab".repeat(32),
+            offset: 0,
+            length: 1024,
+            range_start: 20,
+            range_end: 10,  // inverted: end < start
+            packed_start: 0,
+            packed_end: 1024,
+        };
+        let mut output = Vec::new();
+        let result = append_referenced_term_bytes(&store, &term, &mut output);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            ServerError::InvalidSerializedShard(
+                crate::InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange
+            )
+        ));
+    }
 }

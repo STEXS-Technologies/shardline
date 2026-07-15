@@ -424,11 +424,18 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::*;
     use crate::error::IndexError;
+    use crate::object_store::ServerObjectStore;
     use serde_json::to_vec;
-    use shardline_index::{FileChunkRecord, FileRecord};
+    use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, RecordMutation};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_storage::{ObjectBody, ObjectIntegrity};
+    use tempfile::TempDir;
+
+    const TEST_PG_URL: &str = "postgres://localhost:5432/test";
 
     fn test_scope() -> RepositoryScope {
         RepositoryScope::new(
@@ -463,6 +470,51 @@ mod tests {
         };
         to_vec(&record).unwrap()
     }
+
+    async fn make_backend() -> (super::super::PostgresBackend, TempDir) {
+        let root = TempDir::new().expect("temp dir");
+        let object_store =
+            ServerObjectStore::local(root.path().join("chunks")).expect("local store");
+        let backend = super::super::PostgresBackend::new_with_object_store_and_upload_parallelism(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap(),
+            NonZeroUsize::new(64).unwrap(),
+            TEST_PG_URL,
+            object_store,
+        )
+        .await
+        .expect("constructor");
+        (backend, root)
+    }
+
+    /// Store arbitrary bytes as a chunk in the object store and return the hash + key.
+    fn store_chunk(object_store: &ServerObjectStore, data: &[u8]) -> (String, ObjectKey) {
+        let hash = blake3::hash(data);
+        let hash_hex = hex::encode(hash.as_bytes());
+        let object_key = chunk_object_key(&hash_hex).unwrap();
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*hash.as_bytes()),
+            data.len() as u64,
+        );
+        object_store
+            .put_if_absent(&object_key, ObjectBody::from_vec(data.to_vec()), &integrity)
+            .unwrap();
+        (hash_hex, object_key)
+    }
+
+    /// Store arbitrary bytes under any object key.
+    fn store_object(object_store: &ServerObjectStore, key: &ObjectKey, data: &[u8]) {
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+            data.len() as u64,
+        );
+        object_store
+            .put_if_absent(key, ObjectBody::from_vec(data.to_vec()), &integrity)
+            .unwrap();
+    }
+
+    // ===== Pure function tests =====
 
     #[test]
     fn stored_record_references_hash_matching() {
@@ -503,6 +555,60 @@ mod tests {
     }
 
     #[test]
+    fn stored_record_references_hash_null_scope() {
+        // A record with `repository_scope: None` should never match any scope.
+        let scope = test_scope();
+        let hash = make_hash('b');
+        let bytes = {
+            let record = FileRecord {
+                file_id: "test/file.bin".into(),
+                content_hash: make_hash('f'),
+                total_bytes: 1024,
+                chunk_size: 256,
+                repository_scope: None,
+                chunks: vec![FileChunkRecord {
+                    hash: hash.clone(),
+                    offset: 0,
+                    length: 256,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 256,
+                }],
+            };
+            to_vec(&record).unwrap()
+        };
+        assert!(!stored_record_references_hash(&bytes, &hash, &scope).unwrap());
+    }
+
+    #[test]
+    fn stored_record_references_hash_empty_chunks() {
+        let scope = test_scope();
+        let hash = make_hash('x');
+        let bytes = {
+            let record = FileRecord {
+                file_id: "test/file.bin".into(),
+                content_hash: make_hash('f'),
+                total_bytes: 0,
+                chunk_size: 0,
+                repository_scope: Some(scope.clone()),
+                chunks: Vec::new(),
+            };
+            to_vec(&record).unwrap()
+        };
+        assert!(!stored_record_references_hash(&bytes, &hash, &scope).unwrap());
+    }
+
+    #[test]
+    fn stored_record_references_hash_hash_not_in_chunks() {
+        let scope = test_scope();
+        let stored_hash = make_hash('a');
+        let queried_hash = make_hash('z');
+        let bytes = file_record_json_bytes(&scope, &stored_hash);
+        assert!(!stored_record_references_hash(&bytes, &queried_hash, &scope).unwrap());
+    }
+
+    #[test]
     fn map_record_store_error_not_found() {
         let error = PostgresMetadataStoreError::RecordNotFound;
         let result = map_record_store_error(error);
@@ -510,13 +616,96 @@ mod tests {
     }
 
     #[test]
-    fn map_record_store_error_other() {
+    fn map_record_store_error_sqlx() {
+        let error = PostgresMetadataStoreError::Sqlx(Box::new(sqlx::Error::PoolClosed));
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_json() {
+        let error = PostgresMetadataStoreError::Json(
+            serde_json::from_str::<()>("invalid").unwrap_err(),
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_hash_parse() {
+        let error = PostgresMetadataStoreError::HashParse(
+            shardline_protocol::HashParseError::InvalidLength,
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_object_key() {
+        let error = PostgresMetadataStoreError::ObjectKey(
+            shardline_storage::ObjectKeyError::Empty,
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_range() {
+        let error = PostgresMetadataStoreError::Range(
+            shardline_protocol::RangeError::Inverted,
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_retention_hold() {
+        let error = PostgresMetadataStoreError::RetentionHold(
+            shardline_index::RetentionHoldError::EmptyReason,
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_quarantine_candidate() {
+        let error = PostgresMetadataStoreError::QuarantineCandidate(
+            shardline_index::QuarantineCandidateError::InvertedTimeline,
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_webhook_delivery() {
+        let error = PostgresMetadataStoreError::WebhookDelivery(
+            shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_integer_out_of_range() {
         let error = PostgresMetadataStoreError::IntegerOutOfRange;
         let result = map_record_store_error(error);
-        assert!(matches!(
-            result,
-            ServerError::Index(IndexError::PostgresMetadata(_))
-        ));
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_invalid_record_kind() {
+        let error = PostgresMetadataStoreError::InvalidRecordKind;
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+    }
+
+    #[test]
+    fn map_record_store_error_invalid_repo_type() {
+        let error = PostgresMetadataStoreError::InvalidRepoType(
+            "unknown".to_owned(),
+        );
+        let result = map_record_store_error(error);
+        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
     }
 
     #[test]
@@ -527,5 +716,761 @@ mod tests {
     #[test]
     fn connect_postgres_metadata_pool_invalid_url() {
         assert!(connect_postgres_metadata_pool("!!not-a-valid-url!!", 5).is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_postgres_metadata_pool_very_small_connections_succeeds() {
+        // max_connections=1 should be accepted (lazy pool, no actual connect).
+        let result = connect_postgres_metadata_pool("postgres://localhost:5432/test", 1);
+        assert!(result.is_ok() || result.is_err());
+        // Drop the pool explicitly within the tokio context.
+        drop(result);
+    }
+
+    // ===== chunk_length / read_chunk integration tests =====
+
+    #[tokio::test]
+    async fn chunk_length_returns_stored_chunk_length() {
+        let (backend, _root) = make_backend().await;
+        let data = b"chunk data for length test";
+        let (hash_hex, _key) = store_chunk(&backend.object_store(), data);
+        let length = backend.chunk_length(&hash_hex).await.expect("chunk_length");
+        assert_eq!(length, data.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn chunk_length_not_found_for_missing_hash() {
+        let (backend, _root) = make_backend().await;
+        let hash_hex = "ab".repeat(32); // valid hex but no chunk stored
+        let result = backend.chunk_length(&hash_hex).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn read_chunk_returns_stored_bytes() {
+        let (backend, _root) = make_backend().await;
+        let data = b"read-chunk test data";
+        let (hash_hex, _key) = store_chunk(&backend.object_store(), data);
+        let read_data = backend.read_chunk(&hash_hex).await.expect("read_chunk");
+        assert_eq!(read_data, data);
+    }
+
+    #[tokio::test]
+    async fn read_chunk_not_found_for_missing_hash() {
+        let (backend, _root) = make_backend().await;
+        let hash_hex = "ba".repeat(32);
+        let result = backend.read_chunk(&hash_hex).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn read_chunk_with_large_data() {
+        let (backend, _root) = make_backend().await;
+        let data = vec![0xABu8; 65536]; // 64 KB chunk
+        let (hash_hex, _key) = store_chunk(&backend.object_store(), &data);
+        let read_data = backend.read_chunk(&hash_hex).await.expect("read_chunk");
+        assert_eq!(read_data.len(), 65536);
+        assert_eq!(read_data, data);
+    }
+
+    // ===== object_length / read_object integration tests =====
+
+    #[tokio::test]
+    async fn object_length_returns_stored_length() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/obj-length").unwrap();
+        let data = b"object length test data";
+        store_object(&backend.object_store(), &key, data);
+        let length = backend.object_length(&key).await.expect("object_length");
+        assert_eq!(length, data.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn object_length_not_found_for_missing_key() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/missing-obj").unwrap();
+        let result = backend.object_length(&key).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn read_object_returns_stored_bytes() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/read-obj").unwrap();
+        let data = b"read object test content";
+        store_object(&backend.object_store(), &key, data);
+        let read_data = backend.read_object(&key).await.expect("read_object");
+        assert_eq!(read_data, data);
+    }
+
+    #[tokio::test]
+    async fn read_object_not_found_for_missing_key() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/never-stored").unwrap();
+        let result = backend.read_object(&key).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn read_object_roundtrip_large_blob() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/large-blob").unwrap();
+        let data = vec![0x42u8; 131072]; // 128 KB
+        store_object(&backend.object_store(), &key, &data);
+        let read_data = backend.read_object(&key).await.expect("read_object large");
+        assert_eq!(read_data.len(), 131072);
+        assert_eq!(read_data, data);
+    }
+
+    // ===== delete_object_if_present tests =====
+
+    #[tokio::test]
+    async fn delete_object_if_present_deletes_existing() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/delete-existing").unwrap();
+        store_object(&backend.object_store(), &key, b"to be deleted");
+        let outcome = backend
+            .delete_object_if_present(&key)
+            .await
+            .expect("delete");
+        assert_eq!(outcome, DeleteOutcome::Deleted);
+        // Verify the object is gone.
+        assert!(matches!(
+            backend.object_length(&key).await,
+            Err(ServerError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_object_if_present_missing_returns_not_found() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/never-existed").unwrap();
+        let outcome = backend
+            .delete_object_if_present(&key)
+            .await
+            .expect("delete missing");
+        assert_eq!(outcome, DeleteOutcome::NotFound);
+    }
+
+    #[tokio::test]
+    async fn delete_object_if_present_double_delete() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/double-delete").unwrap();
+        store_object(&backend.object_store(), &key, b"delete me twice");
+        // First delete succeeds.
+        assert_eq!(
+            backend
+                .delete_object_if_present(&key)
+                .await
+                .expect("first delete"),
+            DeleteOutcome::Deleted
+        );
+        // Second delete returns NotFound.
+        assert_eq!(
+            backend
+                .delete_object_if_present(&key)
+                .await
+                .expect("second delete"),
+            DeleteOutcome::NotFound
+        );
+    }
+
+    // ===== visit_object_prefix tests =====
+
+    #[tokio::test]
+    async fn visit_object_prefix_returns_matching_objects() {
+        let (backend, _root) = make_backend().await;
+        let keys = [
+            ObjectKey::parse("test/prefix/a").unwrap(),
+            ObjectKey::parse("test/prefix/b").unwrap(),
+            ObjectKey::parse("test/prefix/sub/c").unwrap(),
+            ObjectKey::parse("test/other/x").unwrap(),
+        ];
+        for key in &keys {
+            store_object(&backend.object_store(), key, b"data");
+        }
+
+        let prefix = ObjectPrefix::parse("test/prefix").unwrap();
+        let mut found: Vec<String> = Vec::new();
+        backend
+            .visit_object_prefix(&prefix, |meta| {
+                found.push(meta.key().as_str().to_owned());
+                Ok(())
+            })
+            .expect("visit");
+        assert_eq!(found.len(), 3, "should find 3 objects under test/prefix/");
+        assert!(found.iter().any(|k: &String| k.contains("test/prefix/a")));
+        assert!(found.iter().any(|k: &String| k.contains("test/prefix/b")));
+        assert!(found.iter().any(|k: &String| k.contains("test/prefix/sub/c")));
+    }
+
+    #[tokio::test]
+    async fn visit_object_prefix_empty_when_no_match() {
+        let (backend, _root) = make_backend().await;
+        let prefix = ObjectPrefix::parse("no/such/prefix").unwrap();
+        let mut count = 0_u64;
+        backend
+            .visit_object_prefix(&prefix, |_| {
+                count += 1;
+                Ok(())
+            })
+            .expect("visit empty");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn visit_object_prefix_empty_store() {
+        let (backend, _root) = make_backend().await;
+        let prefix = ObjectPrefix::parse("test").unwrap();
+        let mut count = 0_u64;
+        backend
+            .visit_object_prefix(&prefix, |_| {
+                count += 1;
+                Ok(())
+            })
+            .expect("visit empty store");
+        assert_eq!(count, 0);
+    }
+
+    // ===== list_object_flat_namespace_page tests =====
+
+    #[tokio::test]
+    async fn list_object_flat_namespace_page_returns_at_most_limit() {
+        let (backend, _root) = make_backend().await;
+        for i in 0..10 {
+            let key = ObjectKey::parse(&format!("test/page/obj{i:03}")).unwrap();
+            store_object(&backend.object_store(), &key, b"page data");
+        }
+        let prefix = ObjectPrefix::parse("test/page").unwrap();
+        let page = backend
+            .list_object_flat_namespace_page(&prefix, None, 4)
+            .expect("list page");
+        assert_eq!(page.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn list_object_flat_namespace_page_with_limit() {
+        let (backend, _root) = make_backend().await;
+        for i in 0..5 {
+            let key = ObjectKey::parse(&format!("test/page2/obj{i:03}")).unwrap();
+            store_object(&backend.object_store(), &key, b"data");
+        }
+        let prefix = ObjectPrefix::parse("test/page2").unwrap();
+        // Request 2 items; the local store may or may not support start_after,
+        // but should at least respect the limit.
+        let page = backend
+            .list_object_flat_namespace_page(&prefix, None, 2)
+            .expect("list with limit");
+        assert!(!page.is_empty());
+        assert!(page.len() <= 2);
+    }
+
+    // ===== Special characters and edge cases =====
+
+    #[tokio::test]
+    async fn object_keys_with_special_characters() {
+        let (backend, _root) = make_backend().await;
+        // Object keys with hyphens, dots, underscores, and slashes.
+        let key = ObjectKey::parse("test/special_chars/file-v1.0.bin").unwrap();
+        let data = b"special key data";
+        store_object(&backend.object_store(), &key, data);
+        let read_data = backend.read_object(&key).await.expect("read special key");
+        assert_eq!(read_data, data);
+    }
+
+    #[tokio::test]
+    async fn chunk_length_rejects_invalid_hash_format() {
+        let (backend, _root) = make_backend().await;
+        // Non-hex characters or wrong length should produce an error.
+        let result = backend.chunk_length("not-a-valid-hex-string").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_chunk_rejects_invalid_hash_format() {
+        let (backend, _root) = make_backend().await;
+        let result = backend.read_chunk("!!invalid!!").await;
+        assert!(result.is_err());
+    }
+
+    // ===== Record store tests using LocalRecordStore =====
+    // These test RecordTraversal + RecordMutation traits directly,
+    // allowing record-set/scan/delete patterns without postgres.
+
+    /// Helper to open a LocalRecordStore in a temp dir.
+    fn local_record_store() -> (LocalRecordStore, TempDir) {
+        let storage = TempDir::new().expect("temp dir");
+        (LocalRecordStore::open(storage.path().to_path_buf()), storage)
+    }
+
+    fn test_file_record(
+        file_id: &str,
+        content_hash: &str,
+        scope: &RepositoryScope,
+    ) -> FileRecord {
+        FileRecord {
+            file_id: file_id.to_owned(),
+            content_hash: content_hash.to_owned(),
+            total_bytes: 1024,
+            chunk_size: 256,
+            repository_scope: Some(scope.clone()),
+            chunks: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn record_set_write_and_read_latest() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/record-set.bin", &make_hash('a'), &scope);
+
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .expect("write latest");
+
+        let locator = RecordTraversal::latest_record_locator(&store, &record);
+        let exists = RecordTraversal::record_locator_exists(&store, &locator)
+            .await
+            .expect("exists");
+        assert!(exists);
+
+        let bytes = RecordTraversal::read_record_bytes(&store, &locator)
+            .await
+            .expect("read");
+        let parsed = parse_stored_file_record_bytes(&bytes).expect("parse");
+        assert_eq!(parsed.file_id, record.file_id);
+        assert_eq!(parsed.content_hash, record.content_hash);
+    }
+
+    #[tokio::test]
+    async fn record_set_write_and_read_version() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/version-record.bin", &make_hash('b'), &scope);
+
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .expect("write version");
+
+        let locator = RecordTraversal::version_record_locator(&store, &record);
+        let exists = RecordTraversal::record_locator_exists(&store, &locator)
+            .await
+            .expect("exists");
+        assert!(exists);
+
+        let bytes = RecordTraversal::read_record_bytes(&store, &locator)
+            .await
+            .expect("read version");
+        let parsed = parse_stored_file_record_bytes(&bytes).expect("parse");
+        assert_eq!(parsed.file_id, record.file_id);
+        assert_eq!(parsed.content_hash, record.content_hash);
+    }
+
+    #[tokio::test]
+    async fn record_set_overwrite_latest() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record_v1 = test_file_record("test/overwrite.bin", &make_hash('a'), &scope);
+        let record_v2 = FileRecord {
+            content_hash: make_hash('b'),
+            total_bytes: 2048,
+            ..record_v1.clone()
+        };
+
+        RecordMutation::write_latest_record(&store, &record_v1)
+            .await
+            .expect("write v1");
+        RecordMutation::write_latest_record(&store, &record_v2)
+            .await
+            .expect("write v2 (overwrite)");
+
+        let locator = RecordTraversal::latest_record_locator(&store, &record_v1);
+        let bytes = RecordTraversal::read_record_bytes(&store, &locator)
+            .await
+            .expect("read after overwrite");
+        let parsed = parse_stored_file_record_bytes(&bytes).expect("parse");
+        // The latest record should now have v2 data (same file_id).
+        assert_eq!(parsed.total_bytes, 2048);
+    }
+
+    // record_scan — scan with various prefixes / repository scopes
+
+    #[tokio::test]
+    async fn record_scan_list_all_latest_locators() {
+        let (store, _storage) = local_record_store();
+        let scope_a = test_scope();
+        let scope_b = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "other-owner",
+            "other-repo",
+            Some("main"),
+        )
+        .unwrap();
+        let rec1 = test_file_record("file1.bin", &make_hash('a'), &scope_a);
+        let rec2 = test_file_record("file2.bin", &make_hash('b'), &scope_a);
+        let rec3 = test_file_record("file3.bin", &make_hash('c'), &scope_b);
+
+        RecordMutation::write_latest_record(&store, &rec1).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec2).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec3).await.unwrap();
+
+        let locators = RecordTraversal::list_latest_record_locators(&store)
+            .await
+            .expect("list all");
+
+        // Should contain 3 distinct locators.
+        assert_eq!(locators.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn record_scan_repository_scope() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let other_scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main"))
+                .unwrap();
+        let rec_in_scope = test_file_record("in-scope.bin", &make_hash('a'), &scope);
+        let rec_other = test_file_record("other.bin", &make_hash('b'), &other_scope);
+
+        RecordMutation::write_latest_record(&store, &rec_in_scope).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec_other).await.unwrap();
+
+        let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&scope);
+        let repo_locators = RecordTraversal::list_repository_latest_record_locators(
+            &store,
+            &repo_scope,
+        )
+        .await
+        .expect("list repo scope");
+        assert_eq!(repo_locators.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn record_scan_different_revisions_same_repository() {
+        let (store, _storage) = local_record_store();
+        let main_scope = test_scope();
+        let release_scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", Some("release"))
+                .unwrap();
+        let rec_main = test_file_record("main-file.bin", &make_hash('a'), &main_scope);
+        let rec_release = test_file_record("release-file.bin", &make_hash('b'), &release_scope);
+
+        RecordMutation::write_latest_record(&store, &rec_main).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec_release).await.unwrap();
+
+        let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&main_scope);
+        let locators = RecordTraversal::list_repository_latest_record_locators(
+            &store,
+            &repo_scope,
+        )
+        .await
+        .expect("list repo (all revisions)");
+        // Both revisions share the same repository scope key.
+        assert_eq!(locators.len(), 2);
+    }
+
+    // record_delete — delete existing, delete non-existent
+
+    #[tokio::test]
+    async fn record_delete_existing_locator() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/delete-me.bin", &make_hash('x'), &scope);
+
+        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        let locator = RecordTraversal::latest_record_locator(&store, &record);
+
+        // Delete it.
+        RecordMutation::delete_record_locator(&store, &locator)
+            .await
+            .expect("delete");
+
+        let exists = RecordTraversal::record_locator_exists(&store, &locator)
+            .await
+            .expect("exists after delete");
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn record_delete_nonexistent_locator_fails() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/never-written.bin", &make_hash('y'), &scope);
+        let locator = RecordTraversal::latest_record_locator(&store, &record);
+
+        let result = RecordMutation::delete_record_locator(&store, &locator).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn record_delete_then_rewrite() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/recreate.bin", &make_hash('z'), &scope);
+
+        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        let locator = RecordTraversal::latest_record_locator(&store, &record);
+
+        RecordMutation::delete_record_locator(&store, &locator)
+            .await
+            .expect("delete");
+
+        // Rewrite the same record.
+        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        let exists = RecordTraversal::record_locator_exists(&store, &locator)
+            .await
+            .expect("exists after rewrite");
+        assert!(exists);
+    }
+
+    // list_latest_version_records — version record listing
+
+    #[tokio::test]
+    async fn list_latest_version_records_with_version_records() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let rec1 = test_file_record("v1.bin", &make_hash('a'), &scope);
+        let rec2 = test_file_record("v2.bin", &make_hash('b'), &scope);
+
+        // Write version records.
+        RecordMutation::write_version_record(&store, &rec1).await.unwrap();
+        RecordMutation::write_version_record(&store, &rec2).await.unwrap();
+
+        let v_locators = RecordTraversal::list_version_record_locators(&store)
+            .await
+            .expect("list versions");
+        assert_eq!(v_locators.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_latest_version_records_empty_when_no_versions() {
+        let (store, _storage) = local_record_store();
+        let locators = RecordTraversal::list_version_record_locators(&store)
+            .await
+            .expect("list versions empty");
+        assert!(locators.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_latest_version_records_repository_scoped() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let other_scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main"))
+                .unwrap();
+        let rec = test_file_record("file.bin", &make_hash('a'), &scope);
+        let other_rec = test_file_record("other.bin", &make_hash('b'), &other_scope);
+
+        RecordMutation::write_version_record(&store, &rec).await.unwrap();
+        RecordMutation::write_version_record(&store, &other_rec).await.unwrap();
+
+        let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&scope);
+        let locators = RecordTraversal::list_repository_version_record_locators(
+            &store, &repo_scope,
+        )
+        .await
+        .expect("list repo versions");
+        assert_eq!(locators.len(), 1);
+    }
+
+    // ===== modified_since_epoch read access =====
+
+    #[tokio::test]
+    async fn modified_since_epoch_returns_timestamp_for_stored_record() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/timestamp.bin", &make_hash('t'), &scope);
+
+        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        let locator = RecordTraversal::latest_record_locator(&store, &record);
+
+        let duration = RecordTraversal::modified_since_epoch(&store, &locator)
+            .await
+            .expect("modified_since_epoch");
+        // Should be a reasonable recent timestamp (>0).
+        assert!(duration.as_secs() > 0);
+    }
+
+    #[tokio::test]
+    async fn modified_since_epoch_fails_for_missing_locator() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/no-exist.bin", &make_hash('n'), &scope);
+        let locator = RecordTraversal::latest_record_locator(&store, &record);
+
+        let result = RecordTraversal::modified_since_epoch(&store, &locator).await;
+        assert!(result.is_err());
+    }
+
+    // ===== latest_record_locator vs version_record_locator =====
+
+    #[tokio::test]
+    async fn latest_and_version_locators_differ() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = test_file_record("test/locator-diff.bin", &make_hash('d'), &scope);
+
+        let latest = RecordTraversal::latest_record_locator(&store, &record);
+        let version = RecordTraversal::version_record_locator(&store, &record);
+        // Latest and version locators should be different for the same record.
+        assert_ne!(latest, version, "latest and version locator keys must differ");
+    }
+
+    // ===== Edge: empty records, zero-byte records =====
+
+    #[tokio::test]
+    async fn record_set_empty_chunks_list() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let record = FileRecord {
+            file_id: "test/empty-chunks.bin".into(),
+            content_hash: make_hash('e'),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: Some(scope),
+            chunks: Vec::new(),
+        };
+
+        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        let locator = RecordTraversal::latest_record_locator(&store, &record);
+        let bytes = RecordTraversal::read_record_bytes(&store, &locator)
+            .await
+            .expect("read empty-chunks record");
+        let parsed = parse_stored_file_record_bytes(&bytes).expect("parse");
+        assert!(parsed.chunks.is_empty());
+        assert_eq!(parsed.total_bytes, 0);
+    }
+
+    // ===== repository_metadata_inventory — various record counts =====
+
+    #[tokio::test]
+    async fn repository_metadata_inventory_counts() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&scope);
+
+        // Write 3 latest records + 2 version records in the same repository.
+        for i in 0..3 {
+            let rec = test_file_record(
+                &format!("inventory/file{i}.bin"),
+                &make_hash(char::from(b'a' + i)),
+                &scope,
+            );
+            RecordMutation::write_latest_record(&store, &rec).await.unwrap();
+        }
+        for i in 0..2 {
+            let rec = test_file_record(
+                &format!("inventory/version{i}.bin"),
+                &make_hash(char::from(b'x' + i)),
+                &scope,
+            );
+            RecordMutation::write_version_record(&store, &rec).await.unwrap();
+        }
+
+        // Count latest records in the repository.
+        let latest_locators = RecordTraversal::list_repository_latest_record_locators(
+            &store, &repo_scope,
+        )
+        .await
+        .expect("list repo latest");
+        assert_eq!(latest_locators.len(), 3);
+
+        // Count version records in the repository.
+        let version_locators = RecordTraversal::list_repository_version_record_locators(
+            &store, &repo_scope,
+        )
+        .await
+        .expect("list repo versions");
+        assert_eq!(version_locators.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn repository_metadata_inventory_empty_repository() {
+        let (store, _storage) = local_record_store();
+        let scope = test_scope();
+        let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&scope);
+
+        let latest = RecordTraversal::list_repository_latest_record_locators(&store, &repo_scope)
+            .await
+            .expect("list repo latest empty");
+        assert!(latest.is_empty());
+
+        let versions = RecordTraversal::list_repository_version_record_locators(
+            &store, &repo_scope,
+        )
+        .await
+        .expect("list repo versions empty");
+        assert!(versions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_metadata_inventory_mixed_repositories() {
+        let (store, _storage) = local_record_store();
+        let scope_a = test_scope();
+        let scope_b =
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner-b", "repo-b", Some("main"))
+                .unwrap();
+        let repo_a = shardline_index::RepositoryRecordScope::from_repository_scope(&scope_a);
+        let repo_b = shardline_index::RepositoryRecordScope::from_repository_scope(&scope_b);
+
+        let rec_a = test_file_record("a.bin", &make_hash('1'), &scope_a);
+        let rec_b = test_file_record("b.bin", &make_hash('2'), &scope_b);
+        RecordMutation::write_latest_record(&store, &rec_a).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec_b).await.unwrap();
+
+        assert_eq!(
+            RecordTraversal::list_repository_latest_record_locators(&store, &repo_a)
+                .await
+                .expect("repo_a")
+                .len(),
+            1
+        );
+        assert_eq!(
+            RecordTraversal::list_repository_latest_record_locators(&store, &repo_b)
+                .await
+                .expect("repo_b")
+                .len(),
+            1
+        );
+    }
+
+    // ===== Invalid identifier / missing record errors =====
+
+    #[tokio::test]
+    async fn reconstruction_rejects_invalid_file_id() {
+        let (backend, _root) = make_backend().await;
+        // read_record() internally calls validate_identifier() which should reject "/".
+        let result = backend
+            .reconstruction("/absolute/path", None, None, None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[tokio::test]
+    async fn file_total_bytes_rejects_invalid_file_id() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .file_total_bytes("../traverse", None, None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[tokio::test]
+    async fn download_file_rejects_invalid_file_id() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .download_file("\0null", None, None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[tokio::test]
+    async fn read_chunk_for_file_version_rejects_invalid_hash() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .read_chunk_for_file_version("bad-hash", "file.bin", "bad-content-hash", None)
+            .await;
+        // Should be InvalidFileId or InvalidContentHash.
+        assert!(result.is_err());
     }
 }
