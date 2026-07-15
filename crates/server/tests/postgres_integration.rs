@@ -4,10 +4,16 @@
 use std::num::NonZeroUsize;
 
 use shardline_server::{
-    BackupManifestReport, BenchmarkBackend, PostgresBackend, ServerConfig, ServerStatsResponse,
-    apply_database_migrations, bundled_database_migrations, write_backup_manifest,
+    BackupManifestReport, BenchmarkBackend, LifecycleRepairOptions, LifecycleRepairReport,
+    PostgresBackend, ServerBackend, ServerConfig, ServerObjectStore, ServerStatsResponse,
+    apply_database_migrations, bundled_database_migrations, run_lifecycle_repair,
+    write_backup_manifest,
 };
+use shardline_oci_adapter::{OciAdapterError, OciBackend};
+use shardline_protocol::ShardlineHash;
+use shardline_storage::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 use shardline_test_support::DockerLocalStack;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
@@ -595,4 +601,459 @@ fn test_backup_manifest_report_defaults() {
     assert_eq!(report.object_backend, "local");
     assert_eq!(report.manifest_version, 1);
     assert_eq!(report.latest_records, 0);
+}
+
+// ===========================================================================
+// SECTION 2 — ServerBackend::Postgres variant dispatch
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_backend_postgres_variant_construction() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    // Verify the variant is Postgres by matching.
+    assert!(
+        matches!(sb, ServerBackend::Postgres(_)),
+        "should construct Postgres variant"
+    );
+}
+
+// ===========================================================================
+// OciBackend trait — dispatch via Postgres backend (local object store)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_create_resumable_upload_returns_none_for_local_store() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    let key = ObjectKey::parse("oci-create-key").unwrap();
+    let result: Result<Option<String>, OciAdapterError> =
+        OciBackend::create_resumable_object_upload(&sb, &key).await;
+    assert!(result.is_ok());
+    // Local store → None (no resumable upload support).
+    assert!(result.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_upload_resumable_part_returns_not_found() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    let key = ObjectKey::parse("oci-upload-key").unwrap();
+    let result: Result<String, OciAdapterError> =
+        OciBackend::upload_resumable_object_part(
+            &sb, &key, "upload-id", 0, axum::body::Bytes::from_static(b"part"),
+        )
+        .await;
+    // Local store branch → NotFound.
+    assert!(matches!(result, Err(shardline_oci_adapter::OciAdapterError::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_complete_resumable_upload_returns_not_found() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    let key = ObjectKey::parse("oci-complete-key").unwrap();
+    let result: Result<(), OciAdapterError> =
+        OciBackend::complete_resumable_object_upload(
+            &sb, &key, "upload-id", vec![(0, "etag".to_owned())],
+        )
+        .await;
+    assert!(matches!(result, Err(shardline_oci_adapter::OciAdapterError::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_abort_resumable_upload_succeeds() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    let key = ObjectKey::parse("oci-abort-key").unwrap();
+    // Local store branch → Ok(()).
+    let result: Result<(), OciAdapterError> =
+        OciBackend::abort_resumable_object_upload(&sb, &key, "upload-id").await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_copy_object_if_absent() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    let src = ObjectKey::parse("oci-copy-src").unwrap();
+    let dst = ObjectKey::parse("oci-copy-dst").unwrap();
+    // Seed source via the backend's put path.
+    // put_object_bytes_if_absent is pub(crate) so seed through upload.
+    // Instead, use the ServerBackend's OCI layer if possible, or use the
+    // object store directly.
+    let store = ServerObjectStore::local(_tmp.path().join("chunks")).unwrap();
+    let data = b"oci-copy-data";
+    let hash = ShardlineHash::from_bytes(*blake3::hash(data).as_bytes());
+    let integrity = ObjectIntegrity::new(hash, data.len() as u64);
+    store.put_if_absent(&src, ObjectBody::from_slice(data), &integrity).unwrap();
+    let result: Result<PutOutcome, OciAdapterError> =
+        OciBackend::copy_object_if_absent(&sb, &src, &dst);
+    assert!(result.is_ok());
+    let put_outcome = result.unwrap();
+    // Either Inserted (first copy) or AlreadyExists.
+    assert!(
+        put_outcome == PutOutcome::Inserted || put_outcome == PutOutcome::AlreadyExists,
+        "copy should succeed: {put_outcome:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_delete_object_if_present() {
+    let _url = ensure_pg().await;
+    let (backend, tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    let key = ObjectKey::parse("oci-delete-me").unwrap();
+    // Seed an object.
+    let store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let data = b"oci-delete-data";
+    let hash = ShardlineHash::from_bytes(*blake3::hash(data).as_bytes());
+    let integrity = ObjectIntegrity::new(hash, data.len() as u64);
+    store.put_if_absent(&key, ObjectBody::from_slice(data), &integrity).unwrap();
+    let result: Result<DeleteOutcome, OciAdapterError> =
+        OciBackend::delete_object_if_present(&sb, &key).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), DeleteOutcome::Deleted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_put_sha256_addressed_object_bytes_if_absent() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    let body = b"oci-sha256-payload";
+    let digest_hex = hex::encode(Sha256::digest(body));
+    let canonical_key = shardline_server::shared_sha256_object_key(&digest_hex).unwrap();
+    let result: Result<PutOutcome, OciAdapterError> =
+        OciBackend::put_sha256_addressed_object_bytes_if_absent(
+            &sb, &canonical_key, &digest_hex, body.to_vec(),
+        );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), PutOutcome::Inserted);
+}
+
+// ===========================================================================
+// Record operations — multi-file uploads, verify via SQL + stats
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_record_ops_multi_file_upload() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("multi-rec").await;
+    let files = ["alpha.txt", "beta.txt", "gamma.txt"];
+    for (i, name) in files.iter().enumerate() {
+        let content = format!("content-{i}");
+        bench
+            .upload_file(name, axum::body::Bytes::from(content), None)
+            .await
+            .unwrap();
+    }
+    // Verify all three records exist via SQL.
+    let pool = fresh_pool().await;
+    for name in &files {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM shardline_file_records WHERE file_id = $1)",
+        )
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(exists, "record {name} should exist");
+    }
+    // Stats should show >= 3 files.
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 3, "stats should show >= 3 files: {stats:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_record_ops_duplicate_upload_idempotent() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("dup-rec").await;
+    let content = b"same content";
+    // Upload twice.
+    let r1 = bench
+        .upload_file("dup-file.bin", axum::body::Bytes::from_static(content), None)
+        .await
+        .unwrap();
+    let r2 = bench
+        .upload_file("dup-file.bin", axum::body::Bytes::from_static(content), None)
+        .await
+        .unwrap();
+    // Both should succeed (idempotent).
+    assert!(!r1.file_id.is_empty());
+    assert!(!r2.file_id.is_empty());
+    // The same file_id may produce multiple records (each upload is a new
+    // version).  Verify at least one record exists and the uploads succeed.
+    let pool = fresh_pool().await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM shardline_file_records WHERE file_id = 'dup-file.bin'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(count >= 1, "at least one record should exist");
+    assert!(r1.file_id == r2.file_id, "same file id for both uploads");
+}
+
+// ===========================================================================
+// Database migration — version ordering, SQL validity
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_version_ordering() {
+    let migrations = bundled_database_migrations();
+    assert!(!migrations.is_empty());
+    assert!(migrations.windows(2).all(|w| w.first().unwrap().version < w.get(1).unwrap().version));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_each_has_valid_sql() {
+    for m in bundled_database_migrations() {
+        assert!(!m.up_sql.is_empty(), "{} up_sql empty", m.version);
+        assert!(!m.down_sql.is_empty(), "{} down_sql empty", m.version);
+        assert!(
+            m.up_sql.trim().starts_with("CREATE")
+                || m.up_sql.trim().starts_with("ALTER")
+                || m.up_sql.trim().starts_with("INSERT")
+                || m.up_sql.trim().starts_with("--"),
+            "{} up_sql unexpected start: {:?}",
+            m.version,
+            &m.up_sql.trim()[..20.min(m.up_sql.trim().len())]
+        );
+        assert!(!m.name.is_empty(), "{} name empty", m.version);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_find_by_version_iteration() {
+    let migrations = bundled_database_migrations();
+    // Simulate migration_by_version via linear search.
+    let found = migrations.iter().find(|m| m.version == "20260417000000");
+    assert!(found.is_some(), "known version should be findable");
+    assert_eq!(found.unwrap().name, "metadata_store");
+    let not_found = migrations.iter().find(|m| m.version == "00000000000000");
+    assert!(not_found.is_none(), "unknown version should not be found");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_status_entry_accessors() {
+    use shardline_server::DatabaseMigrationStatusEntry;
+    let entry = DatabaseMigrationStatusEntry {
+        version: "v1".to_owned(),
+        name: "test".to_owned(),
+        applied: true,
+        applied_at_utc: Some("2026-01-01T00:00:00Z".to_owned()),
+    };
+    assert_eq!(entry.version, "v1");
+    assert_eq!(entry.name, "test");
+    assert!(entry.applied);
+    assert!(entry.applied_at_utc.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_options_new() {
+    use shardline_server::{DatabaseMigrationCommand, DatabaseMigrationOptions};
+    let opts = DatabaseMigrationOptions::new(
+        "postgres://localhost/test".to_owned(),
+        DatabaseMigrationCommand::Up { steps: Some(2) },
+    );
+    assert_eq!(opts.database_url(), "postgres://localhost/test");
+    assert!(matches!(opts.command(), DatabaseMigrationCommand::Up { steps: Some(2) }));
+}
+
+// ===========================================================================
+// Lifecycle repair — runs with Postgres stores (via config)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lifecycle_repair_empty_store() {
+    let _url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let config = pg_config(&tmp);
+    let report: LifecycleRepairReport = run_lifecycle_repair(config, LifecycleRepairOptions::default())
+        .await
+        .unwrap();
+    // The shared database may have records from other tests, so counts
+    // can vary. Just verify the function completes without error and returns
+    // a well-formed report.
+    assert!(
+        report.referenced_objects <= 1_000_000,
+        "sanity bound on referenced objects: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lifecycle_repair_with_seeded_records() {
+    let _url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    // Upload a file first so there are records to scan.
+    {
+        let config = pg_config(&tmp);
+        let bench = BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "repair-seed")
+            .await
+            .unwrap();
+        bench
+            .upload_file("repair-seed.bin", axum::body::Bytes::from_static(b"repair data"), None)
+            .await
+            .unwrap();
+    }
+    let config = pg_config(&tmp);
+    let report: LifecycleRepairReport = run_lifecycle_repair(config, LifecycleRepairOptions::default())
+        .await
+        .unwrap();
+    // At minimum we should have scanned the seeded record(s).
+    assert!(
+        report.scanned_records >= 1,
+        "lifecycle repair should complete: {report:?}"
+    );
+}
+
+// ===========================================================================
+// BenchmarkBackend — additional edge cases
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_benchmark_backend_empty_upload() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("empty-up").await;
+    let response = bench
+        .upload_file("empty-file.bin", axum::body::Bytes::new(), None)
+        .await
+        .unwrap();
+    assert!(response.total_bytes == 0, "empty upload should have 0 bytes");
+    assert!(!response.file_id.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_benchmark_backend_reconstruction_with_content_hash() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("recon-hash").await;
+    let content = b"reconstruct with content hash";
+    let resp = bench
+        .upload_file("recon-hash.bin", axum::body::Bytes::from_static(content), None)
+        .await
+        .unwrap();
+    // Reconstruction by content hash should succeed.
+    let recon = bench
+        .reconstruction("recon-hash.bin", Some(&resp.content_hash), None, None)
+        .await
+        .unwrap();
+    assert!(
+        !recon.terms.is_empty() || recon.offset_into_first_range == 0,
+        "reconstruction by content hash should return valid response"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_benchmark_backend_reconstruction_invalid_content_hash() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("recon-bad-hash").await;
+    bench
+        .upload_file("recon-bad-hash.bin", axum::body::Bytes::from_static(b"data"), None)
+        .await
+        .unwrap();
+    // Non-matching content hash should fail.
+    let result = bench
+        .reconstruction("recon-bad-hash.bin", Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), None, None)
+        .await;
+    assert!(result.is_err(), "reconstruction with wrong content hash should fail");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_benchmark_backend_download_missing_file() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("dl-missing").await;
+    let result = bench.download_file("definitely-not-uploaded", None, None).await;
+    assert!(result.is_err(), "download of missing file should fail");
+}
+
+// ===========================================================================
+// Stats — verified after multi-file operations
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_stats_after_multi_file_upload() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("stats-multi").await;
+    for i in 0..5 {
+        let content = format!("multi-stats-content-{i}");
+        bench
+            .upload_file(
+                &format!("stats-multi-{i}.bin"),
+                axum::body::Bytes::from(content),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 5, "should have at least 5 files: {stats:?}");
+}
+
+// ===========================================================================
+// Additional ServerBackend dispatch — pure construction matching
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_backend_local_variant_from_config_without_pg() {
+    // When no index_postgres_url is set, from_config creates Local.
+    // This tests that the dispatch logic correctly chooses Local variant.
+    let tmp = TempDir::new().unwrap();
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    let config = ServerConfig::new(
+        bind_addr,
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65536).unwrap(),
+    );
+    // from_config is pub(crate), so we use BenchmarkBackend::from_config instead.
+    let bench = BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "no-pg")
+        .await
+        .unwrap();
+    assert_eq!(bench.metadata_backend_name(), "local");
+}
+
+// ===========================================================================
+// Backup manifest — verify report fields after seeding records
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backup_manifest_with_multiple_records() {
+    let _url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    // Seed multiple records.
+    {
+        let config = pg_config(&tmp);
+        let bench = BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "bkup-multi")
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let content = format!("backup-content-{i}");
+            bench
+                .upload_file(
+                    &format!("backup-multi-{i}.bin"),
+                    axum::body::Bytes::from(content),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let config = pg_config(&tmp);
+    let mut buffer = Vec::new();
+    let report = write_backup_manifest(config, &mut buffer).await.unwrap();
+    assert_eq!(report.metadata_backend, "postgres");
+    assert!(report.latest_records >= 3, "should have >= 3 records: {report:?}");
+    assert!(report.object_count > 0, "object count should be positive");
+    let json_str = String::from_utf8(buffer).unwrap();
+    // Verify the manifest is valid JSON with expected fields.
+    assert!(json_str.contains("metadata_backend"));
+    assert!(json_str.contains("postgres"));
+    assert!(json_str.contains("latest_records"));
 }

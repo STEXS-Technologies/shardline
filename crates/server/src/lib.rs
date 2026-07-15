@@ -115,7 +115,7 @@ pub use database_migration::{
     DatabaseMigrationReport, DatabaseMigrationStatusEntry, apply_database_migrations,
     bundled_database_migrations, run_database_migration,
 };
-pub use error::ServerError;
+pub use error::{ObjectStoreError, ServerError};
 pub(crate) use error::{InvalidReconstructionResponseError, InvalidSerializedShardError};
 pub use fsck::{
     FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,

@@ -48,7 +48,13 @@ static REPOSITORY_REFERENCE_PROBE_TEST_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
 
 impl ServerBackend {
-    pub(crate) async fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
+    /// Build a [`ServerBackend`] from a [`ServerConfig`] by resolving the object store
+    /// and metadata backend (local or Postgres).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the object store or Postgres backend fails to initialise.
+    pub async fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
         let object_store = object_store_from_config(config)?;
         if let Some(index_postgres_url) = config.index_postgres_url() {
             let backend =
@@ -262,7 +268,8 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) const fn object_backend_name(&self) -> &'static str {
+    #[must_use]
+    pub const fn object_backend_name(&self) -> &'static str {
         match self {
             Self::Local(backend) => backend.object_backend_name(),
             Self::Postgres(backend) => backend.object_backend_name(),
