@@ -69,6 +69,7 @@ rusqlite = { workspace = true, features = ["bundled"] }
 serial_test = "3"
 shardline-test-support.workspace = true
 tempfile.workspace = true
+wiremock = "0.6"
 xet-client.workspace = true
 xet-data.workspace = true
 xet-runtime.workspace = true
