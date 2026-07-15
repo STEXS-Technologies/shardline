@@ -219,4 +219,72 @@ mod tests {
         assert!(msg.contains("lowercase"), "expected mention of lowercase in display, got: {msg}");
         assert!(msg.contains("hexadecimal"), "expected mention of hexadecimal in display, got: {msg}");
     }
+
+    #[test]
+    fn hash_copy_and_clone_work() {
+        let hash = ShardlineHash::from_bytes([42; 32]);
+        let cloned = hash;
+        assert_eq!(hash, cloned);
+        let copied = hash;
+        assert_eq!(hash, copied);
+    }
+
+    #[test]
+    fn hash_partial_eq_compares_bytes() {
+        let a = ShardlineHash::from_bytes([1; 32]);
+        let b = ShardlineHash::from_bytes([1; 32]);
+        let c = ShardlineHash::from_bytes([2; 32]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn hash_parse_hex_rejects_garbage_after_valid_prefix() {
+        let result = ShardlineHash::parse_hex(&format!("{}zz", "a".repeat(64)));
+        assert_eq!(result, Err(HashParseError::InvalidLength));
+    }
+
+    #[test]
+    fn hash_hex_string_all_byte_values() {
+        let mut bytes = [0u8; 32];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        let hash = ShardlineHash::from_bytes(bytes);
+        let hex = hash.hex_string();
+        let expected = (0..32u8)
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .concat();
+        assert_eq!(hex, expected);
+    }
+
+    #[test]
+    fn hash_parse_hex_rejects_uppercase_at_start() {
+        // Exactly 64 chars, first char uppercase => InvalidCharacter
+        let mixed = format!("A{}", "a".repeat(63));
+        let result = ShardlineHash::parse_hex(&mixed);
+        assert_eq!(result, Err(HashParseError::InvalidCharacter));
+    }
+
+    #[test]
+    fn hash_parse_hex_rejects_uppercase_in_middle() {
+        // Exactly 64 chars, one char in middle uppercase => InvalidCharacter
+        let mut bytes = "a".repeat(32);
+        bytes.push('F');
+        bytes.push_str(&"a".repeat(31));
+        assert_eq!(bytes.len(), 64);
+        let result = ShardlineHash::parse_hex(&bytes);
+        assert_eq!(result, Err(HashParseError::InvalidCharacter));
+    }
+
+    #[test]
+    fn hash_error_derive_impls() {
+        // HashParseError implements Clone, Copy, PartialEq, Eq
+        let a = HashParseError::InvalidLength;
+        let b = HashParseError::InvalidCharacter;
+        let a2 = a;
+        assert_eq!(a, a2);
+        assert_ne!(a, b);
+    }
 }

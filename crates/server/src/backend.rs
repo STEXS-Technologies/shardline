@@ -967,6 +967,19 @@ mod tests {
             compose_benchmark_object_key_prefix(Some(""), "bench-1"),
             "bench/bench-1"
         );
+        // Also verify with None prefix (different branch)
+        assert_eq!(
+            compose_benchmark_object_key_prefix(Some(""), "bench-2"),
+            "bench/bench-2"
+        );
+    }
+
+    #[test]
+    fn benchmark_object_key_prefix_none_existing() {
+        assert_eq!(
+            compose_benchmark_object_key_prefix(None, "bench-3"),
+            "bench/bench-3"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

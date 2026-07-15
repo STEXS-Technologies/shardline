@@ -84,4 +84,46 @@ mod tests {
         assert!(ServerRole::Transfer.serves_transfer());
         assert!(!ServerRole::Transfer.uses_reconstruction_cache());
     }
+
+    #[test]
+    fn all_role_serves_all_routes_and_uses_cache() {
+        assert!(ServerRole::All.serves_api());
+        assert!(ServerRole::All.serves_transfer());
+        assert!(ServerRole::All.uses_reconstruction_cache());
+    }
+
+    #[test]
+    fn server_role_as_str_returns_expected_values() {
+        assert_eq!(ServerRole::All.as_str(), "all");
+        assert_eq!(ServerRole::Api.as_str(), "api");
+        assert_eq!(ServerRole::Transfer.as_str(), "transfer");
+    }
+
+    #[test]
+    fn server_role_parse_rejects_invalid() {
+        use super::ServerRoleParseError;
+        assert!(matches!(
+            ServerRole::parse("invalid"),
+            Err(ServerRoleParseError)
+        ));
+        assert!(matches!(
+            ServerRole::parse(""),
+            Err(ServerRoleParseError)
+        ));
+    }
+
+    #[test]
+    fn server_role_parse_error_display() {
+        let err = super::ServerRoleParseError;
+        assert_eq!(err.to_string(), "invalid server role");
+    }
+
+    #[test]
+    fn server_role_debug_and_clone() {
+        let role = ServerRole::All;
+        let cloned = role;
+        assert_eq!(role, cloned);
+        let debug = format!("{role:?}");
+        assert!(!debug.is_empty());
+    }
 }

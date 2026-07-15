@@ -1776,4 +1776,66 @@ mod tests {
             let _ = h.await;
         }
     }
+
+    // ── CacheInner evict_oldest on empty cache ────────────────────────────
+
+    #[tokio::test]
+    async fn cache_inner_evict_oldest_empty_cache_is_noop() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(5).unwrap_or(NonZeroUsize::MIN),
+        );
+        let key = ReconstructionCacheKey::latest("new-key", None);
+
+        // Eviction should not prevent insertion
+        cache.put(&key, b"data").await.unwrap();
+        let result = cache.get(&key).await.unwrap();
+        assert_eq!(result, Some(b"data".to_vec()));
+    }
+
+    // ── CacheInner evict_oldest stale eviction entries only ────────────────
+
+    #[tokio::test]
+    async fn cache_inner_evict_oldest_all_stale_clears_eviction_order() {
+        // Create a cache with capacity 2 and insert 2 entries, then
+        // delete both via remove() which cleans eviction_order.
+        // Then insert a third key — evict_oldest must handle finding
+        // nothing to evict gracefully.
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN),
+        );
+        let k1 = ReconstructionCacheKey::latest("k1", None);
+        let k2 = ReconstructionCacheKey::latest("k2", None);
+        let k3 = ReconstructionCacheKey::latest("k3", None);
+
+        cache.put(&k1, b"one").await.unwrap();
+        cache.put(&k2, b"two").await.unwrap();
+
+        // Delete both to clean up entries but keep eviction_order entries
+        cache.delete(&k1).await.unwrap();
+        cache.delete(&k2).await.unwrap();
+
+        // k3 should be insertable without panic
+        cache.put(&k3, b"three").await.unwrap();
+        assert_eq!(cache.get(&k3).await.unwrap(), Some(b"three".to_vec()));
+    }
+
+    // ── CacheInner insert overwrites existing key correctly ────────────────
+
+    #[tokio::test]
+    async fn cache_inner_insert_overwrites_existing_key() {
+        let cache = MemoryReconstructionCache::new(
+            NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN),
+            NonZeroUsize::new(100).unwrap_or(NonZeroUsize::MIN),
+        );
+        let key = ReconstructionCacheKey::latest("overwrite", None);
+
+        // Insert twice — the first entry is replaced in insert()
+        cache.put(&key, b"first").await.unwrap();
+        cache.put(&key, b"second").await.unwrap();
+
+        let result = cache.get(&key).await.unwrap();
+        assert_eq!(result, Some(b"second".to_vec()));
+    }
 }

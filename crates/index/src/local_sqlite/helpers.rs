@@ -1235,6 +1235,386 @@ fn from_sql_error(error: impl StdError + Send + Sync + 'static) -> SqliteError {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::os::unix::ffi::OsStrExt;
+
+    use super::super::{
+        collect_rows, normalize_local_root, record_not_found_error,
+    };
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+
+    // ── ensure_metadata_size_within_limit ─────────────────────────────────
+
+    #[test]
+    fn metadata_size_within_limit_ok() {
+        ensure_metadata_size_within_limit(100, 200).unwrap();
+    }
+
+    #[test]
+    fn metadata_size_at_limit_ok() {
+        ensure_metadata_size_within_limit(200, 200).unwrap();
+    }
+
+    #[test]
+    fn metadata_size_over_limit_errors() {
+        let err = ensure_metadata_size_within_limit(300, 200).unwrap_err();
+        assert!(matches!(
+            err,
+            LocalIndexStoreError::MetadataTooLarge {
+                observed_bytes: 300,
+                maximum_bytes: 200,
+            }
+        ));
+    }
+
+    // ── u64_to_i64 / i64_to_u64 ──────────────────────────────────────────
+
+    #[test]
+    fn u64_to_i64_normal_value() {
+        assert_eq!(u64_to_i64(42).unwrap(), 42i64);
+    }
+
+    #[test]
+    fn u64_to_i64_max_i64_value() {
+        assert_eq!(u64_to_i64(i64::MAX as u64).unwrap(), i64::MAX);
+    }
+
+    #[test]
+    fn u64_to_i64_overflow_errors() {
+        let too_big = (i64::MAX as u64).saturating_add(1);
+        assert!(matches!(
+            u64_to_i64(too_big),
+            Err(LocalIndexStoreError::IntegerOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn i64_to_u64_normal_value() {
+        assert_eq!(i64_to_u64(42).unwrap(), 42u64);
+    }
+
+    #[test]
+    fn i64_to_u64_zero() {
+        assert_eq!(i64_to_u64(0).unwrap(), 0u64);
+    }
+
+    #[test]
+    fn i64_to_u64_negative_errors() {
+        assert!(matches!(
+            i64_to_u64(-1),
+            Err(LocalIndexStoreError::IntegerOutOfRange)
+        ));
+    }
+
+    // ── record_not_found_error / invalid_metadata_path_error / invalid_record_metadata_path_error ──
+
+    #[test]
+    fn record_not_found_error_kind() {
+        let err = record_not_found_error();
+        assert!(matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound));
+    }
+
+    #[test]
+    fn invalid_metadata_path_error_kind() {
+        let err = invalid_metadata_path_error();
+        assert!(matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData));
+    }
+
+    #[test]
+    fn invalid_record_metadata_path_error_kind() {
+        let err = invalid_record_metadata_path_error();
+        assert!(matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData));
+    }
+
+    // ── is_valid_local_table_name ─────────────────────────────────────────
+
+    #[test]
+    fn is_valid_local_table_name_accepts_known_tables() {
+        assert!(is_valid_local_table_name("shardline_file_records"));
+        assert!(is_valid_local_table_name("shardline_file_reconstructions"));
+        assert!(is_valid_local_table_name("shardline_stored_objects"));
+        assert!(is_valid_local_table_name("shardline_dedupe_shards"));
+        assert!(is_valid_local_table_name("shardline_quarantine_candidates"));
+        assert!(is_valid_local_table_name("shardline_retention_holds"));
+        assert!(is_valid_local_table_name("shardline_webhook_deliveries"));
+        assert!(is_valid_local_table_name("shardline_provider_repository_states"));
+    }
+
+    #[test]
+    fn is_valid_local_table_name_rejects_unknown() {
+        assert!(!is_valid_local_table_name("shardline_unknown_table"));
+        assert!(!is_valid_local_table_name(""));
+        assert!(!is_valid_local_table_name("sqlite_master"));
+    }
+
+    // ── ensure_sqlite_database_path_is_safe ─────────────────────────────────
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_when_not_exists() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("nonexistent.sqlite3");
+        ensure_sqlite_database_path_is_safe(&path).unwrap();
+    }
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_when_regular_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("test.sqlite3");
+        std::fs::write(&path, b"content").unwrap();
+        ensure_sqlite_database_path_is_safe(&path).unwrap();
+    }
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_rejects_directory() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("adir");
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            ensure_sqlite_database_path_is_safe(&path),
+            Err(LocalIndexStoreError::Io(ref e)) if e.kind() == std::io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_rejects_symlink() {
+        let storage = shardline_test_support::TempStorage::new();
+        let target = storage.path().join("real.sqlite3");
+        let link = storage.path().join("link.sqlite3");
+        std::fs::write(&target, b"data").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            ensure_sqlite_database_path_is_safe(&link),
+            Err(LocalIndexStoreError::Io(ref e)) if e.kind() == std::io::ErrorKind::InvalidData
+        ));
+    }
+
+    // ── sqlite_open_flags ──────────────────────────────────────────────────
+
+    #[test]
+    fn sqlite_open_flags_includes_no_follow() {
+        let flags = sqlite_open_flags();
+        assert!(
+            flags.contains(rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW),
+            "expected SQLITE_OPEN_NOFOLLOW to be set"
+        );
+        assert!(
+            flags.contains(rusqlite::OpenFlags::SQLITE_OPEN_CREATE),
+            "expected SQLITE_OPEN_CREATE"
+        );
+    }
+
+    // ── collect_rows ───────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_rows_empty_iterator() {
+        let storage = shardline_test_support::TempStorage::new();
+        initialize_local_metadata_root(storage.path()).unwrap();
+        let db_path = storage.path().join("test.sqlite3");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (v TEXT);
+             INSERT INTO t VALUES ('a'), ('b');",
+        )
+        .unwrap();
+        let mut stmt = conn.prepare("SELECT v FROM t WHERE v = 'nonexistent'").unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+        let collected: Vec<String> = collect_rows(rows).unwrap();
+        assert!(collected.is_empty());
+    }
+
+    #[test]
+    fn collect_rows_non_empty_iterator() {
+        let storage = shardline_test_support::TempStorage::new();
+        initialize_local_metadata_root(storage.path()).unwrap();
+        let db_path = storage.path().join("test.sqlite3");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (v TEXT);
+             INSERT INTO t VALUES ('a'), ('b');",
+        )
+        .unwrap();
+        let mut stmt = conn.prepare("SELECT v FROM t ORDER BY v").unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+        let collected: Vec<String> = collect_rows(rows).unwrap();
+        assert_eq!(collected, vec!["a", "b"]);
+    }
+
+    // ── legacy_layout_exists ───────────────────────────────────────────────
+
+    #[test]
+    fn legacy_layout_exists_returns_false_for_empty_dir() {
+        let storage = shardline_test_support::TempStorage::new();
+        assert!(!legacy_layout_exists(storage.path()));
+    }
+
+    #[test]
+    fn legacy_layout_exists_when_files_dir_present() {
+        let storage = shardline_test_support::TempStorage::new();
+        std::fs::create_dir(storage.path().join("files")).unwrap();
+        assert!(legacy_layout_exists(storage.path()));
+    }
+
+    #[test]
+    fn legacy_layout_exists_when_file_versions_dir_present() {
+        let storage = shardline_test_support::TempStorage::new();
+        std::fs::create_dir(storage.path().join("file_versions")).unwrap();
+        assert!(legacy_layout_exists(storage.path()));
+    }
+
+    #[test]
+    fn legacy_layout_exists_when_gc_dir_present() {
+        let storage = shardline_test_support::TempStorage::new();
+        std::fs::create_dir(storage.path().join("gc")).unwrap();
+        assert!(legacy_layout_exists(storage.path()));
+    }
+
+    // ── legacy_record_path ─────────────────────────────────────────────────
+
+    fn sample_scope() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap()
+    }
+
+    fn sample_record(scope: Option<RepositoryScope>) -> crate::FileRecord {
+        crate::FileRecord {
+            file_id: "test.bin".into(),
+            content_hash: "c".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: scope,
+            chunks: vec![],
+        }
+    }
+
+    #[test]
+    fn legacy_record_path_latest_no_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let record = sample_record(None);
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Latest, &record);
+        assert!(path.ends_with("test.bin"));
+        assert!(path.starts_with(storage.path().join("files")));
+    }
+
+    #[test]
+    fn legacy_record_path_latest_with_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let scope = sample_scope();
+        let record = sample_record(Some(scope));
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Latest, &record);
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("github"));
+        assert!(path_str.contains("test.bin"));
+    }
+
+    #[test]
+    fn legacy_record_path_version_no_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let record = sample_record(None);
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Version, &record);
+        assert!(path.starts_with(storage.path().join("file_versions")));
+        assert!(path.ends_with(&record.content_hash));
+        assert!(path.to_string_lossy().contains("test.bin"));
+    }
+
+    #[test]
+    fn legacy_record_path_version_with_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let scope = sample_scope();
+        let record = sample_record(Some(scope));
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Version, &record);
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("file_versions"));
+        assert!(path_str.contains("github"));
+        assert!(path_str.contains("test.bin"));
+        assert!(path_str.contains(&record.content_hash));
+    }
+
+    // ── legacy_quarantine_object_key ───────────────────────────────────────
+
+    #[test]
+    fn legacy_quarantine_object_key_produces_two_char_prefix() {
+        let hash = "aabbccdd";
+        let ok = legacy_quarantine_object_key(hash).unwrap();
+        assert!(ok.as_str().starts_with("aa/"), "prefix should be first two chars, got: {}", ok.as_str());
+        assert!(ok.as_str().contains(hash), "hash should be in key");
+    }
+
+    #[test]
+    fn legacy_quarantine_object_key_short_hash_uses_first_two_chars() {
+        let hash = "abcdef1234567890";
+        let ok = legacy_quarantine_object_key(hash).unwrap();
+        assert!(ok.as_str().starts_with("ab/"));
+    }
+
+    // ── file_modified_since_epoch ──────────────────────────────────────────
+
+    #[test]
+    fn file_modified_since_epoch_returns_zero_for_non_existent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("no-such-file");
+        let result = file_modified_since_epoch(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn file_modified_since_epoch_returns_value_for_existing_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("existing.txt");
+        std::fs::write(&path, b"data").unwrap();
+        let result = file_modified_since_epoch(&path).unwrap();
+        assert!(result > 0, "modified timestamp should be positive");
+    }
+
+    // ── normalize_local_root ───────────────────────────────────────────────
+
+    #[test]
+    fn normalize_local_root_removes_gc_suffix() {
+        let storage = shardline_test_support::TempStorage::new();
+        let gc_path = storage.path().join("gc");
+        std::fs::create_dir_all(&gc_path).unwrap();
+        let normalized = normalize_local_root(gc_path);
+        assert_eq!(normalized, storage.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn normalize_local_root_keeps_non_gc_path() {
+        let storage = shardline_test_support::TempStorage::new();
+        let normalized = normalize_local_root(storage.path().to_path_buf());
+        assert_eq!(normalized, storage.path().canonicalize().unwrap());
+    }
+
+    // ── local_record_locator ───────────────────────────────────────────────
+
+    #[test]
+    fn local_record_locator_latest_has_no_content_hash() {
+        let record = sample_record(None);
+        let locator = local_record_locator(LocalRecordKind::Latest, &record, None);
+        assert_eq!(locator.kind, LocalRecordKind::Latest);
+        assert_eq!(locator.file_id, "test.bin");
+        assert!(locator.content_hash.is_none());
+    }
+
+    #[test]
+    fn local_record_locator_version_has_content_hash() {
+        let record = sample_record(None);
+        let ch = record.content_hash.clone();
+        let locator =
+            local_record_locator(LocalRecordKind::Version, &record, Some(ch.clone()));
+        assert_eq!(locator.kind, LocalRecordKind::Version);
+        assert_eq!(locator.content_hash, Some(ch));
+    }
+
+    // ── from_sql_error ─────────────────────────────────────────────────────
+
+    #[test]
+    fn from_sql_error_wraps_into_sqlite_error() {
+        let io_err = std::io::Error::other("test error");
+        let sql_err = from_sql_error(io_err);
+        assert!(matches!(
+            sql_err,
+            rusqlite::Error::FromSqlConversionFailure(0, _, _)
+        ));
+    }
+
+    // ── initialize_local_metadata_root ─────────────────────────────────────
 
     #[test]
     fn initialize_local_metadata_root_creates_directory() {

@@ -280,4 +280,73 @@ mod tests {
             Err(ProviderServiceError::ConfigLengthMismatch)
         ));
     }
+
+    #[test]
+    fn read_bounded_provider_config_rejects_trailing_data_after_expected_length() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("config.json");
+        // Write content that is longer than the expected length
+        std::fs::write(&file_path, b"hello config with trailing data").expect("write");
+
+        let mut file = std::fs::File::open(&file_path).expect("open");
+        // Claim length 5 but file has more content
+        let result = read_bounded_provider_config(&file_path, &mut file, 5);
+        assert!(matches!(
+            result,
+            Err(ProviderServiceError::ConfigLengthMismatch)
+        ));
+    }
+
+    #[test]
+    fn read_bounded_provider_config_rejects_size_growth_after_metadata() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("config.json");
+
+        // Create a file, note its initial length
+        std::fs::write(&file_path, b"initial").expect("write");
+        let metadata_len = std::fs::metadata(&file_path).expect("metadata").len();
+        assert_eq!(metadata_len, 7);
+
+        // Open the file, claim a smaller length, then append data so the
+        // trailing read sees non-zero data at the exact position
+        let mut file = std::fs::File::open(&file_path).expect("open");
+        // Claim 3 bytes — after reading 3 bytes, the trailing byte read should
+        // see data (since file has 7 bytes)
+        let result = read_bounded_provider_config(&file_path, &mut file, 3);
+        // Should fail with ConfigLengthMismatch because:
+        // 1. bytes.len() == 3 (claimed length)
+        // 2. trailing byte read sees 'i' -> Ok(1) -> ConfigLengthMismatch
+        assert!(matches!(
+            result,
+            Err(ProviderServiceError::ConfigLengthMismatch)
+        ));
+    }
+
+    #[test]
+    fn parse_provider_config_document_rejects_invalid_json() {
+        let mut bytes = b"definitely not valid json".to_vec();
+        let doc = parse_provider_config_document(&mut bytes);
+        assert!(doc.is_err());
+        // Buffer should still be zeroized
+        assert!(bytes.iter().all(|b| *b == 0));
+    }
+
+    // ── set_before_provider_config_read_hook test ─────────────────────────
+
+    #[test]
+    fn set_before_provider_config_read_hook_stores_registration() {
+        use super::super::BEFORE_PROVIDER_CONFIG_READ_HOOK;
+
+        let path = std::path::PathBuf::from("/tmp/test-hook-config");
+        let called = std::sync::atomic::AtomicBool::new(false);
+        set_before_provider_config_read_hook(path.clone(), move || {
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Verify the hook was stored
+        let slot = BEFORE_PROVIDER_CONFIG_READ_HOOK.lock().unwrap();
+        assert!(slot.is_some());
+        let registration = slot.as_ref().unwrap();
+        assert_eq!(registration.path, path);
+    }
 }

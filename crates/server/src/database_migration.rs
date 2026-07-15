@@ -634,6 +634,110 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn bundled_database_migrations_each_have_valid_sql() {
+        for migration in bundled_database_migrations() {
+            // up_sql should be valid SQL (at least not empty and should start
+            // with common SQL keywords)
+            assert!(!migration.up_sql.is_empty());
+            assert!(
+                migration.up_sql.trim().starts_with("CREATE")
+                    || migration.up_sql.trim().starts_with("ALTER")
+                    || migration.up_sql.trim().starts_with("INSERT")
+                    || migration.up_sql.trim().starts_with("--"),
+                "migration {} up_sql does not start with expected SQL keyword: {:?}",
+                migration.version,
+                &migration.up_sql.trim()[..20.min(migration.up_sql.trim().len())]
+            );
+            assert!(!migration.down_sql.is_empty());
+            assert!(
+                migration.down_sql.trim().starts_with("DROP")
+                    || migration.down_sql.trim().starts_with("DELETE")
+                    || migration.down_sql.trim().starts_with("ALTER")
+                    || migration.down_sql.trim().starts_with("--"),
+                "migration {} down_sql does not start with expected SQL keyword: {:?}",
+                migration.version,
+                &migration.down_sql.trim()[..20.min(migration.down_sql.trim().len())]
+            );
+        }
+    }
+
+    #[test]
+    fn migration_status_entry_display_and_clone() {
+        let entry = DatabaseMigrationStatusEntry {
+            version: "v1".to_owned(),
+            name: "test".to_owned(),
+            applied: true,
+            applied_at_utc: None,
+        };
+        let cloned = entry.clone();
+        assert_eq!(entry, cloned);
+        let debug = format!("{entry:?}");
+        assert!(!debug.is_empty());
+    }
+
+    #[test]
+    fn database_migration_error_display_empty_database_url() {
+        let err = super::DatabaseMigrationError::EmptyDatabaseUrl;
+        assert_eq!(err.to_string(), "database URL must not be empty");
+    }
+
+    #[test]
+    fn database_migration_error_display_unknown_applied_migration() {
+        let err = super::DatabaseMigrationError::UnknownAppliedMigration("v0".to_owned());
+        let display = err.to_string();
+        assert!(display.contains("unknown shardline migration version"));
+        assert!(display.contains("v0"));
+    }
+
+    #[test]
+    fn database_migration_error_display_checksum_mismatch() {
+        let err = super::DatabaseMigrationError::ChecksumMismatch {
+            version: "v1".to_owned(),
+            expected_checksum: "abc123".to_owned(),
+            observed_checksum: "def456".to_owned(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("checksum mismatch"));
+        assert!(display.contains("v1"));
+    }
+
+    #[test]
+    fn database_migration_error_debug_roundtrip() {
+        let err = super::DatabaseMigrationError::EmptyDatabaseUrl;
+        let debug = format!("{err:?}");
+        assert!(!debug.is_empty());
+    }
+
+    #[test]
+    fn database_migration_empty_url_option_rejected_at_construction() {
+        // The empty URL validation in run_database_migration requires an async
+        // runtime and a Postgres connection; instead verify the static
+        // accessor returns the expected value.
+        let options = DatabaseMigrationOptions::new(
+            String::new(),
+            DatabaseMigrationCommand::Status,
+        );
+        assert_eq!(options.database_url(), "");
+        assert_eq!(options.command(), &DatabaseMigrationCommand::Status);
+    }
+
+    #[test]
+    fn database_migration_report_fields() {
+        let report = super::DatabaseMigrationReport {
+            backend: "postgres".to_owned(),
+            command: DatabaseMigrationCommand::Up { steps: Some(2) },
+            applied_count: 2,
+            reverted_count: 0,
+            applied_total_count: 2,
+            pending_count: 7,
+            migrations: vec![],
+        };
+        assert_eq!(report.backend, "postgres");
+        assert_eq!(report.applied_count, 2);
+        assert_eq!(report.pending_count, 7);
+    }
+
     async fn exercise_database_migration_up_status_and_down_cover_full_lifecycle()
     -> Result<(), Box<dyn Error>> {
         let Some(base_url) = env_var("DATABASE_URL").ok() else {

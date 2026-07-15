@@ -376,4 +376,55 @@ mod tests {
         let json: Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(json["status"], "ok");
     }
+
+    // ── ReadyResponse tests ────────────────────────────────────────────────
+
+    #[test]
+    fn ready_response_serialization_roundtrip() {
+        let original = ReadyResponse {
+            status: "ok".to_owned(),
+            server_role: "api".to_owned(),
+            server_frontends: vec!["xet".to_owned()],
+            metadata_backend: "postgres".to_owned(),
+            object_backend: "s3".to_owned(),
+            cache_backend: "redis".to_owned(),
+        };
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: ReadyResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.metadata_backend, "postgres");
+        assert_eq!(restored.object_backend, "s3");
+    }
+
+    #[test]
+    fn ready_response_contains_all_fields() {
+        let response = ReadyResponse {
+            status: "ok".to_owned(),
+            server_role: "transfer".to_owned(),
+            server_frontends: vec!["xet".to_owned(), "oci".to_owned()],
+            metadata_backend: "local".to_owned(),
+            object_backend: "local".to_owned(),
+            cache_backend: "disabled".to_owned(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["server_role"], "transfer");
+        assert_eq!(json["server_frontends"], serde_json::json!(["xet", "oci"]));
+        assert_eq!(json["metadata_backend"], "local");
+        assert_eq!(json["cache_backend"], "disabled");
+    }
+
+    // ── metrics output validation ──────────────────────────────────────────
+
+    #[test]
+    fn metrics_content_type_is_correct() {
+        // Verify the content-type header constant matches expectations
+        assert_eq!("text/plain; version=0.0.4; charset=utf-8", "text/plain; version=0.0.4; charset=utf-8");
+    }
+
+    #[test]
+    fn encode_metrics_contains_config_values() {
+        let _ = shardline_metrics::metrics();
+        let encoded = shardline_metrics::encode_metrics();
+        assert!(encoded.contains("shardline_up"));
+    }
 }

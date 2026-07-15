@@ -457,10 +457,13 @@ impl AsyncIndexStore for LocalIndexStore {
 
 #[cfg(test)]
 mod tests {
-    use shardline_protocol::ChunkRange;
+    use shardline_protocol::{ChunkRange, RepositoryProvider};
 
     use super::*;
-    use crate::{AsyncIndexStore, ReconstructionTerm};
+    use crate::{
+        AsyncIndexStore, ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm,
+        RetentionHold, WebhookDelivery,
+    };
 
     fn make_store() -> super::super::LocalIndexStore {
         let storage = shardline_test_support::TempStorage::new();
@@ -629,5 +632,240 @@ mod tests {
             .expect("list should succeed");
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], file_id);
+    }
+
+    // ── Async LifecycleStore operations ───────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_quarantine_candidate_upsert_and_read() {
+        let store = make_store();
+        let key = shardline_storage::ObjectKey::parse("chunks/aa/async-cand").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 500, 5000, 6000).unwrap();
+
+        AsyncIndexStore::upsert_quarantine_candidate(&store, &candidate)
+            .await
+            .expect("upsert should succeed");
+        let loaded = AsyncIndexStore::quarantine_candidate(&store, &key)
+            .await
+            .expect("lookup should succeed");
+        assert_eq!(loaded, Some(candidate));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_quarantine_candidate_delete() {
+        let store = make_store();
+        let key = shardline_storage::ObjectKey::parse("chunks/bb/async-del").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 600, 6000, 7000).unwrap();
+
+        AsyncIndexStore::upsert_quarantine_candidate(&store, &candidate)
+            .await
+            .unwrap();
+        assert!(
+            AsyncIndexStore::delete_quarantine_candidate(&store, &key)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !AsyncIndexStore::delete_quarantine_candidate(&store, &key)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_retention_hold_upsert_and_read() {
+        let store = make_store();
+        let key = shardline_storage::ObjectKey::parse("chunks/cc/async-hold").unwrap();
+        let hold = RetentionHold::new(key.clone(), "async reason".into(), 700, None).unwrap();
+
+        AsyncIndexStore::upsert_retention_hold(&store, &hold)
+            .await
+            .expect("upsert should succeed");
+        let loaded = AsyncIndexStore::retention_hold(&store, &key)
+            .await
+            .expect("lookup should succeed");
+        assert_eq!(loaded, Some(hold));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_retention_hold_delete() {
+        let store = make_store();
+        let key = shardline_storage::ObjectKey::parse("chunks/dd/async-del-hold").unwrap();
+        let hold = RetentionHold::new(key.clone(), "del".into(), 800, None).unwrap();
+
+        AsyncIndexStore::upsert_retention_hold(&store, &hold)
+            .await
+            .unwrap();
+        assert!(
+            AsyncIndexStore::delete_retention_hold(&store, &key)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !AsyncIndexStore::delete_retention_hold(&store, &key)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_webhook_delivery_record_and_list() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "async-delivery".into(),
+            9000,
+        )
+        .unwrap();
+
+        assert!(
+            AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+                .await
+                .expect("record should succeed")
+        );
+        let deliveries = AsyncIndexStore::list_webhook_deliveries(&store)
+            .await
+            .expect("list should succeed");
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].delivery_id(), "async-delivery");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_webhook_delivery_delete() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "async-del-delivery".into(),
+            10000,
+        )
+        .unwrap();
+
+        AsyncIndexStore::record_webhook_delivery(&store, &delivery)
+            .await
+            .unwrap();
+        assert!(
+            AsyncIndexStore::delete_webhook_delivery(&store, &delivery)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !AsyncIndexStore::delete_webhook_delivery(&store, &delivery)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_provider_repository_state_upsert_and_read() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "async-team".into(),
+            "async-repo".into(),
+            Some(1000),
+            Some(2000),
+            Some("refs/heads/main".into()),
+        );
+
+        AsyncIndexStore::upsert_provider_repository_state(&store, &state)
+            .await
+            .expect("upsert should succeed");
+        let loaded = AsyncIndexStore::provider_repository_state(
+            &store,
+            RepositoryProvider::GitHub,
+            "async-team",
+            "async-repo",
+        )
+        .await
+        .expect("lookup should succeed");
+        assert_eq!(loaded, Some(state));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_provider_repository_state_delete() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "del-team".into(),
+            "del-repo".into(),
+            None,
+            None,
+            None,
+        );
+
+        AsyncIndexStore::upsert_provider_repository_state(&store, &state)
+            .await
+            .unwrap();
+        assert!(
+            AsyncIndexStore::delete_provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "del-team",
+                "del-repo",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !AsyncIndexStore::delete_provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "del-team",
+                "del-repo",
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_insert_xorb_then_contains_xorb() {
+        let store = make_store();
+        let hash = ShardlineHash::from_bytes([20; 32]);
+        let xorb_id = crate::XorbId::new(hash);
+
+        AsyncIndexStore::insert_xorb(&store, &xorb_id)
+            .await
+            .expect("insert_xorb should succeed");
+        assert!(
+            AsyncIndexStore::contains_xorb(&store, &xorb_id)
+                .await
+                .expect("contains_xorb should succeed")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_reconstruction_returns_none_for_missing() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([99; 32]));
+        let loaded = AsyncIndexStore::reconstruction(&store, &file_id)
+            .await
+            .expect("lookup should succeed");
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_contains_object_returns_false_for_missing() {
+        let store = make_store();
+        let object_id = StoredObjectId::new(ShardlineHash::from_bytes([98; 32]));
+        assert!(
+            !AsyncIndexStore::contains_object(&store, &object_id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_dedupe_shard_mapping_returns_none_for_missing() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([97; 32]);
+        let loaded = AsyncIndexStore::dedupe_shard_mapping(&store, &chunk_hash)
+            .await
+            .expect("lookup should succeed");
+        assert!(loaded.is_none());
     }
 }

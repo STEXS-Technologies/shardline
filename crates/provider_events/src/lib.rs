@@ -137,6 +137,89 @@ pub enum ProviderEventsError {
 }
 
 #[cfg(test)]
+mod lib_tests {
+    use shardline_vcs::{
+        ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind,
+        RevisionRef, WebhookDeliveryId,
+    };
+
+    use super::ProviderWebhookOutcomeKind;
+
+    #[test]
+    fn duplicate_webhook_outcome_for_deleted() {
+        let event = RepositoryWebhookEvent::new(
+            RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+            WebhookDeliveryId::new("delivery-dup").unwrap(),
+            RepositoryWebhookEventKind::RepositoryDeleted,
+        );
+        let outcome = super::duplicate_webhook_outcome(&event);
+        assert_eq!(outcome.provider, ProviderKind::GitHub);
+        assert_eq!(outcome.owner, "org");
+        assert_eq!(outcome.repo, "repo");
+        assert_eq!(
+            outcome.event_kind,
+            ProviderWebhookOutcomeKind::RepositoryDeleted
+        );
+        assert_eq!(outcome.affected_file_versions, 0);
+        assert_eq!(outcome.affected_chunks, 0);
+        assert_eq!(outcome.applied_holds, 0);
+        assert_eq!(outcome.retention_seconds, None);
+    }
+
+    #[test]
+    fn duplicate_webhook_outcome_for_renamed() {
+        let new_repo = RepositoryRef::new(ProviderKind::GitHub, "new-org", "new-repo").unwrap();
+        let event = RepositoryWebhookEvent::new(
+            RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+            WebhookDeliveryId::new("delivery-dup-rename").unwrap(),
+            RepositoryWebhookEventKind::RepositoryRenamed {
+                new_repository: new_repo,
+            },
+        );
+        let outcome = super::duplicate_webhook_outcome(&event);
+        assert_eq!(
+            outcome.event_kind,
+            ProviderWebhookOutcomeKind::RepositoryRenamed {
+                new_owner: "new-org".to_owned(),
+                new_repo: "new-repo".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_webhook_outcome_for_revision_pushed() {
+        let event = RepositoryWebhookEvent::new(
+            RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+            WebhookDeliveryId::new("delivery-dup-rev").unwrap(),
+            RepositoryWebhookEventKind::RevisionPushed {
+                revision: RevisionRef::new("refs/heads/main").unwrap(),
+            },
+        );
+        let outcome = super::duplicate_webhook_outcome(&event);
+        assert_eq!(
+            outcome.event_kind,
+            ProviderWebhookOutcomeKind::RevisionPushed {
+                revision: "refs/heads/main".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_webhook_outcome_for_access_changed() {
+        let event = RepositoryWebhookEvent::new(
+            RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+            WebhookDeliveryId::new("delivery-dup-access").unwrap(),
+            RepositoryWebhookEventKind::AccessChanged,
+        );
+        let outcome = super::duplicate_webhook_outcome(&event);
+        assert_eq!(
+            outcome.event_kind,
+            ProviderWebhookOutcomeKind::AccessChanged
+        );
+    }
+}
+
+#[cfg(test)]
 mod error_display_tests {
     use super::ProviderEventsError;
     use shardline_index::RetentionHoldError;

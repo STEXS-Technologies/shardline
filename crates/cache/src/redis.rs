@@ -497,4 +497,89 @@ mod tests {
         let ttl = NonZeroU64::new(60).unwrap();
         assert!(RedisReconstructionCache::new("redis+unix:///run/redis.sock", ttl).is_ok());
     }
+
+    // ── More redis_key format edge cases ──────────────────────────────────
+
+    #[test]
+    fn redis_key_format_special_chars_in_names() {
+        let scope = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "org.name",
+            "repo-name",
+            Some("rev_sion"),
+        );
+        assert!(scope.is_ok());
+        if let Ok(scope) = scope {
+            let key = ReconstructionCacheKey::latest("file.bin", Some(&scope));
+            let redis_key = RedisReconstructionCache::redis_key(&key);
+            assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+            assert!(redis_key.contains(hex::encode("org.name").as_str()));
+            assert!(redis_key.contains(hex::encode("repo-name").as_str()));
+            assert!(redis_key.contains(hex::encode("rev_sion").as_str()));
+        }
+    }
+
+    #[test]
+    fn redis_key_format_long_file_id() {
+        let long_id = "a".repeat(1000);
+        let key = ReconstructionCacheKey::latest(&long_id, None);
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:global:latest:"));
+        assert!(redis_key.ends_with(&hex::encode(&long_id)));
+        assert_eq!(redis_key.len(), "shardline:reconstruction:v1:global:latest:".len() + hex::encode(&long_id).len());
+    }
+
+    #[test]
+    fn redis_key_format_long_content_hash() {
+        let long_hash = "b".repeat(200);
+        let key = ReconstructionCacheKey::version("f", &long_hash, None);
+        let redis_key = RedisReconstructionCache::redis_key(&key);
+        assert!(redis_key.starts_with("shardline:reconstruction:v1:global:"));
+        assert!(redis_key.contains(&hex::encode(&long_hash)));
+    }
+
+    #[test]
+    fn redis_key_format_with_all_providers_and_revision() {
+        let providers = [
+            (RepositoryProvider::GitHub, "github"),
+            (RepositoryProvider::GitLab, "gitlab"),
+            (RepositoryProvider::Gitea, "gitea"),
+            (RepositoryProvider::Codeberg, "codeberg"),
+            (RepositoryProvider::Generic, "generic"),
+        ];
+        for (provider, expected) in &providers {
+            let scope = RepositoryScope::new(*provider, "owner", "repo", Some("main"));
+            assert!(scope.is_ok());
+            if let Ok(scope) = scope {
+                let key = ReconstructionCacheKey::latest("f.bin", Some(&scope));
+                let redis_key = RedisReconstructionCache::redis_key(&key);
+                assert!(
+                    redis_key.contains(expected),
+                    "expected provider token {expected} in {redis_key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn redis_key_format_version_no_scope_all_providers() {
+        let providers = [
+            RepositoryProvider::GitHub,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Gitea,
+            RepositoryProvider::Codeberg,
+            RepositoryProvider::Generic,
+        ];
+        for provider in &providers {
+            let scope = RepositoryScope::new(*provider, "ns", "proj", None);
+            assert!(scope.is_ok());
+            if let Ok(scope) = scope {
+                let key = ReconstructionCacheKey::version("file.bin", "hash1", Some(&scope));
+                let redis_key = RedisReconstructionCache::redis_key(&key);
+                assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
+                // Without revision, "head" is used
+                assert!(redis_key.contains(":head:"), "expected :head: in key for {provider:?}");
+            }
+        }
+    }
 }

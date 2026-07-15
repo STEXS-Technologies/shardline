@@ -2780,6 +2780,76 @@ mod config_types_tests {
         );
         assert!(config.upload_max_in_flight_chunks().get() > 0);
     }
+
+    #[test]
+    fn server_config_with_token_signing_key_rejects_too_large() {
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        // MAX_TOKEN_SIGNING_KEY_BYTES is 1_048_576; exceed it
+        let result = config.with_token_signing_key(vec![0u8; 2_000_000]);
+        assert!(matches!(
+            result,
+            Err(ServerConfigError::TokenSigningKeyTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn server_config_with_provider_runtime_rejects_api_key_too_large() {
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
+        // MAX_PROVIDER_API_KEY_BYTES is 4096; exceed it
+        let result = config.with_provider_runtime(
+            PathBuf::from("/tmp/provider.yaml"),
+            vec![0u8; 5000],
+            "issuer".to_owned(),
+            NonZeroU64::new(3600).unwrap(),
+        );
+        assert!(matches!(
+            result,
+            Err(ServerConfigError::ProviderApiKeyTooLarge { .. })
+        ));
+    }
+
+    // ── Secret file read hook tests ─────────────────────────────────────────
+
+    #[test]
+    fn take_secret_file_read_hook_returns_hook_for_matching_path() {
+        let mut slot = Vec::new();
+        let path = PathBuf::from("/tmp/test-hook");
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = called.clone();
+        slot.push(super::SecretFileReadHookRegistration {
+            path: path.clone(),
+            hook: Box::new(move || { called_clone.store(true, std::sync::atomic::Ordering::SeqCst); }),
+        });
+        let hook = take_secret_file_read_hook_for_path(&mut slot, &path);
+        assert!(hook.is_some());
+        hook.unwrap()();
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(slot.is_empty());
+    }
+
+    #[test]
+    fn take_secret_file_read_hook_returns_none_for_non_matching_path() {
+        let mut slot = Vec::new();
+        slot.push(super::SecretFileReadHookRegistration {
+            path: PathBuf::from("/tmp/other"),
+            hook: Box::new(|| {}),
+        });
+        let result = take_secret_file_read_hook_for_path(&mut slot, Path::new("/tmp/nonexistent"));
+        assert!(result.is_none());
+        assert_eq!(slot.len(), 1);
+    }
 }
 
 #[cfg(not(test))]

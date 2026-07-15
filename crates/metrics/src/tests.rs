@@ -288,6 +288,31 @@ fn global_metrics_and_registry_are_accessible() {
     let _r = registry();
 }
 
+// ── Helper constructors ─────────────────────────────────────────────────────
+
+#[test]
+fn must_counter_creates_valid_counter() {
+    let counter = crate::must_counter("shardline_test_must_counter", "test counter");
+    counter.inc();
+    assert_eq!(counter.get(), 1);
+}
+
+#[test]
+fn must_gauge_creates_valid_gauge() {
+    let gauge = crate::must_gauge("shardline_test_must_gauge", "test gauge");
+    gauge.set(42);
+    assert_eq!(gauge.get(), 42);
+}
+
+#[test]
+fn must_histogram_creates_valid_histogram() {
+    let histogram = crate::must_histogram(
+        prometheus::HistogramOpts::new("shardline_test_must_histogram", "test histogram"),
+    );
+    histogram.observe(0.5);
+    assert_eq!(histogram.get_sample_count(), 1);
+}
+
 // ── Backend metrics ────────────────────────────────────────────────────────
 
 #[test]

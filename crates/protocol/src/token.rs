@@ -870,4 +870,195 @@ mod tests {
         assert!(!msg.is_empty());
         assert!(msg.contains("provider"));
     }
+
+    // ── TokenClaims field accessors ──────────────────────────────────────
+
+    #[test]
+    fn token_claims_field_accessors() {
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
+        let claims = TokenClaims::new("issuer", "subject", TokenScope::Write, repository, 100)
+            .unwrap();
+        assert_eq!(claims.issuer(), "issuer");
+        assert_eq!(claims.subject(), "subject");
+        assert_eq!(claims.scope(), TokenScope::Write);
+        assert_eq!(claims.expires_at_unix_seconds(), 100);
+        assert_eq!(claims.repository().owner(), "team");
+    }
+
+    // ── TokenScope exhaustive ────────────────────────────────────────────
+
+    #[test]
+    fn token_scope_read_allows_read_not_write() {
+        assert!(TokenScope::Read.allows_read());
+        assert!(!TokenScope::Read.allows_write());
+    }
+
+    #[test]
+    fn token_scope_write_allows_both() {
+        assert!(TokenScope::Write.allows_read());
+        assert!(TokenScope::Write.allows_write());
+    }
+
+    // ── TokenClaims::new validation ──────────────────────────────────────
+
+    #[test]
+    fn token_claims_rejects_control_characters_in_issuer() {
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
+        let claims = TokenClaims::new("issuer\x00", "subject", TokenScope::Read, repository, 100);
+        assert_eq!(claims, Err(TokenClaimsError::ControlCharacter));
+    }
+
+    #[test]
+    fn token_claims_rejects_control_characters_in_subject() {
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
+        let claims = TokenClaims::new("issuer", "sub\nject", TokenScope::Read, repository, 100);
+        assert_eq!(claims, Err(TokenClaimsError::ControlCharacter));
+    }
+
+    #[test]
+    fn token_claims_rejects_oversized_issuer() {
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
+        let oversized = "i".repeat(MAX_TOKEN_COMPONENT_BYTES + 1);
+        let claims = TokenClaims::new(&oversized, "subject", TokenScope::Read, repository, 100);
+        assert_eq!(claims, Err(TokenClaimsError::TooLong));
+    }
+
+    // ── TokenSigner verification edge cases ──────────────────────────────
+
+    #[test]
+    fn token_signer_verify_rejects_empty_token() {
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let result = signer.verify_at("", 100);
+        assert!(matches!(result, Err(TokenCodecError::InvalidFormat)));
+    }
+
+    #[test]
+    fn token_signer_verify_rejects_token_without_dot() {
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let result = signer.verify_at("justhexwithoutdot", 100);
+        assert!(matches!(result, Err(TokenCodecError::InvalidFormat)));
+    }
+
+    #[test]
+    fn token_signer_verify_rejects_too_long_token() {
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let long_token = format!(
+            "{}.{}",
+            "a".repeat(MAX_TOKEN_PAYLOAD_HEX_BYTES),
+            "b".repeat(TOKEN_SIGNATURE_HEX_BYTES + 1)
+        );
+        let result = signer.verify_at(&long_token, 100);
+        assert!(matches!(result, Err(TokenCodecError::InvalidFormat)));
+    }
+
+    #[test]
+    fn token_signer_verify_rejects_invalid_hex_payload() {
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let result = signer.verify_at("zzzz.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 100);
+        assert!(matches!(result, Err(TokenCodecError::InvalidHex(_))));
+    }
+
+    #[test]
+    fn token_signer_sign_and_verify_now() {
+        // verify_now uses the current wall clock — sign with a future expiry
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
+        let far_future = 2_000_000_000; // well past 2025
+        let claims =
+            TokenClaims::new("issuer", "subject", TokenScope::Read, repository, far_future)
+                .unwrap();
+        // verify_now should succeed since expiration is far in the future
+        // (the current unix timestamp is around 1.7-1.8 billion as of 2025)
+        let token = signer.sign(&claims).unwrap();
+        let verified = signer.verify_now(&token);
+        assert!(verified.is_ok(), "verify_now failed: {:?}", verified.err());
+    }
+
+    // ── RepositoryProvider as_str exhaustive ─────────────────────────────
+
+    #[test]
+    fn repository_provider_as_str_all_variants() {
+        assert_eq!(RepositoryProvider::GitHub.as_str(), "github");
+        assert_eq!(RepositoryProvider::Gitea.as_str(), "gitea");
+        assert_eq!(RepositoryProvider::GitLab.as_str(), "gitlab");
+        assert_eq!(RepositoryProvider::Codeberg.as_str(), "codeberg");
+        assert_eq!(RepositoryProvider::Generic.as_str(), "generic");
+    }
+
+    // ── RepositoryScope accessors ────────────────────────────────────────
+
+    #[test]
+    fn repository_scope_accessors() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", Some("dev"))
+                .unwrap();
+        assert_eq!(scope.provider(), RepositoryProvider::GitLab);
+        assert_eq!(scope.owner(), "group");
+        assert_eq!(scope.name(), "project");
+        assert_eq!(scope.revision(), Some("dev"));
+    }
+
+    #[test]
+    fn repository_scope_allows_missing_revision() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::Gitea, "owner", "repo", None).unwrap();
+        assert_eq!(scope.revision(), None);
+    }
+
+    // ── RepositoryProvider parse error ───────────────────────────────────
+
+    #[test]
+    fn repository_provider_parse_error_debug_non_empty() {
+        let debug = format!("{:?}", RepositoryProviderParseError);
+        assert!(!debug.is_empty());
+    }
+
+    // ── TokenCodecError derivation ───────────────────────────────────────
+
+    #[test]
+    fn token_codec_error_from_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = TokenCodecError::Json(json_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn token_codec_error_from_hex_error() {
+        let hex_err = hex::FromHexError::InvalidStringLength;
+        let err = TokenCodecError::InvalidHex(hex_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn token_codec_error_empty_signing_key_display() {
+        let msg = TokenCodecError::EmptySigningKey.to_string();
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn token_codec_error_signing_key_too_short_display() {
+        let msg = TokenCodecError::SigningKeyTooShort { actual_bytes: 4 }.to_string();
+        assert!(msg.contains("4"));
+        assert!(msg.contains("32"));
+    }
+
+    #[test]
+    fn token_codec_error_claims_display() {
+        let claims_err = TokenClaimsError::ControlCharacter;
+        let err = TokenCodecError::Claims(claims_err);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid"), "expected 'invalid' in Claims display, got: {msg}");
+    }
 }

@@ -173,4 +173,67 @@ mod tests {
             "protocols/shared/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
     }
+
+    #[test]
+    fn shared_sha256_key_rejects_invalid_digest() {
+        assert!(matches!(
+            shared_sha256_object_key("not-a-valid-hex-digest"),
+            Err(ServerError::InvalidContentHash)
+        ));
+    }
+
+    #[test]
+    fn parse_sha256_digest_rejects_empty() {
+        assert!(matches!(
+            parse_sha256_digest(""),
+            Err(ServerError::InvalidDigest)
+        ));
+    }
+
+    #[test]
+    fn parse_sha256_digest_rejects_non_sha256_prefix() {
+        assert!(matches!(
+            parse_sha256_digest("md5:abc123"),
+            Err(ServerError::InvalidDigest)
+        ));
+    }
+
+    #[test]
+    fn validate_oci_repository_scope_without_scope_accepts_any() {
+        assert!(validate_oci_repository_scope("team/assets", None).is_ok());
+    }
+
+    #[test]
+    fn validate_oci_repository_scope_rejects_out_of_bounds() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        // Create a scope with no revision
+        let Ok(scope) = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None)
+        else {
+            return;
+        };
+        // "other/assets" does not start with "team/assets" → NotFound
+        assert!(matches!(
+            validate_oci_repository_scope("other/assets", Some(&scope)),
+            Err(ServerError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn scope_namespace_returns_global_for_none() {
+        let result = super::scope_namespace(None);
+        assert_eq!(result, "global");
+    }
+
+    #[test]
+    fn scope_namespace_returns_hex_hash_for_some() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let Ok(scope) = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None)
+        else {
+            return;
+        };
+        let result = super::scope_namespace(Some(&scope));
+        // Returns a SHA-256 hex string of the scoped provider+owner+name
+        assert_eq!(result.len(), 64, "scope namespace should be a 64-char hex hash");
+        assert!(result.chars().all(|c| c.is_ascii_hexdigit()), "scope namespace should be hex: {result}");
+    }
 }

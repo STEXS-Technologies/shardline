@@ -215,4 +215,43 @@ mod tests {
         let output = String::from_utf8(buffer).unwrap();
         assert!(output.contains("shardline_active_connections"));
     }
+
+    #[tokio::test]
+    async fn metrics_service_call_with_server_error_still_records() {
+        use std::sync::Arc;
+        use axum::body::Body;
+        use axum::http::Request;
+        use prometheus::{Encoder, Registry, TextEncoder};
+        use tower::Service;
+        use tower::ServiceExt;
+
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+
+        let svc = tower::service_fn(|_req: Request<Body>| {
+            async {
+                Ok::<_, std::convert::Infallible>(
+                    axum::response::Response::builder()
+                        .status(500)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }
+        });
+        let mut wrapped = layer.layer(svc);
+
+        let req = Request::get("/error").body(Body::empty()).unwrap();
+        let response = wrapped.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(response.status(), 500);
+
+        let encoder = TextEncoder::new();
+        let families = registry.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&families, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("shardline_active_connections"));
+        assert!(output.contains("shardline_upload_duration_seconds_count"));
+        assert!(output.contains("shardline_download_duration_seconds_count"));
+    }
 }
