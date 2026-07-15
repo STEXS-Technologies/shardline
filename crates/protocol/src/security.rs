@@ -173,4 +173,72 @@ mod tests {
         let s: &str = secret.as_ref();
         assert_eq!(s, "text");
     }
+
+    #[test]
+    fn secret_bytes_clone_produces_equal_data() {
+        let a = SecretBytes::from_slice(b"secret-data");
+        let b = a.clone();
+        assert_eq!(a.expose_secret(), b.expose_secret());
+    }
+
+    #[test]
+    fn secret_string_clone_produces_equal_data() {
+        let a = SecretString::from_secret("secret-text");
+        let b = a.clone();
+        assert_eq!(a.expose_secret(), b.expose_secret());
+    }
+
+    #[test]
+    fn secret_bytes_partial_eq_compares_content() {
+        let a = SecretBytes::from_slice(b"same");
+        let b = SecretBytes::from_slice(b"same");
+        let c = SecretBytes::from_slice(b"different");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn secret_string_partial_eq_compares_content() {
+        let a = SecretString::from_secret("same");
+        let b = SecretString::from_secret("same");
+        let c = SecretString::from_secret("different");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn secret_bytes_len_various_sizes() {
+        assert_eq!(SecretBytes::new(vec![]).len(), 0);
+        assert_eq!(SecretBytes::from_slice(b"a").len(), 1);
+        assert_eq!(SecretBytes::from_slice(b"hello").len(), 5);
+        assert_eq!(SecretBytes::from_slice(&[0; 100]).len(), 100);
+    }
+
+    #[test]
+    fn secret_string_empty_vs_non_empty() {
+        assert!(SecretString::new(String::new()).is_empty());
+        assert!(!SecretString::from_secret("data").is_empty());
+    }
+
+    #[test]
+    fn secret_bytes_is_empty_various() {
+        assert!(SecretBytes::new(vec![]).is_empty());
+        assert!(!SecretBytes::from_slice(b"x").is_empty());
+    }
+
+    #[test]
+    fn secret_bytes_debug_no_content_leak() {
+        let secret = SecretBytes::from_slice(b"hunter2-password-12345");
+        let debug = format!("{secret:?}");
+        assert_eq!(debug, "***");
+        assert!(!debug.contains("hunter2"));
+    }
+
+    #[test]
+    fn secret_string_debug_no_content_leak() {
+        let secret = SecretString::from_secret("my-secret-api-token");
+        let debug = format!("{secret:?}");
+        assert_eq!(debug, "***");
+        assert!(!debug.contains("api-token"));
+    }
 }

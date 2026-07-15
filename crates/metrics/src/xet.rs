@@ -126,3 +126,111 @@ impl XetMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::XetMetrics;
+
+    fn new_metrics() -> XetMetrics {
+        XetMetrics::new(&Registry::new())
+    }
+
+    #[test]
+    fn record_shard_upload_increments_both_counters() {
+        let m = new_metrics();
+        m.record_shard_upload(42);
+        assert_eq!(m.shard_uploads.get(), 1);
+        assert_eq!(m.shard_upload_bytes.get(), 42);
+    }
+
+    #[test]
+    fn record_shard_upload_zero_bytes() {
+        let m = new_metrics();
+        m.record_shard_upload(0);
+        assert_eq!(m.shard_uploads.get(), 1);
+        assert_eq!(m.shard_upload_bytes.get(), 0);
+    }
+
+    #[test]
+    fn record_xorb_upload_increments_both_counters() {
+        let m = new_metrics();
+        m.record_xorb_upload(100);
+        assert_eq!(m.xorb_uploads.get(), 1);
+        assert_eq!(m.xorb_upload_bytes.get(), 100);
+    }
+
+    #[test]
+    fn record_xorb_upload_zero_bytes() {
+        let m = new_metrics();
+        m.record_xorb_upload(0);
+        assert_eq!(m.xorb_uploads.get(), 1);
+        assert_eq!(m.xorb_upload_bytes.get(), 0);
+    }
+
+    #[test]
+    fn record_xorb_download_increments_bytes() {
+        let m = new_metrics();
+        m.record_xorb_download(256);
+        assert_eq!(m.xorb_downloads.get(), 256);
+    }
+
+    #[test]
+    fn record_xorb_download_zero() {
+        let m = new_metrics();
+        m.record_xorb_download(0);
+        assert_eq!(m.xorb_downloads.get(), 0);
+    }
+
+    #[test]
+    fn record_reconstruction_ok_increments_request_and_observes_histograms() {
+        let m = new_metrics();
+        m.record_reconstruction(true, std::time::Duration::from_millis(50), 5);
+        assert_eq!(m.reconstruction_requests.get(), 1);
+    }
+
+    #[test]
+    fn record_reconstruction_failure_increments_request() {
+        let m = new_metrics();
+        m.record_reconstruction(false, std::time::Duration::from_secs(1), 10);
+        assert_eq!(m.reconstruction_requests.get(), 1);
+    }
+
+    #[test]
+    fn record_reconstruction_multiple_calls_accumulate() {
+        let m = new_metrics();
+        m.record_reconstruction(true, std::time::Duration::from_millis(10), 2);
+        m.record_reconstruction(true, std::time::Duration::from_millis(20), 3);
+        assert_eq!(m.reconstruction_requests.get(), 2);
+    }
+
+    #[test]
+    fn record_dedupe_shard_query_hit_increments_both() {
+        let m = new_metrics();
+        m.record_dedupe_shard_query(true);
+        assert_eq!(m.dedupe_shard_queries.get(), 1);
+        assert_eq!(m.dedupe_shard_hits.get(), 1);
+    }
+
+    #[test]
+    fn record_dedupe_shard_query_miss_only_queries() {
+        let m = new_metrics();
+        m.record_dedupe_shard_query(false);
+        assert_eq!(m.dedupe_shard_queries.get(), 1);
+        assert_eq!(m.dedupe_shard_hits.get(), 0);
+    }
+
+    #[test]
+    fn all_counters_start_at_zero() {
+        let m = new_metrics();
+        assert_eq!(m.shard_uploads.get(), 0);
+        assert_eq!(m.shard_upload_bytes.get(), 0);
+        assert_eq!(m.xorb_uploads.get(), 0);
+        assert_eq!(m.xorb_upload_bytes.get(), 0);
+        assert_eq!(m.xorb_downloads.get(), 0);
+        assert_eq!(m.reconstruction_requests.get(), 0);
+        assert_eq!(m.dedupe_shard_queries.get(), 0);
+        assert_eq!(m.dedupe_shard_hits.get(), 0);
+    }
+}

@@ -1066,4 +1066,74 @@ mod tests {
         let result = open_secret_file(Path::new("/"));
         assert!(result.is_err());
     }
+
+    // ── optional_s3_secret_from_sources — file too large ──────────────────
+
+    #[test]
+    fn optional_s3_secret_from_file_too_large_returns_size_error() {
+        use super::optional_s3_secret_from_sources;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // MAX_S3_CREDENTIAL_BYTES is 4096; write more than that
+        let large_data = vec![b'x'; 5000];
+        std::io::Write::write_all(&mut tmp, &large_data).unwrap();
+        tmp.flush().unwrap();
+
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            None,
+            "TEST_FILE_ENV",
+            Some(tmp.path().display().to_string()),
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
+    }
+
+    // ── load_s3_object_store_config_from_env — key prefix ────────────────
+
+    #[test]
+    #[serial_test::serial]
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    fn load_s3_object_store_config_with_key_prefix() {
+        // SAFETY: serialized env var test
+        unsafe { std::env::set_var("SHARDLINE_S3_BUCKET", "test-bucket"); }
+        unsafe { std::env::set_var("SHARDLINE_S3_KEY_PREFIX", "shardline/"); }
+        unsafe { std::env::set_var("SHARDLINE_S3_REGION", "eu-west-1"); }
+        unsafe { std::env::set_var("SHARDLINE_S3_ENDPOINT", "https://s3.example.com"); }
+        // Remove any credential overrides
+        unsafe { std::env::remove_var("SHARDLINE_S3_ACCESS_KEY_ID"); }
+        unsafe { std::env::remove_var("SHARDLINE_S3_SECRET_ACCESS_KEY"); }
+        let result = super::load_s3_object_store_config_from_env();
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.bucket(), "test-bucket");
+        assert!(config.key_prefix().is_some());
+        // Cleanup
+        unsafe { std::env::remove_var("SHARDLINE_S3_BUCKET"); }
+        unsafe { std::env::remove_var("SHARDLINE_S3_KEY_PREFIX"); }
+        unsafe { std::env::remove_var("SHARDLINE_S3_REGION"); }
+        unsafe { std::env::remove_var("SHARDLINE_S3_ENDPOINT"); }
+    }
+
+    // ── configure_provider_runtime_from_paths — TTL zero ──────────────────
+
+    #[test]
+    fn configure_provider_runtime_ttl_zero_with_both_paths_provided() {
+        use super::configure_provider_runtime_from_paths;
+        let mut config = test_config();
+        config = config
+            .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+            .unwrap();
+        let result = configure_provider_runtime_from_paths(
+            config,
+            Some(std::path::PathBuf::from("/config")),
+            Some(std::path::PathBuf::from("/api_key")),
+            "issuer".to_owned(),
+            Err(super::super::ServerConfigError::ZeroProviderTokenTtl),
+        );
+        assert!(matches!(
+            result,
+            Err(super::super::ServerConfigError::ZeroProviderTokenTtl)
+        ));
+    }
 }

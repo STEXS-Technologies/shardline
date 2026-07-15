@@ -369,4 +369,144 @@ mod tests {
 
         assert!(result.is_ok());
     }
+
+    // ── parse_bearer_token edge cases ──────────────────────────────────────
+
+    #[test]
+    fn parse_bearer_token_rejects_missing_bearer_prefix() {
+        use super::parse_bearer_token;
+        let result = parse_bearer_token("Basic token");
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_empty_token_after_prefix() {
+        use super::parse_bearer_token;
+        let result = parse_bearer_token("Bearer ");
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_whitespace_only_token() {
+        use super::parse_bearer_token;
+        let result = parse_bearer_token("Bearer   ");
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_token_with_whitespace() {
+        use super::parse_bearer_token;
+        let result = parse_bearer_token("Bearer abc def");
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_oversized_token() {
+        use super::{MAX_BEARER_TOKEN_BYTES, parse_bearer_token};
+        let large = "a".repeat(MAX_BEARER_TOKEN_BYTES + 1);
+        let header = format!("Bearer {large}");
+        let result = parse_bearer_token(&header);
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn parse_bearer_token_accepts_valid_token() {
+        use super::parse_bearer_token;
+        let result = parse_bearer_token("Bearer valid-token-here");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "valid-token-here");
+    }
+
+    // ── scope_allows ───────────────────────────────────────────────────────
+
+    #[test]
+    fn scope_allows_read_when_scope_is_read() {
+        assert!(super::scope_allows(TokenScope::Read, TokenScope::Read));
+    }
+
+    #[test]
+    fn scope_allows_write_when_scope_is_write() {
+        assert!(super::scope_allows(TokenScope::Write, TokenScope::Write));
+    }
+
+    #[test]
+    fn scope_allows_read_when_scope_is_write() {
+        // Write scope implicitly allows Read
+        assert!(super::scope_allows(TokenScope::Write, TokenScope::Read));
+    }
+
+    #[test]
+    fn scope_allows_rejects_write_when_scope_is_read() {
+        assert!(!super::scope_allows(TokenScope::Read, TokenScope::Write));
+    }
+
+    // ── AuthError conversion ───────────────────────────────────────────────
+
+    #[test]
+    fn from_auth_error_invalid_token() {
+        use shardline_server_core::AuthError;
+        let err: ServerError = AuthError::InvalidToken.into();
+        assert!(matches!(err, ServerError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn from_auth_error_expired_token() {
+        use shardline_server_core::AuthError;
+        let err: ServerError = AuthError::ExpiredToken.into();
+        assert!(matches!(err, ServerError::InvalidToken(_)));
+    }
+
+    #[test]
+    fn from_auth_error_insufficient_scope() {
+        use shardline_server_core::AuthError;
+        let err: ServerError = AuthError::InsufficientScope.into();
+        assert!(matches!(err, ServerError::InsufficientScope));
+    }
+
+    #[test]
+    fn from_auth_error_provider_error() {
+        use shardline_server_core::AuthError;
+        let err: ServerError = AuthError::ProviderError("msg".to_owned()).into();
+        assert!(matches!(err, ServerError::SigningKeyError(_)));
+    }
+
+    // ── ServerAuth from_provider ───────────────────────────────────────────
+
+    #[test]
+    fn server_auth_from_provider_delegates() {
+        use shardline_server_core::auth::PassthroughProvider;
+        let provider = Box::new(PassthroughProvider);
+        let auth = ServerAuth::from_provider(provider);
+        // Verify it can authorize a request with a Bearer token
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer any-token"),
+        );
+        let result = auth.authorize(&headers, TokenScope::Write);
+        assert!(result.is_ok());
+        let ctx = result.unwrap();
+        // PassthroughProvider uses "anonymous" as the default subject
+        assert!(ctx.claims().subject() == "anonymous" || ctx.claims().subject() == "passthrough");
+    }
+
+    #[test]
+    fn server_auth_debug_redacts_provider() {
+        use shardline_server_core::auth::PassthroughProvider;
+        let provider = Box::new(PassthroughProvider);
+        let auth = ServerAuth::from_provider(provider);
+        let debug = format!("{auth:?}");
+        assert!(!debug.contains("PassthroughProvider"));
+        assert!(debug.contains("<dyn AuthProvider>"));
+    }
+
+    #[test]
+    fn server_auth_provider_arc_returns_cloneable_arc() {
+        use shardline_server_core::auth::PassthroughProvider;
+        let provider = Box::new(PassthroughProvider);
+        let auth = ServerAuth::from_provider(provider);
+        let arc = auth.provider_arc();
+        // Verify the arc points to the same provider
+        assert!(std::sync::Arc::ptr_eq(&auth.provider, &arc));
+    }
 }

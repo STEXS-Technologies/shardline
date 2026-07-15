@@ -421,4 +421,104 @@ mod tests {
             Err(crate::ProviderEventsError::ConflictingRenameTargetRecord)
         ));
     }
+
+    // ── collect_deleted_repository_record_references: provider+all providers ─
+
+    #[test]
+    fn repository_record_scope_all_providers() {
+        for provider in &[
+            RepositoryProvider::GitHub,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Gitea,
+            RepositoryProvider::Codeberg,
+            RepositoryProvider::Generic,
+        ] {
+            let repo = RepositoryRef::new(
+                match provider {
+                    RepositoryProvider::GitHub => ProviderKind::GitHub,
+                    RepositoryProvider::GitLab => ProviderKind::GitLab,
+                    RepositoryProvider::Gitea => ProviderKind::Gitea,
+                    RepositoryProvider::Codeberg => ProviderKind::Codeberg,
+                    RepositoryProvider::Generic => ProviderKind::Generic,
+                },
+                "owner",
+                "repo",
+            )
+            .unwrap();
+            let scope = repository_record_scope(&repo);
+            assert_eq!(scope.provider(), *provider);
+            assert_eq!(scope.owner(), "owner");
+            assert_eq!(scope.name(), "repo");
+        }
+    }
+
+    // ── renamed_file_record preserves revision ────────────────────────────
+
+    #[test]
+    fn renamed_file_record_preserves_revision() {
+        let record = super::FileRecord {
+            repository_scope: Some(
+                RepositoryScope::new(
+                    RepositoryProvider::GitHub,
+                    "old-owner",
+                    "old-repo",
+                    Some("feature-x"),
+                )
+                .unwrap(),
+            ),
+            ..test_record()
+        };
+        let new_repo =
+            RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
+        let renamed = renamed_file_record(&record, &new_repo).unwrap();
+        let scope = renamed.repository_scope.unwrap();
+        assert_eq!(scope.revision(), Some("feature-x"));
+    }
+
+    // ── record_identity_key special characters ────────────────────────────
+
+    #[test]
+    fn record_identity_key_special_characters() {
+        let record = super::FileRecord {
+            file_id: "file with spaces (1).bin".to_owned(),
+            content_hash: "a".repeat(64),
+            ..test_record()
+        };
+        let key = record_identity_key(&record);
+        assert!(key.contains("file with spaces (1).bin"));
+    }
+
+    // ── record_belongs_to_repository all provider variants ───────────────
+
+    #[test]
+    fn record_belongs_to_repository_all_providers_match() {
+        let cases = [
+            (ProviderKind::GitHub, RepositoryProvider::GitHub),
+            (ProviderKind::GitLab, RepositoryProvider::GitLab),
+            (ProviderKind::Gitea, RepositoryProvider::Gitea),
+            (ProviderKind::Codeberg, RepositoryProvider::Codeberg),
+            (ProviderKind::Generic, RepositoryProvider::Generic),
+        ];
+        for (kind, prov) in &cases {
+            let record = super::FileRecord {
+                repository_scope: Some(
+                    RepositoryScope::new(*prov, "owner", "repo", Some("main")).unwrap(),
+                ),
+                ..test_record()
+            };
+            let repository = RepositoryRef::new(*kind, "owner", "repo").unwrap();
+            assert!(
+                record_belongs_to_repository(&record, &repository),
+                "expected match for {kind:?}"
+            );
+        }
+    }
+
+    // ── parse_record_entry with empty bytes ──────────────────────────────
+
+    #[test]
+    fn parse_record_entry_empty_bytes_returns_error() {
+        let result = parse_record_entry(b"");
+        assert!(result.is_err());
+    }
 }

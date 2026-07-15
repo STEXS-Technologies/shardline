@@ -2668,3 +2668,112 @@ async fn create_upload_session_metadata_write_failure_cleans_up() {
         Ok(_) => panic!("expected error"),
     }
 }
+
+// ── Additional edge case tests ─────────────────────────────────────────────
+
+#[test]
+fn oci_blob_key_with_path_traversal_digest_rejected() {
+    // A digest with path traversal characters should be rejected
+    let result = super::oci_blob_key(
+        "repo",
+        "../etc/passwd",
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "path traversal in digest should produce an error"
+    );
+}
+
+#[test]
+fn oci_manifest_media_type_key_empty_repo_errors() {
+    assert!(matches!(
+        super::oci_manifest_media_type_key("", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", None),
+        Err(OciAdapterError::InvalidRepositoryName)
+    ));
+}
+
+#[test]
+fn oci_tag_target_prefix_errors_with_invalid_digest() {
+    assert!(matches!(
+        super::oci_tag_target_prefix("repo", "short", None),
+        Err(OciAdapterError::InvalidDigest)
+    ));
+}
+
+#[test]
+fn parse_reference_rejects_digest_with_garbage_suffix() {
+    // "sha256:" prefix detected but hex is wrong → InvalidDigest
+    assert!(matches!(
+        super::parse_reference("sha256:xyz-not-hex"),
+        Err(OciAdapterError::InvalidDigest)
+    ));
+}
+
+#[test]
+fn parse_reference_with_colon_behaves_as_tag() {
+    // "md5:" is not a "sha256:" prefix, so it's treated as a tag.
+    // Tags cannot contain colons, so it gets InvalidManifestReference.
+    assert!(matches!(
+        super::parse_reference("md5:00112233445566778899aabbccddeeff"),
+        Err(OciAdapterError::InvalidManifestReference)
+    ));
+}
+
+#[test]
+fn upload_session_location_with_session_id() {
+    let loc = super::upload_session_location("repo", "abc123");
+    assert_eq!(loc, "/v2/repo/blobs/uploads/abc123");
+}
+
+#[test]
+fn oci_blob_location_with_complex_repo() {
+    let loc = super::oci_blob_location("org/team/project", "deadbeef");
+    assert_eq!(
+        loc,
+        "/v2/org/team/project/blobs/sha256:deadbeef"
+    );
+}
+
+#[test]
+fn oci_manifest_location_allows_any_reference() {
+    let loc = super::oci_manifest_location("repo", "v1.0.0-rc1");
+    assert_eq!(loc, "/v2/repo/manifests/v1.0.0-rc1");
+}
+
+#[test]
+fn upload_body_path_for_session_contains_bin_extension() {
+    let root = temp_root();
+    let path =
+        super::upload_body_path_for_session(root.path(), "0123456789abcdef").unwrap();
+    let name = path.file_name().unwrap().to_string_lossy();
+    assert_eq!(name, "0123456789abcdef.bin");
+}
+
+#[tokio::test]
+async fn upload_length_with_zero_length_body() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let len = upload_length(root.path(), &session_id).await.unwrap();
+    assert_eq!(len, 0, "fresh session should have zero length");
+}
+
+#[tokio::test]
+async fn touch_upload_session_invalid_session_id_errors() {
+    let root = temp_root();
+    let session = OciUploadSession {
+        repository: "repo".to_owned(),
+        scope_namespace: "global".to_owned(),
+        created_at_unix_seconds: 0,
+        last_touched_unix_seconds: 0,
+        use_s3_multipart: false,
+        s3_multipart: None,
+    };
+    let result = super::touch_upload_session(root.path(), "bad/session/id", session).await;
+    assert!(matches!(
+        result,
+        Err(OciAdapterError::InvalidUploadSession)
+    ));
+}
+
+

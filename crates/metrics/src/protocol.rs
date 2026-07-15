@@ -142,3 +142,105 @@ impl ProtocolMetrics {
         self.oci_registry_token_active.dec();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::ProtocolMetrics;
+
+    fn new_metrics() -> ProtocolMetrics {
+        ProtocolMetrics::new(&Registry::new())
+    }
+
+    #[test]
+    fn record_lfs_upload_increments_counter() {
+        let m = new_metrics();
+        m.record_lfs_upload();
+        assert_eq!(m.lfs_uploads.get(), 1);
+    }
+
+    #[test]
+    fn record_lfs_download_increments_counter() {
+        let m = new_metrics();
+        m.record_lfs_download();
+        assert_eq!(m.lfs_downloads.get(), 1);
+    }
+
+    #[test]
+    fn record_oci_upload_increments_counter() {
+        let m = new_metrics();
+        m.record_oci_upload();
+        assert_eq!(m.oci_uploads.get(), 1);
+    }
+
+    #[test]
+    fn record_oci_download_increments_counter() {
+        let m = new_metrics();
+        m.record_oci_download();
+        assert_eq!(m.oci_downloads.get(), 1);
+    }
+
+    #[test]
+    fn record_hub_api_request_increments_counter() {
+        let m = new_metrics();
+        m.record_hub_api_request("/test", "GET", 200);
+        assert_eq!(m.hub_api_requests.get(), 1);
+    }
+
+    #[test]
+    fn record_hub_api_commit_increments_counter() {
+        let m = new_metrics();
+        m.record_hub_api_commit("create");
+        assert_eq!(m.hub_api_commits.get(), 1);
+    }
+
+    #[test]
+    fn record_hub_api_file_upload_increments_counter() {
+        let m = new_metrics();
+        m.record_hub_api_file_upload();
+        assert_eq!(m.hub_api_file_uploads.get(), 1);
+    }
+
+    #[test]
+    fn record_hub_api_file_download_increments_counter() {
+        let m = new_metrics();
+        m.record_hub_api_file_download();
+        assert_eq!(m.hub_api_file_downloads.get(), 1);
+    }
+
+    #[test]
+    fn oci_registry_token_begin_end_balance() {
+        let m = new_metrics();
+        m.begin_oci_registry_token_request();
+        m.begin_oci_registry_token_request();
+        m.end_oci_registry_token_request();
+        // Two begins, one end => gauge = 1
+        assert_eq!(m.oci_registry_token_active.get(), 1);
+    }
+
+    #[test]
+    fn oci_registry_token_request_records() {
+        let m = new_metrics();
+        m.record_oci_registry_token_request();
+        m.record_oci_registry_token_rate_limited();
+        assert_eq!(m.oci_registry_token_requests.get(), 1);
+        assert_eq!(m.oci_registry_token_rate_limited.get(), 1);
+    }
+
+    #[test]
+    fn all_counters_start_at_zero() {
+        let m = new_metrics();
+        assert_eq!(m.lfs_uploads.get(), 0);
+        assert_eq!(m.lfs_downloads.get(), 0);
+        assert_eq!(m.oci_uploads.get(), 0);
+        assert_eq!(m.oci_downloads.get(), 0);
+        assert_eq!(m.hub_api_requests.get(), 0);
+        assert_eq!(m.hub_api_commits.get(), 0);
+        assert_eq!(m.hub_api_file_uploads.get(), 0);
+        assert_eq!(m.hub_api_file_downloads.get(), 0);
+        assert_eq!(m.oci_registry_token_requests.get(), 0);
+        assert_eq!(m.oci_registry_token_rate_limited.get(), 0);
+        assert_eq!(m.oci_registry_token_active.get(), 0);
+    }
+}
