@@ -878,4 +878,96 @@ mod tests {
         let service = ReconstructionCacheService::disabled();
         assert_eq!(service.backend_name(), "disabled");
     }
+
+    // ── benchmark_memory_reconstruction_cache_with_loader ───────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn benchmark_memory_reconstruction_cache_with_loader_hits_cache() {
+        let report = super::benchmark_memory_reconstruction_cache_with_loader(
+            "bench-file.bin",
+            "aa".repeat(32).as_str(),
+            None,
+            || async { Ok(sample_response("bench-chunk")) },
+        )
+        .await
+        .expect("benchmark");
+        // Cold load should be > 0 micros.
+        assert!(
+            report.cold_load_micros > 0,
+            "cold_load_micros should be > 0, got {}",
+            report.cold_load_micros
+        );
+        // Hot load should be > 0 on second access (cached).
+        assert!(
+            report.hot_load_micros > 0,
+            "hot_load_micros should be > 0, got {}",
+            report.hot_load_micros
+        );
+        assert!(report.cache_hit, "benchmark should report a cache hit");
+        assert!(
+            report.response_bytes > 0,
+            "response_bytes should be > 0"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn benchmark_memory_reconstruction_cache_with_loader_propagates_error() {
+        let result = super::benchmark_memory_reconstruction_cache_with_loader(
+            "error-file.bin",
+            "bb".repeat(32).as_str(),
+            None,
+            || async { Err(crate::ServerError::NotFound) },
+        )
+        .await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    // ── benchmark_memory_reconstruction_cache (delegation wrapper) ──────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn benchmark_memory_reconstruction_cache_propagates_backend_error() {
+        // Without a valid backend, the delegation should fail.
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = crate::LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
+        )
+        .await
+        .expect("local backend");
+        let result = crate::benchmark_memory_reconstruction_cache(
+            &backend,
+            "missing.bin",
+            "cc".repeat(32).as_str(),
+            None,
+        )
+        .await;
+        // Without a stored record, reconstruction should fail (NotFound or similar).
+        assert!(result.is_err());
+    }
+
+    // ── Redis adapter error path ────────────────────────────────────────
+
+    #[test]
+    fn from_config_redis_without_url_returns_error() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::num::NonZeroUsize;
+        use std::path::PathBuf;
+
+        let mut config = crate::config::ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/tmp/test"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        // Set the adapter to Redis without setting a URL.
+        config.cache.adapter = super::ReconstructionCacheAdapter::Redis;
+        config.cache.redis_url = None;
+
+        let result = ReconstructionCacheService::from_config(&config);
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::MissingReconstructionCacheRedisUrl)
+        ));
+    }
 }

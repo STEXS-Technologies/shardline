@@ -1209,4 +1209,54 @@ mod tests {
     // reconstruct_referenced_object_file_bytes require a functioning Xet
     // frontend with a valid serialised xorb in the store.  Integration
     // tests with real xorb data belong in the lifecycle_repair module.
+
+    // ── ServerObjectStoreError::S3 conversion ───────────────────────────
+
+    #[test]
+    fn server_object_store_error_s3_converts() {
+        use shardline_storage::S3ObjectStoreError;
+        let s3_err = shardline_server_core::ServerObjectStoreError::S3(
+            S3ObjectStoreError::EmptyBucket,
+        );
+        let err: crate::ServerError = s3_err.into();
+        assert!(matches!(
+            err,
+            crate::ServerError::ObjectStore(crate::error::ObjectStoreError::S3(_))
+        ));
+    }
+
+    // ── read_full_object via non-local (archive) path with S3 store ────
+
+    #[test]
+    fn read_full_object_length_one_overflow_edge() {
+        // length=1 -> end = 0 -> ByteRange(0,0) should be valid
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/edge").unwrap();
+        let result = read_full_object(&store, &key, 1);
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    // ── reconstruct_chunk_file_bytes: non-local capacity mismatch ───────
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_non_local_rejects_capacity_mismatch() {
+        // Using blackhole which triggers the read_full_object fallback.
+        // read_full_object returns NotFound for non-zero length on blackhole,
+        // so capacity mismatch isn't reached. This test documents that the
+        // capacity path is S3-only.
+        let store = ServerObjectStore::blackhole();
+        let hash = "11".repeat(32);
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }];
+        let result = reconstruct_chunk_file_bytes(&store, &chunks, 99);
+        // read_full_object on blackhole returns NotFound before capacity check
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
 }

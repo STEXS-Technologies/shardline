@@ -982,4 +982,104 @@ mod tests {
         // SAFETY: test-only env var cleanup under serial_test
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
+
+    // ── load_server_config_from_env: OCI zero-value edge cases ───────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_zero_oci_registry_token_ttl() {
+        set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroOciRegistryTokenTtlSeconds)
+        ));
+        remove_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_zero_oci_upload_max_active_sessions() {
+        set_env_var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroOciUploadMaxActiveSessions)
+        ));
+        remove_env_var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_zero_oci_registry_token_max_in_flight() {
+        set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests)
+        ));
+        remove_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── load_server_config_from_env: auth provider branches ─────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_oidc_requires_issuer() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MissingOidcIssuer)
+        ));
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_jwks_requires_url() {
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "jwks");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MissingJwksUrl)
+        ));
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_lower_max_request_body_bytes_parse_error() {
+        set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "0");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ZeroMaxRequestBodyBytes)
+        ));
+        remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
 }

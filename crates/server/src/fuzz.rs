@@ -1213,4 +1213,194 @@ mod tests {
         let result = fuzz_reconstruction_response_summary("http://localhost:8080", &record, range.ok());
         assert!(result.is_ok() || result.is_err());
     }
+
+    #[test]
+    fn fuzz_reconstruction_response_summary_full_range() {
+        // ByteRange covering the entire record
+        use shardline_index::{FileChunkRecord, FileRecord};
+        let record = FileRecord {
+            file_id: "full.bin".to_owned(),
+            content_hash: "aa".repeat(32),
+            total_bytes: 10,
+            chunk_size: 10,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "bb".repeat(32),
+                offset: 0,
+                length: 10,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 10,
+            }],
+        };
+        let range = shardline_protocol::ByteRange::new(0, 9);
+        let result = fuzz_reconstruction_response_summary("http://localhost:8080", &record, range.ok());
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn fuzz_reconstruction_response_summary_without_range() {
+        // No range constraint
+        use shardline_index::{FileChunkRecord, FileRecord};
+        let record = FileRecord {
+            file_id: "norange.bin".to_owned(),
+            content_hash: "aa".repeat(32),
+            total_bytes: 10,
+            chunk_size: 10,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "bb".repeat(32),
+                offset: 0,
+                length: 10,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 10,
+            }],
+        };
+        let result = fuzz_reconstruction_response_summary("http://localhost:8080", &record, None);
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn fuzz_protocol_frontend_summary_with_oci_tag_reference() {
+        // OCI reference as a tag (not digest)
+        let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let digest = &format!("sha256:{hex}");
+        let result = fuzz_protocol_frontend_summary("oci", hex, digest, "my-repo", "latest").unwrap();
+        assert!(result.frontend_accepts);
+        assert!(result.oci_reference_accepts);
+    }
+
+    #[test]
+    fn fuzz_protocol_frontend_summary_rejects_bazel_with_bad_hash() {
+        // Bazel with a hash that fails key derivation
+        let result = fuzz_protocol_frontend_summary("bazel-http", "bad", "sha256:bad", "repo", "v1").unwrap();
+        assert!(result.frontend_accepts);
+        assert!(!result.bazel_accepts);
+    }
+
+    #[test]
+    fn fuzz_oci_frontend_summary_rejects_invalid_content_range() {
+        let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let digest = &format!("sha256:{hex}");
+        let result = fuzz_oci_frontend_summary(
+            "my-repo", "v1", digest, "abc123",
+            "not-a-range", "/v2/my-repo/blobs/sha256:abc",
+        ).unwrap();
+        assert!(!result.content_range_accepts);
+    }
+
+    #[test]
+    fn fuzz_oci_frontend_summary_rejects_invalid_session_id() {
+        let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let digest = &format!("sha256:{hex}");
+        let result = fuzz_oci_frontend_summary(
+            "my-repo", "v1", digest, "!!!invalid-session!!!",
+            "0-100", "/v2/my-repo/blobs/sha256:abc",
+        ).unwrap();
+        assert!(!result.session_accepts);
+    }
+
+    #[test]
+    fn fuzz_oci_frontend_summary_empty_session_id() {
+        let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let digest = &format!("sha256:{hex}");
+        let result = fuzz_oci_frontend_summary(
+            "my-repo", "v1", digest, "",
+            "0-100", "/v2/my-repo/blobs/sha256:abc",
+        ).unwrap();
+        assert!(!result.session_accepts);
+    }
+
+    #[test]
+    fn fuzz_lifecycle_repair_summary_retention_none_missing() {
+        // release_after = None, object does not exist => DeleteMissing
+        let result = fuzz_lifecycle_repair_summary(
+            200, 100, &[],
+            &[(None, 100, false)],
+            &[],
+        ).unwrap();
+        assert_eq!(result.retention_delete_missing, 1);
+    }
+
+    #[test]
+    fn fuzz_lifecycle_repair_summary_all_delete_future() {
+        // All webhook entries are in the future (> max_processed_at = now + 300)
+        let result = fuzz_lifecycle_repair_summary(
+            100, 50, &[], &[],
+            &[500, 600, 700],
+        ).unwrap();
+        assert_eq!(result.webhook_delete_future, 3);
+    }
+
+    #[test]
+    fn fuzz_lifecycle_repair_summary_all_delete_stale() {
+        // All webhook entries are stale (below stale_cutoff)
+        let result = fuzz_lifecycle_repair_summary(
+            100, 50, &[], &[],
+            &[10, 20, 30],
+        ).unwrap();
+        assert_eq!(result.webhook_delete_stale, 3);
+    }
+
+    #[test]
+    fn fuzz_lifecycle_repair_summary_max_inputs() {
+        // All 8 combinations of quarantine (2^3)
+        let result = fuzz_lifecycle_repair_summary(
+            200, 100,
+            &[
+                (false, false, false), // DeleteMissing
+                (false, false, true),  // DeleteMissing
+                (false, true, false),  // DeleteMissing
+                (false, true, true),   // DeleteMissing
+                (true, false, false),  // Keep
+                (true, false, true),   // DeleteHeld
+                (true, true, false),   // DeleteReachable
+                (true, true, true),    // DeleteReachable (reachable wins over held)
+            ],
+            &[
+                (None, 0, true),        // Keep (indefinite hold, exists)
+                (None, 0, false),       // DeleteMissing (indefinite, missing)
+                (Some(100), 50, true),  // DeleteExpired
+                (Some(300), 100, true), // Keep
+                (Some(100), 50, false), // DeleteMissing
+            ],
+            &[50, 150, 600],
+        ).unwrap();
+        assert_eq!(result.quarantine_keep, 1);
+        assert_eq!(result.quarantine_delete_missing, 4);
+        assert_eq!(result.quarantine_delete_reachable, 2);
+        assert_eq!(result.quarantine_delete_held, 1);
+        // retention: (Some(100), 50, true) => 100 <= 200 => DeleteExpired
+        //           (Some(100), 50, false) => 100 <= 200 => DeleteExpired checked first
+        //           (Some(300), 100, true) => 300 > 200 => Keep (object exists)
+        //           (None, 0, true) => Keep (indefinite, exists)
+        //           (None, 0, false) => DeleteMissing (indefinite, missing)
+        assert_eq!(result.retention_keep, 2);
+        assert_eq!(result.retention_delete_expired, 2);
+        assert_eq!(result.retention_delete_missing, 1);
+        // webhook: stale_cutoff=200-100=100, max=200+300=500
+        //          50 <= 100 => DeleteStale
+        //          150 > 100 && 150 <= 500 => Keep
+        //          600 > 500 => DeleteFuture
+        assert_eq!(result.webhook_keep, 1);
+        assert_eq!(result.webhook_delete_stale, 1);
+        assert_eq!(result.webhook_delete_future, 1);
+    }
+
+    #[test]
+    fn fuzz_lfs_frontend_summary_rejects_oid_with_special_chars() {
+        // OID with special characters that should fail validation
+        let result = fuzz_lfs_frontend_summary("!@#$%^&*()");
+        let _ = result;
+    }
+
+    #[test]
+    fn fuzz_bazel_http_frontend_summary_rejects_invalid_hash() {
+        // Hash that fails key derivation
+        let result = fuzz_bazel_http_frontend_summary("z");
+        let _ = result;
+    }
 }

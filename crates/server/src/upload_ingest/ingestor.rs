@@ -728,6 +728,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_reports_hash_mismatch_when_sha256_disabled() {
+        // finish() with compute_sha256=false and an expected_sha256 should
+        // hit the `sha256.take()` returning None path (line 148).
+        let object_store = ServerObjectStore::blackhole();
+        let chunk_size = NonZeroUsize::new(1024).unwrap();
+        let mut ingestor = FileUploadIngestor::new(chunk_size, false); // sha256 disabled
+        ingestor
+            .ingest_body_chunk(&object_store, &Bytes::from_static(b"some data"))
+            .await
+            .unwrap();
+        let result = ingestor
+            .finish(&object_store, "test.bin", None, Some("any-digest"))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ServerError::ExpectedBodyHashMismatch)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingestor_reports_hash_mismatch_when_expected_digest_differs() {
         let storage = tempfile::tempdir();
         assert!(storage.is_ok());
