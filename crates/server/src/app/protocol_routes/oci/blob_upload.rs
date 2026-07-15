@@ -327,3 +327,198 @@ pub(crate) async fn oci_delete_blob_upload(
         .body(Body::empty())
         .map_err(|_error| ServerError::Overflow)
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Method, StatusCode, header},
+    };
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+
+    use super::super::test_helpers::{build_oci_test_state, oci_test_router};
+
+    const REPO: &str = "team/assets";
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    async fn send(
+        app: &axum::Router,
+        method: Method,
+        uri: &str,
+        body: Body,
+    ) -> axum::http::Response<Body> {
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(body)
+            .unwrap();
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    async fn upload_blob_direct(app: &axum::Router, repository: &str, data: &[u8]) -> (String, axum::http::Response<Body>) {
+        let digest = sha256_hex(data);
+        let uri = format!("/v2/{repository}/blobs/uploads/?digest=sha256:{digest}");
+        let response = send(app, Method::POST, &uri, Body::from(data.to_vec())).await;
+        (digest, response)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_rejects_unsupported_digest_algorithm() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        let data = b"test data";
+        let digest = sha256_hex(data);
+        let uri = format!(
+            "/v2/{REPO}/blobs/uploads/?digest=sha256:{digest}&digest-algorithm=sha1"
+        );
+        let response = send(&app, Method::POST, &uri, Body::from(data.to_vec())).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_direct_empty_body() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        let data = b"";
+        let (_digest, response) = upload_blob_direct(&app, REPO, data).await;
+        assert!(
+            response.status() == StatusCode::CREATED || response.status() == StatusCode::ACCEPTED,
+            "empty body upload should return created or accepted, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_direct_various_sizes() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Small blob (1 byte)
+        let (_, response) = upload_blob_direct(&app, REPO, b"x").await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Medium blob (1 KB)
+        let medium = vec![b'A'; 1024];
+        let (_, response) = upload_blob_direct(&app, REPO, &medium).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_initiate_returns_accepted() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        let uri = format!("/v2/{REPO}/blobs/uploads/");
+        let response = send(&app, Method::POST, &uri, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(response.headers().get(header::LOCATION).is_some());
+        assert!(response.headers().get(header::RANGE).is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_range_header_on_response() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        let uri = format!("/v2/{REPO}/blobs/uploads/");
+        let response = send(&app, Method::POST, &uri, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let range = response
+            .headers()
+            .get(header::RANGE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(range, "0-0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_get_missing_session_returns_not_found() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Use a hex-only session ID that passes upload session validation
+        // but doesn't exist in the store.
+        let uri = format!("/v2/{REPO}/blobs/uploads/0000000000000000");
+        let response = send(&app, Method::GET, &uri, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_put_missing_session_returns_not_found() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        let digest = sha256_hex(b"data");
+        let uri = format!(
+            "/v2/{REPO}/blobs/uploads/0000000000000000?digest=sha256:{digest}"
+        );
+        let response = send(&app, Method::PUT, &uri, Body::from(b"data".to_vec())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_delete_missing_session_returns_not_found() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        let uri = format!("/v2/{REPO}/blobs/uploads/0000000000000000");
+        let response = send(&app, Method::DELETE, &uri, Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_direct_with_large_blob() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // 100 KB blob
+        let data = vec![b'Z'; 102_400];
+        let (_, response) = upload_blob_direct(&app, REPO, &data).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_direct_with_same_blob_twice() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        let data = b"deduplicated content";
+        let (_, response1) = upload_blob_direct(&app, REPO, data).await;
+        assert_eq!(response1.status(), StatusCode::CREATED);
+        // Same blob uploaded again should also succeed (idempotent)
+        let (_, response2) = upload_blob_direct(&app, REPO, data).await;
+        assert_eq!(response2.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_mount_existing_blob() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Upload a blob first
+        let data = b"mountable content";
+        let (digest, _) = upload_blob_direct(&app, REPO, data).await;
+
+        // Now mount it into another repository via POST with ?mount=
+        let other_repo = "team/other-assets";
+        let mount_uri = format!(
+            "/v2/{other_repo}/blobs/uploads/?mount=sha256:{digest}&from={REPO}"
+        );
+        let response = send(&app, Method::POST, &mount_uri, Body::empty()).await;
+        assert!(
+            response.status() == StatusCode::CREATED
+                || response.status() == StatusCode::ACCEPTED,
+            "mount should succeed, got {}",
+            response.status()
+        );
+    }
+}

@@ -174,4 +174,25 @@ mod tests {
         let query: XetTokenQuery = serde_json::from_str(json).unwrap();
         assert!(query.subject.is_none());
     }
+
+    #[test]
+    fn xet_token_query_subject_empty_string() {
+        let json = r#"{"subject": ""}"#;
+        let query: XetTokenQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.subject, Some(String::new()));
+    }
+
+    #[test]
+    fn xet_token_query_extra_fields_ignored() {
+        let json = r#"{"subject": "user", "extra": 42}"#;
+        let query: XetTokenQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.subject, Some("user".to_owned()));
+    }
+
+    #[test]
+    fn xet_token_query_json_value_with_subject() {
+        let json = r#"{"subject": "alice"}"#;
+        let query: XetTokenQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.subject, Some("alice".to_owned()));
+    }
 }

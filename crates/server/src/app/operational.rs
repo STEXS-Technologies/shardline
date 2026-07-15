@@ -270,6 +270,48 @@ pub(super) async fn metrics(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+
+    use crate::model::{HealthResponse, ReadyResponse};
+
+    #[test]
+    fn health_response_json_format() {
+        let response = HealthResponse {
+            status: "ok".to_owned(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[test]
+    fn health_response_serialization_roundtrip() {
+        let original = HealthResponse {
+            status: "ok".to_owned(),
+        };
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: HealthResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn ready_response_json_format() {
+        let response = ReadyResponse {
+            status: "ok".to_owned(),
+            server_role: "all".to_owned(),
+            server_frontends: vec!["xet".to_owned(), "oci".to_owned()],
+            metadata_backend: "local".to_owned(),
+            object_backend: "local".to_owned(),
+            cache_backend: "memory".to_owned(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["server_role"], "all");
+        assert_eq!(json["server_frontends"], serde_json::json!(["xet", "oci"]));
+        assert_eq!(json["metadata_backend"], "local");
+    }
+
     #[test]
     fn metrics_output_is_valid_prometheus_text_format() {
         let body = concat!(
@@ -308,5 +350,30 @@ mod tests {
         let encoded = shardline_metrics::encode_metrics();
         assert!(!encoded.is_empty());
         assert!(encoded.contains("# HELP") || encoded.contains("# TYPE"));
+    }
+
+    #[test]
+    fn encode_metrics_contains_expected_metric_names() {
+        let _ = shardline_metrics::metrics();
+        let encoded = shardline_metrics::encode_metrics();
+        // The metrics output should include at least shardline_up.
+        assert!(encoded.contains("shardline_up"));
+    }
+
+    #[tokio::test]
+    async fn health_into_response_returns_ok_status() {
+        // health() returns Json<HealthResponse> which serializes to {"status":"ok"}
+        let response = super::health().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_body_contains_status_ok() {
+        let response = super::health().await.into_response();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json["status"], "ok");
     }
 }
