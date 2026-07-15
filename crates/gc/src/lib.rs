@@ -1975,4 +1975,187 @@ mod tests {
         assert_eq!(report.deleted_chunks, 0);
         assert_eq!(report.deleted_bytes, 0);
     }
+
+    // ── GC with various retention configurations ───────────────────────────
+
+    #[test]
+    fn gc_very_long_retention_preserves_quarantine() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join(format!("gc-test-long-ret-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("chunks")).unwrap();
+            let object_store = ServerObjectStore::local(&dir).unwrap();
+            let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
+
+            let hash = "1111111111111111111111111111111111111111111111111111111111111111";
+            let prefix = &hash[..2];
+            let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+            put_object(&object_store, &key, b"long retention orphan");
+
+            // Mark with very long retention (approx 3 years) — quarantine entry should be
+            // created and not expired.
+            let result = run_gc_with_stores(
+                &record_store,
+                &index_store,
+                &object_store,
+                &[ServerFrontend::Xet],
+                LocalGcOptions::mark_only(100_000_000),
+            )
+            .await;
+            assert!(result.is_ok());
+            let diag = result.unwrap();
+            assert_eq!(diag.report.new_quarantine_candidates, 1);
+            assert_eq!(diag.report.active_quarantine_candidates, 1);
+
+            // Sweep — entry should NOT be deleted (retention not expired)
+            let sweep_result = run_gc_with_stores(
+                &record_store,
+                &index_store,
+                &object_store,
+                &[ServerFrontend::Xet],
+                LocalGcOptions::sweep_only(),
+            )
+            .await;
+            assert!(sweep_result.is_ok());
+            let sweep_diag = sweep_result.unwrap();
+            assert_eq!(sweep_diag.report.deleted_chunks, 0);
+            assert_eq!(sweep_diag.report.active_quarantine_candidates, 1);
+        });
+    }
+
+    #[test]
+    fn gc_mark_and_sweep_in_one_pass_deletes_orphans() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join(format!("gc-test-ms-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("chunks")).unwrap();
+            let object_store = ServerObjectStore::local(&dir).unwrap();
+            let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
+
+            let hash = "2222222222222222222222222222222222222222222222222222222222222222";
+            let prefix = &hash[..2];
+            let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+            put_object(&object_store, &key, b"one-pass-orphan");
+
+            // mark_and_sweep with 0 retention → mark creates entry, sweep deletes
+            let result = run_gc_with_stores(
+                &record_store,
+                &index_store,
+                &object_store,
+                &[ServerFrontend::Xet],
+                LocalGcOptions::mark_and_sweep(0),
+            )
+            .await;
+            assert!(result.is_ok());
+            let diag = result.unwrap();
+            assert_eq!(diag.report.new_quarantine_candidates, 1);
+            assert_eq!(diag.report.deleted_chunks, 1);
+            assert!(diag.report.deleted_bytes > 0);
+            // After sweep, quarantine should be empty
+            assert_eq!(diag.report.active_quarantine_candidates, 0);
+        });
+    }
+
+    #[test]
+    fn gc_with_retention_hold_and_quarantine_in_mark_sweep() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join(format!("gc-test-hold-q-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("chunks")).unwrap();
+            let object_store = ServerObjectStore::local(&dir).unwrap();
+            let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
+
+            let now = shardline_protocol::unix_now_seconds_lossy();
+
+            // Orphan with an active retention hold — should be skipped by mark
+            let held_hash = "3333333333333333333333333333333333333333333333333333333333333333";
+            let held_prefix = &held_hash[..2];
+            let held_key = ObjectKey::parse(&format!("{held_prefix}/{held_hash}")).unwrap();
+            put_object(&object_store, &held_key, b"held-orphan");
+            let hold = RetentionHold::new(
+                held_key,
+                "operator hold".to_owned(),
+                now - 100,
+                Some(now + 3600),
+            )
+            .unwrap();
+            index_store.upsert_retention_hold(&hold).await.unwrap();
+
+            // Orphan without hold — should be quarantined
+            let orphan_hash = "4444444444444444444444444444444444444444444444444444444444444444";
+            let orphan_prefix = &orphan_hash[..2];
+            let orphan_key = ObjectKey::parse(&format!("{orphan_prefix}/{orphan_hash}")).unwrap();
+            put_object(&object_store, &orphan_key, b"free-orphan");
+
+            // mark_and_sweep with 0 retention
+            let result = run_gc_with_stores(
+                &record_store,
+                &index_store,
+                &object_store,
+                &[ServerFrontend::Xet],
+                LocalGcOptions::mark_and_sweep(0),
+            )
+            .await;
+            assert!(result.is_ok());
+            let diag = result.unwrap();
+            // Held orphan should not appear in orphan count or be quarantined/deleted
+            assert_eq!(
+                diag.report.orphan_chunks, 1,
+                "only the free orphan should be counted"
+            );
+            assert_eq!(diag.report.new_quarantine_candidates, 1);
+            assert_eq!(diag.report.deleted_chunks, 1);
+        });
+    }
+
+    // ── run_gc_with_stores mark + sweep with quarantine candidates already present ─
+
+    #[test]
+    fn gc_with_existing_quarantine_candidates_retains_unexpired() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join(format!("gc-test-ex-q-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("chunks")).unwrap();
+            let object_store = ServerObjectStore::local(&dir).unwrap();
+            let index_store = MemoryIndexStore::new();
+            let record_store = MemoryRecordStore::new();
+
+            let now = shardline_protocol::unix_now_seconds_lossy();
+
+            // Pre-existing quarantine candidate with far-future expiry
+            let hash = "5555555555555555555555555555555555555555555555555555555555555555";
+            let prefix = &hash[..2];
+            let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+            put_object(&object_store, &key, b"pre-existing quarantine");
+            let candidate = QuarantineCandidate::new(
+                key,
+                23,
+                now - 100,
+                now + 86400, // far in the future
+            )
+            .unwrap();
+            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+
+            // Run sweep only — candidate should be retained (not expired)
+            let result = run_gc_with_stores(
+                &record_store,
+                &index_store,
+                &object_store,
+                &[ServerFrontend::Xet],
+                LocalGcOptions::sweep_only(),
+            )
+            .await;
+            assert!(result.is_ok());
+            let diag = result.unwrap();
+            assert_eq!(diag.report.deleted_chunks, 0, "unexpired should not be deleted");
+            assert_eq!(diag.report.active_quarantine_candidates, 1);
+        });
+    }
 }

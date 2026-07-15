@@ -5,7 +5,9 @@
     clippy::panic,
     clippy::clone_on_copy,
     clippy::shadow_unrelated,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::needless_return
 )]
 
 use std::num::NonZeroUsize;
@@ -1608,6 +1610,145 @@ async fn test_s3_list_prefix_after_partial_delete() {
     // List should return 3 remaining
     let objects = store.list_prefix(&prefix).unwrap();
     assert_eq!(objects.len(), 3);
+}
+
+// ===========================================================================
+// Stress/concurrency tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_s3_100_concurrent_puts() {
+    let store = Arc::new(s3_store().await);
+    let mut handles = Vec::new();
+    for i in 0..100 {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            let key = ObjectKey::parse(&format!("concurrent100/key-{i:04}")).unwrap();
+            let data = format!("concurrent-data-{i}");
+            let integrity = ObjectIntegrity::new(
+                shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data.as_bytes()).as_bytes()),
+                data.len() as u64,
+            );
+            s.put_if_absent(&key, ObjectBody::from_vec(data.into_bytes()), &integrity)
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "concurrent put should succeed");
+        assert_eq!(result.unwrap(), PutOutcome::Inserted);
+    }
+
+    // Verify all 100 exist
+    let store = s3_store().await;
+    for i in 0..100 {
+        let key = ObjectKey::parse(&format!("concurrent100/key-{i:04}")).unwrap();
+        assert!(store.contains(&key).unwrap(), "key #{i} should exist");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_s3_10_concurrent_content_addressed() {
+    let store = Arc::new(s3_store().await);
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let s = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            let key = ObjectKey::parse(&format!("ca/concurrent-{i:02}")).unwrap();
+            let data = format!("content-addressed-concurrent-{i}");
+            let result = s.begin_content_addressed_upload(&key).await;
+            match result {
+                Ok(BeginMultipartUploadResult::AlreadyExists) => {
+                    return Ok::<_, shardline_storage::S3ObjectStoreError>(PutOutcome::AlreadyExists);
+                }
+                Ok(BeginMultipartUploadResult::Upload(mut writer, temp_key)) => {
+                    writer.write(data.as_bytes());
+                    writer.wait_for_capacity(4).await?;
+                    let outcome = s.finish_content_addressed_upload(writer, &temp_key, &key).await?;
+                    Ok(outcome)
+                }
+                Err(e) => Err(e),
+            }
+        }));
+    }
+
+    let mut inserted = 0;
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "concurrent content-addressed upload should succeed");
+        if result.unwrap() == PutOutcome::Inserted {
+            inserted += 1;
+        }
+    }
+    assert!(inserted >= 1, "at least one upload should succeed as Inserted");
+
+    // Verify keys exist
+    let store = s3_store().await;
+    for i in 0..10 {
+        let key = ObjectKey::parse(&format!("ca/concurrent-{i:02}")).unwrap();
+        assert!(store.contains(&key).unwrap(), "key ca/concurrent-{i:02} should exist");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_s3_concurrent_put_and_get_same_key() {
+    let store = Arc::new(s3_store().await);
+    let key = ObjectKey::parse("concurrent/put-get-same").unwrap();
+    let data = b"concurrent put-get data";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+
+    // Concurrent put + get of same key
+    let store_put = Arc::clone(&store);
+    let key_put = key.clone();
+    let put_handle = tokio::spawn(async move {
+        store_put.put_if_absent(&key_put, ObjectBody::from_slice(data), &integrity)
+    });
+
+    let store_get = Arc::clone(&store);
+    let key_get = key.clone();
+    let get_handle = tokio::spawn(async move {
+        store_get.contains(&key_get)
+    });
+
+    let (put_result, get_result) = tokio::join!(put_handle, get_handle);
+    // Put may succeed or return AlreadyExists — both valid
+    let put = put_result.unwrap();
+    assert!(put.is_ok(), "put should succeed: {put:?}");
+    // Get may return true or false depending on timing — just verify no crash
+    let _ = get_result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_s3_concurrent_put_and_delete_same_key() {
+    let store = Arc::new(s3_store().await);
+    let key = ObjectKey::parse("concurrent/put-delete-same").unwrap();
+    let data = b"concurrent put-delete data";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+
+    // Concurrent put + delete of same key
+    let store_put = Arc::clone(&store);
+    let key_put = key.clone();
+    let put_handle = tokio::spawn(async move {
+        store_put.put_if_absent(&key_put, ObjectBody::from_slice(data), &integrity)
+    });
+
+    let store_del = Arc::clone(&store);
+    let key_del = key.clone();
+    let del_handle = tokio::spawn(async move {
+        store_del.delete_if_present(&key_del)
+    });
+
+    let (put_result, del_result) = tokio::join!(put_handle, del_handle);
+    let put = put_result.unwrap();
+    assert!(put.is_ok(), "put should succeed: {put:?}");
+    let del = del_result.unwrap();
+    assert!(del.is_ok(), "delete should succeed: {del:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
