@@ -77,6 +77,14 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_index_rebuild_with_valid_config() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = run_index_rebuild(Some(sandbox.path())).await;
+        // On an empty deployment with a valid temp dir, rebuild should complete
+        assert!(result.is_ok(), "run_index_rebuild should succeed on empty deployment: {result:?}");
+    }
+
     #[tokio::test]
     async fn run_index_rebuild_rejects_symlinked_root() {
         let sandbox = tempfile::tempdir().unwrap();

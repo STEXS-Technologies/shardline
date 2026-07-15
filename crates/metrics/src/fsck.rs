@@ -36,3 +36,27 @@ impl FsckMetrics {
         self.errors_found.inc_by(errors);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn fsck_metrics_record_run_increments_counters() {
+        let registry = Registry::new();
+        let metrics = FsckMetrics::new(&registry);
+
+        assert_eq!(metrics.runs.get(), 0);
+        assert_eq!(metrics.errors_found.get(), 0);
+
+        metrics.record_run(std::time::Duration::from_secs(5), 3);
+        assert_eq!(metrics.runs.get(), 1);
+        assert_eq!(metrics.errors_found.get(), 3);
+
+        metrics.record_run(std::time::Duration::from_secs(2), 0);
+        assert_eq!(metrics.runs.get(), 2);
+        assert_eq!(metrics.errors_found.get(), 3);
+    }
+}

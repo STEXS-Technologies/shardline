@@ -46,3 +46,30 @@ impl GcMetrics {
         self.bytes_collected.inc_by(bytes);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn gc_metrics_record_run_increments_counters() {
+        let registry = Registry::new();
+        let metrics = GcMetrics::new(&registry);
+
+        assert_eq!(metrics.runs.get(), 0);
+        assert_eq!(metrics.objects_collected.get(), 0);
+        assert_eq!(metrics.bytes_collected.get(), 0);
+
+        metrics.record_run(std::time::Duration::from_secs(1), 5, 100);
+        assert_eq!(metrics.runs.get(), 1);
+        assert_eq!(metrics.objects_collected.get(), 5);
+        assert_eq!(metrics.bytes_collected.get(), 100);
+
+        metrics.record_run(std::time::Duration::from_secs(2), 3, 50);
+        assert_eq!(metrics.runs.get(), 2);
+        assert_eq!(metrics.objects_collected.get(), 8);
+        assert_eq!(metrics.bytes_collected.get(), 150);
+    }
+}

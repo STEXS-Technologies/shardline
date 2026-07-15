@@ -352,6 +352,17 @@ async fn repo_create(
         RepoType::Dataset => HubRepoType::Dataset,
         RepoType::Space => HubRepoType::Space,
     };
+    // Check for duplicate — return 409 if the repo already exists.
+    if state
+        .store
+        .get_repo(&full_name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .is_some()
+    {
+        return Err(HubApiError::Conflict(format!(
+            "repo {full_name} already exists"
+        )));
+    }
     let repo = state
         .store
         .create_repo(repo_type, &full_name, request.private)
@@ -1619,6 +1630,17 @@ async fn webhook_create(
         .get_repo(&name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RepoNotFound)?;
+    // Check for duplicate webhook URL.
+    let existing = state
+        .store
+        .list_webhooks(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    if existing.iter().any(|wh| wh.url == request.url) {
+        return Err(HubApiError::Conflict(format!(
+            "webhook with URL {} already exists for repo {name}",
+            request.url
+        )));
+    }
     let webhook = state
         .store
         .create_webhook(

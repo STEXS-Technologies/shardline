@@ -156,6 +156,16 @@ mod tests {
         assert!(!msg.is_empty());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_backup_manifest_with_valid_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("manifest.json");
+        let result = run_backup_manifest(Some(sandbox.path()), &output).await;
+        // On an empty deployment with a valid temp dir, backup should complete
+        assert!(result.is_ok(), "run_backup_manifest should succeed on empty deployment: {result:?}");
+        assert!(output.exists(), "manifest output file should be created");
+    }
+
     #[tokio::test]
     async fn run_backup_manifest_rejects_missing_root() {
         let sandbox = tempfile::tempdir().unwrap();

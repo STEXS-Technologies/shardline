@@ -50,3 +50,47 @@ impl ProviderMetrics {
         self.token_exchanges.inc();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn provider_metrics_record_webhook() {
+        let registry = Registry::new();
+        let metrics = ProviderMetrics::new(&registry);
+
+        assert_eq!(metrics.webhook_events.get(), 0);
+
+        metrics.record_webhook("github", "push");
+        assert_eq!(metrics.webhook_events.get(), 1);
+
+        metrics.record_webhook("gitlab", "merge_request");
+        assert_eq!(metrics.webhook_events.get(), 2);
+    }
+
+    #[test]
+    fn provider_metrics_record_webhook_duration() {
+        let registry = Registry::new();
+        let metrics = ProviderMetrics::new(&registry);
+
+        // No getter for histogram, just verify no panic
+        metrics.record_webhook_duration(std::time::Duration::from_millis(150));
+    }
+
+    #[test]
+    fn provider_metrics_record_token_exchange() {
+        let registry = Registry::new();
+        let metrics = ProviderMetrics::new(&registry);
+
+        assert_eq!(metrics.token_exchanges.get(), 0);
+
+        metrics.record_token_exchange();
+        assert_eq!(metrics.token_exchanges.get(), 1);
+
+        metrics.record_token_exchange();
+        assert_eq!(metrics.token_exchanges.get(), 2);
+    }
+}

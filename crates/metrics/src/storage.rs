@@ -81,3 +81,81 @@ impl StorageMetrics {
         self.dedup_saves_bytes_total.inc_by(bytes);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn storage_metrics_record_object_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.objects_total.get(), 0);
+        assert_eq!(metrics.objects_bytes_total.get(), 0);
+
+        metrics.record_object_stored(100);
+        assert_eq!(metrics.objects_total.get(), 1);
+        assert_eq!(metrics.objects_bytes_total.get(), 100);
+
+        metrics.record_object_stored(200);
+        assert_eq!(metrics.objects_total.get(), 2);
+        assert_eq!(metrics.objects_bytes_total.get(), 300);
+    }
+
+    #[test]
+    fn storage_metrics_record_chunk_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.chunks_total.get(), 0);
+        assert_eq!(metrics.chunks_bytes_total.get(), 0);
+
+        metrics.record_chunk_stored(1024);
+        assert_eq!(metrics.chunks_total.get(), 1);
+        assert_eq!(metrics.chunks_bytes_total.get(), 1024);
+    }
+
+    #[test]
+    fn storage_metrics_record_xorb_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.xorbs_total.get(), 0);
+        assert_eq!(metrics.xorbs_bytes_total.get(), 0);
+
+        metrics.record_xorb_stored(4096);
+        assert_eq!(metrics.xorbs_total.get(), 1);
+        assert_eq!(metrics.xorbs_bytes_total.get(), 4096);
+    }
+
+    #[test]
+    fn storage_metrics_record_shard_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.shards_total.get(), 0);
+
+        metrics.record_shard_stored();
+        assert_eq!(metrics.shards_total.get(), 1);
+
+        metrics.record_shard_stored();
+        assert_eq!(metrics.shards_total.get(), 2);
+    }
+
+    #[test]
+    fn storage_metrics_record_dedup_saves() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.dedup_saves_bytes_total.get(), 0);
+
+        metrics.record_dedup_saves(500);
+        assert_eq!(metrics.dedup_saves_bytes_total.get(), 500);
+
+        metrics.record_dedup_saves(300);
+        assert_eq!(metrics.dedup_saves_bytes_total.get(), 800);
+    }
+}
