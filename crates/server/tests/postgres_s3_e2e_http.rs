@@ -5,7 +5,8 @@
     clippy::let_underscore_must_use,
     clippy::shadow_unrelated,
     clippy::expect_used,
-    clippy::panic
+    clippy::panic,
+    clippy::needless_borrows_for_generic_args
 )]
 
 use std::{
@@ -573,4 +574,437 @@ async fn test_all_frontends_health_and_ready() {
     assert_eq!(json["metadata_backend"], "postgres");
     assert_eq!(json["object_backend"], "s3");
     assert!(json["server_frontends"].as_array().unwrap().len() >= 5);
+}
+
+// ===========================================================================
+// 11. OCI Manifest + Tag operations (via oneshot — wildcard route limitation)
+// ===========================================================================
+
+/// Build a temporary OCI app for oneshot tests backed by Postgres + S3.
+async fn oci_oneshot_app() -> (axum::Router, String) {
+    let (pg_url, s3_prefix) = ensure_stack().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Oci]).unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec()).unwrap()
+    .with_index_postgres_url(pg_url.to_owned()).unwrap()
+    .with_reconstruction_cache_disabled()
+    .with_object_storage(ObjectStorageAdapter::S3, Some(s3_config(s3_prefix)));
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let repo_s = RepositoryScope::new(
+        RepositoryProvider::Generic, "test", "test", Some("main"),
+    ).unwrap();
+    let claims = TokenClaims::new(
+        "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+    ).unwrap();
+    let token = provider.mint_token(&claims).unwrap();
+    let _ = Box::new(tmp);
+    (app, token)
+}
+
+fn oci_digest_hex(data: &[u8]) -> String {
+    sha256_hex(data)
+}
+
+async fn oci_upload_blob_oneshot(app: &axum::Router, token: &str, repo: &str, data: &[u8]) -> String {
+    let digest = oci_digest_hex(data);
+    let uri = format!("/v2/{repo}/blobs/uploads/?digest=sha256:{digest}");
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(data.to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 201, "blob upload: status={}", resp.status());
+    digest
+}
+
+fn oci_manifest_json(config_digest: &str, layer_digest: &str) -> String {
+    serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 0,
+            "digest": format!("sha256:{config_digest}")
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "size": 0,
+                "digest": format!("sha256:{layer_digest}")
+            }
+        ]
+    }).to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_manifest_push_and_get_by_tag() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+    let tag = "pg-s3-v0.0.1";
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
+    let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
+    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
+
+    let put_uri = format!("/v2/{repo}/manifests/{tag}");
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&put_uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(axum::body::Body::from(manifest_body))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(put_resp.status(), 201);
+    let dh = put_resp.headers().get("Docker-Content-Digest").and_then(|v| v.to_str().ok());
+    assert!(dh.is_some());
+    assert!(dh.unwrap().contains(&manifest_digest));
+
+    let get_req = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/manifests/{tag}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty()).unwrap();
+    let get_resp = app.clone().oneshot(get_req).await.unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let j: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(get_resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(j["schemaVersion"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_manifest_get_by_digest() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+    let tag = "pg-s3-digest-ref";
+
+    let config_digest = oci_upload_blob_oneshot(&app, &token, repo, b"{}").await;
+    let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, b"pg-s3-dl").await;
+    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+    let manifest_digest = oci_digest_hex(manifest_body.as_bytes());
+
+    app.clone().oneshot(
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri(&format!("/v2/{repo}/manifests/{tag}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(axum::body::Body::from(manifest_body)).unwrap()
+    ).await.unwrap();
+
+    let get_resp = app.clone().oneshot(
+        axum::http::Request::builder()
+            .method("GET")
+            .uri(&format!("/v2/{repo}/manifests/sha256:{manifest_digest}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(get_resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_tags_list() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+    let tag = "pg-s3-tag";
+
+    let cd = oci_upload_blob_oneshot(&app, &token, repo, b"{}").await;
+    let ld = oci_upload_blob_oneshot(&app, &token, repo, b"pg-s3-tl").await;
+    app.clone().oneshot(
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri(&format!("/v2/{repo}/manifests/{tag}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(axum::body::Body::from(oci_manifest_json(&cd, &ld))).unwrap()
+    ).await.unwrap();
+
+    let list_resp = app.clone().oneshot(
+        axum::http::Request::builder()
+            .method("GET")
+            .uri(&format!("/v2/{repo}/tags/list"))
+            .header("Authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(list_resp.status(), 200);
+    let j: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(list_resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(j["name"], repo);
+    assert!(j["tags"].as_array().unwrap().iter().any(|t| t == tag));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_blob_head() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+    let content = b"pg-s3-head-content";
+    let digest = oci_upload_blob_oneshot(&app, &token, repo, content).await;
+
+    let head_resp = app.clone().oneshot(
+        axum::http::Request::builder()
+            .method("HEAD")
+            .uri(&format!("/v2/{repo}/blobs/sha256:{digest}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(head_resp.status(), 200);
+    let cl: u64 = head_resp.headers().get("content-length")
+        .and_then(|v| v.to_str().ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
+    assert_eq!(cl, content.len() as u64);
+    assert!(head_resp.headers().get("Docker-Content-Digest").is_some());
+}
+
+// ===========================================================================
+// 12. LFS edge cases
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_batch_upload_existing() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+    let content = b"pg-s3-batch-test";
+    let oid = sha256_hex(content);
+    client.put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec()).send().await.unwrap();
+    let batch_resp = client.post(server.url("/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation":"upload","objects":[{"oid":oid,"size":content.len() as u64}]}))
+        .send().await.unwrap();
+    assert_eq!(batch_resp.status(), 200);
+    let j: serde_json::Value = batch_resp.json().await.unwrap();
+    assert_eq!(j["objects"][0]["oid"], oid);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_batch_download_missing() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+    let batch_resp = client.post(server.url("/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation":"download","objects":[{"oid":"f".repeat(64),"size":42}]}))
+        .send().await.unwrap();
+    assert_eq!(batch_resp.status(), 200);
+    let j: serde_json::Value = batch_resp.json().await.unwrap();
+    assert!(j["objects"][0].get("error").is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_head_object() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+    let content = b"pg-s3-head-lfs";
+    let oid = sha256_hex(content);
+    client.put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec()).send().await.unwrap();
+    let head = client.head(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    let cl: u64 = head.headers().get("content-length")
+        .and_then(|v| v.to_str().ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
+    assert_eq!(cl, content.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_patch_object() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+    let c1 = b"pg-s3-patch-";
+    let c2 = b"final";
+    let full = [c1.to_vec(), c2.to_vec()].concat();
+    let oid = sha256_hex(&full);
+    let total = full.len() as u64;
+
+    client.patch(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &format!("bytes 0-{}/{}", c1.len() as u64 - 1, total))
+        .body(c1.to_vec()).send().await.unwrap();
+    client.patch(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &format!("bytes {}-{}/{}", c1.len(), total - 1, total))
+        .body(c2.to_vec()).send().await.unwrap();
+    let get = client.get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header())).send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.bytes().await.unwrap().as_ref(), full.as_slice());
+}
+
+// ===========================================================================
+// 13. Hub API routes beyond whoami
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_create_repo_and_commit() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+    let (ns, name) = ("pgs3-team", "pgs3-model");
+    let mp = format!("{ns}/{name}");
+
+    assert_eq!(client.post(server.url("/api/repos/create"))
+        .header("Authorization", auth()).header("Content-Type", "application/json")
+        .json(&serde_json::json!({"type":"model","name":&mp,"private":false}))
+        .send().await.unwrap().status(), 201);
+
+    let info = client.get(server.url(&format!("/api/models/{ns}/{name}")))
+        .header("Authorization", auth()).send().await.unwrap();
+    assert_eq!(info.status(), 200);
+    assert_eq!(info.json::<serde_json::Value>().await.unwrap()["id"], mp);
+
+    let cb64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"PG+S3 e2e commit");
+    let ndjson = format!("{{\"header\":{{\"message\":\"pg-s3\",\"parentCommit\":\"\"}}}}\n{{\"file\":{{\"path\":\"f.txt\",\"content\":\"{cb64}\"}}}}");
+    assert_eq!(client.post(server.url(&format!("/api/models/{ns}/{name}/commit/main")))
+        .header("Authorization", auth()).header("Content-Type", "application/x-ndjson")
+        .body(ndjson).send().await.unwrap().status(), 200);
+
+    assert_eq!(client.get(server.url(&format!("/api/models/{ns}/{name}/revisions")))
+        .header("Authorization", auth()).send().await.unwrap().status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_upload_lfs_and_batch() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+    let content = b"pgs3-hub-lfs";
+    let oid = sha256_hex(content);
+
+    assert_eq!(client.put(server.url(&format!("/lfs/objects/{oid}")))
+        .header("Authorization", auth()).header("Content-Type", "application/octet-stream")
+        .body(content.to_vec()).send().await.unwrap().status(), 200);
+    let get = client.get(server.url(&format!("/lfs/objects/{oid}")))
+        .header("Authorization", auth()).send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_modelcard() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+    let (ns, name) = ("pgs3card-team", "pgs3card-model");
+
+    client.post(server.url("/api/repos/create"))
+        .header("Authorization", auth()).header("Content-Type", "application/json")
+        .json(&serde_json::json!({"type":"model","name":format!("{ns}/{name}"),"private":false}))
+        .send().await.unwrap();
+
+    assert_eq!(client.get(server.url(&format!("/api/models/{ns}/{name}/modelcard")))
+        .header("Authorization", auth()).send().await.unwrap().status(), 404);
+
+    let rb64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"# PG+S3 Model");
+    client.post(server.url(&format!("/api/models/{ns}/{name}/commit/main")))
+        .header("Authorization", auth()).header("Content-Type", "application/x-ndjson")
+        .body(format!("{{\"header\":{{\"message\":\"mc\",\"parentCommit\":\"\"}}}}\n{{\"file\":{{\"path\":\"README.md\",\"content\":\"{rb64}\"}}}}"))
+        .send().await.unwrap();
+
+    assert_eq!(client.get(server.url(&format!("/api/models/{ns}/{name}/modelcard")))
+        .header("Authorization", auth()).send().await.unwrap().status(), 200);
+}
+
+// ===========================================================================
+// 14. Error / edge cases
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_error_no_auth_on_protected_endpoints() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+    assert_eq!(client.post(server.url("/v1/lfs/objects/batch"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&serde_json::json!({"operation":"download","objects":[]}))
+        .send().await.unwrap().status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_error_invalid_token() {
+    let server = TestServer::start(&[ServerFrontend::Xet]).await;
+    let client = reqwest::Client::new();
+    assert_eq!(client.get(server.url("/v1/stats"))
+        .header("Authorization", "Bearer invalid.token.here")
+        .send().await.unwrap().status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_error_oci_manifest_not_found() {
+    let (app, token) = oci_oneshot_app().await;
+    let resp = app.clone().oneshot(
+        axum::http::Request::builder()
+            .method("GET")
+            .uri("/v2/test/test/manifests/nonexistent-tag")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(resp.status(), 404);
+    let j: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(j["errors"][0]["code"], "MANIFEST_UNKNOWN");
+}
+
+// ===========================================================================
+// 15. Metrics after operations
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_metrics_after_lfs_upload() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+    let oid = sha256_hex(b"pgs3-metrics");
+    client.put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(b"pgs3-metrics".to_vec()).send().await.unwrap();
+    let m = client.get(server.url("/metrics")).send().await.unwrap();
+    assert_eq!(m.status(), 200);
+    assert!(m.text().await.unwrap().contains("shardline_up 1"));
+}
+
+// ===========================================================================
+// 16. Cross-protocol: upload via LFS, read via OCI blob
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_cross_protocol_lfs_to_oci() {
+    let server = TestServer::start(&[ServerFrontend::Lfs, ServerFrontend::Oci]).await;
+    let client = reqwest::Client::new();
+    let content = b"pgs3-cross";
+    let oid = sha256_hex(content);
+
+    client.put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec()).send().await.unwrap();
+    let get = client.get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header())).send().await.unwrap();
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.bytes().await.unwrap().as_ref(), content);
 }

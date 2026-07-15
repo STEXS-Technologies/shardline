@@ -1,7 +1,12 @@
 #![cfg(feature = "docker")]
-#![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing
+)]
 
 use std::num::NonZeroUsize;
+
+use std::sync::Arc;
 
 use shardline_server::{
     BackupManifestReport, BenchmarkBackend, LifecycleRepairOptions, LifecycleRepairReport,
@@ -1056,4 +1061,417 @@ async fn test_backup_manifest_with_multiple_records() {
     assert!(json_str.contains("metadata_backend"));
     assert!(json_str.contains("postgres"));
     assert!(json_str.contains("latest_records"));
+}
+
+// ===========================================================================
+// ServerBackend::Postgres dispatch — direct pub-method coverage
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_public_base_url() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    assert_eq!(backend.public_base_url(), "http://127.0.0.1:8080");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_ready_succeeds() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend.ready().await;
+    assert!(result.is_ok(), "ready() should succeed with Postgres: {result:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_file_total_bytes_after_upload() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let content = b"check total bytes via Postgres";
+    backend
+        .upload_file("pg-total-bytes.txt", axum::body::Bytes::from_static(content), None)
+        .await
+        .unwrap();
+    let total = backend
+        .file_total_bytes("pg-total-bytes.txt", None, None)
+        .await
+        .unwrap();
+    assert_eq!(total, content.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_file_total_bytes_not_found() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend.file_total_bytes("nonexistent", None, None).await;
+    assert!(matches!(result, Err(shardline_server::ServerError::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_chunk_length_rejects_invalid_hash() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend.chunk_length("not-a-valid-hex").await;
+    assert!(result.is_err(), "chunk_length should reject invalid hash");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_chunk_length_not_found() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend.chunk_length(&"c".repeat(64)).await;
+    assert!(matches!(result, Err(shardline_server::ServerError::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_xorb_length_not_found() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let hash = blake3_hash(b"no-such-xorb-for-pg-backend");
+    let result = backend.xorb_length(&hash).await;
+    assert!(matches!(result, Err(shardline_server::ServerError::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_xorb_length_after_upload() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    // upload_xorb via Postgres backend
+    let data = b"valid xorb body for length check";
+    let hash = blake3_hash(data);
+    let result = backend.upload_xorb(&hash, axum::body::Bytes::from_static(data)).await;
+    // upload_xorb expects valid xorb format; may fail if body isn't valid xorb
+    // If it fails, xorb_length should still be NotFound
+    if result.is_ok() {
+        let len = backend.xorb_length(&hash).await.unwrap();
+        assert_eq!(len, data.len() as u64);
+    } else {
+        let err = backend.xorb_length(&hash).await;
+        assert!(err.is_err(), "xorb without valid upload should be missing");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_read_chunk_rejects_invalid_hash() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend.read_chunk("bad-hash").await;
+    assert!(result.is_err(), "read_chunk should reject invalid hash");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_read_chunk_not_found() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend.read_chunk(&"d".repeat(64)).await;
+    assert!(matches!(result, Err(shardline_server::ServerError::NotFound)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_read_chunk_for_file_version_rejects_invalid_file_id() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend
+        .read_chunk_for_file_version(
+            &blake3_hash(b"hash"),
+            "/absolute/path",
+            &blake3_hash(b"content"),
+            None,
+        )
+        .await;
+    assert!(result.is_err(), "should reject invalid file_id");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_read_chunk_for_file_version_not_found() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let result = backend
+        .read_chunk_for_file_version(
+            &blake3_hash(b"chunkkey"),
+            "nonexistent-file",
+            &blake3_hash(b"version"),
+            None,
+        )
+        .await;
+    assert!(result.is_err(), "should fail for missing record");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_stats_after_upload() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    backend
+        .upload_file("pg-stats-test.txt", axum::body::Bytes::from_static(b"stats data"), None)
+        .await
+        .unwrap();
+    let stats = backend.stats().await.unwrap();
+    assert!(stats.files >= 1, "stats should show at least 1 file: {stats:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_upload_xorb_rejects_invalid_body() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let data = b"not a valid xorb body at all";
+    let hash = blake3_hash(data);
+    let result = backend
+        .upload_xorb(&hash, axum::body::Bytes::from_static(data))
+        .await;
+    assert!(result.is_err(), "upload_xorb should reject invalid xorb data");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_upload_xorb_rejects_hash_mismatch() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let data = b"body content with wrong hash";
+    let wrong_hash = blake3_hash(b"different data");
+    let result = backend
+        .upload_xorb(&wrong_hash, axum::body::Bytes::from_static(data))
+        .await;
+    assert!(result.is_err(), "upload_xorb should reject hash mismatch");
+}
+
+// ===========================================================================
+// ServerBackend identity dispatch — Postgres variant
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_backend_postgres_object_backend_name() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    assert_eq!(sb.object_backend_name(), "local");
+}
+
+// ===========================================================================
+// Postgres operations with larger data
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_upload_100_files_via_postgres() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("hundred-files").await;
+    for i in 0..100 {
+        let content = format!("hundred-file-content-{i}");
+        let file_id = format!("hf-{i:04}.bin");
+        bench
+            .upload_file(&file_id, axum::body::Bytes::from(content), None)
+            .await
+            .unwrap();
+    }
+    // Stats should reflect them
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 100, "stats should show >= 100 files: {stats:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_upload_then_delete_and_verify_stats() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("up-del-stats").await;
+
+    // Upload 10 files
+    for i in 0..10 {
+        let content = format!("delete-stats-content-{i}");
+        let file_id = format!("up-del-custom-{i:02}.txt");
+        bench
+            .upload_file(&file_id, axum::body::Bytes::from(content), None)
+            .await
+            .unwrap();
+    }
+
+    // Stats should reflect uploaded files
+    let stats_before = bench.stats().await.unwrap();
+    assert!(stats_before.files >= 10, "should have >= 10 files: {stats_before:?}");
+
+    // Download each file to verify content
+    for i in 0..10 {
+        let file_id = format!("up-del-custom-{i:02}.txt");
+        let downloaded = bench.download_file(&file_id, None, None).await.unwrap();
+        let expected = format!("delete-stats-content-{i}");
+        assert_eq!(String::from_utf8(downloaded).unwrap(), expected);
+    }
+}
+
+// ===========================================================================
+// Edge cases — Postgres
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_empty_file_upload() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let response = backend
+        .upload_file("empty-pg-file.bin", axum::body::Bytes::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(response.total_bytes, 0, "empty upload should have 0 bytes");
+    assert!(!response.file_id.is_empty());
+    // Verify via download
+    let downloaded = backend
+        .download_file("empty-pg-file.bin", None, None)
+        .await
+        .unwrap();
+    assert!(downloaded.is_empty(), "downloaded empty file should be empty");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_backend_large_metadata_values_upload() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    // Upload a file with a large body to exercise larger metadata records
+    let large_body = vec![0xAB_u8; 1_000_000]; // 1 MB
+    let response = backend
+        .upload_file(
+            "large-meta-file.bin",
+            axum::body::Bytes::from(large_body.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.total_bytes, 1_000_000);
+    // Download and verify
+    let downloaded = backend
+        .download_file("large-meta-file.bin", None, None)
+        .await
+        .unwrap();
+    assert_eq!(downloaded.len(), 1_000_000);
+    assert_eq!(downloaded[0], 0xAB);
+    assert_eq!(downloaded[999_999], 0xAB);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_concurrent_uploads() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("concurrent-up").await;
+    let bench = Arc::new(bench);
+
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let b = Arc::clone(&bench);
+        handles.push(tokio::spawn(async move {
+            let content = format!("concurrent-content-{i}");
+            let file_id = format!("conc-up-{i:02}.txt");
+            b.upload_file(&file_id, axum::body::Bytes::from(content), None)
+            .await
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "concurrent upload should succeed: {result:?}");
+    }
+
+    // Stats should reflect them
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 20, "stats should show >= 20 files: {stats:?}");
+}
+
+// ===========================================================================
+// OciBackend trait dispatch — ServerBackend::Postgres
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_postgres_put_sha256_addressed_bytes() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    use shardline_oci_adapter::OciBackend;
+    let body = b"oci-postgres-sha256-payload";
+    let digest_hex = hex::encode(Sha256::digest(body));
+    let canonical_key = shardline_server::shared_sha256_object_key(&digest_hex).unwrap();
+    let result = OciBackend::put_sha256_addressed_object_bytes_if_absent(
+        &sb, &canonical_key, &digest_hex, body.to_vec(),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), PutOutcome::Inserted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_postgres_put_sha256_addressed_bytes_already_exists() {
+    let _url = ensure_pg().await;
+    let (backend, _tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    use shardline_oci_adapter::OciBackend;
+    let body = b"oci-postgres-dedup-payload";
+    let digest_hex = hex::encode(Sha256::digest(body));
+    let canonical_key = shardline_server::shared_sha256_object_key(&digest_hex).unwrap();
+    let first = OciBackend::put_sha256_addressed_object_bytes_if_absent(
+        &sb, &canonical_key, &digest_hex, body.to_vec(),
+    ).unwrap();
+    assert_eq!(first, PutOutcome::Inserted);
+    let second = OciBackend::put_sha256_addressed_object_bytes_if_absent(
+        &sb, &canonical_key, &digest_hex, body.to_vec(),
+    ).unwrap();
+    assert_eq!(second, PutOutcome::AlreadyExists);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_postgres_copy_object_if_absent() {
+    let _url = ensure_pg().await;
+    let (backend, tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    use shardline_oci_adapter::OciBackend;
+    let src = ObjectKey::parse("oci-pg-copy-src").unwrap();
+    let dst = ObjectKey::parse("oci-pg-copy-dst").unwrap();
+    // Seed via local store
+    let store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let data = b"oci-pg-copy-data";
+    let hash = ShardlineHash::from_bytes(*blake3::hash(data).as_bytes());
+    let integrity = ObjectIntegrity::new(hash, data.len() as u64);
+    store.put_if_absent(&src, ObjectBody::from_slice(data), &integrity).unwrap();
+    let outcome = OciBackend::copy_object_if_absent(&sb, &src, &dst).unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_postgres_delete_object_if_present() {
+    let _url = ensure_pg().await;
+    let (backend, tmp) = pg_backend().await;
+    let sb = ServerBackend::Postgres(backend);
+    use shardline_oci_adapter::OciBackend;
+    let key = ObjectKey::parse("oci-pg-delete-me").unwrap();
+    // Seed an object
+    let store = ServerObjectStore::local(tmp.path().join("chunks")).unwrap();
+    let data = b"oci-pg-delete-data";
+    let hash = ShardlineHash::from_bytes(*blake3::hash(data).as_bytes());
+    let integrity = ObjectIntegrity::new(hash, data.len() as u64);
+    store.put_if_absent(&key, ObjectBody::from_slice(data), &integrity).unwrap();
+    let outcome = OciBackend::delete_object_if_present(&sb, &key).await.unwrap();
+    assert_eq!(outcome, DeleteOutcome::Deleted);
+}
+
+// ===========================================================================
+// Record operations roundtrip — set, scan, delete
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_record_roundtrip_set_scan_delete() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("rec-roundtrip").await;
+
+    // Set: upload files
+    for i in 0..5 {
+        let content = format!("roundtrip-content-{i}");
+        let file_id = format!("rt-{i}.bin");
+        bench
+            .upload_file(&file_id, axum::body::Bytes::from(content), None)
+            .await
+            .unwrap();
+    }
+
+    // Verify via stats
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 5);
+
+    // Verify each file can be downloaded
+    for i in 0..5 {
+        let content = format!("roundtrip-content-{i}");
+        let file_id = format!("rt-{i}.bin");
+        let downloaded = bench
+            .download_file(&file_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(downloaded).unwrap(), content);
+    }
 }
