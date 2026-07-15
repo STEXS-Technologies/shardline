@@ -221,13 +221,17 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // and must be merged at the Router<()> level after both sides are
     // converted via `.with_state()`.
     let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
+    let mut xet_frontend_enabled = false;
     for frontend in state.config.server_frontends() {
         match frontend {
             ServerFrontend::Hub => {
                 hub_state = Some(build_hub_state(&state)?);
             }
-            ServerFrontend::Xet
-            | ServerFrontend::Lfs
+            ServerFrontend::Xet => {
+                xet_frontend_enabled = true;
+                app = register_frontend_routes(app, *frontend, role, &state);
+            }
+            ServerFrontend::Lfs
             | ServerFrontend::BazelHttp
             | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
@@ -241,7 +245,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 
     // Merge hub routes (Router<()>) into the main app (Router<()>).
     Ok(if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs))
+        app.merge(shardline_hub_api::hub_routes(hs, !xet_frontend_enabled))
     } else {
         app
     })

@@ -163,18 +163,26 @@ impl std::fmt::Debug for HubState {
 }
 
 /// Builds the Hub API router with [`HubState`] as the shared state.
-pub fn router() -> Router<HubState> {
-    Router::new()
+///
+/// When `register_xet_token_routes` is `false`, the xet-read-token and
+/// xet-write-token routes are omitted to avoid conflicts with the Xet
+/// protocol frontend when both are enabled simultaneously.
+pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
+    let mut r = Router::new()
         .route("/health", get(health))
-        .route("/api/whoami-v2", get(whoami))
-        .route(
-            "/api/{type}/{ns}/{repo}/xet-read-token/{rev}",
-            get(xet_read_token),
-        )
-        .route(
-            "/api/{type}/{ns}/{repo}/xet-write-token/{rev}",
-            get(xet_write_token),
-        )
+        .route("/api/whoami-v2", get(whoami));
+    if register_xet_token_routes {
+        r = r
+            .route(
+                "/api/{type}/{ns}/{repo}/xet-read-token/{rev}",
+                get(xet_read_token),
+            )
+            .route(
+                "/api/{type}/{ns}/{repo}/xet-write-token/{rev}",
+                get(xet_write_token),
+            );
+    }
+    r = r
         .route("/api/repos/create", post(repo_create))
         .route("/api/repos", get(repo_list))
         .route("/api/{type}/search", get(repo_search))
@@ -223,7 +231,8 @@ pub fn router() -> Router<HubState> {
         .route(
             "/api/{type}/{ns}/{repo}/webhooks/{webhook_id}",
             delete(webhook_delete),
-        )
+        );
+    r
 }
 
 // ---- Health ----

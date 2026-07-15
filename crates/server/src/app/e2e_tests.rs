@@ -245,8 +245,11 @@ async fn test_app_for_frontends_with_role(
     let app: Router = app.with_state(Arc::clone(&state));
 
     // Merge Hub routes at the type-erased Router<()> level.
+    // Register Hub's xet token routes only when the Xet frontend is not active
+    // (to avoid route conflicts with the native Xet adapter routes).
+    let register_hub_xet_routes = !frontends.contains(&ServerFrontend::Xet);
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs))
+        app.merge(shardline_hub_api::hub_routes(hs, register_hub_xet_routes))
     } else {
         app
     };
@@ -463,13 +466,14 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
     let app: Router = app.with_state(Arc::clone(&state));
 
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs))
+        app.merge(shardline_hub_api::hub_routes(hs, false))
     } else {
         app
     };
 
     (app, tmp)
 }
+
 
 // ---------------------------------------------------------------------------
 // Provider config helpers
@@ -721,7 +725,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
     let app: Router = app.with_state(Arc::clone(&state));
 
     let app = if let Some(hs) = hub_state {
-        app.merge(shardline_hub_api::hub_routes(hs))
+        app.merge(shardline_hub_api::hub_routes(hs, false))
     } else {
         app
     };
