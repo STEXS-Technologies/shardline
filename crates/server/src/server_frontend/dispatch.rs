@@ -221,6 +221,29 @@ mod tests {
         assert!(!visited);
     }
 
+    #[test]
+    fn visit_protocol_object_member_chunks_with_xet_but_non_xorb_key_skips_visit() {
+        // Xet frontend with a non-xorb key → owns_protocol_object returns false
+        // → falls through without visiting.
+        let key = ObjectKey::parse("shards/ab/some.shard").unwrap();
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let frontends = vec![ServerFrontend::Xet];
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(
+            &frontends,
+            &store,
+            &key,
+            |_hash| {
+                visited = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!visited);
+    }
+
+
+
     // -----------------------------------------------------------------------
     // append_referenced_term_bytes
     // -----------------------------------------------------------------------

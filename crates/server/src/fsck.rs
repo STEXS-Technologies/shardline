@@ -192,4 +192,161 @@ mod tests {
         };
         assert_eq!(_report.latest_records, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // FsckError -> ServerError — remaining uncovered branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_fsck_error_s3_object_store_maps_correctly() {
+        let s3_err = shardline_storage::S3ObjectStoreError::IncompleteCredentials;
+        let fsck_err = FsckError::S3ObjectStore(s3_err);
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::ObjectStore(crate::error::ObjectStoreError::S3(_))
+        ));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_not_found() {
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::NotFound,
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(server_err, ServerError::NotFound));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_overflow() {
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::Overflow,
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(server_err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_invalid_content_hash() {
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::InvalidContentHash,
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(server_err, ServerError::InvalidContentHash));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_stored_length_mismatch() {
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch,
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::ObjectStore(crate::error::ObjectStoreError::StoredLengthMismatch)
+        ));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_local() {
+        let local_err = shardline_storage::LocalObjectStoreError::Io(
+            std::io::Error::other("local store err"),
+        );
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::Local(local_err),
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::ObjectStore(crate::error::ObjectStoreError::Local(_))
+        ));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_s3() {
+        let s3_err = shardline_storage::S3ObjectStoreError::IncompleteCredentials;
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::S3(s3_err),
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::ObjectStore(crate::error::ObjectStoreError::S3(_))
+        ));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_io() {
+        let io_err = std::io::Error::other("object store io");
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::Io(io_err),
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(server_err, ServerError::Io(_)));
+    }
+
+    #[test]
+    fn from_fsck_error_object_store_numeric_conversion() {
+        let num_err = u64::try_from(-1i32).unwrap_err();
+        let fsck_err = FsckError::ObjectStore(
+            shardline_server_core::ServerObjectStoreError::NumericConversion(num_err),
+        );
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(server_err, ServerError::NumericConversion(_)));
+    }
+
+    #[test]
+    fn from_fsck_error_xet_adapter() {
+        let xet_err = shardline_xet_adapter::XetAdapterError::Overflow;
+        let fsck_err = FsckError::XetAdapter(xet_err);
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(server_err, ServerError::Overflow));
+    }
+
+    #[test]
+    fn from_fsck_error_local_index_store() {
+        let io_err = std::io::Error::other("index_store_io");
+        let index_err = shardline_index::LocalIndexStoreError::Io(io_err);
+        let fsck_err = FsckError::LocalIndexStore(index_err);
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::Index(crate::error::IndexError::Local(_))
+        ));
+    }
+
+    #[test]
+    fn from_fsck_error_memory_index_store() {
+        let mem_err = shardline_index::MemoryIndexStoreError::LockPoisoned;
+        let fsck_err = FsckError::MemoryIndexStore(mem_err);
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::Index(crate::error::IndexError::MemoryIndex(_))
+        ));
+    }
+
+    #[test]
+    fn from_fsck_error_memory_record_store() {
+        let mem_err = shardline_index::MemoryRecordStoreError::LockPoisoned;
+        let fsck_err = FsckError::MemoryRecordStore(mem_err);
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::Index(crate::error::IndexError::MemoryRecord(_))
+        ));
+    }
+
+    #[test]
+    fn from_fsck_error_postgres_metadata() {
+        let pg_err = shardline_index::PostgresMetadataStoreError::HashParse(
+            shardline_protocol::HashParseError::InvalidLength,
+        );
+        let fsck_err = FsckError::PostgresMetadata(pg_err);
+        let server_err: ServerError = fsck_err.into();
+        assert!(matches!(
+            server_err,
+            ServerError::Index(crate::error::IndexError::PostgresMetadata(_))
+        ));
+    }
 }

@@ -346,15 +346,701 @@ impl Drop for PromActiveRequestGuard {
 
 #[cfg(test)]
 mod tests {
-    use shardline_protocol::TokenScope;
+    use std::sync::Arc;
+
+    use axum::http::{HeaderMap, HeaderValue, Uri};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner};
 
     use super::{
-        MIN_OCI_TOKEN_EXPIRES_IN_SECONDS, OCI_REGISTRY_SERVICE, oci_bearer_challenge,
-        parse_oci_registry_actions, parse_oci_registry_token_query, parse_oci_registry_token_scope,
-        parse_oci_registry_token_scopes, scope_allows_oci_exchange,
+        MAX_OCI_TOKEN_BASIC_AUTH_BYTES, MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
+        MAX_OCI_TOKEN_QUERY_SCOPES, MAX_OCI_TOKEN_QUERY_SERVICE_BYTES, MIN_OCI_TOKEN_EXPIRES_IN_SECONDS, OCI_REGISTRY_SERVICE,
+        bounded_query_values, oci_bearer_challenge, oci_registry_token, parse_oci_registry_actions,
+        parse_oci_registry_token_query, parse_oci_registry_token_scope,
+        parse_oci_registry_token_scopes, scope_allows_oci_exchange, single_bounded_query_value,
+        verify_oci_registry_bootstrap_credentials,
     };
+    use crate::ServerError;
 
-    // ── parse_oci_registry_token_scope ──────────────────────────────────────
+    fn signing_key() -> Vec<u8> {
+        vec![b'k'; 32]
+    }
+
+    fn test_signer() -> TokenSigner {
+        TokenSigner::new(&signing_key()).unwrap()
+    }
+
+    fn test_claims() -> TokenClaims {
+        TokenClaims::new(
+            "issuer",
+            "subject",
+            TokenScope::Write,
+            RepositoryScope::new(
+                RepositoryProvider::GitHub,
+                "owner",
+                "repo",
+                None,
+            )
+            .unwrap(),
+            999_999_999_999,
+        )
+        .unwrap()
+    }
+
+    // ── single_bounded_query_value ──────────────────────────────────────────
+
+    #[test]
+    fn single_value_returns_value() {
+        let result = single_bounded_query_value(
+            &uri("/v2/token?service=shardline"),
+            "service",
+            MAX_OCI_TOKEN_QUERY_SERVICE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(result.as_deref(), Some("shardline"));
+    }
+
+    #[test]
+    fn single_value_no_key_returns_none() {
+        let result = single_bounded_query_value(
+            &uri("/v2/token"),
+            "service",
+            MAX_OCI_TOKEN_QUERY_SERVICE_BYTES,
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn single_value_empty_value_returns_none() {
+        let result = single_bounded_query_value(
+            &uri("/v2/token?service="),
+            "service",
+            MAX_OCI_TOKEN_QUERY_SERVICE_BYTES,
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn single_value_multiple_values_errors() {
+        assert!(matches!(
+            single_bounded_query_value(
+                &uri("/v2/token?service=a&service=b"),
+                "service",
+                MAX_OCI_TOKEN_QUERY_SERVICE_BYTES,
+            ),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn single_value_too_large_errors() {
+        assert!(matches!(
+            single_bounded_query_value(
+                &uri(&format!("/v2/token?service={}", "x".repeat(MAX_OCI_TOKEN_QUERY_SERVICE_BYTES + 1))),
+                "service",
+                MAX_OCI_TOKEN_QUERY_SERVICE_BYTES,
+            ),
+            Err(ServerError::RequestQueryTooLarge)
+        ));
+    }
+
+    // ── bounded_query_values ────────────────────────────────────────────────
+
+    #[test]
+    fn bounded_values_returns_values() {
+        let result = bounded_query_values(
+            &uri("/v2/token?scope=a&scope=b"),
+            "scope",
+            MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
+            MAX_OCI_TOKEN_QUERY_SCOPES,
+        )
+        .unwrap();
+        assert_eq!(result, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn bounded_values_no_key_returns_empty() {
+        let result = bounded_query_values(
+            &uri("/v2/token"),
+            "scope",
+            MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
+            MAX_OCI_TOKEN_QUERY_SCOPES,
+        )
+        .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bounded_values_skips_empty_values() {
+        let result = bounded_query_values(
+            &uri("/v2/token?scope=a&scope=&scope=b"),
+            "scope",
+            MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
+            MAX_OCI_TOKEN_QUERY_SCOPES,
+        )
+        .unwrap();
+        assert_eq!(result, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn bounded_values_too_many_values_errors() {
+        assert!(matches!(
+            bounded_query_values(
+                &uri("/v2/token?scope=a&scope=b&scope=c"),
+                "scope",
+                MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
+                2,
+            ),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn bounded_values_value_too_large_errors() {
+        assert!(matches!(
+            bounded_query_values(
+                &uri(&format!("/v2/token?scope={}", "x".repeat(MAX_OCI_TOKEN_QUERY_SCOPE_BYTES + 1))),
+                "scope",
+                MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
+                MAX_OCI_TOKEN_QUERY_SCOPES,
+            ),
+            Err(ServerError::RequestQueryTooLarge)
+        ));
+    }
+
+    // ── verify_oci_registry_bootstrap_credentials ───────────────────────────
+
+    #[test]
+    fn verify_bootstrap_missing_header_errors() {
+        let headers = HeaderMap::new();
+        let signer = test_signer();
+        assert!(matches!(
+            verify_oci_registry_bootstrap_credentials(&headers, &signer),
+            Err(ServerError::MissingAuthorization)
+        ));
+    }
+
+    #[test]
+    fn verify_bootstrap_invalid_header_format_errors() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("NotAValidScheme token"),
+        );
+        let signer = test_signer();
+        assert!(matches!(
+            verify_oci_registry_bootstrap_credentials(&headers, &signer),
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
+    }
+
+    #[test]
+    fn verify_bootstrap_bearer_valid_token() {
+        let signer = test_signer();
+        let claims = test_claims();
+        let token = signer.sign(&claims).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let result = verify_oci_registry_bootstrap_credentials(&headers, &signer).unwrap();
+        assert_eq!(result.issuer(), claims.issuer());
+        assert_eq!(result.subject(), claims.subject());
+    }
+
+    #[test]
+    fn verify_bootstrap_bearer_expired_token_errors() {
+        let signer = test_signer();
+        let expired_claims = TokenClaims::new(
+            "issuer",
+            "subject",
+            TokenScope::Write,
+            RepositoryScope::new(
+                RepositoryProvider::GitHub,
+                "owner",
+                "repo",
+                None,
+            )
+            .unwrap(),
+            0, // expired
+        )
+        .unwrap();
+        let token = signer.sign(&expired_claims).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        assert!(matches!(
+            verify_oci_registry_bootstrap_credentials(&headers, &signer),
+            Err(ServerError::InvalidToken(_))
+        ));
+    }
+
+    #[test]
+    fn verify_bootstrap_basic_valid_token() {
+        let signer = test_signer();
+        let claims = test_claims();
+        let token = signer.sign(&claims).unwrap();
+        // Basic auth uses base64(username:password) where password is the token
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("user:{token}"),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
+        );
+        let result = verify_oci_registry_bootstrap_credentials(&headers, &signer).unwrap();
+        assert_eq!(result.issuer(), claims.issuer());
+    }
+
+    #[test]
+    fn verify_bootstrap_basic_oversized_encoded_errors() {
+        let oversized = "x".repeat(MAX_OCI_TOKEN_BASIC_AUTH_BYTES + 1);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {oversized}")).unwrap(),
+        );
+        let signer = test_signer();
+        assert!(matches!(
+            verify_oci_registry_bootstrap_credentials(&headers, &signer),
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
+    }
+
+    #[test]
+    fn verify_bootstrap_basic_invalid_base64_errors() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str("Basic !!!invalid-base64!!!").unwrap(),
+        );
+        let signer = test_signer();
+        assert!(matches!(
+            verify_oci_registry_bootstrap_credentials(&headers, &signer),
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
+    }
+
+    #[test]
+    fn verify_bootstrap_basic_no_colon_errors() {
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            "username-no-colon",
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
+        );
+        let signer = test_signer();
+        assert!(matches!(
+            verify_oci_registry_bootstrap_credentials(&headers, &signer),
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
+    }
+
+    #[test]
+    fn verify_bootstrap_basic_empty_password_errors() {
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            "user:",
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
+        );
+        let signer = test_signer();
+        assert!(matches!(
+            verify_oci_registry_bootstrap_credentials(&headers, &signer),
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
+    }
+
+    // ── parse_oci_registry_token_query additional edge cases ────────────────
+
+    #[test]
+    fn parse_query_with_account() {
+        let query = parse_oci_registry_token_query(
+            &uri("/v2/token?account=myaccount"),
+        )
+        .unwrap();
+        assert_eq!(query._account.as_deref(), Some("myaccount"));
+    }
+
+    #[test]
+    fn parse_query_with_service_mismatch_returns_none_service() {
+        // service is stored; the caller (oci_registry_token) checks it separately
+        let query = parse_oci_registry_token_query(
+            &uri("/v2/token?service=other"),
+        )
+        .unwrap();
+        assert_eq!(query.service.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn parse_query_empty_scope_value_skipped() {
+        let query = parse_oci_registry_token_query(
+            &uri("/v2/token?scope="),
+        )
+        .unwrap();
+        assert!(query.scopes.is_empty());
+    }
+
+    #[test]
+    fn parse_query_rejects_duplicate_service() {
+        assert!(matches!(
+            parse_oci_registry_token_query(&uri("/v2/token?service=a&service=b")),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── parse_oci_registry_token_scope additional edge cases ────────────────
+
+    #[test]
+    fn parse_scope_whitespace_returns_none() {
+        assert_eq!(
+            parse_oci_registry_token_scope(Some("  ")).unwrap(),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn parse_scope_invalid_actions_errors() {
+        assert!(matches!(
+            parse_oci_registry_token_scope(Some("repository:repo:invalid")),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn parse_scope_invalid_resource_type_errors() {
+        assert!(matches!(
+            parse_oci_registry_token_scope(Some("registry:repo:pull")),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn parse_scope_invalid_repository_name_errors() {
+        assert!(matches!(
+            parse_oci_registry_token_scope(Some("repository:\0invalid:pull")),
+            Err(ServerError::InvalidRepositoryName)
+        ));
+    }
+
+    // ── parse_oci_registry_token_scopes additional edge cases ───────────────
+
+    #[test]
+    fn parse_scopes_with_empty_scope_entries() {
+        let scopes = vec![
+            "repository:repo:pull".to_owned(),
+            String::new(),
+            "repository:repo:push".to_owned(),
+        ];
+        let (scope, repo) = parse_oci_registry_token_scopes(&scopes).unwrap();
+        assert_eq!(scope, Some(TokenScope::Write));
+        assert_eq!(repo, Some("repo".to_owned()));
+    }
+
+    #[test]
+    fn parse_scopes_write_upgrades_read() {
+        // When a Write scope follows a Read scope, result is Write.
+        let scopes = vec![
+            "repository:repo:pull".to_owned(),
+            "repository:repo:push".to_owned(),
+        ];
+        let (scope, _) = parse_oci_registry_token_scopes(&scopes).unwrap();
+        assert_eq!(scope, Some(TokenScope::Write));
+    }
+
+    // ── parse_oci_registry_actions additional edge cases ────────────────────
+
+    #[test]
+    fn parse_actions_only_push() {
+        assert_eq!(
+            parse_oci_registry_actions("push").unwrap(),
+            TokenScope::Write
+        );
+    }
+
+    #[test]
+    fn parse_actions_whitespace_around_actions() {
+        assert_eq!(
+            parse_oci_registry_actions(" pull , push ").unwrap(),
+            TokenScope::Write
+        );
+    }
+
+    // ── scope_allows_oci_exchange additional edge cases ─────────────────────
+
+    // ── oci_registry_token handler tests ────────────────────────────────────
+
+    use crate::AppState;
+
+    async fn build_state_with_auth() -> Arc<AppState> {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::num::NonZeroUsize;
+        let config = crate::config::ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            "http://127.0.0.1:8080".to_owned(),
+            root,
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_token_signing_key(signing_key())
+        .expect("signing key set");
+        let backend = crate::backend::ServerBackend::from_config(&config)
+            .await
+            .expect("backend");
+        Arc::new(AppState {
+            config,
+            role: crate::server_role::ServerRole::All,
+            backend,
+            auth: None,
+            provider_tokens: None,
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            transfer_limiter: crate::TransferLimiter::new(
+                NonZeroUsize::new(4096).unwrap(),
+                NonZeroUsize::new(16).unwrap(),
+            ),
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            protocol_metrics: crate::app::ProtocolMetrics::default(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_requires_auth_header() {
+        let state = build_state_with_auth().await;
+        let headers = HeaderMap::new();
+        let uri: Uri = "/v2/token".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServerError::UnauthorizedChallenge(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_with_bearer_token_succeeds() {
+        let state = build_state_with_auth().await;
+        let signer = test_signer();
+        let claims = test_claims();
+        let token = signer.sign(&claims).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let uri: Uri = "/v2/token?scope=repository:owner/repo:pull".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.0.access_token, response.0.token);
+        assert!(response.0.expires_in >= MIN_OCI_TOKEN_EXPIRES_IN_SECONDS);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_rejects_wrong_service() {
+        let state = build_state_with_auth().await;
+        let signer = test_signer();
+        let claims = test_claims();
+        let token = signer.sign(&claims).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let uri: Uri = "/v2/token?service=wrong-service".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(result, Err(ServerError::InvalidManifestReference)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_expired_bearer_returns_challenge() {
+        let state = build_state_with_auth().await;
+        let signer = test_signer();
+        let expired = TokenClaims::new(
+            "issuer",
+            "subject",
+            TokenScope::Write,
+            RepositoryScope::new(
+                RepositoryProvider::GitHub,
+                "owner",
+                "repo",
+                None,
+            )
+            .unwrap(),
+            0,
+        )
+        .unwrap();
+        let token = signer.sign(&expired).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let uri: Uri = "/v2/token".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServerError::UnauthorizedChallenge(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_insufficient_scope_errors() {
+        let state = build_state_with_auth().await;
+        let signer = test_signer();
+        let read_claims = TokenClaims::new(
+            "issuer",
+            "subject",
+            TokenScope::Read,
+            RepositoryScope::new(
+                RepositoryProvider::GitHub,
+                "owner",
+                "repo",
+                None,
+            )
+            .unwrap(),
+            999_999_999_999,
+        )
+        .unwrap();
+        let token = signer.sign(&read_claims).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        // Requesting write scope when we only have read
+        let uri: Uri = "/v2/token?scope=repository:owner/repo:push"
+            .parse()
+            .unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(result, Err(ServerError::InsufficientScope)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_with_basic_auth_succeeds() {
+        let state = build_state_with_auth().await;
+        let signer = test_signer();
+        let claims = test_claims();
+        let token = signer.sign(&claims).unwrap();
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("user:{token}"),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
+        );
+        let uri: Uri = "/v2/token".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_exchange_missing_signing_key_errors() {
+        // A state without a signing key should return MissingAuthorization
+        // We need a state with no signing key configured.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::num::NonZeroUsize;
+        let config = crate::config::ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            "http://127.0.0.1:8080".to_owned(),
+            root,
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        let backend = crate::backend::ServerBackend::from_config(&config)
+            .await
+            .expect("backend");
+        let state = Arc::new(AppState {
+            config,
+            role: crate::server_role::ServerRole::All,
+            backend,
+            auth: None,
+            provider_tokens: None,
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            transfer_limiter: crate::TransferLimiter::new(
+                NonZeroUsize::new(4096).unwrap(),
+                NonZeroUsize::new(16).unwrap(),
+            ),
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            protocol_metrics: crate::app::ProtocolMetrics::default(),
+        });
+        let headers = HeaderMap::new();
+        let uri: Uri = "/v2/token".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(result, Err(ServerError::MissingAuthorization)));
+    }
+
+    /// Verify that when the service name differs from OCI_REGISTRY_SERVICE it
+    /// returns an error. This branch is on line 60-63.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_wrong_service_triggers_error() {
+        let state = build_state_with_auth().await;
+        let signer = test_signer();
+        let claims = test_claims();
+        let token = signer.sign(&claims).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let uri: Uri = "/v2/token?service=unknown-registry".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(result, Err(ServerError::InvalidManifestReference)));
+    }
 
     #[test]
     fn parse_scope_none_returns_none() {

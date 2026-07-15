@@ -374,6 +374,9 @@ mod provider_tests {
         provider::ProviderServiceError,
         provider_events::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind},
     };
+    use crate::app::{
+        MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
+    };
 
     #[test]
     fn normalize_provider_name_github() {
@@ -650,5 +653,378 @@ mod provider_tests {
         };
         let response = provider_webhook_response(outcome);
         assert_eq!(response.event_kind, "access_changed");
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_provider_name_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_provider_name_path_accepts_valid_name() {
+        assert!(validate_provider_name_path("github").is_ok());
+        assert!(validate_provider_name_path("a").is_ok());
+        assert!(validate_provider_name_path("custom-provider-123").is_ok());
+    }
+
+    #[test]
+    fn validate_provider_name_path_rejects_empty() {
+        assert!(matches!(
+            validate_provider_name_path(""),
+            Err(ServerError::InvalidProviderTokenRequest)
+        ));
+    }
+
+    #[test]
+    fn validate_provider_name_path_rejects_too_long() {
+        let long_name = "a".repeat(MAX_PROVIDER_NAME_BYTES + 1);
+        assert!(matches!(
+            validate_provider_name_path(&long_name),
+            Err(ServerError::InvalidProviderTokenRequest)
+        ));
+    }
+
+    #[test]
+    fn validate_provider_name_path_accepts_max_length() {
+        let max_name = "a".repeat(MAX_PROVIDER_NAME_BYTES);
+        assert!(validate_provider_name_path(&max_name).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_provider_subject
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_provider_subject_from_query() {
+        let headers = HeaderMap::new();
+        let result = extract_provider_subject(&headers, Some("query-subject"));
+        assert_eq!(result.unwrap(), "query-subject");
+    }
+
+    #[test]
+    fn extract_provider_subject_query_takes_priority() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-shardline-provider-subject",
+            "header-subject".parse().unwrap(),
+        );
+        let result = extract_provider_subject(&headers, Some("query-subject"));
+        // query wins over header
+        assert_eq!(result.unwrap(), "query-subject");
+    }
+
+    #[test]
+    fn extract_provider_subject_from_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-shardline-provider-subject",
+            "header-subject".parse().unwrap(),
+        );
+        let result = extract_provider_subject(&headers, None);
+        assert_eq!(result.unwrap(), "header-subject");
+    }
+
+    #[test]
+    fn extract_provider_subject_header_whitespace_only_is_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-shardline-provider-subject",
+            "   ".parse().unwrap(),
+        );
+        // No authorization header — should fail with MissingProviderSubject
+        let result = extract_provider_subject(&headers, None);
+        assert!(matches!(result, Err(ServerError::MissingProviderSubject)));
+    }
+
+    #[test]
+    fn extract_provider_subject_from_basic_auth() {
+        let mut headers = HeaderMap::new();
+        // "alice:password" base64
+        let encoded = BASE64_STANDARD.encode(b"alice:password");
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Basic {encoded}").parse().unwrap(),
+        );
+        let result = extract_provider_subject(&headers, None);
+        assert_eq!(result.unwrap(), "alice");
+    }
+
+    #[test]
+    fn extract_provider_subject_basic_auth_no_password_delimiter() {
+        let mut headers = HeaderMap::new();
+        // No colon in decoded — split_once returns None
+        let encoded = BASE64_STANDARD.encode(b"justusername");
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Basic {encoded}").parse().unwrap(),
+        );
+        let result = extract_provider_subject(&headers, None);
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn extract_provider_subject_basic_auth_password_only_means_empty_username() {
+        let mut headers = HeaderMap::new();
+        let encoded = BASE64_STANDARD.encode(b":password");
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Basic {encoded}").parse().unwrap(),
+        );
+        // After split_once(':'), username is "" which is empty → MissingProviderSubject
+        let result = extract_provider_subject(&headers, None);
+        assert!(matches!(result, Err(ServerError::MissingProviderSubject)));
+    }
+
+    #[test]
+    fn extract_provider_subject_missing_all_sources() {
+        let headers = HeaderMap::new();
+        let result = extract_provider_subject(&headers, None);
+        assert!(matches!(result, Err(ServerError::MissingProviderSubject)));
+    }
+
+    #[test]
+    fn extract_provider_subject_rejects_invalid_utf8_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-shardline-provider-subject",
+            axum::http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
+        );
+        let result = extract_provider_subject(&headers, None);
+        assert!(matches!(result, Err(ServerError::InvalidProviderTokenRequest)));
+    }
+
+    #[test]
+    fn extract_provider_subject_rejects_basic_auth_without_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer token".parse().unwrap(),
+        );
+        let result = extract_provider_subject(&headers, None);
+        // No "Basic " prefix → MissingProviderSubject
+        assert!(matches!(result, Err(ServerError::MissingProviderSubject)));
+    }
+
+    #[test]
+    fn extract_provider_subject_rejects_invalid_basic_auth_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic not-valid-base64!!".parse().unwrap(),
+        );
+        let result = extract_provider_subject(&headers, None);
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn extract_provider_subject_rejects_basic_auth_too_large() {
+        let mut headers = HeaderMap::new();
+        let large = "a".repeat(MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES + 1);
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Basic {large}").parse().unwrap(),
+        );
+        let result = extract_provider_subject(&headers, None);
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
+
+    #[test]
+    fn extract_provider_subject_rejects_query_subject_too_long() {
+        let headers = HeaderMap::new();
+        let long_subject = "a".repeat(MAX_PROVIDER_SUBJECT_BYTES + 1);
+        let result = extract_provider_subject(&headers, Some(&long_subject));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidProviderTokenRequest)
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // bounded_subject — edge case for max length
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bounded_subject_rejects_too_long() {
+        let long = "a".repeat(MAX_PROVIDER_SUBJECT_BYTES + 1);
+        assert!(matches!(
+            bounded_subject(Some(&long)),
+            Err(ServerError::InvalidProviderTokenRequest)
+        ));
+    }
+
+    #[test]
+    fn bounded_subject_accepts_max_length() {
+        let max = "a".repeat(MAX_PROVIDER_SUBJECT_BYTES);
+        let result = bounded_subject(Some(&max)).unwrap();
+        assert_eq!(result, Some(max.as_str()));
+    }
+
+    // -----------------------------------------------------------------------
+    // map_provider_issue_error — all uncovered branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn map_provider_issue_error_reference() {
+        let ref_err = shardline_vcs::VcsReferenceError::Empty;
+        let result = map_provider_issue_error(ProviderServiceError::Reference(ref_err));
+        assert!(matches!(result, ServerError::InvalidProviderTokenRequest));
+    }
+
+    #[test]
+    fn map_provider_issue_error_subject() {
+        let subj_err = shardline_vcs::ProviderBoundaryError::Empty;
+        let result = map_provider_issue_error(ProviderServiceError::Subject(subj_err));
+        assert!(matches!(result, ServerError::InvalidProviderTokenRequest));
+    }
+
+    #[test]
+    fn map_provider_issue_error_api_key_too_large() {
+        let result = map_provider_issue_error(ProviderServiceError::ApiKeyTooLarge);
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_config_too_large() {
+        let result =
+            map_provider_issue_error(ProviderServiceError::ConfigTooLarge {
+                observed_bytes: 999,
+                maximum_bytes: 100,
+            });
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_config_length_mismatch() {
+        let result = map_provider_issue_error(ProviderServiceError::ConfigLengthMismatch);
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_io() {
+        let result =
+            map_provider_issue_error(ProviderServiceError::Io(std::io::Error::other("io error")));
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_json() {
+        let json_err = serde_json::from_str::<()>("invalid").unwrap_err();
+        let result = map_provider_issue_error(ProviderServiceError::Json(json_err));
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_duplicate_provider() {
+        let result = map_provider_issue_error(ProviderServiceError::DuplicateProvider);
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_missing_webhook_secret() {
+        let result = map_provider_issue_error(ProviderServiceError::MissingWebhookSecret);
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_empty_webhook_secret() {
+        let result = map_provider_issue_error(ProviderServiceError::EmptyWebhookSecret);
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_token() {
+        let token_err = shardline_vcs::ProviderTokenIssuanceError::LifetimeOverflow;
+        let result = map_provider_issue_error(ProviderServiceError::Token(token_err));
+        assert!(matches!(result, ServerError::Provider(_)));
+    }
+
+    #[test]
+    fn map_provider_issue_error_builtin_invalid_repository_payload() {
+        let built_in = BuiltInProviderError::InvalidRepositoryPayload;
+        let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
+        assert!(matches!(
+            result,
+            ServerError::InvalidProviderWebhookPayload
+        ));
+    }
+
+    #[test]
+    fn map_provider_issue_error_builtin_invalid_revision_payload() {
+        let built_in = BuiltInProviderError::InvalidRevisionPayload;
+        let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
+        assert!(matches!(
+            result,
+            ServerError::InvalidProviderWebhookPayload
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // reconciled_provider_repository_state
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reconciled_provider_repository_state_returns_updated_state() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            None,
+            None,
+            None,
+        );
+        let reconciled = reconciled_provider_repository_state(&state, 1000);
+        // All three reconciliation timestamps should be None since there are
+        // no signals and no prior reconciled values.
+        assert_eq!(
+            reconciled,
+            state.with_reconciliation(None, None, None)
+        );
+    }
+
+    #[test]
+    fn reconciled_provider_repository_state_with_signals() {
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            Some(10),  // access_changed_at
+            Some(50),  // revision_pushed_at
+            None,
+        );
+        // last_access_changed_at=10 > last_authorization_rechecked_at=None → now
+        // latest_lifecycle_signal_at=max(10,50)=50 > last_drift_checked_at=None → now
+        // last_revision_pushed_at=50 > last_cache_invalidated_at=None → now
+        let reconciled = reconciled_provider_repository_state(&state, 1000);
+        assert_eq!(
+            reconciled.last_cache_invalidated_at_unix_seconds(),
+            Some(1000)
+        );
+        assert_eq!(
+            reconciled.last_authorization_rechecked_at_unix_seconds(),
+            Some(1000)
+        );
+        assert_eq!(reconciled.last_drift_checked_at_unix_seconds(), Some(1000));
+    }
+
+    #[test]
+    fn reconciled_provider_repository_state_preserves_existing_good_timestamps() {
+        // If reconciled_at already >= signal_at, keep it
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            Some(10),  // access_changed_at
+            Some(5),   // revision_pushed_at
+            None,
+        );
+        // Use with_reconciliation to set prior reconciled values that are
+        // already after the signal.
+        let state = state.with_reconciliation(Some(20), Some(15), Some(25));
+        let reconciled = reconciled_provider_repository_state(&state, 1000);
+        assert_eq!(reconciled.last_cache_invalidated_at_unix_seconds(), Some(20));
+        assert_eq!(
+            reconciled.last_authorization_rechecked_at_unix_seconds(),
+            Some(15)
+        );
+        assert_eq!(reconciled.last_drift_checked_at_unix_seconds(), Some(25));
     }
 }

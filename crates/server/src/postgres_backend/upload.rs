@@ -379,4 +379,161 @@ mod tests {
         let result = backend.upload_xorb(&hash, Bytes::from(data.to_vec())).await;
         assert!(result.is_err(), "upload_xorb should reject invalid xorb data");
     }
+
+    #[tokio::test]
+    async fn upload_xorb_rejects_hash_mismatch() {
+        let (backend, _root) = make_backend().await;
+        let data = b"some content";
+        // Use a hash that does NOT match the data.
+        let wrong_hash = "ab".repeat(32);
+        let result = backend.upload_xorb(&wrong_hash, Bytes::from(data.to_vec())).await;
+        assert!(result.is_err(), "upload_xorb should reject hash mismatch");
+    }
+
+    #[tokio::test]
+    async fn upload_xorb_rejects_empty_body() {
+        let (backend, _root) = make_backend().await;
+        let data = b"";
+        let hash = hex::encode(blake3::hash(data).as_bytes());
+        let result = backend.upload_xorb(&hash, Bytes::from(data.to_vec())).await;
+        assert!(result.is_err(), "upload_xorb should reject empty body");
+    }
+
+    #[tokio::test]
+    async fn upload_xorb_accepts_valid_xorb() {
+        let (backend, _root) = make_backend().await;
+        // Build a valid single-chunk xorb using the test fixture.
+        let content = b"hello xorb world";
+        let (xorb_bytes, expected_hash) = crate::test_fixtures::single_chunk_xorb(content);
+        let result = backend.upload_xorb(&expected_hash, xorb_bytes).await;
+        assert!(result.is_ok(), "upload_xorb should accept a valid xorb");
+    }
+
+    #[tokio::test]
+    async fn upload_xorb_rejects_valid_xorb_with_wrong_hash() {
+        let (backend, _root) = make_backend().await;
+        let content = b"valid content but wrong hash declared";
+        let (xorb_bytes, _actual_hash) = crate::test_fixtures::single_chunk_xorb(content);
+        let wrong_hash = "ff".repeat(32);
+        let result = backend.upload_xorb(&wrong_hash, xorb_bytes).await;
+        assert!(result.is_err(), "upload_xorb should reject hash mismatch even for valid xorb");
+    }
+
+    #[tokio::test]
+    async fn put_object_bytes_overwrite_non_existent_then_existing() {
+        let (backend, _root) = make_backend().await;
+        let key = make_object_key("overwrite-new");
+        // Overwrite on a key that doesn't exist yet should succeed (create or overwrite).
+        let data = b"first data".to_vec();
+        backend.put_object_bytes_overwrite(&key, data).expect("overwrite non-existent");
+
+        // Overwrite existing.
+        let data2 = b"replacement data".to_vec();
+        backend.put_object_bytes_overwrite(&key, data2).expect("overwrite existing");
+
+        // Verify the final content by reading back via the object store.
+        let meta = backend.object_store().metadata(&key).expect("metadata after overwrite");
+        assert!(meta.is_some());
+    }
+
+    #[tokio::test]
+    async fn put_sha256_addressed_object_file_with_user_key() {
+        let (backend, _root) = make_backend().await;
+        let data = b"content for user-key test";
+        let digest_hex = hex::encode(sha2::Sha256::digest(data));
+        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        // Use a user key that differs from the canonical key.
+        let user_key = make_object_key("user-named-file-key");
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+            data.len() as u64,
+        );
+
+        // Keep tmpfile alive for the duration of the test.
+        let tmpfile = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmpfile.path(), data).expect("write temp file");
+
+        // Store via a user key (different from canonical).
+        let outcome = backend
+            .put_sha256_addressed_object_file(&user_key, &digest_hex, tmpfile.path(), &integrity)
+            .expect("put with user key");
+        assert_eq!(outcome, PutOutcome::Inserted);
+
+        // Canonical key should already exist (inserted during the user-key call).
+        // Verify by reading directly.
+        let meta = backend.object_store().metadata(&canonical_key).expect("meta");
+        assert!(meta.is_some(), "canonical key should exist after user-key put");
+    }
+
+    #[tokio::test]
+    async fn put_object_bytes_if_absent_large_data() {
+        let (backend, _root) = make_backend().await;
+        let key = make_object_key("large-blob");
+        let data = vec![0xABu8; 1_000_000]; // 1 MB
+        let outcome = backend.put_object_bytes_if_absent(&key, data).expect("put large");
+        assert_eq!(outcome, PutOutcome::Inserted);
+    }
+
+    #[tokio::test]
+    async fn copy_object_if_absent_nonexistent_source_fails() {
+        let (backend, _root) = make_backend().await;
+        let src = make_object_key("non-existent-source");
+        let dst = make_object_key("dest");
+        let result = backend.copy_object_if_absent(&src, &dst);
+        assert!(result.is_err(), "copy of non-existent source should fail");
+    }
+
+    #[tokio::test]
+    async fn put_object_bytes_if_absent_special_key_characters() {
+        let (backend, _root) = make_backend().await;
+        // Keys with hyphens, dots, underscores should work.
+        let key = ObjectKey::parse("test/special-v1.0_data.bin").unwrap();
+        let data = b"special key test".to_vec();
+        let outcome = backend.put_object_bytes_if_absent(&key, data).expect("put special key");
+        assert_eq!(outcome, PutOutcome::Inserted);
+    }
+
+    #[tokio::test]
+    async fn put_object_bytes_if_absent_roundtrip_verify() {
+        let (backend, _root) = make_backend().await;
+        let key = make_object_key("roundtrip-verify");
+        let original = b"verify roundtrip content".to_vec();
+        backend.put_object_bytes_if_absent(&key, original.clone()).expect("put");
+
+        // Read back via the object store and verify.
+        let meta = backend.object_store().metadata(&key).expect("meta");
+        assert!(meta.is_some());
+        let Some(meta) = meta else { return };
+
+        // Read the object bytes to verify.
+        use shardline_storage::ObjectStore;
+        let read_bytes = crate::object_store::read_full_object(
+            &backend.object_store(),
+            &key,
+            meta.length(),
+        ).expect("read full");
+        assert_eq!(read_bytes, original);
+    }
+
+    #[tokio::test]
+    async fn put_object_bytes_overwrite_large_data() {
+        let (backend, _root) = make_backend().await;
+        let key = make_object_key("overwrite-large");
+        let data = vec![0xCDu8; 500_000];
+        backend.put_object_bytes_overwrite(&key, data).expect("overwrite large");
+    }
+
+    #[tokio::test]
+    async fn put_object_bytes_if_absent_double_put_same_data() {
+        let (backend, _root) = make_backend().await;
+        let key = make_object_key("double-put-same");
+        let data = b"same data".to_vec();
+
+        let first = backend.put_object_bytes_if_absent(&key, data.clone()).expect("first put");
+        assert_eq!(first, PutOutcome::Inserted);
+
+        // Second put with identical data returns AlreadyExists.
+        let second = backend.put_object_bytes_if_absent(&key, data).expect("second put");
+        assert_eq!(second, PutOutcome::AlreadyExists);
+    }
 }

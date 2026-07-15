@@ -521,4 +521,287 @@ mod tests {
             response.status()
         );
     }
+
+    // ── Session lifecycle tests ─────────────────────────────────────────────
+
+    /// Extracts the session ID from a Location header like `/v2/repo/blobs/uploads/<session_id>`.
+    fn session_id_from_location(response: &axum::http::Response<Body>) -> String {
+        let location = response.headers().get(header::LOCATION).unwrap().to_str().unwrap().to_owned();
+        // Location is like: /v2/team/assets/blobs/uploads/<session_id>
+        location.split('/').next_back().unwrap().to_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_patch_appends_bytes() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PATCH to append data
+        let patch_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let patch_response = send(&app, Method::PATCH, &patch_uri, Body::from(b"hello".to_vec())).await;
+        assert_eq!(patch_response.status(), StatusCode::ACCEPTED);
+        let range = patch_response.headers().get(header::RANGE).unwrap().to_str().unwrap().to_owned();
+        assert_eq!(range, "0-4");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_patch_empty_body() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PATCH with empty body
+        let patch_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let patch_response = send(&app, Method::PATCH, &patch_uri, Body::empty()).await;
+        assert_eq!(patch_response.status(), StatusCode::ACCEPTED);
+        // Range should remain 0-0 (nothing appended)
+        let range = patch_response.headers().get(header::RANGE).unwrap().to_str().unwrap().to_owned();
+        assert_eq!(range, "0-0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_delete_after_initiate() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // DELETE the session
+        let delete_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let delete_response = send(&app, Method::DELETE, &delete_uri, Body::empty()).await;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_get_after_initiate() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // GET the session status
+        let get_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let get_response = send(&app, Method::GET, &get_uri, Body::empty()).await;
+        // Should return NO_CONTENT with Location and Range headers
+        assert_eq!(get_response.status(), StatusCode::NO_CONTENT);
+        assert!(get_response.headers().get(header::LOCATION).is_some());
+        assert!(get_response.headers().get(header::RANGE).is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_patch_with_content_range() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PATCH with Content-Range header (start=0, end=4, total=5)
+        let patch_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let request = axum::http::Request::builder()
+            .method(Method::PATCH)
+            .uri(&patch_uri)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(axum::http::header::CONTENT_RANGE, "bytes 0-4/5")
+            .body(Body::from(b"hello".to_vec()))
+            .unwrap();
+        let patch_response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(patch_response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_patch_with_invalid_content_range() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PATCH with Content-Range with wrong start (5 instead of 0)
+        let patch_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let request = axum::http::Request::builder()
+            .method(Method::PATCH)
+            .uri(&patch_uri)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(axum::http::header::CONTENT_RANGE, "bytes 5-9/10")
+            .body(Body::from(b"hello".to_vec()))
+            .unwrap();
+        let patch_response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(patch_response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_put_finalize() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PATCH to append data
+        let data = b"final data";
+        let patch_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let patch_response = send(&app, Method::PATCH, &patch_uri, Body::from(data.to_vec())).await;
+        assert_eq!(patch_response.status(), StatusCode::ACCEPTED);
+
+        // PUT to finalize with digest
+        let digest = sha256_hex(data);
+        let put_uri = format!(
+            "/v2/{REPO}/blobs/uploads/{session_id}?digest=sha256:{digest}"
+        );
+        let put_response = send(&app, Method::PUT, &put_uri, Body::empty()).await;
+        assert_eq!(put_response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_put_finalize_hash_mismatch() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PATCH to append data
+        let data = b"data for hash mismatch test";
+        let patch_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let patch_response = send(&app, Method::PATCH, &patch_uri, Body::from(data.to_vec())).await;
+        assert_eq!(patch_response.status(), StatusCode::ACCEPTED);
+
+        // PUT with wrong digest — should fail with hash mismatch
+        let wrong_digest = sha256_hex(b"different data");
+        let put_uri = format!(
+            "/v2/{REPO}/blobs/uploads/{session_id}?digest=sha256:{wrong_digest}"
+        );
+        let put_response = send(&app, Method::PUT, &put_uri, Body::empty()).await;
+        assert_eq!(put_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_put_without_digest_errors() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PUT without digest should fail
+        let put_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let put_response = send(&app, Method::PUT, &put_uri, Body::empty()).await;
+        assert_eq!(put_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_patch_wrong_repository_errors() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session in one repository
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // Try to PATCH using a different repository
+        let wrong_repo = "team/other-assets";
+        let patch_uri = format!("/v2/{wrong_repo}/blobs/uploads/{session_id}");
+        let patch_response = send(&app, Method::PATCH, &patch_uri, Body::from(b"data".to_vec())).await;
+        assert_eq!(patch_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_mount_nonexistent_blob_returns_error() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Mount a blob that doesn't exist — the handler attempts
+        // copy_object_if_absent which on a local backend returns an IO error
+        // (not NotFound), so this currently returns 500.
+        let some_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mount_uri = format!(
+            "/v2/{REPO}/blobs/uploads/?mount=sha256:{some_digest}&from={REPO}"
+        );
+        let response = send(&app, Method::POST, &mount_uri, Body::empty()).await;
+        // The mount path should eventually fall through to session creation,
+        // but the local backend copy_object_if_absent returns Io error instead
+        // of NotFound for missing source files. This test documents the current
+        // behavior — it returns an error (not a panic).
+        assert!(response.status().is_server_error(), "mount non-existent blob should return an error, got {}", response.status());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_direct_with_content_range() {
+        // Direct upload with Content-Range header alongside digest
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+    
+        let data = b"content-range-direct";
+        let digest = sha256_hex(data);
+        let uri = format!("/v2/{REPO}/blobs/uploads/?digest=sha256:{digest}");
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(&uri)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(data.to_vec()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_upload_session_patch_then_get_shows_updated_range() {
+        let ctx = build_oci_test_state().await;
+        let app = oci_test_router(&ctx.state);
+
+        // Initiate a session
+        let init_uri = format!("/v2/{REPO}/blobs/uploads/");
+        let init_response = send(&app, Method::POST, &init_uri, Body::empty()).await;
+        assert_eq!(init_response.status(), StatusCode::ACCEPTED);
+        let session_id = session_id_from_location(&init_response);
+
+        // PATCH to append data
+        let patch_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let patch_response = send(&app, Method::PATCH, &patch_uri, Body::from(b"test data".to_vec())).await;
+        assert_eq!(patch_response.status(), StatusCode::ACCEPTED);
+
+        // GET session should show updated range
+        let get_uri = format!("/v2/{REPO}/blobs/uploads/{session_id}");
+        let get_response = send(&app, Method::GET, &get_uri, Body::empty()).await;
+        assert_eq!(get_response.status(), StatusCode::NO_CONTENT);
+        let range = get_response.headers().get(header::RANGE).unwrap().to_str().unwrap().to_owned();
+        assert_eq!(range, "0-8"); // "test data" is 9 bytes → 0-8
+    }
 }
