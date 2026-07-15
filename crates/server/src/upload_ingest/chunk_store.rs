@@ -333,6 +333,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_store_shared_variant_inserts_and_round_trips() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+        let data = b"local shared content";
+        let chunk = ChunkBuffer::Shared(Bytes::from_static(data));
+        let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
+        assert!(outcome.inserted);
+        assert_eq!(outcome.chunk_length, data.len() as u64);
+
+        // Verify the object exists in the store
+        let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
+        assert!(store.contains(&object_key).unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_store_shared_variant_dedup_returns_not_inserted() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+        let chunk1 = ChunkBuffer::Shared(Bytes::from_static(b"shared dedup"));
+        let outcome1 = put_if_absent_chunk_buffer(&store, chunk1).await.unwrap();
+        assert!(outcome1.inserted);
+
+        let chunk2 = ChunkBuffer::Shared(Bytes::from_static(b"shared dedup"));
+        let outcome2 = put_if_absent_chunk_buffer(&store, chunk2).await.unwrap();
+        assert!(!outcome2.inserted);
+        assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
+    }
+
+    #[tokio::test]
     async fn local_store_different_chunks_store_separately() {
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
@@ -414,5 +443,50 @@ mod tests {
         let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // put_if_absent_pooled_chunk_buffer — Shared variant rejection
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pooled_chunk_buffer_rejects_shared_input() {
+        let store = ServerObjectStore::blackhole();
+        let chunk = ChunkBuffer::Shared(Bytes::from_static(b"shared data"));
+        let result = put_if_absent_pooled_chunk_buffer(&store, chunk).await;
+        assert!(
+            matches!(result, Err(crate::ServerError::Overflow)),
+            "expected Overflow when passing Shared chunk to pooled function"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // put_if_absent_chunk_buffer with Blackhole store — Shared variant
+    // via the shared_bytes path
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn blackhole_shared_same_hash_inserted_returns_true() {
+        let store = ServerObjectStore::blackhole();
+        let chunk1 = ChunkBuffer::Shared(Bytes::from_static(b"shared dedup data"));
+        let outcome1 = put_if_absent_chunk_buffer(&store, chunk1).await.unwrap();
+        let chunk2 = ChunkBuffer::Shared(Bytes::from_static(b"shared dedup data"));
+        let outcome2 = put_if_absent_chunk_buffer(&store, chunk2).await.unwrap();
+        // Blackhole always returns Inserted
+        assert!(outcome1.inserted);
+        assert!(outcome2.inserted);
+        assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
+    }
+
+    // ------------------------------------------------------------------
+    // ChunkBuffer length via chunk_object_key_and_integrity edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn zero_length_chunk_produces_valid_key() {
+        let chunk = ChunkBuffer::Pooled(Bytes::new());
+        let request = chunk_object_key_and_integrity(&chunk).unwrap();
+        assert_eq!(request.chunk_length, 0);
+        assert!(!request.hash_hex.is_empty());
     }
 }

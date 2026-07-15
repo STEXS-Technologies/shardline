@@ -1168,4 +1168,45 @@ mod tests {
             Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
         ));
     }
+
+    // ── read_open_local_object_append IO error on read_to_end ───────────
+
+    #[test]
+    fn read_open_local_object_append_returns_io_error_on_read_failure() {
+        // On Linux/macOS, opening a directory for reading succeeds but
+        // reading from the resulting fd returns EISDIR, which becomes an
+        // Io error (not UnexpectedEof). This exercises the generic IO
+        // error branch at line 225.
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let dir_file = std::fs::File::open(&dir_path).unwrap();
+        let meta_len = dir_file.metadata().unwrap().len();
+
+        if meta_len == 0 {
+            // Filesystems that report directory length 0 can't hit the
+            // IO error path through this mechanism (Take with limit 0
+            // returns Ok(0) without reading). Skip.
+            return;
+        }
+
+        let mut output = Vec::new();
+        let result = read_open_local_object_append(&dir_path, dir_file, meta_len, &mut output);
+        assert!(
+            matches!(result, Err(crate::ServerError::Io(_))),
+            "expected Io error when reading from a directory fd, got {result:?}"
+        );
+    }
+
+    // ── reconstruct_chunk_file_bytes: non-local output.len() != capacity ─
+
+    // This path is unreachable without an S3-like store that returns data
+    // for read_full_object — blackhole returns NotFound before the capacity
+    // check.  S3 testing requires external infrastructure.
+
+    // ── reconstruct_referenced_object_file_bytes: term_end mismatch ──────
+
+    // The term_end and capacity checks in
+    // reconstruct_referenced_object_file_bytes require a functioning Xet
+    // frontend with a valid serialised xorb in the store.  Integration
+    // tests with real xorb data belong in the lifecycle_repair module.
 }

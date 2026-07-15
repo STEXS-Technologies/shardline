@@ -656,4 +656,82 @@ mod tests {
             "expected 5 timestamp issues (for all 5 fields), got: {report:?}"
         );
     }
+
+    // ── Retention hold with active hold and existing object is clean ────
+
+    #[tokio::test]
+    async fn retention_hold_active_with_existing_object_clean() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+        let obj_key = make_key("ab/1234");
+
+        // Create the object on disk
+        let object_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_path, b"some data").unwrap();
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        // Valid retention hold with release_after > held_at
+        let hold = shardline_index::RetentionHold::new(
+            obj_key.clone(),
+            "operator hold".to_owned(),
+            100,
+            Some(200),
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&index_store, &hold).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(&index_store, &object_root, &object_store, &reach, &mut report)
+            .await
+            .unwrap();
+        // Active hold with existing object and not quarantined → clean
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
+
+    // ── Retention hold with permanent hold (no release_after) is active ──
+
+    #[tokio::test]
+    async fn retention_hold_permanent_without_release_is_active() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+        let obj_key = make_key("ab/5678");
+
+        // Create the object on disk
+        let object_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_path, b"permanent data").unwrap();
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        // Permanent hold: no release_after → always active
+        let hold = shardline_index::RetentionHold::new(
+            obj_key.clone(),
+            "permanent hold".to_owned(),
+            100,
+            None,
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&index_store, &hold).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(&index_store, &object_root, &object_store, &reach, &mut report)
+            .await
+            .unwrap();
+        // Permanent hold with existing object → clean
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
 }
