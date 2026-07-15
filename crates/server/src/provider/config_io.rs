@@ -153,3 +153,131 @@ pub(super) fn set_before_provider_config_read_hook(
         hook: Box::new(hook),
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+    use crate::provider::ProviderConfigDocument;
+
+    #[test]
+    fn ensure_provider_config_size_within_limit_accepts_zero() {
+        assert!(ensure_provider_config_size_within_limit(0).is_ok());
+    }
+
+    #[test]
+    fn ensure_provider_config_size_within_limit_accepts_max() {
+        assert!(ensure_provider_config_size_within_limit(MAX_PROVIDER_CONFIG_BYTES).is_ok());
+    }
+
+    #[test]
+    fn ensure_provider_config_size_within_limit_rejects_excess() {
+        let result = ensure_provider_config_size_within_limit(MAX_PROVIDER_CONFIG_BYTES + 1);
+        assert!(matches!(
+            result,
+            Err(ProviderServiceError::ConfigTooLarge {
+                maximum_bytes: MAX_PROVIDER_CONFIG_BYTES,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn read_provider_config_bytes_returns_content() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(b"{\"providers\":[]}")
+            .expect("write content");
+        let bytes = read_provider_config_bytes(file.path()).expect("read config");
+        assert_eq!(bytes, b"{\"providers\":[]}");
+    }
+
+    #[test]
+    fn read_provider_config_bytes_rejects_oversized() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        // Write exactly one byte over the limit by truncating.
+        file.as_file_mut()
+            .set_len(MAX_PROVIDER_CONFIG_BYTES + 1)
+            .expect("set len");
+        let result = read_provider_config_bytes(file.path());
+        assert!(matches!(
+            result,
+            Err(ProviderServiceError::ConfigTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn read_provider_config_bytes_rejects_nonexistent_path() {
+        let path = std::path::Path::new("/nonexistent/path/providers.json");
+        let result = read_provider_config_bytes(path);
+        assert!(matches!(result, Err(ProviderServiceError::Io(_))));
+    }
+
+    #[test]
+    fn parse_provider_config_document_parses_valid_json() {
+        let mut bytes = br#"{"providers":[]}"#.to_vec();
+        let doc = parse_provider_config_document(&mut bytes);
+        assert!(doc.is_ok());
+        let ProviderConfigDocument { providers } = doc.unwrap();
+        assert!(providers.is_empty());
+    }
+
+    #[test]
+    fn parse_provider_config_document_zeroizes_buffer_after_success() {
+        let mut bytes = br#"{"providers":[]}"#.to_vec();
+        let _doc = parse_provider_config_document(&mut bytes);
+        assert!(bytes.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn parse_provider_config_document_zeroizes_buffer_after_failure() {
+        let mut bytes = b"invalid json".to_vec();
+        let doc = parse_provider_config_document(&mut bytes);
+        assert!(doc.is_err());
+        assert!(bytes.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn resolve_provider_config_path_accepts_regular_file() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let resolved = resolve_provider_config_path(file.path()).expect("resolve");
+        assert_eq!(resolved, file.path());
+    }
+
+    #[test]
+    fn resolve_provider_config_path_rejects_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let result = resolve_provider_config_path(dir.path());
+        assert!(matches!(result, Err(ProviderServiceError::Io(_))));
+    }
+
+    #[test]
+    fn read_bounded_provider_config_reads_exact_content() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("config.json");
+        std::fs::write(&file_path, b"hello config").expect("write");
+
+        let mut file = std::fs::File::open(&file_path).expect("open");
+        let metadata_len = file.metadata().expect("metadata").len();
+        assert_eq!(metadata_len, 12, "file should be exactly 12 bytes");
+
+        let bytes = read_bounded_provider_config(&file_path, &mut file, 12)
+            .expect("read bounded");
+        assert_eq!(bytes, b"hello config");
+    }
+
+    #[test]
+    fn read_bounded_provider_config_rejects_mismatched_length() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("config.json");
+        std::fs::write(&file_path, b"hello").expect("write");
+
+        let mut file = std::fs::File::open(&file_path).expect("open");
+        // Claim length 10 but file is only 5 bytes
+        let result = read_bounded_provider_config(&file_path, &mut file, 10);
+        assert!(matches!(
+            result,
+            Err(ProviderServiceError::ConfigLengthMismatch)
+        ));
+    }
+}

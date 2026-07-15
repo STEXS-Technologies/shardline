@@ -15,6 +15,8 @@ use axum::{
     middleware,
     routing::{get, head, post},
 };
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use hmac::Mac;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1098,47 +1100,52 @@ async fn batch_reconstruction_v1_route() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn xet_read_token_without_auth_returns_error() {
-    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+async fn xet_read_token_without_provider_key_returns_unauthorized() {
+    let (app, _tmp, _cfg_dir) =
+        test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
 
-    // Without auth configured, token endpoints should return 401 or 500
+    // Request the xet-read-token route WITHOUT the x-shardline-provider-key header.
+    // The route IS registered when provider tokens are configured, but fails auth.
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/github/team/repo/xet-read-token/main")
+                .uri("/api/github/team/assets/xet-read-token/main")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert!(
-        response.status().is_server_error() || response.status().is_client_error(),
-        "expected error status without auth, got {}",
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "missing provider key should return 401, got {}",
         response.status()
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn xet_write_token_without_auth_returns_error() {
-    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+async fn xet_write_token_without_provider_key_returns_unauthorized() {
+    let (app, _tmp, _cfg_dir) =
+        test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
 
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/github/team/repo/xet-write-token/main")
+                .uri("/api/github/team/assets/xet-write-token/main")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert!(
-        response.status().is_server_error() || response.status().is_client_error(),
-        "expected error status without auth, got {}",
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "missing provider key should return 401, got {}",
         response.status()
     );
 }
@@ -6763,4 +6770,651 @@ async fn metrics_endpoint_returns_200_with_oci() {
         body.contains("shardline_up 1"),
         "metrics should contain shardline_up gauge"
     );
+}
+
+// ============================================================================
+// Hub API E2E Tests — routes with zero coverage before these tests
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// 1. GET /api/{type}/{ns}/{repo}/modelcard → repo_modelcard
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_modelcard_returns_readme_markdown() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a model repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"mc-team/mc-model","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Commit a README.md so the modelcard has something to return
+    let readme_content = b"# Test Model\n\nThis is a test model card.";
+    let content_b64 = STANDARD.encode(readme_content);
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"add readme\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"README.md\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let commit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/mc-team/mc-model/commit/main")
+                .header("content-type", "application/x-ndjson")
+                .body(Body::from(ndjson))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        commit.status(),
+        StatusCode::OK,
+        "commit failed: {}",
+        String::from_utf8_lossy(&body_bytes(commit).await)
+    );
+
+    // GET modelcard — should return the README.md content
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/mc-team/mc-model/modelcard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.contains("text/markdown"),
+        "expected markdown content-type, got {ct}"
+    );
+    let body = body_bytes(resp).await;
+    assert_eq!(body, readme_content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_modelcard_not_found_without_readme() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo but do NOT commit a README.md
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"mc-team/no-readme","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // GET modelcard — no README.md committed → 404
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/mc-team/no-readme/modelcard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// 2. POST /api/{type}/{ns}/{repo}/commit/{rev} → commit
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_commit_creates_new_revision() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"cm-team/cm-model","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Commit an inline file via NDJSON
+    let content_b64 = STANDARD.encode(b"Hello, commit test!");
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"initial commit\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"hello.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/cm-team/cm-model/commit/main")
+                .header("content-type", "application/x-ndjson")
+                .body(Body::from(ndjson))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(
+        json.get("commitId").and_then(|v| v.as_str()).is_some()
+            || json.get("commit_id").and_then(|v| v.as_str()).is_some(),
+        "commit response should contain commit_id: {json}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_commit_rejects_wrong_content_type() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"cm-team/ct-reject","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Send commit with wrong Content-Type → should be rejected
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/cm-team/ct-reject/commit/main")
+                .header("content-type", "text/plain")
+                .body(Body::from("not ndjson"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// 3. GET /{type}/{ns}/{repo}/resolve/{rev}/{*path} → resolve_file
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_resolve_file_returns_inline_content() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"rs-team/rs-model","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Commit a small file
+    let file_content = b"resolve-me-content";
+    let content_b64 = STANDARD.encode(file_content);
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"add file\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"data.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let commit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/rs-team/rs-model/commit/main")
+                .header("content-type", "application/x-ndjson")
+                .body(Body::from(ndjson))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commit.status(), StatusCode::OK);
+
+    // Resolve the file at the resolve endpoint
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/models/rs-team/rs-model/resolve/main/data.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Check headers before consuming body
+    let sha_header = resp
+        .headers()
+        .get("X-Shardline-SHA")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned());
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_bytes(resp).await;
+    assert_eq!(body, file_content);
+    // Should have the SHA header
+    assert!(
+        sha_header.is_some(),
+        "response should have X-Shardline-SHA header"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_resolve_file_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create repo (no files committed)
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"rs-team/rs-empty","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Resolve a non-existent file → 404
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/models/rs-team/rs-empty/resolve/main/nonexistent.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// 4. POST /objects/batch → lfs_batch (Hub API LFS batch)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_lfs_batch_empty_download() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // The Hub API LFS batch request requires a "ref" field with the branch name.
+    let body = serde_json::json!({
+        "operation": "download",
+        "ref": {"name": "main"},
+        "objects": []
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/objects/batch")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["transfer"], "basic");
+    assert!(json["objects"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_lfs_batch_invalid_json() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/objects/batch")
+                .header("content-type", "application/json")
+                .body(Body::from("not valid json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error());
+}
+
+// ---------------------------------------------------------------------------
+// 5. PUT /lfs/objects/{oid} → lfs_upload  (Hub API)
+// 6. GET /lfs/objects/{oid} → lfs_download (Hub API)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_lfs_upload_and_download() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let content = b"hub-lfs-test-content";
+    let oid = test_oid(content);
+
+    // Upload via PUT /lfs/objects/{oid}
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/lfs/objects/{oid}"))
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Download via GET /lfs/objects/{oid}
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/lfs/objects/{oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = body_bytes(get).await;
+    assert_eq!(body, content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_lfs_download_not_found() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let oid = test_oid(b"never-uploaded-hub-lfs");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/lfs/objects/{oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// 7. GET /api/datasets/{ns}/{repo}/parquet → dataset_parquet
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_dataset_parquet_returns_empty_for_fresh_dataset() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a dataset repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"dataset","name":"pq-team/pq-empty","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // GET parquet endpoint — fresh dataset returns empty files list
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/datasets/pq-team/pq-empty/parquet")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let files = json["files"].as_array().unwrap();
+    assert!(files.is_empty(), "fresh dataset should have no parquet files");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_dataset_parquet_rejects_non_dataset() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a model repo (not a dataset)
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"pq-team/pq-model","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // GET dataset parquet endpoint on a model repo → 400 error
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/datasets/pq-team/pq-model/parquet")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// 8. POST /api/{type}/{ns}/{repo}/webhooks → webhook_create
+// 9. GET  /api/{type}/{ns}/{repo}/webhooks → webhook_list
+// 10. DELETE /api/{type}/{ns}/{repo}/webhooks/{webhook_id} → webhook_delete
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_webhooks_create_list_delete() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"wh-team/wh-model","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Step 1: Create a webhook
+    let webhook_url = "https://hooks.example.com/shardline";
+    let create_wh = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/wh-team/wh-model/webhooks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "url": webhook_url,
+                        "events": ["push"],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_wh.status(), StatusCode::CREATED);
+    let wh_json = body_json(create_wh).await;
+    let wh_id = wh_json["id"].as_str().unwrap().to_owned();
+    assert_eq!(wh_json["url"], webhook_url);
+    assert!(wh_json["active"].as_bool().unwrap_or(false));
+
+    // Step 2: List webhooks — should contain the created webhook
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/wh-team/wh-model/webhooks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_json = body_json(list).await;
+    let webhooks = list_json["webhooks"].as_array().unwrap();
+    assert_eq!(webhooks.len(), 1);
+    assert_eq!(webhooks[0]["id"], wh_id);
+    assert_eq!(webhooks[0]["url"], webhook_url);
+
+    // Step 3: Delete the webhook
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/models/wh-team/wh-model/webhooks/{wh_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        delete.status(),
+        StatusCode::NO_CONTENT,
+        "delete webhook should return 204, got {}",
+        delete.status()
+    );
+
+    // Step 4: List webhooks again — should be empty
+    let list2 = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/wh-team/wh-model/webhooks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list2.status(), StatusCode::OK);
+    let list2_json = body_json(list2).await;
+    let webhooks2 = list2_json["webhooks"].as_array().unwrap();
+    assert!(webhooks2.is_empty(), "webhooks should be empty after delete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_webhooks_list_empty_for_repo_without_webhooks() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo without adding any webhooks
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"wh-team/wh-no-hooks","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // List webhooks — should return empty list
+    let list = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/wh-team/wh-no-hooks/webhooks")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let json = body_json(list).await;
+    let webhooks = json["webhooks"].as_array().unwrap();
+    assert!(webhooks.is_empty());
 }

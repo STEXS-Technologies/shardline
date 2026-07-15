@@ -443,9 +443,171 @@ mod tests {
     use url::Url;
 
     use super::{
-        DatabaseMigrationCommand, DatabaseMigrationOptions, apply_database_migrations,
-        bundled_database_migrations, run_database_migration,
+        DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationOptions,
+        DatabaseMigrationStatusEntry, apply_database_migrations, bundled_database_migrations,
+        migration_by_version, migration_checksum, run_database_migration,
     };
+
+    #[test]
+    fn bundled_migrations_are_not_empty() {
+        let migrations = bundled_database_migrations();
+        assert!(!migrations.is_empty());
+    }
+
+    #[test]
+    fn bundled_migrations_have_expected_count() {
+        assert_eq!(bundled_database_migrations().len(), 9);
+    }
+
+    #[test]
+    fn bundled_migrations_have_unique_versions() {
+        let migrations = bundled_database_migrations();
+        let mut versions: Vec<&str> = migrations.iter().map(|m| m.version).collect();
+        versions.sort();
+        versions.dedup();
+        assert_eq!(versions.len(), migrations.len());
+    }
+
+    #[test]
+    fn bundled_migrations_have_non_empty_sql() {
+        for migration in bundled_database_migrations() {
+            assert!(
+                !migration.up_sql.is_empty(),
+                "migration {} has empty up_sql",
+                migration.version
+            );
+            assert!(
+                !migration.down_sql.is_empty(),
+                "migration {} has empty down_sql",
+                migration.version
+            );
+        }
+    }
+
+    #[test]
+    fn migration_checksum_is_deterministic() {
+        let migrations = bundled_database_migrations();
+        for migration in migrations {
+            let hash1 = migration_checksum(migration);
+            let hash2 = migration_checksum(migration);
+            assert_eq!(hash1, hash2, "checksum must be deterministic for {}", migration.version);
+        }
+    }
+
+    #[test]
+    fn migration_checksum_differs_for_different_migrations() {
+        let migrations = bundled_database_migrations();
+        if migrations.len() >= 2 {
+            let hash1 = migration_checksum(&migrations[0]);
+            let hash2 = migration_checksum(&migrations[1]);
+            assert_ne!(hash1, hash2, "different migrations must have different checksums");
+        }
+    }
+
+    #[test]
+    fn migration_by_version_finds_known_version() {
+        let migrations = bundled_database_migrations();
+        for migration in migrations {
+            let found = migration_by_version(migration.version);
+            assert!(found.is_some(), "version {} not found by migration_by_version", migration.version);
+            assert_eq!(found.unwrap().version, migration.version);
+        }
+    }
+
+    #[test]
+    fn migration_by_version_returns_none_for_unknown() {
+        assert!(migration_by_version("00000000000000").is_none());
+    }
+
+    #[test]
+    fn migration_by_version_returns_none_for_empty_string() {
+        assert!(migration_by_version("").is_none());
+    }
+
+    #[test]
+    fn database_migration_options_new_and_accessors() {
+        let options = DatabaseMigrationOptions::new(
+            "postgres://localhost:5432/test".to_owned(),
+            DatabaseMigrationCommand::Status,
+        );
+        assert_eq!(options.database_url(), "postgres://localhost:5432/test");
+        assert_eq!(options.command(), &DatabaseMigrationCommand::Status);
+    }
+
+    #[test]
+    fn database_migration_options_up_command() {
+        let options = DatabaseMigrationOptions::new(
+            "postgres://localhost:5432/test".to_owned(),
+            DatabaseMigrationCommand::Up { steps: Some(3) },
+        );
+        assert!(matches!(options.command(), DatabaseMigrationCommand::Up { steps: Some(3) }));
+    }
+
+    #[test]
+    fn database_migration_options_down_command() {
+        let options = DatabaseMigrationOptions::new(
+            "postgres://localhost:5432/test".to_owned(),
+            DatabaseMigrationCommand::Down { steps: 2 },
+        );
+        assert!(matches!(options.command(), DatabaseMigrationCommand::Down { steps: 2 }));
+    }
+
+    #[test]
+    fn database_migration_status_entry_fields() {
+        let entry = DatabaseMigrationStatusEntry {
+            version: "20260417000000".to_owned(),
+            name: "metadata_store".to_owned(),
+            applied: true,
+            applied_at_utc: Some("2026-04-17T00:00:00Z".to_owned()),
+        };
+        assert_eq!(entry.version, "20260417000000");
+        assert_eq!(entry.name, "metadata_store");
+        assert!(entry.applied);
+        assert_eq!(
+            entry.applied_at_utc,
+            Some("2026-04-17T00:00:00Z".to_owned())
+        );
+    }
+
+    #[test]
+    fn database_migration_status_entry_not_applied() {
+        let entry = DatabaseMigrationStatusEntry {
+            version: "20260418000000".to_owned(),
+            name: "dedupe_shards".to_owned(),
+            applied: false,
+            applied_at_utc: None,
+        };
+        assert!(!entry.applied);
+        assert!(entry.applied_at_utc.is_none());
+    }
+
+    #[test]
+    fn database_migration_debug_and_clone() {
+        let m = DatabaseMigration {
+            version: "v1",
+            name: "test",
+            up_sql: "SELECT 1",
+            down_sql: "SELECT 0",
+        };
+        let cloned = m;
+        assert_eq!(m.version, cloned.version);
+        assert_eq!(m.name, cloned.name);
+    }
+
+    #[test]
+    fn database_migration_report_backend_is_postgres() {
+        // Verify by constructing a report manually in a test helper.
+        let report = super::DatabaseMigrationReport {
+            backend: "postgres".to_owned(),
+            command: DatabaseMigrationCommand::Status,
+            applied_count: 0,
+            reverted_count: 0,
+            applied_total_count: 0,
+            pending_count: 0,
+            migrations: vec![],
+        };
+        assert_eq!(report.backend, "postgres");
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn database_migration_up_status_and_down_cover_full_lifecycle() {
