@@ -224,4 +224,96 @@ mod tests {
         let result = parse_oci_path("team/assets/blobs/uploads/abc123");
         assert!(matches!(result, Ok(OciPath::BlobUploadSession { .. })));
     }
+
+    // ── Additional edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn blob_path_with_trailing_slash_after_blobs_rejects() {
+        // Trimmed to "team/assets/blobs" — no "/blobs/" match (no trailing /),
+        // so it falls through to NotFound.
+        let path = "team/assets/blobs/";
+        let result = parse_oci_path(path);
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[test]
+    fn blob_path_with_missing_sha256_prefix_rejects() {
+        // Digest that doesn't start with "sha256:" is invalid
+        let path = "team/assets/blobs/not-sha256-prefix";
+        let result = parse_oci_path(path);
+        assert!(matches!(result, Err(ServerError::InvalidDigest)));
+    }
+
+    #[test]
+    fn path_with_too_many_segments_still_parses_if_matches_pattern() {
+        // Deep nesting in the repository portion is fine (matches blob pattern)
+        let path = format!("a/b/c/d/e/f/blobs/{VALID_DIGEST}");
+        let result = parse_oci_path(&path);
+        assert!(matches!(
+            result,
+            Ok(OciPath::Blob { repository, .. }) if repository == "a/b/c/d/e/f"
+        ));
+    }
+
+    #[test]
+    fn manifest_without_reference_returns_not_found() {
+        // "/manifests" with nothing after (trailing slash trimmed)
+        let result = parse_oci_path("team/assets/manifests/");
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[test]
+    fn manifest_reference_with_slash_is_valid() {
+        // Slashes in the reference part are accepted as-is.
+        let result = parse_oci_path("team/assets/manifests/v1/something");
+        assert!(matches!(
+            result,
+            Ok(OciPath::Manifest { reference, .. }) if reference == "v1/something"
+        ));
+    }
+
+    #[test]
+    fn blob_session_with_extra_trailing_slash() {
+        // Trailing slash after session ID
+        let result = parse_oci_path("team/assets/blobs/uploads/abc123/");
+        assert!(matches!(
+            result,
+            Ok(OciPath::BlobUploadSession { session_id, .. }) if session_id == "abc123"
+        ));
+    }
+
+    #[test]
+    fn tags_list_with_repository_having_hyphens_and_dots() {
+        // Repository names commonly contain hyphens and dots.
+        let result = parse_oci_path("my-team/my-repo.v2/tags/list");
+        assert!(matches!(
+            result,
+            Ok(OciPath::TagsList { repository }) if repository == "my-team/my-repo.v2"
+        ));
+    }
+
+    #[test]
+    fn repository_with_underscores_accepted() {
+        let result = parse_oci_path("team/my_repo/tags/list");
+        assert!(matches!(
+            result,
+            Ok(OciPath::TagsList { repository }) if repository == "team/my_repo"
+        ));
+    }
+
+    #[test]
+    fn repository_with_numbers_accepted() {
+        let result = parse_oci_path("team2/project3/blobs/uploads");
+        assert!(matches!(
+            result,
+            Ok(OciPath::BlobUploads { repository }) if repository == "team2/project3"
+        ));
+    }
+
+    #[test]
+    fn path_dot_segment_rejected() {
+        // Directories like "." or ".." are not valid in repository names
+        let result = parse_oci_path("team/./assets/tags/list");
+        assert!(matches!(result, Err(ServerError::InvalidRepositoryName)));
+    }
 }

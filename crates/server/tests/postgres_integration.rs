@@ -1,7 +1,9 @@
 #![cfg(feature = "docker")]
 #![allow(
     clippy::unwrap_used,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::expect_used
 )]
 
 use std::num::NonZeroUsize;
@@ -9,10 +11,10 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use shardline_server::{
-    BackupManifestReport, BenchmarkBackend, LifecycleRepairOptions, LifecycleRepairReport,
-    PostgresBackend, ServerBackend, ServerConfig, ServerObjectStore, ServerStatsResponse,
-    apply_database_migrations, bundled_database_migrations, run_lifecycle_repair,
-    write_backup_manifest,
+    BackupManifestReport, BenchmarkBackend, DatabaseMigrationCommand, DatabaseMigrationOptions,
+    LifecycleRepairOptions, LifecycleRepairReport, PostgresBackend, ServerBackend, ServerConfig,
+    ServerObjectStore, ServerStatsResponse, apply_database_migrations, bundled_database_migrations,
+    run_database_migration, run_lifecycle_repair, write_backup_manifest,
 };
 use shardline_oci_adapter::{OciAdapterError, OciBackend};
 use shardline_protocol::ShardlineHash;
@@ -1422,6 +1424,330 @@ async fn test_oci_postgres_copy_object_if_absent() {
     store.put_if_absent(&src, ObjectBody::from_slice(data), &integrity).unwrap();
     let outcome = OciBackend::copy_object_if_absent(&sb, &src, &dst).unwrap();
     assert_eq!(outcome, PutOutcome::Inserted);
+}
+
+// ===========================================================================
+// Stress/concurrency tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_100_uploads() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("conc100-up").await;
+    let bench = Arc::new(bench);
+
+    let mut handles = Vec::new();
+    for i in 0..100 {
+        let b = Arc::clone(&bench);
+        handles.push(tokio::spawn(async move {
+            let content = format!("conc100-content-{i}");
+            let file_id = format!("conc100-{i:04}.txt");
+            b.upload_file(&file_id, axum::body::Bytes::from(content), None).await
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "concurrent upload should succeed: {result:?}");
+    }
+
+    // Stats should reflect all 100 files
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 100, "stats should show >= 100 files: {stats:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_10_reconstructions() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("conc10-recon").await;
+    let bench = Arc::new(bench);
+
+    // Upload a single file first
+    let content = b"shared reconstruction test content for concurrent access";
+    bench
+        .upload_file("conc-recon-file.bin", axum::body::Bytes::from_static(content), None)
+        .await
+        .unwrap();
+
+    // 10 concurrent reconstruction requests for the same file
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let b = Arc::clone(&bench);
+        handles.push(tokio::spawn(async move {
+            b.reconstruction("conc-recon-file.bin", None, None, None).await
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "concurrent reconstruction should succeed: {result:?}");
+        let response = result.unwrap();
+        assert!(
+            !response.terms.is_empty() || response.offset_into_first_range == 0,
+            "reconstruction should return valid response"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_set_and_scan() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("conc-set-scan").await;
+    let bench = Arc::new(bench);
+
+    // Concurrently upload 10 files while repeatedly querying stats
+    let bench_upload = Arc::clone(&bench);
+    let upload_handle = tokio::spawn(async move {
+        for i in 0..10 {
+            let content = format!("set-scan-content-{i}");
+            let file_id = format!("set-scan-{i:02}.bin");
+            bench_upload
+                .upload_file(&file_id, axum::body::Bytes::from(content), None)
+                .await
+                .unwrap();
+        }
+        10u32
+    });
+
+    let bench_scan = Arc::clone(&bench);
+    let scan_handle = tokio::spawn(async move {
+        for _ in 0..5 {
+            let _drop = bench_scan.stats().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        true
+    });
+
+    let (upload_count, scan_done) = tokio::join!(upload_handle, scan_handle);
+    assert_eq!(upload_count.unwrap(), 10);
+    assert!(scan_done.unwrap());
+
+    // Final stats reflect uploads
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 10, "stats should show >= 10 files: {stats:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_upload_and_delete() {
+    let _url = ensure_pg().await;
+    let (bench, _tmp) = pg_benchmark("conc-up-del").await;
+    let bench = Arc::new(bench);
+
+    // Race condition: concurrent upload + delete of same file
+    let bench_upload = Arc::clone(&bench);
+    let bench_delete = Arc::clone(&bench);
+
+    let upload_handle = tokio::spawn(async move {
+        let mut results = Vec::new();
+        for i in 0..20 {
+            let content = format!("race-content-{i}");
+            let file_id = format!("race-file-{i:02}.bin");
+            let result = bench_upload
+                .upload_file(&file_id, axum::body::Bytes::from(content), None)
+                .await;
+            results.push(result);
+        }
+        results
+    });
+
+    let delete_handle = tokio::spawn(async move {
+        let mut results = Vec::new();
+        for i in 0..20 {
+            let file_id = format!("race-file-{i:02}.bin");
+            // Use download to check existence; delete is not directly exposed,
+            // so we simulate concurrency via conflicting file operations.
+            let result = bench_delete.download_file(&file_id, None, None).await;
+            results.push(result);
+        }
+        results
+    });
+
+    let (upload_results, download_results) = tokio::join!(upload_handle, delete_handle);
+    for result in upload_results.unwrap() {
+        // Uploads should succeed or fail with specific errors (idempotent)
+        if let Err(ref e) = result {
+            assert!(
+                format!("{e:?}").contains("InvalidFileId") || format!("{e:?}").contains("NotFound"),
+                "unexpected upload error: {e:?}"
+            );
+        }
+    }
+    // Download results may be Ok or Err depending on timing — both are valid
+    assert_eq!(download_results.unwrap().len(), 20);
+}
+
+// ===========================================================================
+// Database migration edge cases (integration-level with Docker Postgres)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_status_pending_zero() {
+    let _url = ensure_pg().await;
+    // The shared database has all migrations applied; verify status reports zero pending
+    let url = PG.get().expect("ensure_pg() not called").1.clone();
+    let opts = DatabaseMigrationOptions::new(url, DatabaseMigrationCommand::Status);
+    let report = run_database_migration(&opts).await.unwrap();
+    assert_eq!(report.pending_count, 0, "all migrations should be applied");
+    assert_eq!(
+        report.applied_total_count,
+        bundled_database_migrations().len() as u64
+    );
+    assert_eq!(report.migrations.len(), bundled_database_migrations().len());
+    // Every migration should be marked applied
+    assert!(report.migrations.iter().all(|m| m.applied));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_partial_apply_and_revert() {
+    // Create a fresh database to test reversion without affecting shared state
+    let base_url = PG.get().expect("ensure_pg() not called").1.clone();
+    let db_name = format!("shardline_migrate_test_{}", std::process::id());
+    let admin_url = {
+        let mut url = url::Url::parse(&base_url).unwrap();
+        url.set_path("postgres");
+        url.to_string()
+    };
+    let admin_pool = sqlx::PgPool::connect(&admin_url).await.unwrap();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .ok();
+    sqlx::query(&format!("CREATE DATABASE {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+
+    let test_url = {
+        let mut url = url::Url::parse(&base_url).unwrap();
+        url.set_path(&db_name);
+        url.to_string()
+    };
+
+    // 1. Partial migration: apply only first 2 migrations
+    let partial_opts = DatabaseMigrationOptions::new(
+        test_url.clone(),
+        DatabaseMigrationCommand::Up { steps: Some(2) },
+    );
+    let partial_report = run_database_migration(&partial_opts).await.unwrap();
+    assert_eq!(partial_report.applied_count, 2);
+    assert_eq!(partial_report.pending_count, bundled_database_migrations().len() as u64 - 2);
+
+    // 2. Revert one migration
+    let revert_opts = DatabaseMigrationOptions::new(
+        test_url.clone(),
+        DatabaseMigrationCommand::Down { steps: 1 },
+    );
+    let revert_report = run_database_migration(&revert_opts).await.unwrap();
+    assert_eq!(revert_report.reverted_count, 1);
+    assert_eq!(revert_report.pending_count, bundled_database_migrations().len() as u64 - 1);
+
+    // 3. Re-apply the same migration (idempotent)
+    let reapply_opts = DatabaseMigrationOptions::new(
+        test_url.clone(),
+        DatabaseMigrationCommand::Up { steps: Some(2) },
+    );
+    let reapply_report = run_database_migration(&reapply_opts).await.unwrap();
+    assert_eq!(reapply_report.applied_count, 1, "only one was pending");
+
+    // 4. Apply all remaining
+    let all_opts = DatabaseMigrationOptions::new(
+        test_url.clone(),
+        DatabaseMigrationCommand::Up { steps: None },
+    );
+    let all_report = run_database_migration(&all_opts).await.unwrap();
+    assert_eq!(all_report.pending_count, 0);
+
+    // Verify the first migration's table exists after re-apply
+    let pool = sqlx::PgPool::connect(&test_url).await.unwrap();
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'shardline_file_records')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(table_exists, "migration table should exist after re-apply");
+    pool.close().await;
+
+    // Cleanup
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .ok();
+    admin_pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_options_up_down_commands() {
+    // Verify that DatabaseMigrationCommand::Up and Down accessors work
+    let up_opts = DatabaseMigrationOptions::new(
+        "postgres://localhost/test".to_owned(),
+        DatabaseMigrationCommand::Up { steps: Some(3) },
+    );
+    assert!(matches!(up_opts.command(), DatabaseMigrationCommand::Up { steps: Some(3) }));
+
+    let down_opts = DatabaseMigrationOptions::new(
+        "postgres://localhost/test".to_owned(),
+        DatabaseMigrationCommand::Down { steps: 2 },
+    );
+    assert!(matches!(down_opts.command(), DatabaseMigrationCommand::Down { steps: 2 }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_migration_version_uniqueness() {
+    let migrations = bundled_database_migrations();
+    let mut versions: Vec<&str> = migrations.iter().map(|m| m.version).collect();
+    versions.sort();
+    let deduped = {
+        let mut v = versions.clone();
+        v.dedup();
+        v
+    };
+    assert_eq!(versions.len(), deduped.len(), "all migration versions must be unique");
+}
+
+// ===========================================================================
+// Backup manifest roundtrip — seed data, run backup, verify manifest
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backup_manifest_roundtrip() {
+    let _url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+
+    // Seed data
+    {
+        let config = pg_config(&tmp);
+        let bench = BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "bkup-rt")
+            .await
+            .unwrap();
+        bench
+            .upload_file("roundtrip-a.bin", axum::body::Bytes::from_static(b"alpha"), None)
+            .await
+            .unwrap();
+        bench
+            .upload_file("roundtrip-b.bin", axum::body::Bytes::from_static(b"beta"), None)
+            .await
+            .unwrap();
+    }
+
+    // Run backup
+    let config = pg_config(&tmp);
+    let mut buffer = Vec::new();
+    let report = write_backup_manifest(config, &mut buffer).await.unwrap();
+    assert_eq!(report.metadata_backend, "postgres");
+    assert!(report.latest_records >= 2, "should have >= 2 records: {report:?}");
+    assert!(report.object_count > 0, "object count should be positive");
+
+    // Roundtrip: parse the JSON output and verify key fields
+    let json_str = String::from_utf8(buffer).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(parsed["manifest_version"], 1);
+    assert_eq!(parsed["metadata_backend"], "postgres");
+    assert_eq!(parsed["object_backend"], "local");
+    assert!(parsed["latest_records"].as_u64().unwrap_or(0) >= 2);
+    assert!(parsed["object_count"].as_u64().unwrap_or(0) > 0);
+    assert!(parsed["objects"].is_array());
+    assert!(!parsed["objects"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

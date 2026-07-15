@@ -12,7 +12,7 @@
 )]
 
 use std::{
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
@@ -154,6 +154,129 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TestServerBuilder — configurable test server for role-split / provider tests
+// ---------------------------------------------------------------------------
+
+struct TestServerBuilder {
+    frontends: Vec<ServerFrontend>,
+    role: ServerRole,
+    provider_config: Option<(TempDir, std::path::PathBuf)>,
+}
+
+impl TestServerBuilder {
+    fn new(frontends: &[ServerFrontend]) -> Self {
+        Self {
+            frontends: frontends.to_vec(),
+            role: ServerRole::All,
+            provider_config: None,
+        }
+    }
+
+    fn with_provider(mut self) -> Self {
+        // Create a temporary provider config file
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("providers.json");
+        let provider_config = serde_json::json!({
+            "providers": [{
+                "kind": "generic",
+                "integration_subject": "test-app",
+                "webhook_secret": "test-secret",
+                "repositories": [{
+                    "owner": "test",
+                    "name": "test",
+                    "visibility": "private",
+                    "default_revision": "main",
+                    "clone_url": "https://example.com/test/test.git",
+                    "read_subjects": ["test-user"],
+                    "write_subjects": ["test-user"]
+                }]
+            }]
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&provider_config).unwrap()).unwrap();
+        self.provider_config = Some((tmp, config_path));
+        self
+    }
+
+    async fn start(&mut self) -> TestServer {
+        let pg_url = ensure_pg().await;
+        let tmp = TempDir::new().unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
+
+        let mut config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        )
+        .with_server_role(self.role)
+        .with_server_frontends(self.frontends.clone())
+        .unwrap()
+        .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+        .unwrap()
+        .with_index_postgres_url(pg_url.to_owned())
+        .unwrap()
+        .with_reconstruction_cache_disabled();
+
+        if let Some((_provider_tmp, config_path)) = self.provider_config.as_ref() {
+            config = config
+                .with_provider_runtime(
+                    config_path.clone(),
+                    b"test-api-key".to_vec(),
+                    "test-issuer".to_owned(),
+                    NonZeroU64::new(3600).unwrap(),
+                )
+                .unwrap();
+        }
+
+        config.validate_runtime_requirements().unwrap();
+
+        let app = app::router(config).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    shutdown_rx.await.ok();
+                })
+                .await
+                .ok();
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Mint a bearer token with full scope.
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "test",
+            "test",
+            Some("main"),
+        )
+        .unwrap();
+        let claims = TokenClaims::new(
+            "shardline",
+            "test",
+            TokenScope::Write,
+            repo,
+            u64::MAX,
+        )
+        .unwrap();
+        let token = provider.mint_token(&claims).unwrap();
+
+        TestServer {
+            shutdown: Some(shutdown_tx),
+            base_url,
+            token,
+            _tmp: tmp,
         }
     }
 }
@@ -932,6 +1055,820 @@ async fn test_lfs_patch_object() {
     assert_eq!(get_resp.status(), 200);
     let body = get_resp.bytes().await.unwrap();
     assert_eq!(body.as_ref(), full_content.as_slice());
+}
+
+// ===========================================================================
+// 17. Provider token tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_provider_issue_token_with_valid_key() {
+    let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet, ServerFrontend::Oci])
+        .with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(server.url("/v1/providers/generic/tokens"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "subject": "test-user",
+            "owner": "test",
+            "repo": "test",
+            "revision": null,
+            "scope": "Read"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    assert_eq!(status, 200, "token issue failed: body={}", body_text);
+    let json: serde_json::Value = serde_json::from_str(&body_text).unwrap();
+    assert!(!json["token"].as_str().unwrap().is_empty());
+    assert_eq!(json["owner"], "test");
+    assert_eq!(json["repo"], "test");
+    assert_eq!(json["scope"], "Read");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_provider_issue_token_without_api_key_returns_401() {
+    let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet])
+        .with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(server.url("/v1/providers/generic/tokens"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "subject": "test-user",
+            "owner": "test",
+            "repo": "test",
+            "revision": null,
+            "scope": "Read"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_provider_issue_token_with_invalid_key_returns_403() {
+    let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet])
+        .with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(server.url("/v1/providers/generic/tokens"))
+        .header("x-shardline-provider-key", "wrong-key")
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "subject": "test-user",
+            "owner": "test",
+            "repo": "test",
+            "revision": null,
+            "scope": "Read"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_provider_git_lfs_authenticate() {
+    let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet, ServerFrontend::Oci])
+        .with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(server.url("/v1/providers/generic/git-lfs-authenticate"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "subject": "test-user",
+            "owner": "test",
+            "repo": "test",
+            "revision": null,
+            "scope": "Read"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(!json["href"].as_str().unwrap().is_empty());
+    assert!(!json["header"]["X-Xet-Access-Token"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_provider_xet_read_token() {
+    let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet])
+        .with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(server.url("/api/generic/test/test/xet-read-token/main?subject=test-user"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(!json["accessToken"].as_str().unwrap().is_empty());
+    assert!(!json["casUrl"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_provider_xet_write_token() {
+    let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet])
+        .with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(server.url("/api/generic/test/test/xet-write-token/main?subject=test-user"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(!json["accessToken"].as_str().unwrap().is_empty());
+    assert!(!json["casUrl"].as_str().unwrap().is_empty());
+}
+
+// ===========================================================================
+// 18. Role-split tests (OCI)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_role_api_serves_manifest_but_not_blob_upload() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::Api)
+    .with_server_frontends([ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic, "test", "test", Some("main"),
+        ).unwrap();
+        let claims = TokenClaims::new(
+            "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+        ).unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+
+    let repo = "test/test";
+    let content = b"role-api-blob";
+    let digest = sha256_hex(content);
+
+    // Manifest endpoint should work (served by API role)
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/manifests/nonexistent"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    // 404 because manifest doesn't exist — but the route should be accessible
+    assert!(resp.status() == 404, "API role should route manifest GET, got {}", resp.status());
+
+    // Blob upload POST should return 404 (not served by API role)
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 404, "API role should NOT serve blob upload, got {}", resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_role_transfer_serves_blob_upload_but_not_manifest() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::Transfer)
+    .with_server_frontends([ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic, "test", "test", Some("main"),
+        ).unwrap();
+        let claims = TokenClaims::new(
+            "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+        ).unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+
+    let repo = "test/test";
+    let content = b"role-transfer-blob";
+    let digest = sha256_hex(content);
+
+    // Blob upload POST should work (served by transfer role)
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 201, "Transfer role should serve blob upload, got {}", resp.status());
+
+    // Manifest GET should return 404 (not served by transfer role)
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/manifests/nonexistent"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 404, "Transfer role should NOT serve manifest GET, got {}", resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_role_all_serves_both() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic, "test", "test", Some("main"),
+        ).unwrap();
+        let claims = TokenClaims::new(
+            "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+        ).unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+
+    let repo = "test/test";
+    let content = b"role-all-blob";
+    let digest = sha256_hex(content);
+
+    // Blob upload should work
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 201, "All role should serve blob upload, got {}", resp.status());
+
+    // Manifest GET should also be routable (return 404 because not found)
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/manifests/nonexistent"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 404, "All role should route manifest GET, got {}", resp.status());
+}
+
+// ===========================================================================
+// 19. More OCI error paths
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_upload_invalid_digest_algorithm() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+    let content = b"some-content";
+
+    // Use sha512 (unsupported) as the digest algorithm
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/?digest=sha512:{}", sha256_hex(content)))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 400, "invalid digest algorithm should return 400, got {}", resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_upload_body_hash_mismatch() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    // Content does not match the digest
+    let content = b"actual-content";
+    let wrong_digest = sha256_hex(b"different-content");
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/?digest=sha256:{wrong_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 400, "body hash mismatch should return 400, got {}", resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_patch_nonexistent_session() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    let req = axum::http::Request::builder()
+        .method("PATCH")
+        .uri(&format!("/v2/{repo}/blobs/uploads/00000000-0000-0000-0000-000000000000"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", "0-63/64")
+        .body(axum::body::Body::from(b"data".to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert_eq!(status, 404, "PATCH non-existent session: status={} body={}", status, body_str);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_put_finalize_without_digest() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    // PUT to blob uploads without ?digest= query parameter
+    let req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v2/{repo}/blobs/uploads/00000000-0000-0000-0000-000000000000"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 400, "PUT without digest should return 400, got {}", resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_get_nonexistent_blob() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+    let fake_digest = "a".repeat(64);
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/blobs/sha256:{fake_digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 404, "GET non-existent blob should return 404, got {}", resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_delete_nonexistent_manifest() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    let req = axum::http::Request::builder()
+        .method("DELETE")
+        .uri(&format!("/v2/{repo}/manifests/nonexistent-tag"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 404, "DELETE non-existent manifest should return 404, got {}", resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_push_manifest_with_nonexistent_blob() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    let manifest_body = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 0,
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "size": 0,
+                "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+        ]
+    }).to_string();
+
+    let req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v2/{repo}/manifests/nonexistent-blob-ref"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(axum::body::Body::from(manifest_body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 400, "manifest referencing non-existent blob should return 400, got {}", resp.status());
+}
+
+// ===========================================================================
+// 20. More LFS edge cases
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_verify_object() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"verify-me-content";
+    let oid = sha256_hex(content);
+
+    // Upload
+    client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    // Verify
+    let verify_resp = client
+        .post(server.url(&format!("/v1/lfs/objects/{oid}/verify")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send().await.unwrap();
+    assert_eq!(verify_resp.status(), 200, "verify existing object should return 200, got {}", verify_resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_verify_nonexistent_object() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let fake_oid = "f".repeat(64);
+
+    let verify_resp = client
+        .post(server.url(&format!("/v1/lfs/objects/{fake_oid}/verify")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send().await.unwrap();
+    assert_eq!(verify_resp.status(), 404, "verify non-existent should return 404, got {}", verify_resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_batch_mixed_existing_missing() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let existing_content = b"existing-batch-content";
+    let existing_oid = sha256_hex(existing_content);
+
+    // Upload existing object
+    client
+        .put(server.url(&format!("/v1/lfs/objects/{existing_oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(existing_content.to_vec())
+        .send().await.unwrap();
+
+    let missing_oid = "c".repeat(64);
+
+    // Batch with mixed
+    let batch_req = serde_json::json!({
+        "operation": "download",
+        "objects": [
+            {"oid": existing_oid, "size": existing_content.len() as u64},
+            {"oid": missing_oid, "size": 42}
+        ]
+    });
+    let batch_resp = client
+        .post(server.url("/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&batch_req)
+        .send().await.unwrap();
+    assert_eq!(batch_resp.status(), 200);
+    let json: serde_json::Value = batch_resp.json().await.unwrap();
+    let objects = json["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 2);
+    // Existing object should not have error
+    assert!(objects[0].get("error").is_none() || objects[0]["error"].is_null(),
+        "existing object should have no error: {:?}", objects[0]);
+    // Missing object should have error
+    assert!(objects[1].get("error").is_some(),
+        "missing object should have error: {:?}", objects[1]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_upload_empty_file() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"";
+    let oid = sha256_hex(content);
+
+    let put_resp = client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert!(put_resp.status().is_success(), "empty file upload should succeed");
+
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send().await.unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_batch_with_large_size() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"large-header-content";
+    let oid = sha256_hex(content);
+
+    // Upload first
+    client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    // Batch with 100MB size declared
+    let batch_req = serde_json::json!({
+        "operation": "download",
+        "objects": [{"oid": oid, "size": 100_000_000}]
+    });
+    let batch_resp = client
+        .post(server.url("/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&batch_req)
+        .send().await.unwrap();
+    assert_eq!(batch_resp.status(), 200);
+}
+
+// ===========================================================================
+// 21. More Hub API routes (postgres only)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_create_dataset_repo() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    let ns = "ds-team";
+    let name = "ds-repo";
+    let ds_path = format!("{ns}/{name}");
+
+    let create_resp = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "type": "dataset",
+            "name": &ds_path,
+            "private": false,
+        }))
+        .send().await.unwrap();
+    assert_eq!(create_resp.status(), 201);
+
+    let info_resp = client
+        .get(server.url(&format!("/api/datasets/{ns}/{name}")))
+        .header("Authorization", auth())
+        .send().await.unwrap();
+    assert_eq!(info_resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_create_space_repo() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    let ns = "space-team";
+    let name = "space-app";
+    let sp_path = format!("{ns}/{name}");
+
+    let create_resp = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "type": "space",
+            "name": &sp_path,
+            "private": false,
+        }))
+        .send().await.unwrap();
+    assert_eq!(create_resp.status(), 201);
+
+    let info_resp = client
+        .get(server.url(&format!("/api/spaces/{ns}/{name}")))
+        .header("Authorization", auth())
+        .send().await.unwrap();
+    assert_eq!(info_resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_revisions_list_json_array() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    let ns = "rev-team";
+    let name = "rev-model";
+    let path = format!("{ns}/{name}");
+
+    // Create repo
+    client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({"type": "model", "name": &path, "private": false}))
+        .send().await.unwrap();
+
+    // Commit a file
+    let content_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"rev-test-content",
+    );
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"rev commit\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"test.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let commit_resp = client
+        .post(server.url(&format!("/api/models/{ns}/{name}/commit/main")))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/x-ndjson")
+        .body(ndjson)
+        .send().await.unwrap();
+    assert_eq!(commit_resp.status(), 200);
+
+    // Get revisions list — verify it returns a JSON object with "revisions" key
+    let rev_resp = client
+        .get(server.url(&format!("/api/models/{ns}/{name}/revisions")))
+        .header("Authorization", auth())
+        .send().await.unwrap();
+    assert_eq!(rev_resp.status(), 200);
+    let rev_json: serde_json::Value = rev_resp.json().await.unwrap();
+    // Revisions should be in a "revisions" array
+    assert!(rev_json.get("revisions").is_some(), "revisions response should have 'revisions' key: {rev_json}");
+    let revisions = rev_json["revisions"].as_array().unwrap();
+    assert!(!revisions.is_empty(), "should have at least one revision");
+}
+
+// ===========================================================================
+// 22. More Bazel edge cases
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bazel_ac_put_and_get() {
+    let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"action-cache-content";
+    let hash = sha256_hex(content);
+
+    // PUT AC
+    let put_resp = client
+        .put(server.url(&format!("/v1/bazel/cache/ac/{hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert!(put_resp.status().is_success(), "AC PUT failed: {}", put_resp.status());
+
+    // GET AC
+    let get_resp = client
+        .get(server.url(&format!("/v1/bazel/cache/ac/{hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send().await.unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bazel_head_existing() {
+    let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"head-test-content";
+    let hash = sha256_hex(content);
+
+    // Upload first
+    client
+        .put(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send().await.unwrap();
+
+    // HEAD existing
+    let head_resp = client
+        .head(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send().await.unwrap();
+    assert_eq!(head_resp.status(), 200);
+    let cl: u64 = head_resp.headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert_eq!(cl, content.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bazel_head_nonexistent() {
+    let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
+    let client = reqwest::Client::new();
+
+    let fake_hash = "f".repeat(64);
+
+    let head_resp = client
+        .head(server.url(&format!("/v1/bazel/cache/cas/{fake_hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send().await.unwrap();
+    assert_eq!(head_resp.status(), 404, "HEAD non-existent should return 404, got {}", head_resp.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bazel_cas_content_hash_mismatch() {
+    let server = TestServer::start(&[ServerFrontend::BazelHttp]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"actual-body-data";
+    let wrong_hash = sha256_hex(b"different-body");
+
+    let put_resp = client
+        .put(server.url(&format!("/v1/bazel/cache/cas/{wrong_hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send().await.unwrap();
+    assert_eq!(put_resp.status(), 400, "content hash mismatch should return 400, got {}", put_resp.status());
 }
 
 // ===========================================================================

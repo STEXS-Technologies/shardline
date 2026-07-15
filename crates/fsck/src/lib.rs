@@ -2123,6 +2123,150 @@ mod tests {
             "expected MissingVersionRecord"
         );
     }
+
+    // ── run_fsck_with_stores: seeded records → clean ─────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_seeded_valid_records_returns_clean() {
+        use shardline_index::{FileChunkRecord, FileRecord, RecordMutation};
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Seed a record with a valid chunk that exists on disk
+        let chunk_data = b"valid chunk content for fsck test";
+        let shardline_hash = shardline_server_core::chunk_hash(chunk_data);
+        let chunk_hash = shardline_index::xet_hash_hex_string(shardline_hash);
+        let chunk_key = shardline_server_core::chunk_object_key(&chunk_hash).unwrap();
+        let chunk_path = object_root.join(chunk_key.as_str());
+        if let Some(parent) = chunk_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&chunk_path, chunk_data).unwrap();
+
+        let record = FileRecord {
+            file_id: "seeded-valid-file".to_owned(),
+            content_hash: shardline_server_core::content_hash(
+                chunk_data.len() as u64,
+                4096,
+                &[FileChunkRecord {
+                    hash: chunk_hash.clone(),
+                    offset: 0,
+                    length: chunk_data.len() as u64,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: chunk_data.len() as u64,
+                }],
+            ),
+            total_bytes: chunk_data.len() as u64,
+            chunk_size: 4096,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: chunk_hash,
+                offset: 0,
+                length: chunk_data.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: chunk_data.len() as u64,
+            }],
+        };
+        RecordMutation::write_version_record(&record_store, &record).await.unwrap();
+        RecordMutation::write_latest_record(&record_store, &record).await.unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        // Should have scanned the records cleanly (no MissingVersionRecord since we have both)
+        assert_eq!(report.latest_records, 1);
+        assert_eq!(report.version_records, 1);
+        assert_eq!(report.inspected_chunk_references, 2); // one from latest, one from version
+        // No MissingVersionRecord issues — we have both latest and version
+        assert!(
+            !report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            "expected no MissingVersionRecord with both records present"
+        );
+        // Should not have chunk hash or length issues
+        assert!(
+            !report.issues.iter().any(|i| matches!(i.kind,
+                FsckIssueKind::ChunkHashMismatch
+                | FsckIssueKind::ChunkLengthMismatch
+                | FsckIssueKind::MissingChunk
+            )),
+            "expected no chunk integrity issues: {:#?}",
+            report.issues
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_corrupted_chunk_data_detects_hash_mismatch() {
+        use shardline_index::{FileChunkRecord, FileRecord, RecordMutation};
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let record_store = shardline_index::LocalRecordStore::open(root.clone());
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let object_root = root.join("chunks");
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Write a chunk with "good data"
+        let chunk_data = b"original correct data for the chunk";
+        let shardline_hash = shardline_server_core::chunk_hash(chunk_data);
+        let chunk_hash_hex = shardline_index::xet_hash_hex_string(shardline_hash);
+        let chunk_key = shardline_server_core::chunk_object_key(&chunk_hash_hex).unwrap();
+        let chunk_path = object_root.join(chunk_key.as_str());
+        if let Some(parent) = chunk_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&chunk_path, b"corrupted data that doesn't match the hash").unwrap();
+
+        let record = FileRecord {
+            file_id: "corrupted-chunk-file".to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: chunk_data.len() as u64,
+            chunk_size: 4096,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: chunk_hash_hex,
+                offset: 0,
+                length: chunk_data.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: chunk_data.len() as u64,
+            }],
+        };
+        RecordMutation::write_version_record(&record_store, &record).await.unwrap();
+        RecordMutation::write_latest_record(&record_store, &record).await.unwrap();
+
+        let report = run_fsck_with_stores(
+            &record_store,
+            &index_store,
+            &object_root,
+            &object_store,
+            shardline_server_core::DEFAULT_SHARD_METADATA_LIMITS,
+        )
+        .await
+        .unwrap();
+
+        // Should detect chunk hash mismatch
+        assert!(
+            report.issues.iter().any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
+            "expected ChunkHashMismatch issue for corrupted chunk: {:#?}",
+            report.issues
+        );
+        assert_eq!(report.inspected_chunk_references, 2); // one from latest, one from version
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
