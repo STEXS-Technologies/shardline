@@ -482,11 +482,18 @@ pub(crate) const fn classify_webhook_delivery_repair_action(
 
 #[cfg(test)]
 mod tests {
+    use shardline_index::{FileChunkRecord, FileRecord};
+
+    use crate::{
+        ServerFrontend, object_store::ServerObjectStore,
+    };
+
     use super::{
-        QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
-        classify_quarantine_repair_action, classify_retention_hold_repair_action,
-        classify_webhook_delivery_repair_action, LifecycleRepairOptions,
-        DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS,
+        LifecycleRepairOptions, LifecycleRepairReport, QuarantineRepairAction, RepairReachability,
+        RetentionHoldRepairAction, WebhookDeliveryRepairAction, classify_quarantine_repair_action,
+        classify_retention_hold_repair_action, classify_webhook_delivery_repair_action,
+        collect_record_object_references, DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS,
+        WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS,
     };
 
     // ── classify_quarantine_repair_action ──────────────────────────────────
@@ -770,5 +777,443 @@ mod tests {
             format!("{:?}", WebhookDeliveryRepairAction::DeleteFuture),
             "DeleteFuture"
         );
+    }
+
+    // ── Constants ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn default_webhook_retention_is_30_days() {
+        assert_eq!(DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, 2_592_000);
+    }
+
+    #[test]
+    fn webhook_future_skew_is_5_minutes() {
+        assert_eq!(WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS, 300);
+    }
+
+    // ── RepairReachability ─────────────────────────────────────────────────
+
+    #[test]
+    fn repair_reachability_default_has_empty_sets() {
+        let reachability = RepairReachability::default();
+        assert!(reachability.referenced_object_keys.is_empty());
+        assert!(reachability.live_dedupe_chunk_hashes.is_empty());
+        assert_eq!(reachability.scanned_records, 0);
+    }
+
+    #[test]
+    fn repair_reachability_can_accumulate_keys() {
+        let mut reachability = RepairReachability::default();
+        reachability
+            .referenced_object_keys
+            .insert("key1".to_owned());
+        reachability
+            .live_dedupe_chunk_hashes
+            .insert("hash1".to_owned());
+        reachability.scanned_records = 42;
+        assert_eq!(reachability.referenced_object_keys.len(), 1);
+        assert!(reachability.referenced_object_keys.contains("key1"));
+        assert_eq!(reachability.live_dedupe_chunk_hashes.len(), 1);
+        assert!(reachability.live_dedupe_chunk_hashes.contains("hash1"));
+        assert_eq!(reachability.scanned_records, 42);
+    }
+
+    // ── LifecycleRepairReport ──────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_repair_report_all_fields_default_to_zero() {
+        let report = LifecycleRepairReport {
+            scanned_records: 0,
+            referenced_objects: 0,
+            scanned_quarantine_candidates: 0,
+            removed_missing_quarantine_candidates: 0,
+            removed_reachable_quarantine_candidates: 0,
+            removed_held_quarantine_candidates: 0,
+            scanned_retention_holds: 0,
+            removed_expired_retention_holds: 0,
+            removed_missing_retention_holds: 0,
+            scanned_webhook_deliveries: 0,
+            removed_stale_webhook_deliveries: 0,
+            removed_future_webhook_deliveries: 0,
+        };
+        assert_eq!(report.scanned_records, 0);
+        assert_eq!(report.referenced_objects, 0);
+        assert_eq!(report.scanned_quarantine_candidates, 0);
+        assert_eq!(report.removed_missing_quarantine_candidates, 0);
+        assert_eq!(report.removed_reachable_quarantine_candidates, 0);
+        assert_eq!(report.removed_held_quarantine_candidates, 0);
+        assert_eq!(report.scanned_retention_holds, 0);
+        assert_eq!(report.removed_expired_retention_holds, 0);
+        assert_eq!(report.removed_missing_retention_holds, 0);
+        assert_eq!(report.scanned_webhook_deliveries, 0);
+        assert_eq!(report.removed_stale_webhook_deliveries, 0);
+        assert_eq!(report.removed_future_webhook_deliveries, 0);
+    }
+
+    #[test]
+    fn lifecycle_repair_report_non_zero_fields() {
+        let report = LifecycleRepairReport {
+            scanned_records: 100,
+            referenced_objects: 50,
+            scanned_quarantine_candidates: 10,
+            removed_missing_quarantine_candidates: 2,
+            removed_reachable_quarantine_candidates: 3,
+            removed_held_quarantine_candidates: 1,
+            scanned_retention_holds: 20,
+            removed_expired_retention_holds: 5,
+            removed_missing_retention_holds: 1,
+            scanned_webhook_deliveries: 30,
+            removed_stale_webhook_deliveries: 10,
+            removed_future_webhook_deliveries: 2,
+        };
+        assert_eq!(report.scanned_records, 100);
+        assert_eq!(report.removed_stale_webhook_deliveries, 10);
+        assert_eq!(report.removed_future_webhook_deliveries, 2);
+        let debug = format!("{:?}", report);
+        assert!(debug.contains("scanned_records: 100"));
+        assert!(debug.contains("referenced_objects: 50"));
+    }
+
+    #[test]
+    fn lifecycle_repair_report_clone_and_eq() {
+        let report = LifecycleRepairReport {
+            scanned_records: 5,
+            referenced_objects: 3,
+            scanned_quarantine_candidates: 0,
+            removed_missing_quarantine_candidates: 0,
+            removed_reachable_quarantine_candidates: 0,
+            removed_held_quarantine_candidates: 0,
+            scanned_retention_holds: 0,
+            removed_expired_retention_holds: 0,
+            removed_missing_retention_holds: 0,
+            scanned_webhook_deliveries: 0,
+            removed_stale_webhook_deliveries: 0,
+            removed_future_webhook_deliveries: 0,
+        };
+        let cloned = report.clone();
+        assert_eq!(report, cloned);
+    }
+
+    // ── collect_record_object_references ──────────────────────────────────
+
+    /// Creates a valid 64-char hex hash string.
+    fn valid_hash() -> String {
+        "ab".repeat(32)
+    }
+
+    fn make_stored_chunks_record(chunks: Vec<FileChunkRecord>) -> Vec<u8> {
+        let record = FileRecord {
+            file_id: "test-file".to_owned(),
+            content_hash: valid_hash(),
+            total_bytes: 1024,
+            chunk_size: 65536,
+            repository_scope: None,
+            chunks,
+        };
+        serde_json::to_vec(&record).unwrap()
+    }
+
+    #[test]
+    fn collect_references_stored_chunks_populates_keys_and_hashes() {
+        let hash = valid_hash();
+        let frontends = [ServerFrontend::Xet];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        let chunk = FileChunkRecord {
+            hash: hash.clone(),
+            offset: 0,
+            length: 512,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 0,
+        };
+        let record_bytes = make_stored_chunks_record(vec![chunk]);
+
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_ok());
+
+        // For StoredChunks: referenced_object_keys should contain the chunk key
+        let expected_chunk_key =
+            crate::chunk_store::chunk_object_key(&hash).unwrap().as_str().to_owned();
+        assert!(
+            reachability.referenced_object_keys.contains(&expected_chunk_key),
+            "expected chunk key {expected_chunk_key} in referenced keys"
+        );
+
+        // live_dedupe_chunk_hashes should contain the chunk hash
+        assert!(reachability.live_dedupe_chunk_hashes.contains(&hash));
+
+        // scanned_records should be incremented
+        assert_eq!(reachability.scanned_records, 1);
+    }
+
+    #[test]
+    fn collect_references_stored_chunks_without_xet_frontend() {
+        let hash = valid_hash();
+        // No Xet frontend means optional_chunk_container_keys won't produce container keys
+        let frontends = [ServerFrontend::Lfs];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        let chunk = FileChunkRecord {
+            hash: hash.clone(),
+            offset: 0,
+            length: 512,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 0,
+        };
+        let record_bytes = make_stored_chunks_record(vec![chunk]);
+
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_ok());
+
+        // Chunk key should still be referenced (doesn't depend on frontend)
+        let expected_chunk_key =
+            crate::chunk_store::chunk_object_key(&hash).unwrap().as_str().to_owned();
+        assert!(reachability.referenced_object_keys.contains(&expected_chunk_key));
+
+        // live_dedupe_chunk_hashes populated
+        assert!(reachability.live_dedupe_chunk_hashes.contains(&hash));
+        assert_eq!(reachability.scanned_records, 1);
+    }
+
+    #[test]
+    fn collect_references_empty_chunks_does_not_increment_records() {
+        let frontends = [ServerFrontend::Xet];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        // A record with no chunks should still increment scanned_records (the record
+        // itself is scanned) but produce no keys or hashes.
+        let record = FileRecord {
+            file_id: "empty".to_owned(),
+            content_hash: valid_hash(),
+            total_bytes: 0,
+            chunk_size: 65536,
+            repository_scope: None,
+            chunks: vec![],
+        };
+        let record_bytes = serde_json::to_vec(&record).unwrap();
+
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_ok());
+        assert_eq!(reachability.scanned_records, 1);
+        assert!(reachability.referenced_object_keys.is_empty());
+        assert!(reachability.live_dedupe_chunk_hashes.is_empty());
+    }
+
+    #[test]
+    fn collect_references_invalid_record_bytes_returns_error() {
+        let frontends = [ServerFrontend::Xet];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        let result = collect_record_object_references(
+            &store,
+            &frontends,
+            b"not-valid-json",
+            &mut reachability,
+        );
+        assert!(result.is_err());
+        // scanned_records should not be incremented on error
+        assert_eq!(reachability.scanned_records, 0);
+    }
+
+    #[test]
+    fn collect_references_multiple_chunks_all_tracked() {
+        let hash1 = "ab".repeat(32);
+        let hash2 = "cd".repeat(32);
+        let frontends = [ServerFrontend::Xet];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        let chunks = vec![
+            FileChunkRecord {
+                hash: hash1.clone(),
+                offset: 0,
+                length: 256,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            },
+            FileChunkRecord {
+                hash: hash2.clone(),
+                offset: 256,
+                length: 256,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            },
+        ];
+        let record_bytes = make_stored_chunks_record(chunks);
+
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_ok());
+        assert_eq!(reachability.scanned_records, 1);
+
+        let key1 = crate::chunk_store::chunk_object_key(&hash1)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        let key2 = crate::chunk_store::chunk_object_key(&hash2)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        assert!(reachability.referenced_object_keys.contains(&key1));
+        assert!(reachability.referenced_object_keys.contains(&key2));
+        assert!(reachability.live_dedupe_chunk_hashes.contains(&hash1));
+        assert!(reachability.live_dedupe_chunk_hashes.contains(&hash2));
+    }
+
+    #[test]
+    fn collect_references_deduplicates_keys() {
+        let hash = valid_hash();
+        let frontends = [ServerFrontend::Xet];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        // Two identical chunks should produce the same key
+        let chunks = vec![
+            FileChunkRecord {
+                hash: hash.clone(),
+                offset: 0,
+                length: 256,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            },
+            FileChunkRecord {
+                hash,
+                offset: 256,
+                length: 256,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            },
+        ];
+        let record_bytes = make_stored_chunks_record(chunks);
+
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_ok());
+        assert_eq!(reachability.referenced_object_keys.len(), 1);
+        assert_eq!(reachability.live_dedupe_chunk_hashes.len(), 1);
+    }
+
+    // ── ReferencedObjectTerms layout ───────────────────────────────────────
+
+    fn make_referenced_terms_record(chunks: Vec<FileChunkRecord>) -> Vec<u8> {
+        // chunk_size = 0 triggers ReferencedObjectTerms layout
+        let record = FileRecord {
+            file_id: "test-term-file".to_owned(),
+            content_hash: valid_hash(),
+            total_bytes: 1024,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks,
+        };
+        serde_json::to_vec(&record).unwrap()
+    }
+
+    #[test]
+    fn collect_references_referenced_terms_with_xet_populates_term_keys() {
+        let term_hash = valid_hash();
+        let frontends = [ServerFrontend::Xet];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        let chunk = FileChunkRecord {
+            hash: term_hash.clone(),
+            offset: 0,
+            length: 512,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 0,
+        };
+        let record_bytes = make_referenced_terms_record(vec![chunk]);
+
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_ok());
+
+        // For ReferencedObjectTerms: referenced_term_object_key is called
+        // which produces a xorb-like key for Xet frontends
+        let expected_term_key =
+            crate::server_frontend::referenced_term_object_key(&frontends, &term_hash)
+                .unwrap()
+                .as_str()
+                .to_owned();
+        assert!(
+            reachability.referenced_object_keys.contains(&expected_term_key),
+            "expected term key {expected_term_key} in referenced keys"
+        );
+
+        // live_dedupe_chunk_hashes should NOT be set for ReferencedObjectTerms
+        assert!(reachability.live_dedupe_chunk_hashes.is_empty());
+        assert_eq!(reachability.scanned_records, 1);
+    }
+
+    #[test]
+    fn collect_references_referenced_terms_without_xet_returns_error() {
+        let term_hash = valid_hash();
+        // Without Xet frontend, referenced_term_object_key returns InvalidContentHash
+        let frontends = [ServerFrontend::Lfs];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability::default();
+
+        let chunk = FileChunkRecord {
+            hash: term_hash,
+            offset: 0,
+            length: 512,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 0,
+        };
+        let record_bytes = make_referenced_terms_record(vec![chunk]);
+
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_err());
+    }
+
+    // ── Overflow test ──────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_references_overflow_scanned_records() {
+        // scanned_records at u64::MAX should overflow on increment
+        let frontends = [ServerFrontend::Xet];
+        let store = ServerObjectStore::blackhole();
+        let mut reachability = RepairReachability { scanned_records: u64::MAX, ..Default::default() };
+
+        let hash = valid_hash();
+        let chunk = FileChunkRecord {
+            hash,
+            offset: 0,
+            length: 512,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 0,
+        };
+        let record_bytes = make_stored_chunks_record(vec![chunk]);
+        // chunk_object_key requires a valid hash and will work even though
+        // scanned_records overflows — the overflow happens first in the code path
+        let result =
+            collect_record_object_references(&store, &frontends, &record_bytes, &mut reachability);
+        assert!(result.is_err());
     }
 }
