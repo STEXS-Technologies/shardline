@@ -1837,6 +1837,17 @@ mod tests {
         (ts, boxed)
     }
 
+    /// Helper: returns (TempDir, HubState) with no auth.
+    fn make_test_state() -> (tempfile::TempDir, HubState) {
+        let (td, store) = make_delete_test_store();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        (td, state)
+    }
+
     #[test]
     fn repo_delete_cleans_up_revisions() {
         let (_ts, store) = make_delete_test_store();
@@ -2570,11 +2581,7 @@ Bob,"say ""hi"""#;
 
     #[test]
     fn route_authorize_without_auth_is_permissive() {
-        let state = HubState {
-            store: make_delete_test_store().1,
-            auth: None,
-            http_client: None,
-        };
+        let (_td, state) = make_test_state();
         let headers = HeaderMap::new();
         assert!(authorize(&state, &headers, TokenScope::Write).is_ok());
     }
@@ -2702,11 +2709,7 @@ Bob,"say ""hi"""#;
 
     #[test]
     fn hub_state_debug_redacts_auth() {
-        let state = HubState {
-            store: make_delete_test_store().1,
-            auth: None,
-            http_client: None,
-        };
+        let (_td, state) = make_test_state();
         let debug = format!("{state:?}");
         assert!(debug.contains("auth"));
     }
@@ -2809,5 +2812,1869 @@ Bob,"say ""hi"""#;
         }];
         let entries = tree_entries_recursive(&files, "nonexistent");
         assert!(entries.is_empty());
+    }
+
+    // ====================================================================
+    // Handler-level integration tests (real LocalIndexStore)
+    // ====================================================================
+
+    /// Helper: creates a model repo + initial revision + optional files in a store.
+    fn make_store_with_repo(
+        repo_type: HubRepoType,
+        repo_id: &str,
+    ) -> (tempfile::TempDir, BoxedHubStore) {
+        let (td, store) = make_delete_test_store();
+        store
+            .create_repo(repo_type, repo_id, false)
+            .expect("create_repo");
+        (td, store)
+    }
+
+    fn make_store_with_revision(
+        rt: HubRepoType,
+        repo_id: &str,
+        rev_sha: &str,
+        files: &[HubFileEntry],
+    ) -> (tempfile::TempDir, BoxedHubStore) {
+        let (td, store) = make_store_with_repo(rt, repo_id);
+        // Parent must match the default_branch SHA set by create_repo (empty tree).
+        let parent = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        let _ = store
+            .create_revision(repo_id, Some(parent), rev_sha, "main", "first")
+            .expect("create_revision");
+        if !files.is_empty() {
+            store
+                .store_files(rev_sha, files)
+                .expect("store_files");
+        }
+        (td, store)
+    }
+
+    fn default_headers() -> HeaderMap {
+        HeaderMap::new()
+    }
+
+    // ------------------------------------------------------------------
+    // health
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_health_returns_ok() {
+        let result = health().await;
+        assert_eq!(result.get("status").and_then(|v| v.as_str()), Some("ok"));
+    }
+
+    // ------------------------------------------------------------------
+    // whoami
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_whoami_anonymous_without_auth() {
+        let (_td, state) = make_test_state();
+        let result = whoami(State(state), default_headers()).await;
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.name, "anonymous");
+        assert!(!resp.is_admin);
+    }
+
+    // ------------------------------------------------------------------
+    // repo_list
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_list_empty() {
+        let (_td, state) = make_test_state();
+        let result = repo_list(State(state), default_headers()).await.unwrap();
+        assert!(result.repos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handler_repo_list_with_repos() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/repo-a");
+        store
+            .create_repo(HubRepoType::Dataset, "org/data-b", false)
+            .unwrap();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_list(State(state), default_headers()).await.unwrap();
+        assert_eq!(result.repos.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // repo_search
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_search_short_query_rejected() {
+        let (_td, state) = make_test_state();
+        let result = repo_search(
+            State(state),
+            default_headers(),
+            Path("models".to_string()),
+            Query(RepoSearchQuery {
+                q: "x".into(),
+                author: None,
+                sort: None,
+                direction: None,
+                limit: 50,
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("at least 2")),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_repo_search_invalid_type() {
+        let (_td, state) = make_test_state();
+        let result = repo_search(
+            State(state),
+            default_headers(),
+            Path("invalid".to_string()),
+            Query(RepoSearchQuery {
+                q: "test".into(),
+                author: None,
+                sort: None,
+                direction: None,
+                limit: 50,
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("invalid repo type")),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_repo_search_finds_matching() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/my-model");
+        store
+            .create_repo(HubRepoType::Model, "other/other", false)
+            .unwrap();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        // The search uses LIKE 'q%' on repo_id, so prefix-match the full ID.
+        let result = repo_search(
+            State(state),
+            default_headers(),
+            Path("models".to_string()),
+            Query(RepoSearchQuery {
+                q: "org/my-model".into(),
+                author: None,
+                sort: None,
+                direction: None,
+                limit: 50,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.repos.len(), 1);
+        assert_eq!(result.repos[0].id, "org/my-model");
+    }
+
+    // ------------------------------------------------------------------
+    // repo_info
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_info_missing_repo() {
+        let (_td, state) = make_test_state();
+        let result = repo_info(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "missing".into(), "nope".into())),
+
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
+    }
+
+    #[tokio::test]
+    async fn handler_repo_info_returns_repo() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/existing");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_info(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "existing".into())),
+
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.id, "org/existing");
+        assert_eq!(result.repo_type, RepoType::Model);
+    }
+
+    #[tokio::test]
+    async fn handler_repo_info_with_card_data() {
+        let readme_content = b"---\nlanguage: en\npipeline_tag: text-classification\n---\n# Model\nSome text";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/card-model",
+            "sha_card",
+            &[HubFileEntry {
+                path: "README.md".into(),
+                size: readme_content.len() as u64,
+                sha: "readme_sha".into(),
+                is_lfs: false,
+                inline_content: Some(readme_content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_info(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "card-model".into())),
+
+        )
+        .await
+        .unwrap();
+        let card = result.card_data.as_ref().expect("expected card_data");
+        assert_eq!(
+            card.get("language").and_then(|v| v.as_str()),
+            Some("en")
+        );
+        assert_eq!(
+            card.get("pipeline_tag").and_then(|v| v.as_str()),
+            Some("text-classification")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // repo_modelcard
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_modelcard_missing_repo() {
+        let (_td, state) = make_test_state();
+        let result = repo_modelcard(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "no".into(), "such".into())),
+
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
+    }
+
+    #[tokio::test]
+    async fn handler_repo_modelcard_no_readme() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/no-readme",
+            "sha_nr",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_modelcard(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "no-readme".into())),
+
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HubApiError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn handler_repo_modelcard_with_readme() {
+        let content = b"# My Model\n\nThis is a test model.";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/my-model",
+            "sha_rm",
+            &[HubFileEntry {
+                path: "README.md".into(),
+                size: content.len() as u64,
+                sha: "rm_sha".into(),
+                is_lfs: false,
+                inline_content: Some(content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_modelcard(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "my-model".into())),
+
+        )
+        .await
+        .unwrap();
+        // Should be a text/markdown response
+        let status = result.status();
+        assert_eq!(status, 200);
+        // Check header
+        let ct = result
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(ct, Some("text/markdown; charset=utf-8"));
+    }
+
+    // ------------------------------------------------------------------
+    // repo_revisions
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_revisions_with_revisions() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/has-revs",
+            "sha_rev1",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_revisions(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "has-revs".into())),
+
+        )
+        .await
+        .unwrap();
+        assert!(!result.revisions.is_empty());
+        let rev = &result.revisions[0];
+        assert_eq!(rev.ref_name, "main");
+        assert_eq!(rev.sha, "sha_rev1");
+    }
+
+    // ------------------------------------------------------------------
+    // repo_create
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_create_model() {
+        let (_td, state) = make_test_state();
+        let req = RepoCreateRequest {
+            repo_type: RepoType::Model,
+            name: "ns/new-repo".to_owned(),
+            private: false,
+        };
+        let (status, json) = repo_create(
+            State(state),
+            default_headers(),
+            Json(req),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json.id, "ns/new-repo");
+    }
+
+    // ------------------------------------------------------------------
+    // repo_create_type
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_create_type_invalid_type() {
+        let (_td, state) = make_test_state();
+        let result = repo_create_type(
+            State(state),
+            default_headers(),
+            Path(("invalid".into(), "ns".into(), "repo".into())),
+
+            Json(serde_json::json!({})),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(_)),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_repo_create_type_success() {
+        let (_td, state) = make_test_state();
+        let (status, json) = repo_create_type(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "ns".into(), "my-repo".into())),
+
+            Json(serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json.id, "ns/my-repo");
+        assert_eq!(json.repo_type, RepoType::Model);
+    }
+
+    #[tokio::test]
+    async fn handler_repo_create_type_private() {
+        let (_td, state) = make_test_state();
+        let (_, json) = repo_create_type(
+            State(state),
+            default_headers(),
+            Path(("datasets".into(), "ns".into(), "secret-data".into())),
+
+            Json(serde_json::json!({"private": true})),
+        )
+        .await
+        .unwrap();
+        assert!(json.private);
+        assert_eq!(json.repo_type, RepoType::Dataset);
+    }
+
+    // ------------------------------------------------------------------
+    // repo_delete (handler-level)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_delete_missing_repo() {
+        let (_td, state) = make_test_state();
+        let result = repo_delete(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "no".into(), "exist".into())),
+
+        )
+        .await;
+        assert!(matches!(result, Err(HubApiError::RepoNotFound)));
+    }
+
+    #[tokio::test]
+    async fn handler_repo_delete_success() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/to-delete");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_delete(
+            State(state.clone()),
+            default_headers(),
+            Path(("models".into(), "org".into(), "to-delete".into())),
+
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+        // Verify it's gone
+        assert!(state.store.get_repo("org/to-delete").unwrap().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // preupload
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_preupload_too_many_files() {
+        let (_td, state) = make_test_state();
+        let files: Vec<PreuploadFile> = (0..10_001)
+            .map(|i| PreuploadFile {
+                path: format!("file_{i}"),
+                lfs: false,
+            })
+            .collect();
+        let result = preupload(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "ns".into(), "r".into(), "main".into())),
+
+            Json(PreuploadRequest {
+                files,
+                git_attributes: None,
+                git_ignore: None,
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("exceeds maximum")),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_preupload_checks_existence() {
+        let content = b"existing content";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/preupload-test",
+            "sha_pre",
+            &[HubFileEntry {
+                path: "existing.txt".into(),
+                size: content.len() as u64,
+                sha: "existing_sha".into(),
+                is_lfs: false,
+                inline_content: Some(content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = preupload(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "preupload-test".into(), "main".into())),
+
+            Json(PreuploadRequest {
+                files: vec![
+                    PreuploadFile {
+                        path: "existing.txt".into(),
+                        lfs: false,
+                    },
+                    PreuploadFile {
+                        path: "new.txt".into(),
+                        lfs: false,
+                    },
+                ],
+                git_attributes: None,
+                git_ignore: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.result.len(), 2);
+        assert!(result.result[0].exists); // existing.txt
+        assert!(!result.result[1].exists); // new.txt
+    }
+
+    // ------------------------------------------------------------------
+    // commit (via handler)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_commit_wrong_content_type() {
+        let (_td, state) = make_test_state();
+        // No Content-Type header → rejection
+        let result = commit(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "ns".into(), "r".into(), "main".into())),
+
+            "{}".to_string(),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("Content-Type")),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    fn ndjson_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/x-ndjson".parse().unwrap(),
+        );
+        h
+    }
+
+    #[tokio::test]
+    async fn handler_commit_inline_file_success() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/commit-test",
+            "parent_sha_001",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let body = r#"{"header":{"message":"add readme"}}
+{"file":{"path":"README.md","content":"SGVsbG8gV29ybGQ="}}
+"#;
+        let result = commit(
+            State(state),
+            ndjson_headers(),
+            Path(("models".into(), "org".into(), "commit-test".into(), "main".into())),
+
+            body.to_string(),
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+        let resp = result.unwrap();
+        assert!(!resp.commit_id.is_empty());
+        assert_eq!(resp.ref_name.as_deref(), Some("main"));
+    }
+
+    #[tokio::test]
+    async fn handler_commit_lfs_pointer_success() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/lfs-commit",
+            "parent_lfs",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        // Valid SHA-256 OID (64 hex chars)
+        let oid = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let body = format!(
+            r#"{{"header":{{"message":"add lfs file"}}}}
+{{"lfsFile":{{"path":"big.bin","oid":"{oid}","size":5000000}}}}
+"#
+        );
+        let result = commit(
+            State(state),
+            ndjson_headers(),
+            Path(("models".into(), "org".into(), "lfs-commit".into(), "main".into())),
+
+            body,
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn handler_commit_delete_file() {
+        // Create a repo with a file, then delete it
+        let content = b"to be deleted";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/del-test",
+            "parent_del",
+            &[HubFileEntry {
+                path: "old.txt".into(),
+                size: content.len() as u64,
+                sha: "old_sha".into(),
+                is_lfs: false,
+                inline_content: Some(content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let body = r#"{"header":{"message":"delete file"}}
+{"deletedEntry":{"path":"old.txt"}}
+"#;
+        let result = commit(
+            State(state),
+            ndjson_headers(),
+            Path(("models".into(), "org".into(), "del-test".into(), "main".into())),
+
+            body.to_string(),
+        )
+        .await;
+        assert!(result.is_ok(), "commit failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn handler_commit_parent_mismatch() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/parent-mismatch",
+            "actual_parent_sha",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        // Body specifies parentCommit that does NOT match URL resolution
+        let body = r#"{"header":{"message":"mismatch","parentCommit":"wrong_parent_sha"}}
+{"file":{"path":"f.txt","content":"dGVzdA=="}}
+"#;
+        let result = commit(
+            State(state),
+            ndjson_headers(),
+            Path(("models".into(), "org".into(), "parent-mismatch".into(), "main".into())),
+
+            body.to_string(),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::Conflict(msg) if msg.contains("parentCommit mismatch")),
+            "expected Conflict, got {err:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // apply_commit — direct testing of the core logic
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_apply_commit_inline_file() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/apply-test",
+            "parent_apply",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let parsed = ParsedCommit {
+            message: "apply inline".into(),
+            parent_commit: None,
+            instructions: vec![CommitInstruction::InlineFile {
+                path: "hello.txt".into(),
+                content: b"world".to_vec(),
+            }],
+        };
+        let result = apply_commit(&state, "org/apply-test", "parent_apply", &parsed)
+            .await
+            .unwrap();
+        assert!(!result.commit_id.is_empty());
+        // Verify the file is stored
+        let _files = state.store.get_files("parent_apply").unwrap();
+        // The new commit's files would be stored under the new commit SHA, not parent
+        // apply_commit calls store_files(&commit_sha, &files) then create_revision
+        // So check files under the new commit SHA
+        let new_sha = &result.commit_id;
+        let new_files = state.store.get_files(new_sha).unwrap();
+        assert_eq!(new_files.len(), 1);
+        assert_eq!(new_files[0].path, "hello.txt");
+    }
+
+    #[tokio::test]
+    async fn handler_apply_commit_lfs_pointer() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/apply-lfs",
+            "parent_lfs2",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let oid = "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff";
+        let parsed = ParsedCommit {
+            message: "add lfs".into(),
+            parent_commit: None,
+            instructions: vec![CommitInstruction::LfsPointer {
+                path: "model.bin".into(),
+                oid: oid.to_owned(),
+                size: 2_000_000,
+            }],
+        };
+        let result = apply_commit(&state, "org/apply-lfs", "parent_lfs2", &parsed)
+            .await
+            .unwrap();
+        let new_files = state.store.get_files(&result.commit_id).unwrap();
+        assert_eq!(new_files.len(), 1);
+        assert!(new_files[0].is_lfs);
+        assert_eq!(new_files[0].sha, oid);
+    }
+
+    #[tokio::test]
+    async fn handler_apply_commit_delete() {
+        let content = b"delete me";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/apply-del",
+            "parent_del2",
+            &[HubFileEntry {
+                path: "old.txt".into(),
+                size: content.len() as u64,
+                sha: "old_sha2".into(),
+                is_lfs: false,
+                inline_content: Some(content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let parsed = ParsedCommit {
+            message: "delete file".into(),
+            parent_commit: None,
+            instructions: vec![CommitInstruction::Delete {
+                path: "old.txt".into(),
+            }],
+        };
+        let result = apply_commit(&state, "org/apply-del", "parent_del2", &parsed)
+            .await
+            .unwrap();
+        let new_files = state.store.get_files(&result.commit_id).unwrap();
+        assert!(new_files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handler_apply_commit_parent_mismatch() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/apply-mismatch",
+            "actual_sha",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let parsed = ParsedCommit {
+            message: "bad parent".into(),
+            parent_commit: Some("different_sha".into()),
+            instructions: vec![],
+        };
+        let result = apply_commit(&state, "org/apply-mismatch", "actual_sha", &parsed).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::Conflict(msg) if msg.contains("parentCommit mismatch")),
+            "expected Conflict, got {err:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // file_tree
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_file_tree_basic() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/tree-test",
+            "sha_tree",
+            &[
+                HubFileEntry {
+                    path: "README.md".into(),
+                    size: 100,
+                    sha: "a".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "src/main.rs".into(),
+                    size: 200,
+                    sha: "b".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+            ],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let entries = file_tree(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "tree-test".into(), "main".into(), String::new())),
+
+            Query(TreeQuery {
+                limit: None,
+                cursor: None,
+                recursive: false,
+            }),
+        )
+        .await
+        .unwrap();
+        // Expect 2 entries: README.md at root and src/ directory
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn handler_file_tree_recursive() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/tree-rec",
+            "sha_tree_rec",
+            &[
+                HubFileEntry {
+                    path: "src/main.rs".into(),
+                    size: 200,
+                    sha: "b".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "src/lib.rs".into(),
+                    size: 300,
+                    sha: "c".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+            ],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let entries = file_tree(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "tree-rec".into(), "main".into(), String::new())),
+
+            Query(TreeQuery {
+                limit: None,
+                cursor: None,
+                recursive: true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entry_type, "file");
+    }
+
+    #[tokio::test]
+    async fn handler_file_tree_with_limit_and_cursor() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/tree-lim",
+            "sha_tree_lim",
+            &[
+                HubFileEntry {
+                    path: "a.txt".into(),
+                    size: 1,
+                    sha: "s1".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "b.txt".into(),
+                    size: 2,
+                    sha: "s2".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "c.txt".into(),
+                    size: 3,
+                    sha: "s3".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+            ],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let entries = file_tree(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "tree-lim".into(), "main".into(), String::new())),
+
+            Query(TreeQuery {
+                limit: Some(2),
+                cursor: Some("a.txt".into()),
+                recursive: false,
+            }),
+        )
+        .await
+        .unwrap();
+        // After a.txt cursor: first 2 entries from b.txt, c.txt
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "b.txt");
+        assert_eq!(entries[1].path, "c.txt");
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_file
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_resolve_file_inline() {
+        let content = b"hello world file content";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/resolve-test",
+            "sha_resolve",
+            &[HubFileEntry {
+                path: "data.txt".into(),
+                size: content.len() as u64,
+                sha: "data_sha".into(),
+                is_lfs: false,
+                inline_content: Some(content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = resolve_file(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "resolve-test".into(), "main".into(), "data.txt".into())),
+
+        )
+        .await;
+        assert!(result.is_ok(), "resolve_file failed: {:?}", result.err());
+        let resp = result.unwrap();
+        assert_eq!(resp.status(), 200);
+        // Should have application/octet-stream content type
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(ct, Some("application/octet-stream"));
+    }
+
+    #[tokio::test]
+    async fn handler_resolve_file_not_found() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/resolve-miss",
+            "sha_miss",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = resolve_file(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "resolve-miss".into(), "main".into(), "nope.txt".into())),
+
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HubApiError::NotFound));
+    }
+
+    // ------------------------------------------------------------------
+    // lfs_batch
+    // ------------------------------------------------------------------
+
+    fn make_lfs_state() -> (tempfile::TempDir, HubState) {
+        let (td, store) = make_delete_test_store();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        (td, state)
+    }
+
+    #[tokio::test]
+    async fn handler_lfs_batch_upload_new_object() {
+        let (_td, state) = make_lfs_state();
+        let result = lfs_batch(
+            State(state),
+            default_headers(),
+            Json(LfsBatchRequest {
+                operation: LfsBatchOperation::Upload,
+                ref_: LfsBatchRef {
+                    name: "main".into(),
+                },
+                objects: vec![LfsObjectRequest {
+                    oid: "abc123".into(),
+                    size: 1000,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.transfer, "basic");
+        assert_eq!(result.objects.len(), 1);
+        let obj = &result.objects[0];
+        // Upload of new object: upload action present, no error
+        assert!(obj.actions.is_some());
+        let actions = obj.actions.as_ref().unwrap();
+        assert!(actions.upload.is_some());
+        assert!(actions.download.is_none());
+        assert!(actions.verify.is_none());
+        assert!(obj.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_lfs_batch_download_existing_object() {
+        let (_td, state) = make_lfs_state();
+        // Store an LFS object first
+        state
+            .store
+            .put_lfs_object("existing_oid", b"some data")
+            .unwrap();
+        let result = lfs_batch(
+            State(state),
+            default_headers(),
+            Json(LfsBatchRequest {
+                operation: LfsBatchOperation::Download,
+                ref_: LfsBatchRef {
+                    name: "main".into(),
+                },
+                objects: vec![LfsObjectRequest {
+                    oid: "existing_oid".into(),
+                    size: 9,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.objects.len(), 1);
+        let obj = &result.objects[0];
+        assert!(obj.actions.is_some());
+        assert!(obj.actions.as_ref().unwrap().download.is_some());
+        assert!(obj.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_lfs_batch_download_missing_object() {
+        let (_td, state) = make_lfs_state();
+        let result = lfs_batch(
+            State(state),
+            default_headers(),
+            Json(LfsBatchRequest {
+                operation: LfsBatchOperation::Download,
+                ref_: LfsBatchRef {
+                    name: "main".into(),
+                },
+                objects: vec![LfsObjectRequest {
+                    oid: "missing_oid".into(),
+                    size: 100,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        let obj = &result.objects[0];
+        // Missing download: actions is None, error is Some(404)
+        assert!(obj.actions.is_none());
+        let err = obj.error.as_ref().expect("expected error for missing object");
+        assert_eq!(err.code, 404);
+    }
+
+    #[tokio::test]
+    async fn handler_lfs_batch_verify_existing() {
+        let (_td, state) = make_lfs_state();
+        state
+            .store
+            .put_lfs_object("verify_oid", b"data")
+            .unwrap();
+        let result = lfs_batch(
+            State(state),
+            default_headers(),
+            Json(LfsBatchRequest {
+                operation: LfsBatchOperation::Verify,
+                ref_: LfsBatchRef {
+                    name: "main".into(),
+                },
+                objects: vec![LfsObjectRequest {
+                    oid: "verify_oid".into(),
+                    size: 4,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        let obj = &result.objects[0];
+        assert!(obj.actions.as_ref().unwrap().verify.is_some());
+        assert!(obj.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_lfs_batch_verify_missing() {
+        let (_td, state) = make_lfs_state();
+        let result = lfs_batch(
+            State(state),
+            default_headers(),
+            Json(LfsBatchRequest {
+                operation: LfsBatchOperation::Verify,
+                ref_: LfsBatchRef {
+                    name: "main".into(),
+                },
+                objects: vec![LfsObjectRequest {
+                    oid: "no_verify_oid".into(),
+                    size: 1,
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        let obj = &result.objects[0];
+        assert!(obj.actions.is_none());
+        assert!(obj.error.is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // lfs_upload
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_lfs_upload_invalid_oid() {
+        let (_td, state) = make_test_state();
+        let result = lfs_upload(
+            State(state),
+            default_headers(),
+            Path("bad-oid".to_string()),
+            bytes::Bytes::from_static(b"data"),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(_)),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_lfs_upload_success() {
+        let (_td, state) = make_test_state();
+        let oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let result = lfs_upload(
+            State(state.clone()),
+            default_headers(),
+            Path(oid.to_string()),
+            bytes::Bytes::from_static(b"some lfs data"),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), StatusCode::OK);
+        // Verify it's stored
+        let data = state.store.get_lfs_object(oid).unwrap();
+        assert_eq!(data, Some(b"some lfs data".to_vec()));
+    }
+
+    // ------------------------------------------------------------------
+    // lfs_download
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_lfs_download_missing() {
+        let (_td, state) = make_test_state();
+        let result = lfs_download(
+            State(state),
+            default_headers(),
+            Path("nonexistent_oid".to_string()),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HubApiError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn handler_lfs_download_success() {
+        let (_td, state) = make_test_state();
+        let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        state
+            .store
+            .put_lfs_object(oid, b"download data")
+            .unwrap();
+        let (status, headers, data) = lfs_download(
+            State(state),
+            default_headers(),
+            Path(oid.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data, b"download data");
+        // Verify content-type header name
+        assert!(!headers.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // git_head
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_revisions_has_initial() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/init-rev");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_revisions(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "init-rev".into())),
+        )
+        .await
+        .unwrap();
+        // create_repo always inserts an initial empty-tree revision
+        assert_eq!(result.revisions.len(), 1);
+        assert_eq!(result.revisions[0].ref_name, "main");
+    }
+
+    #[tokio::test]
+    async fn handler_git_head_with_revision() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/has-head",
+            "sha_head123",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = git_head(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "has-head".into())),
+
+        )
+        .await
+        .unwrap();
+        assert!(result.contains("sha_head123"));
+        assert!(result.contains("refs/heads/main"));
+    }
+
+    // ------------------------------------------------------------------
+    // dataset_parquet
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_commit_no_revision() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/no-rev");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        // "nonexistent_rev" isn't a known ref or SHA → revision not found
+        let result = commit(
+            State(state),
+            ndjson_headers(),
+            Path(("models".into(), "org".into(), "no-rev".into(), "nonexistent_rev".into())),
+            r#"{"header":{"message":"x"}}"#.to_string(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HubApiError::RevisionNotFound));
+    }
+
+    #[tokio::test]
+    async fn handler_dataset_parquet_lists_files() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Dataset,
+            "org/data",
+            "sha_data",
+            &[
+                HubFileEntry {
+                    path: "data/train/data.parquet".into(),
+                    size: 5000,
+                    sha: "pq".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "README.md".into(),
+                    size: 10,
+                    sha: "rm".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+            ],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = dataset_parquet(
+            State(state),
+            default_headers(),
+            Path(("org".into(), "data".into())),
+
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].path.ends_with(".parquet"));
+    }
+
+    #[tokio::test]
+    async fn handler_dataset_parquet_csv_and_jsonl_included() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Dataset,
+            "org/multi",
+            "sha_multi",
+            &[
+                HubFileEntry {
+                    path: "a.csv".into(),
+                    size: 100,
+                    sha: "csv".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "b.jsonl".into(),
+                    size: 200,
+                    sha: "jl".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "c.txt".into(),
+                    size: 50,
+                    sha: "txt".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+            ],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = dataset_parquet(
+            State(state),
+            default_headers(),
+            Path(("org".into(), "multi".into())),
+
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.files.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // dataset_first_rows
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_dataset_first_rows_empty_dataset() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Dataset,
+            "org/empty-ds",
+            "sha_empty_ds",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = dataset_first_rows(
+            State(state),
+            default_headers(),
+            Path(("org".into(), "empty-ds".into())),
+
+            Query(DatasetFirstRowsQuery {
+                config: "default".into(),
+                split: "train".into(),
+                limit: 100,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(result.columns.is_empty());
+        assert!(result.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handler_dataset_first_rows_with_jsonl() {
+        let jsonl_content = b"{\"a\":1,\"b\":\"x\"}\n{\"a\":2,\"b\":\"y\"}\n";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Dataset,
+            "org/jsonl-ds",
+            "sha_jsonl",
+            &[HubFileEntry {
+                path: "data/train/data.jsonl".into(),
+                size: jsonl_content.len() as u64,
+                sha: "jsonl_sha".into(),
+                is_lfs: false,
+                inline_content: Some(jsonl_content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = dataset_first_rows(
+            State(state),
+            default_headers(),
+            Path(("org".into(), "jsonl-ds".into())),
+
+            Query(DatasetFirstRowsQuery {
+                config: "default".into(),
+                split: "train".into(),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.columns.len(), 2);
+        assert!(result.columns.contains(&"a".to_string()));
+        assert!(result.columns.contains(&"b".to_string()));
+        assert_eq!(result.rows.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // dataset_viewer
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_dataset_viewer_with_data() {
+        let csv_content = b"name,age\nAlice,30\nBob,25\nCharlie,35\n";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Dataset,
+            "org/viewer-ds",
+            "sha_viewer",
+            &[HubFileEntry {
+                path: "default/train/data.csv".into(),
+                size: csv_content.len() as u64,
+                sha: "csv_sha".into(),
+                is_lfs: false,
+                inline_content: Some(csv_content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = dataset_viewer(
+            State(state),
+            default_headers(),
+            Path(("org".into(), "viewer-ds".into(), "train".into())),
+
+            Query(DatasetViewerQuery {
+                config: "default".into(),
+                offset: 0,
+                length: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        // Columns are sorted alphabetically (from BTreeMap)
+        assert_eq!(result.columns, vec!["age", "name"]);
+        assert_eq!(result.rows.len(), 3);
+        assert!(result.num_rows_total.is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_dataset_viewer_pagination() {
+        let csv_content = b"n\n1\n2\n3\n4\n5\n";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Dataset,
+            "org/viewer-pag",
+            "sha_vp",
+            &[HubFileEntry {
+                path: "data/test/data.csv".into(),
+                size: csv_content.len() as u64,
+                sha: "vp_sha".into(),
+                is_lfs: false,
+                inline_content: Some(csv_content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = dataset_viewer(
+            State(state),
+            default_headers(),
+            Path(("org".into(), "viewer-pag".into(), "test".into())),
+
+            Query(DatasetViewerQuery {
+                config: "data".into(),
+                offset: 2,
+                length: 2,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rows.len(), 2);
+        // rows[0] is the 3rd data row (offset 2): n=3 (CSV values are parsed as primitives)
+        assert_eq!(
+            result.rows[0].columns.get("n"),
+            Some(&serde_json::json!(3))
+        );
+        assert_eq!(
+            result.rows[1].columns.get("n"),
+            Some(&serde_json::json!(4))
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // webhook_create
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_webhook_create_success() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-test");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let (status, resp) = webhook_create(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-test".into())),
+
+            Json(WebhookCreateRequest {
+                url: "https://example.com/hook".into(),
+                events: vec!["push".into()],
+                secret: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(resp.url, "https://example.com/hook");
+        assert!(resp.active);
+    }
+
+    #[tokio::test]
+    async fn handler_webhook_create_invalid_url() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-badurl");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = webhook_create(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-badurl".into())),
+
+            Json(WebhookCreateRequest {
+                url: "ftp://bad.com/hook".into(),
+                events: vec!["push".into()],
+                secret: None,
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("scheme")),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_webhook_create_too_many_events() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-toomany");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let events: Vec<String> = (0..51).map(|i| format!("event_{i}")).collect();
+        let result = webhook_create(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-toomany".into())),
+
+            Json(WebhookCreateRequest {
+                url: "https://example.com/hook".into(),
+                events,
+                secret: None,
+            }),
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::PathValidation(msg) if msg.contains("exceeds maximum")),
+            "expected PathValidation, got {err:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // webhook_list
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_webhook_list_empty() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-list-empty");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = webhook_list(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-list-empty".into())),
+
+        )
+        .await
+        .unwrap();
+        assert!(result.webhooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handler_webhook_list_with_webhooks() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-list-full");
+        store
+            .create_webhook(
+                "org/wh-list-full",
+                "https://hook1.example.com",
+                &["push".into()],
+                None,
+            )
+            .unwrap();
+        store
+            .create_webhook(
+                "org/wh-list-full",
+                "https://hook2.example.com",
+                &["push".into(), "delete".into()],
+                Some("secret"),
+            )
+            .unwrap();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = webhook_list(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-list-full".into())),
+
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.webhooks.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // webhook_delete
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_webhook_delete_success() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-del");
+        let wh = store
+            .create_webhook(
+                "org/wh-del",
+                "https://example.com/hook",
+                &["push".into()],
+                None,
+            )
+            .unwrap();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = webhook_delete(
+            State(state.clone()),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-del".into(), wh.id.clone())),
+
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+        // Verify it's gone
+        let hooks = state.store.list_webhooks("org/wh-del").unwrap();
+        assert!(hooks.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // authorize — additional coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn route_authorize_with_auth_and_no_header_is_err() {
+        use shardline_server_core::AuthProvider;
+        use shardline_protocol::TokenClaims;
+        struct MockProvider;
+        impl AuthProvider for MockProvider {
+            fn verify_token(
+                &self,
+                _token: &str,
+            ) -> Result<TokenClaims, shardline_server_core::AuthError> {
+                Err(shardline_server_core::AuthError::InvalidToken)
+            }
+            fn mint_token(
+                &self,
+                _claims: &TokenClaims,
+            ) -> Result<String, shardline_server_core::AuthError> {
+                Ok("token".into())
+            }
+        }
+        let state = HubState {
+            store: make_delete_test_store().1,
+            auth: Some(HubAuth::new(Box::new(MockProvider))),
+            http_client: None,
+        };
+        let headers = HeaderMap::new();
+        let result = authorize(&state, &headers, TokenScope::Read);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, HubApiError::Unauthorized),
+            "expected Unauthorized, got {err:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // apply_commit — empty instructions
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_apply_commit_empty_instructions() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/empty-inst",
+            "parent_empty",
+            &[],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let parsed = ParsedCommit {
+            message: "empty commit".into(),
+            parent_commit: None,
+            instructions: vec![],
+        };
+        let result = apply_commit(&state, "org/empty-inst", "parent_empty", &parsed)
+            .await
+            .unwrap();
+        assert!(!result.commit_id.is_empty());
     }
 }

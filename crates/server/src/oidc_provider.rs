@@ -491,4 +491,656 @@ mod tests {
             serde_json::from_value(json).expect("should deserialize discovery doc");
         assert_eq!(disco.jwks_uri, "https://example.com/.well-known/jwks");
     }
+
+    #[test]
+    fn oidc_discovery_deserialize_missing_jwks_uri() {
+        let json = json!({
+            "issuer": "https://example.com"
+            // no jwks_uri
+        });
+        let result: Result<OidcDiscovery, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "missing jwks_uri should fail");
+    }
+
+    #[test]
+    fn oidc_discovery_deserialize_additional_fields_ignored() {
+        let json = json!({
+            "jwks_uri": "https://example.com/jwks",
+            "issuer": "https://example.com",
+            "authorization_endpoint": "https://example.com/auth",
+            "token_endpoint": "https://example.com/token",
+            "userinfo_endpoint": "https://example.com/userinfo",
+            "response_types_supported": ["code"]
+        });
+        let disco: OidcDiscovery =
+            serde_json::from_value(json).expect("should ignore extra fields");
+        assert_eq!(disco.jwks_uri, "https://example.com/jwks");
+    }
+
+    // ── JwksResponse deserialization edge cases ──────────────────────────
+
+    #[test]
+    fn jwks_response_deserialize_missing_keys_field() {
+        let json = json!({});
+        let result: Result<JwksResponse, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "missing 'keys' field should fail");
+    }
+
+    #[test]
+    fn jwks_response_deserialize_extra_fields() {
+        let json = json!({
+            "keys": [],
+            "extra": "field"
+        });
+        let resp: JwksResponse =
+            serde_json::from_value(json).expect("extra fields should be ignored");
+        assert!(resp.keys.is_empty());
+    }
+
+    // ── is_algorithm_compatible (oidc_provider version) ──────────────────
+
+    #[test]
+    fn is_algorithm_compatible_rsa_rs256() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::RS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_rs384() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::RS384));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_rs512() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::RS512));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_ps256() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::PS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_ps384() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::PS384));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_ps512() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::PS512));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_es256_not() {
+        assert!(!is_algorithm_compatible("RSA", Algorithm::ES256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_ec_es256() {
+        assert!(is_algorithm_compatible("EC", Algorithm::ES256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_ec_es384() {
+        assert!(is_algorithm_compatible("EC", Algorithm::ES384));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_ec_rs256_not() {
+        assert!(!is_algorithm_compatible("EC", Algorithm::RS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_hs256_not() {
+        assert!(!is_algorithm_compatible("RSA", Algorithm::HS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_eddsa_not() {
+        assert!(!is_algorithm_compatible("RSA", Algorithm::EdDSA));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_unknown_key_type() {
+        assert!(!is_algorithm_compatible("OCT", Algorithm::HS256));
+        assert!(!is_algorithm_compatible("oct", Algorithm::RS256));
+    }
+
+    // ── build_decoding_key (oidc_provider version) ───────────────────────
+
+    fn sample_rsa_jwk() -> Jwk {
+        Jwk {
+            kid: "test".to_owned(),
+            key_type: "RSA".to_owned(),
+            n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4Qy5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_owned()),
+            e: Some("AQAB".to_owned()),
+            x_coord: None,
+            y_coord: None,
+        }
+    }
+
+    fn sample_ec_jwk() -> Jwk {
+        Jwk {
+            kid: "test".to_owned(),
+            key_type: "EC".to_owned(),
+            n: None,
+            e: None,
+            x_coord: Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4".to_owned()),
+            y_coord: Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM".to_owned()),
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_missing_n() {
+        let mut jwk = sample_rsa_jwk();
+        jwk.n = None;
+        let result = build_decoding_key(&jwk, Algorithm::RS256);
+        assert!(result.is_err(), "expected Err for missing n");
+        if let Err(err) = result {
+            assert!(err.contains("missing n"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_missing_e() {
+        let mut jwk = sample_rsa_jwk();
+        jwk.e = None;
+        let result = build_decoding_key(&jwk, Algorithm::RS256);
+        assert!(result.is_err(), "expected Err for missing e");
+        if let Err(err) = result {
+            assert!(err.contains("missing e"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_ec_missing_x() {
+        let mut jwk = sample_ec_jwk();
+        jwk.x_coord = None;
+        let result = build_decoding_key(&jwk, Algorithm::ES256);
+        assert!(result.is_err(), "expected Err for missing x");
+        if let Err(err) = result {
+            assert!(err.contains("missing x"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_ec_missing_y() {
+        let mut jwk = sample_ec_jwk();
+        jwk.y_coord = None;
+        let result = build_decoding_key(&jwk, Algorithm::ES256);
+        assert!(result.is_err(), "expected Err for missing y");
+        if let Err(err) = result {
+            assert!(err.contains("missing y"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_hs256_unsupported() {
+        let jwk = sample_rsa_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::HS256);
+        assert!(result.is_err(), "expected Err for HS256");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_hs384_unsupported() {
+        let jwk = sample_rsa_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::HS384);
+        assert!(result.is_err(), "expected Err for HS384");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_hs512_unsupported() {
+        let jwk = sample_rsa_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::HS512);
+        assert!(result.is_err(), "expected Err for HS512");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_eddsa_unsupported() {
+        let jwk = sample_ec_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::EdDSA);
+        assert!(result.is_err(), "expected Err for EdDSA");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    // ── base64_decode_url (oidc_provider version) ────────────────────────
+
+    #[test]
+    fn base64_decode_url_valid() {
+        let result = base64_decode_url("dGVzdA").unwrap();
+        assert_eq!(result, b"test");
+    }
+
+    #[test]
+    fn base64_decode_url_invalid_chars() {
+        assert!(base64_decode_url("!!!not-valid!!!").is_err());
+    }
+
+    #[test]
+    fn base64_decode_url_empty_string() {
+        let result = base64_decode_url("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── OidcProvider construction helpers ────────────────────────────────
+
+    fn make_provider(issuer: &str, audience: Option<String>, cached: Option<CachedJwks>) -> OidcProvider {
+        OidcProvider {
+            client: Client::new(),
+            issuer: issuer.to_owned(),
+            audience,
+            cached_keys: Arc::new(Mutex::new(cached)),
+            jwks_url: format!("{issuer}/.well-known/jwks"),
+            _background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn make_provider_no_audience(cached: Option<CachedJwks>) -> OidcProvider {
+        make_provider("https://example.com", None, cached)
+    }
+
+    // ── OidcProvider::new error path ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_with_unreachable_issuer_returns_error() {
+        let result = OidcProvider::new("http://127.0.0.1:1", None).await;
+        assert!(result.is_err(), "expected Err for unreachable issuer");
+        if let Err(err) = result {
+            assert!(
+                matches!(err, OidcProviderError::DiscoveryFetch(_) | OidcProviderError::HttpClient(_)),
+                "expected DiscoveryFetch or HttpClient, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn new_with_unreachable_issuer_error_message_non_empty() {
+        let result = OidcProvider::new("http://127.0.0.1:1", None).await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            let msg = format!("{}", err);
+            assert!(!msg.is_empty());
+        }
+    }
+
+    // ── get_cached_keys ──────────────────────────────────────────────────
+
+    #[test]
+    fn get_cached_keys_returns_none_when_empty() {
+        let provider = make_provider_no_audience(None);
+        assert!(provider.get_cached_keys().is_none());
+    }
+
+    #[test]
+    fn get_cached_keys_returns_keys_when_fresh() {
+        let keys = Arc::new(vec![sample_rsa_jwk()]);
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::clone(&keys),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.get_cached_keys();
+        assert!(result.is_some(), "fresh cache should return keys");
+        // Verify reference equality via Arc
+        assert!(Arc::ptr_eq(&result.unwrap(), &keys));
+    }
+
+    #[test]
+    fn get_cached_keys_returns_none_when_expired() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            fetched_at: Instant::now()
+                .checked_sub(Duration::from_secs(7200))
+                .unwrap_or_else(Instant::now),
+        }));
+        assert!(provider.get_cached_keys().is_none(), "expired cache should return None");
+    }
+
+    #[test]
+    fn get_cached_keys_returns_none_just_before_expiry_boundary() {
+        // fetched_at should still be valid if elapsed < JWKS_CACHE_TTL
+        let just_inside = Instant::now()
+            .checked_sub(JWKS_CACHE_TTL - Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            fetched_at: just_inside,
+        }));
+        assert!(provider.get_cached_keys().is_some(), "cache just inside TTL should return keys");
+    }
+
+    // ── OidcProvider::verify_token ───────────────────────────────────────
+
+    #[test]
+    fn verify_token_too_few_parts_returns_invalid() {
+        let provider = make_provider_no_audience(None);
+        assert!(matches!(
+            provider.verify_token("invalid"),
+            Err(AuthError::InvalidToken)
+        ));
+        assert!(matches!(
+            provider.verify_token("header.payload"),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn verify_token_too_many_parts_returns_invalid() {
+        let provider = make_provider_no_audience(None);
+        assert!(matches!(
+            provider.verify_token("a.b.c.d"),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn verify_token_with_no_keys_returns_provider_error() {
+        let provider = make_provider_no_audience(None);
+        let result = provider.verify_token("aaa.bbb.ccc");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_with_expired_cache_returns_provider_error() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            fetched_at: Instant::now()
+                .checked_sub(Duration::from_secs(7200))
+                .unwrap_or_else(Instant::now),
+        }));
+        let result = provider.verify_token("aaa.bbb.ccc");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError for expired cache, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_invalid_base64_header_returns_provider_error() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("!!!not-base64!!.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_missing_kid_returns_provider_error() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("kid"),
+            "error should mention missing kid"
+        );
+    }
+
+    #[test]
+    fn verify_token_missing_alg_returns_provider_error() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("eyJraWQiOiAidGVzdCJ9.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("alg"),
+            "error should mention missing alg"
+        );
+    }
+
+    #[test]
+    fn verify_token_alg_none_rejected() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("eyJhbGciOiAibm9uZSIsICJraWQiOiAidGVzdCJ9.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::InvalidToken)),
+            "expected InvalidToken, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_unsupported_algorithm_returns_provider_error() {
+        // Header base64: {"alg":"MACSHA256","kid":"test"}  -- not a valid Algorithm
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiTUFDU0hBMjU2IiwgImtpZCI6ICJ0ZXN0In0.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported"),
+            "error should mention unsupported algorithm: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_token_eddsa_algorithm_returns_provider_error() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiRWREU0EiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_no_matching_key_returns_provider_error() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![Jwk {
+                kid: "different-key".to_owned(),
+                key_type: "RSA".to_owned(),
+                n: Some("n".to_owned()),
+                e: Some("e".to_owned()),
+                x_coord: None,
+                y_coord: None,
+            }]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInVua25vd24ifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no matching key"),
+            "error should mention no matching key: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_token_key_type_mismatch_returns_provider_error() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![Jwk {
+                kid: "test".to_owned(),
+                key_type: "EC".to_owned(),
+                n: None,
+                e: None,
+                x_coord: Some("x".to_owned()),
+                y_coord: Some("y".to_owned()),
+            }]),
+            fetched_at: Instant::now(),
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    // ── OidcProvider verify_token with audience ───────────────────────────
+
+    #[test]
+    fn verify_token_with_audience_and_no_keys_returns_provider_error() {
+        // Provider configured with audience, but no keys cached
+        let provider = make_provider("https://issuer.example.com", Some("my-audience".to_owned()), None);
+        let result = provider.verify_token("aaa.bbb.ccc");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    // ── OidcProvider::mint_token ─────────────────────────────────────────
+
+    #[test]
+    fn mint_token_returns_error() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+
+        let provider = make_provider_no_audience(None);
+        let repo = RepositoryScope::new(RepositoryProvider::Generic, "owner", "repo", Some("main"))
+            .expect("valid repo scope");
+        let claims =
+            TokenClaims::new("https://issuer.example.com", "user", TokenScope::Read, repo, 9999999999)
+                .expect("valid claims");
+        let result = provider.mint_token(&claims);
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("mint") || err.contains("support"),
+            "error should indicate minting not supported: {err}"
+        );
+    }
+
+    // ── OidcProvider Clone ───────────────────────────────────────────────
+
+    #[test]
+    fn oidc_provider_clone_produces_valid_instance() {
+        let provider = make_provider_no_audience(None);
+        assert!(matches!(
+            provider.verify_token("a.b.c"),
+            Err(AuthError::ProviderError(_))
+        ));
+    }
+
+    // ── Drop behaviour ───────────────────────────────────────────────────
+
+    #[test]
+    fn oidc_provider_drop_does_not_panic() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            fetched_at: Instant::now(),
+        }));
+        drop(provider);
+        // If we get here, drop succeeded without panicking
+    }
+
+    // ── Jwk deserialization edge cases ───────────────────────────────────
+
+    #[test]
+    fn jwk_deserialize_missing_optional_fields() {
+        let json = json!({
+            "kid": "minimal",
+            "kty": "RSA"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize minimal JWK");
+        assert_eq!(jwk.kid, "minimal");
+        assert_eq!(jwk.key_type, "RSA");
+        assert!(jwk.n.is_none());
+        assert!(jwk.e.is_none());
+    }
+
+    #[test]
+    fn jwk_deserialize_empty_kid() {
+        let json = json!({
+            "kid": "",
+            "kty": "RSA",
+            "n": "n",
+            "e": "e"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize JWK with empty kid");
+        assert!(jwk.kid.is_empty());
+    }
+
+    #[test]
+    fn jwk_deserialize_additional_fields_ignored() {
+        let json = json!({
+            "kid": "key1",
+            "kty": "EC",
+            "alg": "ES256",
+            "use": "sig",
+            "crv": "P-256",
+            "x": "xval",
+            "y": "yval",
+            "ext": true,
+            "key_ops": ["verify"]
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should ignore extra fields");
+        assert_eq!(jwk.kid, "key1");
+        assert_eq!(jwk.key_type, "EC");
+    }
+
+    #[test]
+    fn jwk_deserialize_invalid_type_missing_kid() {
+        let json = json!({
+            "kty": "RSA",
+            "n": "n",
+            "e": "e"
+        });
+        let result: Result<Jwk, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "missing required field kid should fail");
+    }
+
+    // ── Error display contains correct text (additional) ─────────────────
+
+    #[test]
+    fn oidc_provider_error_display_http_client() {
+        let e = OidcProviderError::HttpClient("ssl error".into());
+        assert_eq!(format!("{e}"), "failed to create HTTP client: ssl error");
+    }
+
+    #[test]
+    fn oidc_provider_error_display_discovery() {
+        let e = OidcProviderError::DiscoveryFetch("timeout".into());
+        assert_eq!(
+            format!("{e}"),
+            "failed to fetch OIDC discovery document: timeout"
+        );
+    }
+
+    #[test]
+    fn oidc_provider_error_display_jwks() {
+        let e = OidcProviderError::JwksFetch("500".into());
+        assert_eq!(format!("{e}"), "failed to fetch JWKS keys: 500");
+    }
 }

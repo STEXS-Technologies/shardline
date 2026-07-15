@@ -937,14 +937,16 @@ mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
     use super::{
-        BenchmarkBackend, compose_benchmark_object_key_prefix,
+        BenchmarkBackend, ServerBackend, compose_benchmark_object_key_prefix,
         clear_repository_reference_probe_filter, repository_reference_probe_count,
         reset_repository_reference_probe_count_for_hash, server_error_to_oci,
     };
     use crate::ServerConfig;
     use crate::ServerError;
     use crate::error::ObjectStoreError;
+    use crate::local_backend::LocalBackend;
     use shardline_oci_adapter::OciAdapterError;
+    use shardline_storage::{DeleteOutcome, ObjectKey, ObjectPrefix};
 
     #[test]
     fn benchmark_object_key_prefix_appends_namespace() {
@@ -1087,5 +1089,353 @@ mod tests {
         let err = ServerError::RequestBodyTooLarge;
         let oci = server_error_to_oci(err);
         assert!(matches!(oci, OciAdapterError::Io(_)));
+    }
+
+    // ── ServerBackend construction and identity ─────────────────────────────
+
+    async fn make_backend() -> (ServerBackend, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN);
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            chunk_size,
+        )
+        .await
+        .unwrap();
+        (ServerBackend::Local(backend), tmp)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_from_config_creates_local_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bind_addr = "127.0.0.1:0".parse().unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
+        let config = ServerConfig::new(
+            bind_addr,
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        );
+        let result = ServerBackend::from_config(&config).await;
+        assert!(result.is_ok());
+        let backend = result.unwrap();
+        assert!(matches!(backend, ServerBackend::Local(_)));
+        assert_eq!(backend.backend_name(), "local");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_backend_name_returns_local() {
+        let (backend, _tmp) = make_backend().await;
+        assert_eq!(backend.backend_name(), "local");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_object_backend_name_returns_local() {
+        let (backend, _tmp) = make_backend().await;
+        assert_eq!(backend.object_backend_name(), "local");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_uses_s3_object_store_returns_false_for_local() {
+        let (backend, _tmp) = make_backend().await;
+        assert!(!backend.uses_s3_object_store());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_ready_succeeds_with_empty_store() {
+        let (backend, _tmp) = make_backend().await;
+        let result = backend.ready().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_stats_returns_zero_counts() {
+        let (backend, _tmp) = make_backend().await;
+        let stats = backend.stats().await.unwrap();
+        assert_eq!(stats.chunks, 0);
+        assert_eq!(stats.chunk_bytes, 0);
+        assert_eq!(stats.files, 0);
+    }
+
+    // ── Object CRUD operations ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_put_object_bytes_if_absent_stores_and_returns_outcome() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-test-key").unwrap();
+        let result = backend.put_object_bytes_if_absent(&key, b"hello-backend".to_vec());
+        assert!(result.is_ok());
+        let length = backend.object_length(&key).await.unwrap();
+        assert_eq!(length, 13);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_put_object_bytes_if_absent_idempotent() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-idempotent").unwrap();
+        let first = backend.put_object_bytes_if_absent(&key, b"data".to_vec());
+        assert!(first.is_ok());
+        let second = backend.put_object_bytes_if_absent(&key, b"data".to_vec());
+        assert!(second.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_put_object_bytes_overwrite_stores_object() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-overwrite").unwrap();
+        let result = backend.put_object_bytes_overwrite(&key, b"overwrite-data".to_vec());
+        assert!(result.is_ok());
+        // Verify stored content
+        let read_back = backend.read_object(&key).await.unwrap();
+        assert_eq!(read_back.as_slice(), b"overwrite-data");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_put_sha256_addressed_object_bytes_if_absent_stores_object() {
+        let (backend, _tmp) = make_backend().await;
+        let body = b"sha256-payload-backend";
+        let digest_hex = "ab".repeat(32);
+        let canonical_key =
+            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let result = backend.put_sha256_addressed_object_bytes_if_absent(
+            &canonical_key,
+            &digest_hex,
+            body.to_vec(),
+        );
+        assert!(result.is_ok());
+        let length = backend.object_length(&canonical_key).await.unwrap();
+        assert_eq!(length, body.len() as u64);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_copy_object_if_absent_copies_object() {
+        let (backend, _tmp) = make_backend().await;
+        let src = ObjectKey::parse("backend-src").unwrap();
+        let dst = ObjectKey::parse("backend-dst").unwrap();
+        backend
+            .put_object_bytes_if_absent(&src, b"copy-source".to_vec())
+            .unwrap();
+        let result = backend.copy_object_if_absent(&src, &dst);
+        assert!(result.is_ok());
+        let src_len = backend.object_length(&src).await.unwrap();
+        let dst_len = backend.object_length(&dst).await.unwrap();
+        assert_eq!(src_len, dst_len);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_read_object_returns_stored_bytes() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-read").unwrap();
+        let data = b"readable-content";
+        backend
+            .put_object_bytes_if_absent(&key, data.to_vec())
+            .unwrap();
+        let result = backend.read_object(&key).await.unwrap();
+        assert_eq!(result.as_slice(), data);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_read_object_returns_not_found_for_missing() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-missing").unwrap();
+        let result = backend.read_object(&key).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_object_length_returns_stored_length() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-len").unwrap();
+        let data = b"length-check";
+        backend
+            .put_object_bytes_if_absent(&key, data.to_vec())
+            .unwrap();
+        let length = backend.object_length(&key).await.unwrap();
+        assert_eq!(length, data.len() as u64);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_object_length_returns_not_found_for_missing() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-missing-len").unwrap();
+        let result = backend.object_length(&key).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_delete_object_if_present_removes_object() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-delete").unwrap();
+        backend
+            .put_object_bytes_if_absent(&key, b"to-delete".to_vec())
+            .unwrap();
+        let outcome = backend.delete_object_if_present(&key).await.unwrap();
+        assert_eq!(outcome, DeleteOutcome::Deleted);
+        let length = backend.object_length(&key).await;
+        assert!(matches!(length, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_delete_object_if_present_returns_not_found_for_missing() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-already-missing").unwrap();
+        let outcome = backend.delete_object_if_present(&key).await.unwrap();
+        assert_eq!(outcome, DeleteOutcome::NotFound);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_visit_object_prefix_lists_stored_objects() {
+        let (backend, _tmp) = make_backend().await;
+        let k1 = ObjectKey::parse("prefix-a/obj1").unwrap();
+        let k2 = ObjectKey::parse("prefix-a/obj2").unwrap();
+        backend
+            .put_object_bytes_if_absent(&k1, b"d1".to_vec())
+            .unwrap();
+        backend
+            .put_object_bytes_if_absent(&k2, b"d2".to_vec())
+            .unwrap();
+        let prefix = ObjectPrefix::parse("prefix-a").unwrap();
+        let mut keys = Vec::new();
+        backend
+            .visit_object_prefix(&prefix, |meta| {
+                keys.push(meta.key().as_str().to_owned());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_list_object_flat_namespace_page_returns_results() {
+        let (backend, _tmp) = make_backend().await;
+        let prefix = ObjectPrefix::parse("list-be").unwrap();
+        for i in 0..3 {
+            let key = ObjectKey::parse(&format!("list-be/obj{i}")).unwrap();
+            backend
+                .put_object_bytes_if_absent(&key, b"d".to_vec())
+                .unwrap();
+        }
+        let page = backend
+            .list_object_flat_namespace_page(&prefix, None, 10)
+            .unwrap();
+        assert_eq!(page.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_read_object_stream_returns_stream_for_existing_object() {
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("backend-stream").unwrap();
+        let data = b"stream-content-backend";
+        backend
+            .put_object_bytes_if_absent(&key, data.to_vec())
+            .unwrap();
+        let result = backend
+            .read_object_stream(&key, data.len() as u64, None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_chunk_length_returns_not_found_for_missing() {
+        let (backend, _tmp) = make_backend().await;
+        // Use a valid 64-char hex hash that doesn't exist
+        let hash = "a".repeat(64);
+        let result = backend.chunk_length(&hash).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_xorb_length_returns_not_found_for_missing() {
+        let (backend, _tmp) = make_backend().await;
+        // Use a valid 64-char hex hash that doesn't exist
+        let hash = "b".repeat(64);
+        let result = backend.xorb_length(&hash).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_chunk_length_rejects_invalid_hash() {
+        let (backend, _tmp) = make_backend().await;
+        let result = backend.chunk_length("invalid-hash").await;
+        assert!(result.is_err());
+    }
+
+    // ── OciBackend trait implementation ─────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_oci_create_resumable_upload_returns_none_for_local_store() {
+        use shardline_oci_adapter::OciBackend;
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("oci-test-key").unwrap();
+        let result = OciBackend::create_resumable_object_upload(&backend, &key).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_oci_upload_resumable_part_returns_not_found_for_local_store() {
+        use shardline_oci_adapter::OciBackend;
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("oci-upload-key").unwrap();
+        let result = OciBackend::upload_resumable_object_part(
+            &backend,
+            &key,
+            "upload-id",
+            0,
+            axum::body::Bytes::from_static(b"part-data"),
+        )
+        .await;
+        assert!(matches!(result, Err(shardline_oci_adapter::OciAdapterError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_oci_complete_resumable_upload_returns_not_found_for_local_store() {
+        use shardline_oci_adapter::OciBackend;
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("oci-complete-key").unwrap();
+        let result = OciBackend::complete_resumable_object_upload(
+            &backend,
+            &key,
+            "upload-id",
+            vec![(0, "part-etag".to_owned())],
+        )
+        .await;
+        assert!(matches!(result, Err(shardline_oci_adapter::OciAdapterError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_oci_abort_resumable_upload_succeeds_for_local_store() {
+        use shardline_oci_adapter::OciBackend;
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("oci-abort-key").unwrap();
+        let result = OciBackend::abort_resumable_object_upload(&backend, &key, "upload-id").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_oci_delete_object_if_present_delegates() {
+        use shardline_oci_adapter::OciBackend;
+        let (backend, _tmp) = make_backend().await;
+        let key = ObjectKey::parse("oci-delete-key").unwrap();
+        backend
+            .put_object_bytes_if_absent(&key, b"oci-delete".to_vec())
+            .unwrap();
+        let outcome = OciBackend::delete_object_if_present(&backend, &key).await;
+        assert!(outcome.is_ok());
+        assert_eq!(outcome.unwrap(), DeleteOutcome::Deleted);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_oci_copy_object_if_absent_delegates() {
+        use shardline_oci_adapter::OciBackend;
+        let (backend, _tmp) = make_backend().await;
+        let src = ObjectKey::parse("oci-copy-src").unwrap();
+        let dst = ObjectKey::parse("oci-copy-dst").unwrap();
+        backend
+            .put_object_bytes_if_absent(&src, b"oci-copy-data".to_vec())
+            .unwrap();
+        let result = OciBackend::copy_object_if_absent(&backend, &src, &dst);
+        assert!(result.is_ok());
     }
 }

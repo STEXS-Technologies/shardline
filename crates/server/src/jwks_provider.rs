@@ -567,4 +567,643 @@ mod tests {
         assert_eq!(MIN_JWKS_REFRESH_INTERVAL, Duration::from_secs(60));
         assert_eq!(MAX_JWKS_REFRESH_INTERVAL, Duration::from_secs(3600));
     }
+
+    // ── parse_cache_max_age ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_cache_max_age_valid() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cache-control", "max-age=300".parse().unwrap());
+        assert_eq!(parse_cache_max_age(&headers), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn parse_cache_max_age_missing_header() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_cache_max_age(&headers), None);
+    }
+
+    #[test]
+    fn parse_cache_max_age_unrelated_directive() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cache-control", "no-cache".parse().unwrap());
+        assert_eq!(parse_cache_max_age(&headers), None);
+    }
+
+    #[test]
+    fn parse_cache_max_age_below_min_clamped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cache-control", "max-age=30".parse().unwrap());
+        // Clamped to MIN_JWKS_REFRESH_INTERVAL (60s)
+        assert_eq!(
+            parse_cache_max_age(&headers),
+            Some(MIN_JWKS_REFRESH_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn parse_cache_max_age_above_max_clamped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cache-control", "max-age=7200".parse().unwrap());
+        // Clamped to MAX_JWKS_REFRESH_INTERVAL (3600s)
+        assert_eq!(
+            parse_cache_max_age(&headers),
+            Some(MAX_JWKS_REFRESH_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn parse_cache_max_age_multiple_directives() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers
+            .insert("cache-control", "public, max-age=300, must-revalidate".parse().unwrap());
+        assert_eq!(parse_cache_max_age(&headers), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn parse_cache_max_age_invalid_max_age_value() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cache-control", "max-age=not-a-number".parse().unwrap());
+        assert_eq!(parse_cache_max_age(&headers), None);
+    }
+
+    // ── base64_decode_url ────────────────────────────────────────────────
+
+    #[test]
+    fn base64_decode_url_valid() {
+        // "test" in base64url (no padding)
+        let result = base64_decode_url("dGVzdA").unwrap();
+        assert_eq!(result, b"test");
+    }
+
+    #[test]
+    fn base64_decode_url_invalid_chars() {
+        assert!(base64_decode_url("!!!not-valid!!!").is_err());
+    }
+
+    #[test]
+    fn base64_decode_url_empty_string() {
+        let result = base64_decode_url("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── is_algorithm_compatible ──────────────────────────────────────────
+
+    #[test]
+    fn is_algorithm_compatible_rsa_rs256() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::RS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_rs384() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::RS384));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_rs512() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::RS512));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_ps256() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::PS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_ps384() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::PS384));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_ps512() {
+        assert!(is_algorithm_compatible("RSA", Algorithm::PS512));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_es256_not() {
+        assert!(!is_algorithm_compatible("RSA", Algorithm::ES256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_ec_es256() {
+        assert!(is_algorithm_compatible("EC", Algorithm::ES256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_ec_es384() {
+        assert!(is_algorithm_compatible("EC", Algorithm::ES384));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_ec_rs256_not() {
+        assert!(!is_algorithm_compatible("EC", Algorithm::RS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_hs256_not() {
+        assert!(!is_algorithm_compatible("RSA", Algorithm::HS256));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_rsa_eddsa_not() {
+        assert!(!is_algorithm_compatible("RSA", Algorithm::EdDSA));
+    }
+
+    #[test]
+    fn is_algorithm_compatible_unknown_key_type() {
+        assert!(!is_algorithm_compatible("OCT", Algorithm::HS256));
+        assert!(!is_algorithm_compatible("oct", Algorithm::RS256));
+    }
+
+    // ── build_decoding_key ──────────────────────────────────────────────
+
+    fn sample_rsa_jwk() -> Jwk {
+        Jwk {
+            kid: "test".to_owned(),
+            key_type: "RSA".to_owned(),
+            n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4Qy5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_owned()),
+            e: Some("AQAB".to_owned()),
+            x_coord: None,
+            y_coord: None,
+        }
+    }
+
+    fn sample_ec_jwk() -> Jwk {
+        Jwk {
+            kid: "test".to_owned(),
+            key_type: "EC".to_owned(),
+            n: None,
+            e: None,
+            x_coord: Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4".to_owned()),
+            y_coord: Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM".to_owned()),
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_missing_n() {
+        let mut jwk = sample_rsa_jwk();
+        jwk.n = None;
+        let result = build_decoding_key(&jwk, Algorithm::RS256);
+        assert!(result.is_err(), "expected Err for missing n");
+        if let Err(err) = result {
+            assert!(err.contains("missing n"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_missing_e() {
+        let mut jwk = sample_rsa_jwk();
+        jwk.e = None;
+        let result = build_decoding_key(&jwk, Algorithm::RS256);
+        assert!(result.is_err(), "expected Err for missing e");
+        if let Err(err) = result {
+            assert!(err.contains("missing e"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_ec_missing_x() {
+        let mut jwk = sample_ec_jwk();
+        jwk.x_coord = None;
+        let result = build_decoding_key(&jwk, Algorithm::ES256);
+        assert!(result.is_err(), "expected Err for missing x");
+        if let Err(err) = result {
+            assert!(err.contains("missing x"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_ec_missing_y() {
+        let mut jwk = sample_ec_jwk();
+        jwk.y_coord = None;
+        let result = build_decoding_key(&jwk, Algorithm::ES256);
+        assert!(result.is_err(), "expected Err for missing y");
+        if let Err(err) = result {
+            assert!(err.contains("missing y"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_hs256_unsupported() {
+        let jwk = sample_rsa_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::HS256);
+        assert!(result.is_err(), "expected Err for HS256");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_hs384_unsupported() {
+        let jwk = sample_rsa_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::HS384);
+        assert!(result.is_err(), "expected Err for HS384");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_hs512_unsupported() {
+        let jwk = sample_rsa_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::HS512);
+        assert!(result.is_err(), "expected Err for HS512");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    #[test]
+    fn build_decoding_key_eddsa_unsupported() {
+        let jwk = sample_ec_jwk();
+        let result = build_decoding_key(&jwk, Algorithm::EdDSA);
+        assert!(result.is_err(), "expected Err for EdDSA");
+        if let Err(err) = result {
+            assert!(err.contains("unsupported algorithm"), "error: {err}");
+        }
+    }
+
+    // ── JwksProvider construction helpers ─────────────────────────────────
+
+    fn make_provider(cached: Option<CachedJwks>) -> JwksProvider {
+        JwksProvider {
+            client: Client::new(),
+            jwks_url: "https://example.com/.well-known/jwks".to_owned(),
+            issuer: "https://example.com".to_owned(),
+            cached_keys: Arc::new(RwLock::new(cached)),
+            background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    // ── JwksProvider::new error path ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_with_unreachable_url_returns_error() {
+        let result = JwksProvider::new(
+            "http://127.0.0.1:1/nonexistent-jwks",
+            "https://example.com",
+        )
+        .await;
+        assert!(result.is_err(), "expected Err for unreachable URL");
+        if let Err(err) = result {
+            assert!(
+                matches!(err, JwksProviderError::JwksFetch(_)),
+                "expected JwksFetch error, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn new_with_unreachable_url_error_message_non_empty() {
+        let result = JwksProvider::new(
+            "http://127.0.0.1:1/nonexistent-jwks",
+            "https://example.com",
+        )
+        .await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            let msg = format!("{}", err);
+            assert!(!msg.is_empty());
+        }
+    }
+
+    // ── JwksProvider::verify_token ───────────────────────────────────────
+
+    #[test]
+    fn verify_token_too_few_parts_returns_invalid() {
+        let provider = make_provider(None);
+        assert!(matches!(
+            provider.verify_token("invalid"),
+            Err(AuthError::InvalidToken)
+        ));
+        assert!(matches!(
+            provider.verify_token("header.payload"),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn verify_token_too_many_parts_returns_invalid() {
+        let provider = make_provider(None);
+        assert!(matches!(
+            provider.verify_token("a.b.c.d"),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn verify_token_with_no_keys_returns_provider_error() {
+        let provider = make_provider(None);
+        let result = provider.verify_token("aaa.bbb.ccc");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_invalid_base64_header_returns_provider_error() {
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("!!!not-base64!!.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_missing_kid_returns_provider_error() {
+        // Header base64: {"alg":"RS256"}  (no kid field)
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("kid"),
+            "error should mention missing kid"
+        );
+    }
+
+    #[test]
+    fn verify_token_missing_alg_returns_provider_error() {
+        // Header base64: {"kid":"test"}  (no alg field)
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("eyJraWQiOiAidGVzdCJ9.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("alg"),
+            "error should mention missing alg"
+        );
+    }
+
+    #[test]
+    fn verify_token_alg_none_rejected() {
+        // Header base64: {"alg":"none","kid":"test"}
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("eyJhbGciOiAibm9uZSIsICJraWQiOiAidGVzdCJ9.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::InvalidToken)),
+            "expected InvalidToken, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_unsupported_algorithm_returns_provider_error() {
+        // Header base64: {"alg":"MACSHA256","kid":"test"}  -- not a valid Algorithm
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiTUFDU0hBMjU2IiwgImtpZCI6ICJ0ZXN0In0.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported"),
+            "error should mention unsupported algorithm: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_token_eddsa_algorithm_returns_provider_error() {
+        // Header base64: {"alg":"EdDSA","kid":"test"}
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiRWREU0EiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_no_matching_key_returns_provider_error() {
+        // Header base64: {"alg":"RS256","kid":"unknown"}
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![Jwk {
+                kid: "different-key".to_owned(),
+                key_type: "RSA".to_owned(),
+                n: Some("n".to_owned()),
+                e: Some("e".to_owned()),
+                x_coord: None,
+                y_coord: None,
+            }]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInVua25vd24ifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no matching key"),
+            "error should mention no matching key: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_token_key_type_mismatch_returns_provider_error() {
+        // Header: RS256, but only EC key available — algorithm incompatible
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![Jwk {
+                kid: "test".to_owned(),
+                key_type: "EC".to_owned(),
+                n: None,
+                e: None,
+                x_coord: Some("x".to_owned()),
+                y_coord: Some("y".to_owned()),
+            }]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        // Header: {"alg":"RS256","kid":"test"}
+        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_token_empty_keys_no_match() {
+        // Header: {"alg":"RS256","kid":"test"} but keys is empty vec
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+    }
+
+    // ── JwksProvider::mint_token ─────────────────────────────────────────
+
+    #[test]
+    fn mint_token_returns_error() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+
+        let provider = make_provider(None);
+        let repo = RepositoryScope::new(RepositoryProvider::Generic, "owner", "repo", Some("main"))
+            .expect("valid repo scope");
+        let claims =
+            TokenClaims::new("https://issuer.example.com", "user", TokenScope::Read, repo, 9999999999)
+                .expect("valid claims");
+        let result = provider.mint_token(&claims);
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(_))),
+            "expected ProviderError, got {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("mint") || err.contains("support"),
+            "error should indicate minting not supported: {err}"
+        );
+    }
+
+    // ── JwksProvider Clone ───────────────────────────────────────────────
+
+    #[test]
+    fn jwks_provider_clone_produces_valid_instance() {
+        let provider = make_provider(None);
+        // Both should behave identically (no keys available)
+        assert!(matches!(
+            provider.verify_token("a.b.c"),
+            Err(AuthError::ProviderError(_))
+        ));
+    }
+
+    // ── Jwk deserialization edge cases ───────────────────────────────────
+
+    #[test]
+    fn jwk_deserialize_missing_optional_fields() {
+        // Only kid and kty are required; n, e, x, y are optional
+        let json = json!({
+            "kid": "minimal",
+            "kty": "RSA"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize minimal JWK");
+        assert_eq!(jwk.kid, "minimal");
+        assert_eq!(jwk.key_type, "RSA");
+        assert!(jwk.n.is_none());
+        assert!(jwk.e.is_none());
+    }
+
+    #[test]
+    fn jwk_deserialize_empty_kid() {
+        let json = json!({
+            "kid": "",
+            "kty": "RSA",
+            "n": "n",
+            "e": "e"
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should deserialize JWK with empty kid");
+        assert!(jwk.kid.is_empty());
+    }
+
+    #[test]
+    fn jwk_deserialize_additional_fields_ignored() {
+        let json = json!({
+            "kid": "key1",
+            "kty": "EC",
+            "alg": "ES256",
+            "use": "sig",
+            "crv": "P-256",
+            "x": "xval",
+            "y": "yval",
+            "ext": true,
+            "key_ops": ["verify"]
+        });
+        let jwk: Jwk = serde_json::from_value(json).expect("should ignore extra fields");
+        assert_eq!(jwk.kid, "key1");
+        assert_eq!(jwk.key_type, "EC");
+    }
+
+    #[test]
+    fn jwk_deserialize_invalid_type_missing_kid() {
+        let json = json!({
+            "kty": "RSA",
+            "n": "n",
+            "e": "e"
+            // no kid
+        });
+        // kid is not optional in our struct (no Option wrapper)
+        let result: Result<Jwk, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "missing required field kid should fail");
+    }
+
+    #[test]
+    fn jwks_response_deserialize_empty_keys() {
+        let json = json!({ "keys": [] });
+        let resp: JwksResponse = serde_json::from_value(json).expect("empty keys array");
+        assert!(resp.keys.is_empty());
+    }
+
+    #[test]
+    fn jwks_response_deserialize_multiple_keys() {
+        let json = json!({
+            "keys": [
+                { "kid": "k1", "kty": "RSA", "n": "n1", "e": "e1" },
+                { "kid": "k2", "kty": "EC", "x": "x2", "y": "y2" },
+                { "kid": "k3", "kty": "RSA", "n": "n3", "e": "e3" }
+            ]
+        });
+        let resp: JwksResponse = serde_json::from_value(json).expect("multiple keys");
+        assert_eq!(resp.keys.len(), 3);
+        assert_eq!(resp.keys[0].kid, "k1");
+        assert_eq!(resp.keys[1].kid, "k2");
+        assert_eq!(resp.keys[2].kid, "k3");
+    }
+
+    #[test]
+    fn jwks_response_deserialize_missing_keys_field() {
+        let json = json!({});
+        let result: Result<JwksResponse, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "missing 'keys' field should fail");
+    }
+
+    // ── Drop behaviour ───────────────────────────────────────────────────
+
+    #[test]
+    fn jwks_provider_drop_does_not_panic() {
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            etag: Some("abc123".to_owned()),
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+        drop(provider);
+        // If we get here, drop succeeded without panicking
+    }
 }

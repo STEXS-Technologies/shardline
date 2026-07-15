@@ -266,6 +266,7 @@ fn parse_env_bool(name: &str) -> Result<Option<bool>, ()> {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::{ensure_secret_size_within_limit, open_secret_file, read_secret_file_bytes};
     use shardline_protocol::parse_bool;
@@ -273,6 +274,16 @@ mod tests {
     use std::path::Path;
 
     use super::super::ServerConfigError;
+
+    /// SAFETY: Wrappers for env var manipulation in `#[serial_test::serial]` tests.
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    fn set_env_var(key: &str, value: &str) {
+        unsafe { std::env::set_var(key, value) };
+    }
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    fn remove_env_var(key: &str) {
+        unsafe { std::env::remove_var(key) };
+    }
 
     // -----------------------------------------------------------------------
     // parse_bool (the underlying parser used by parse_env_bool)
@@ -831,6 +842,228 @@ mod tests {
                 observed_bytes: obs,
             },
         );
+        assert!(result.is_err());
+    }
+
+    // ── optional_s3_secret_from_sources — non-UTF-8 file ────────────────────
+
+    #[test]
+    fn optional_s3_secret_from_non_utf8_file_returns_utf8_error() {
+        use super::optional_s3_secret_from_sources;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Write raw bytes that are not valid UTF-8
+        std::io::Write::write_all(&mut tmp, b"\xff\xfe\x00\x01").unwrap();
+        tmp.flush().unwrap();
+
+        let result = optional_s3_secret_from_sources(
+            "TEST_ENV",
+            None,
+            "TEST_FILE_ENV",
+            Some(tmp.path().display().to_string()),
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("UTF-8") || err_msg.contains("utf-8") || err_msg.contains("S3CredentialUtf8"));
+    }
+
+    // ── open_secret_file — symlink escaping parent directory ────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn open_secret_file_symlink_outside_parent_is_err() {
+        use std::os::unix::fs::symlink;
+        use super::open_secret_file;
+
+        // Create a parent directory and a target file outside it
+        let parent = tempfile::tempdir().unwrap();
+        let outside_target = tempfile::NamedTempFile::new().unwrap();
+
+        // Create symlink inside parent that points outside
+        let symlink_path = parent.path().join("escaped_link");
+        symlink(outside_target.path(), &symlink_path).unwrap();
+
+        let result = open_secret_file(&symlink_path);
+        assert!(result.is_err());
+    }
+
+    // ── parse_env_bool via env var ──────────────────────────────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_env_bool_true_value_via_env() {
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_TEST_PARSE_BOOL_TRUE", "true");
+        let result = super::parse_env_bool("SHARDLINE_TEST_PARSE_BOOL_TRUE");
+        assert_eq!(result, Ok(Some(true)));
+        // SAFETY: cleanup
+        remove_env_var("SHARDLINE_TEST_PARSE_BOOL_TRUE");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_env_bool_false_value_via_env() {
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_TEST_PARSE_BOOL_FALSE", "false");
+        let result = super::parse_env_bool("SHARDLINE_TEST_PARSE_BOOL_FALSE");
+        assert_eq!(result, Ok(Some(false)));
+        // SAFETY: cleanup
+        remove_env_var("SHARDLINE_TEST_PARSE_BOOL_FALSE");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_env_bool_unset_env_returns_ok_none() {
+        // SAFETY: serialized env var test
+        remove_env_var("SHARDLINE_TEST_PARSE_BOOL_UNSET");
+        let result = super::parse_env_bool("SHARDLINE_TEST_PARSE_BOOL_UNSET");
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parse_env_bool_invalid_value_returns_err() {
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_TEST_PARSE_BOOL_INVALID", "not-a-bool");
+        let result = super::parse_env_bool("SHARDLINE_TEST_PARSE_BOOL_INVALID");
+        assert_eq!(result, Err(()));
+        // SAFETY: cleanup
+        remove_env_var("SHARDLINE_TEST_PARSE_BOOL_INVALID");
+    }
+
+    // ── load_s3_object_store_config_from_env (env-based) ───────────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_s3_object_store_config_missing_bucket() {
+        // Ensure SHARDLINE_S3_BUCKET is unset
+        // SAFETY: serialized env var test
+        remove_env_var("SHARDLINE_S3_BUCKET");
+        let result = super::load_s3_object_store_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MissingS3Bucket)
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_s3_object_store_config_invalid_allow_http() {
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");
+        set_env_var("SHARDLINE_S3_ALLOW_HTTP", "not-a-bool");
+        let result = super::load_s3_object_store_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::InvalidS3AllowHttp)
+        ));
+        // SAFETY: cleanup
+        remove_env_var("SHARDLINE_S3_BUCKET");
+        remove_env_var("SHARDLINE_S3_ALLOW_HTTP");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn load_s3_object_store_config_invalid_virtual_hosted_style() {
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");
+        set_env_var("SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST", "bad");
+        let result = super::load_s3_object_store_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::InvalidS3VirtualHostedStyleRequest)
+        ));
+        // SAFETY: cleanup
+        remove_env_var("SHARDLINE_S3_BUCKET");
+        remove_env_var("SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST");
+    }
+
+    // ── optional_s3_secret_from_sources — credential source conflict via file env ─
+
+    #[test]
+    #[serial_test::serial]
+    fn optional_s3_secret_env_or_file_conflict() {
+        use super::optional_s3_secret_env_or_file;
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_TEST_S3_SECRET_ENV", "direct-value");
+        set_env_var("SHARDLINE_TEST_S3_SECRET_FILE_ENV", "/some/file");
+        let result = optional_s3_secret_env_or_file(
+            "SHARDLINE_TEST_S3_SECRET_ENV",
+            "SHARDLINE_TEST_S3_SECRET_FILE_ENV",
+        );
+        assert!(result.is_err());
+        // SAFETY: cleanup
+        remove_env_var("SHARDLINE_TEST_S3_SECRET_ENV");
+        remove_env_var("SHARDLINE_TEST_S3_SECRET_FILE_ENV");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn optional_s3_secret_env_or_file_direct_value() {
+        use super::optional_s3_secret_env_or_file;
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_TEST_S3_SECRET_DIRECT", "my-secret");
+        remove_env_var("SHARDLINE_TEST_S3_SECRET_DIRECT_FILE");
+        let result = optional_s3_secret_env_or_file(
+            "SHARDLINE_TEST_S3_SECRET_DIRECT",
+            "SHARDLINE_TEST_S3_SECRET_DIRECT_FILE",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some("my-secret".to_owned()));
+        // SAFETY: cleanup
+        remove_env_var("SHARDLINE_TEST_S3_SECRET_DIRECT");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn optional_s3_secret_env_or_file_both_unset() {
+        use super::optional_s3_secret_env_or_file;
+        // SAFETY: serialized env var test
+        remove_env_var("SHARDLINE_TEST_S3_SECRET_BOTH_UNSET");
+        remove_env_var("SHARDLINE_TEST_S3_SECRET_BOTH_UNSET_FILE");
+        let result = optional_s3_secret_env_or_file(
+            "SHARDLINE_TEST_S3_SECRET_BOTH_UNSET",
+            "SHARDLINE_TEST_S3_SECRET_BOTH_UNSET_FILE",
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    // ── configure_provider_runtime_from_paths — API key file too large ─────
+
+    #[test]
+    fn configure_provider_runtime_api_key_too_large() {
+        use super::configure_provider_runtime_from_paths;
+        let mut config = test_config();
+        config = config
+            .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+            .unwrap();
+
+        let mut api_key_file = tempfile::NamedTempFile::new().unwrap();
+        // MAX_PROVIDER_API_KEY_BYTES is typically small; use a large value
+        let large_key = vec![b'a'; 10_000];
+        std::io::Write::write_all(&mut api_key_file, &large_key).unwrap();
+        api_key_file.flush().unwrap();
+        let mut config_file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut config_file, b"config: {}").unwrap();
+        config_file.flush().unwrap();
+
+        let result = configure_provider_runtime_from_paths(
+            config,
+            Some(config_file.path().to_path_buf()),
+            Some(api_key_file.path().to_path_buf()),
+            "issuer".to_owned(),
+            Ok(std::num::NonZeroU64::new(300).unwrap_or(std::num::NonZeroU64::MIN)),
+        );
+        assert!(result.is_err());
+    }
+
+    // ── open_secret_file — root path (no parent) ───────────────────────────
+
+    #[test]
+    fn open_secret_file_root_path_is_err() {
+        use super::open_secret_file;
+        // A root symlink (no parent) should be handled
+        let result = open_secret_file(Path::new("/"));
         assert!(result.is_err());
     }
 }

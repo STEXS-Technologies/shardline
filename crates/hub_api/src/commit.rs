@@ -482,7 +482,7 @@ mod tests {
     fn parse_ndjson_too_many_instructions() {
         let content_b64 = STANDARD.encode(b"x");
         // Build a body with MAX_COMMIT_INSTRUCTIONS + 1 file instructions
-        let mut body = "{{\"header\":{{\"message\":\"too many\",\"parentCommit\":\"\"}}}}\n".to_string();
+        let mut body = format!("{{\"header\":{{\"message\":\"too many\",\"parentCommit\":\"\"}}}}\n");
         for _ in 0..MAX_COMMIT_INSTRUCTIONS + 1 {
             body.push_str(&format!(
                 "{{\"file\":{{\"path\":\"f.txt\",\"content\":\"{content_b64}\"}}}}\n"
