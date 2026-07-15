@@ -978,6 +978,76 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_rate_limited_when_permits_exhausted() {
+        // Exhaust the semaphore to trigger the rate-limit error path (lines 40-46).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::num::NonZeroUsize;
+        let config = crate::config::ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            "http://127.0.0.1:8080".to_owned(),
+            root,
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .with_token_signing_key(signing_key())
+        .expect("signing key set");
+        let backend = crate::backend::ServerBackend::from_config(&config)
+            .await
+            .expect("backend");
+        // Create a semaphore with 0 permits so try_acquire_owned always fails
+        let state = Arc::new(AppState {
+            config,
+            role: crate::server_role::ServerRole::All,
+            backend,
+            auth: None,
+            provider_tokens: None,
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            transfer_limiter: crate::TransferLimiter::new(
+                NonZeroUsize::new(4096).unwrap(),
+                NonZeroUsize::new(16).unwrap(),
+            ),
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(0)),
+            protocol_metrics: crate::app::ProtocolMetrics::default(),
+        });
+        let headers = HeaderMap::new();
+        let uri: Uri = "/v2/token".parse().unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(result, Err(ServerError::TooManyRegistryTokenRequests)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_token_rejects_different_repository_scope() {
+        // The bootstrap token has repository = owner/repo.
+        // Requesting a token for a different repository should fail.
+        let state = build_state_with_auth().await;
+        let signer = test_signer();
+        let claims = test_claims(); // scope: owner/repo
+        let token = signer.sign(&claims).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        // Request token for "different/repo" which does not match "owner/repo"
+        let uri: Uri = "/v2/token?scope=repository:different/repo:pull"
+            .parse()
+            .unwrap();
+        let result = oci_registry_token(
+            axum::extract::State(state),
+            headers,
+            uri,
+        )
+        .await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn registry_token_exchange_missing_signing_key_errors() {
         // A state without a signing key should return MissingAuthorization
         // We need a state with no signing key configured.
@@ -1268,6 +1338,23 @@ mod tests {
         assert!(scope_allows_oci_exchange(TokenScope::Read, None));
         // Write actual → requested is Write → Write.allows_write() = true
         assert!(scope_allows_oci_exchange(TokenScope::Write, None));
+    }
+
+    // ── parse_oci_registry_token_scopes — line 232: fallthrough for Read+Read ──
+
+    #[test]
+    fn parse_scopes_two_read_uses_existing_scope() {
+        // Two Read scopes: after the first, requested_scope = Some(Read).
+        // The second is also Read, so the guard on line 231
+        // `Some(TokenScope::Read) if scope_value == TokenScope::Write`
+        // does NOT match, and we fall through to line 232 `Some(existing_scope) => existing_scope`.
+        let scopes = vec![
+            "repository:repo:pull".to_owned(),
+            "repository:repo:pull".to_owned(),
+        ];
+        let (scope, repo) = parse_oci_registry_token_scopes(&scopes).unwrap();
+        assert_eq!(scope, Some(TokenScope::Read));
+        assert_eq!(repo, Some("repo".to_owned()));
     }
 
     // ── oci_bearer_challenge ────────────────────────────────────────────────

@@ -1473,4 +1473,160 @@ mod tests {
         // Should be InvalidFileId or InvalidContentHash.
         assert!(result.is_err());
     }
+
+    // ── ready() ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ready_fails_when_postgres_unreachable() {
+        let (backend, _root) = make_backend().await;
+        // The local_root check passes (temp dir exists), but the SQL probe
+        // fails because no real Postgres is available.
+        let result = backend.ready().await;
+        assert!(result.is_err());
+    }
+
+    // ── read_object_stream ───────────────────────────────────
+
+    #[tokio::test]
+    async fn read_object_stream_without_range_ok() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/stream/no-range").unwrap();
+        let data = b"stream data without range";
+        store_object(&backend.object_store(), &key, data);
+        let result = backend
+            .read_object_stream(&key, data.len() as u64, None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn read_object_stream_with_range_ok() {
+        let (backend, _root) = make_backend().await;
+        let key = ObjectKey::parse("test/stream/with-range").unwrap();
+        let data = b"stream data with range spec";
+        store_object(&backend.object_store(), &key, data);
+        let range = ByteRange::new(0, data.len() as u64 - 1).unwrap();
+        let result = backend
+            .read_object_stream(&key, data.len() as u64, Some(range))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // ── xorb_length ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn xorb_length_returns_length_for_stored_xorb() {
+        let (backend, _root) = make_backend().await;
+        let hash_hex = "ab".repeat(32);
+        let key = crate::xet_adapter::xorb_object_key(&hash_hex).unwrap();
+        let data = b"fake xorb content for length test";
+        store_object(&backend.object_store(), &key, data);
+        let length = backend.xorb_length(&hash_hex).await.expect("xorb_length");
+        assert_eq!(length, data.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn xorb_length_not_found_for_missing_hash() {
+        let (backend, _root) = make_backend().await;
+        let hash_hex = "cd".repeat(32);
+        let result = backend.xorb_length(&hash_hex).await;
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
+
+    // ── reconstruction with content_hash (version locator branch) ──
+
+    #[tokio::test]
+    async fn reconstruction_with_invalid_content_hash() {
+        let (backend, _root) = make_backend().await;
+        // An invalid content_hash should be caught before any PG call.
+        let result = backend
+            .reconstruction("test-file.bin", Some("not-a-valid-hash"), None, None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
+    }
+
+    #[tokio::test]
+    async fn reconstruction_with_valid_content_hash_fails_without_postgres() {
+        let (backend, _root) = make_backend().await;
+        // Valid file_id + content_hash → read_record uses version_record_locator
+        // and then fails on PG.
+        let result = backend
+            .reconstruction("test-file.bin", Some(&make_hash('a')), None, None)
+            .await;
+        // The error should be from PG, not InvalidFileId or InvalidContentHash.
+        assert!(result.is_err());
+        assert!(!matches!(result, Err(ServerError::InvalidFileId)));
+        assert!(!matches!(result, Err(ServerError::InvalidContentHash)));
+    }
+
+    // ── file_total_bytes with/without content_hash ──────────
+
+    #[tokio::test]
+    async fn file_total_bytes_with_invalid_content_hash() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .file_total_bytes("test-file.bin", Some("bad"), None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
+    }
+
+    #[tokio::test]
+    async fn file_total_bytes_with_valid_params_fails_without_postgres() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .file_total_bytes("test-file.bin", Some(&make_hash('a')), None)
+            .await;
+        assert!(result.is_err());
+        assert!(!matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    // ── download_file ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn download_file_with_invalid_content_hash() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .download_file("test-file.bin", Some("invalid!"), None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidContentHash)));
+    }
+
+    #[tokio::test]
+    async fn download_file_without_content_hash_fails_without_postgres() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .download_file("test-file.bin", None, None)
+            .await;
+        assert!(result.is_err());
+        assert!(!matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    // ── read_chunk_for_file_version ──────────────────────────
+
+    #[tokio::test]
+    async fn read_chunk_for_file_version_rejects_invalid_file_id() {
+        let (backend, _root) = make_backend().await;
+        let result = backend
+            .read_chunk_for_file_version(
+                &make_hash('a'),
+                "/bad/path",
+                &make_hash('b'),
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    // ── repository_references_xorb ──────────────────────────
+
+    #[tokio::test]
+    async fn repository_references_xorb_fails_without_postgres() {
+        let (backend, _root) = make_backend().await;
+        let scope = test_scope();
+        let result = backend
+            .repository_references_xorb(&make_hash('a'), &scope)
+            .await;
+        // Without PG the traversal should propagate an error.
+        assert!(result.is_err());
+    }
 }

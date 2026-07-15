@@ -536,4 +536,105 @@ mod tests {
         let second = backend.put_object_bytes_if_absent(&key, data).expect("second put");
         assert_eq!(second, PutOutcome::AlreadyExists);
     }
+
+    // ── upload_file error paths ──────────────────────────────
+
+    #[tokio::test]
+    async fn upload_file_rejects_invalid_file_id() {
+        let (backend, _root) = make_backend().await;
+        let body = axum::body::Bytes::from(b"content".to_vec());
+        let result = backend.upload_file("/absolute/path", body, None).await;
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[tokio::test]
+    async fn upload_file_stream_rejects_invalid_file_id() {
+        let (backend, _root) = make_backend().await;
+        let body = crate::upload_ingest::RequestBodyReader::from_bytes(
+            axum::body::Bytes::from(b"content".to_vec()),
+        );
+        let result = backend
+            .upload_file_stream("../traverse", body, None, None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    #[tokio::test]
+    async fn upload_file_stream_rejects_empty_file_id() {
+        let (backend, _root) = make_backend().await;
+        let body = crate::upload_ingest::RequestBodyReader::from_bytes(
+            axum::body::Bytes::from(b"content".to_vec()),
+        );
+        let result = backend
+            .upload_file_stream("", body, None, None)
+            .await;
+        assert!(matches!(result, Err(ServerError::InvalidFileId)));
+    }
+
+    // ── upload_shard_stream error paths ──────────────────────
+
+    #[tokio::test]
+    async fn upload_shard_stream_rejects_empty_body() {
+        let (backend, _root) = make_backend().await;
+        let body = crate::upload_ingest::RequestBodyReader::from_bytes(
+            axum::body::Bytes::new(),
+        );
+        let limits = crate::ShardMetadataLimits::new(
+            std::num::NonZeroUsize::new(100).unwrap(),
+            std::num::NonZeroUsize::new(100).unwrap(),
+            std::num::NonZeroUsize::new(100).unwrap(),
+            std::num::NonZeroUsize::new(100).unwrap(),
+        );
+        let result = backend
+            .upload_shard_stream(body, None, limits)
+            .await;
+        // Empty shard body should produce an error.
+        assert!(result.is_err());
+    }
+
+    // ── put_sha256_addressed_object_bytes_if_absent canonical == user key ──
+
+    #[tokio::test]
+    async fn put_sha256_addressed_object_bytes_if_absent_canonical_equals_user_key() {
+        let (backend, _root) = make_backend().await;
+        let data = b"canonical equals user key".to_vec();
+        let digest_hex = hex::encode(sha2::Sha256::digest(&data));
+        let canonical_key =
+            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+
+        // Passing the same key as both canonical and user → the early return
+        // on line 106 ('if canonical_key == *object_key') is exercised.
+        let outcome = backend
+            .put_sha256_addressed_object_bytes_if_absent(&canonical_key, &digest_hex, data)
+            .expect("put with matching keys");
+        assert_eq!(outcome, PutOutcome::Inserted);
+    }
+
+    // ── put_sha256_addressed_object_file canonical == user key ──
+
+    #[tokio::test]
+    async fn put_sha256_addressed_object_file_canonical_equals_user_key() {
+        let (backend, _root) = make_backend().await;
+        let data = b"file canonical equals user key";
+        let digest_hex = hex::encode(sha2::Sha256::digest(data));
+        let canonical_key =
+            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+            data.len() as u64,
+        );
+
+        let tmpfile = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmpfile.path(), data).expect("write temp file");
+
+        let outcome = backend
+            .put_sha256_addressed_object_file(
+                &canonical_key,
+                &digest_hex,
+                tmpfile.path(),
+                &integrity,
+            )
+            .expect("put with matching keys");
+        assert_eq!(outcome, PutOutcome::Inserted);
+    }
 }

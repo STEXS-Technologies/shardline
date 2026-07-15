@@ -263,4 +263,106 @@ mod tests {
         assert!(debug_str.contains("LfsRedirect"));
         assert!(debug_str.contains("oid"));
     }
+
+    // --- resolve_file_from_store integration tests (requires store) ---
+
+    /// Helper: creates a minimal HubState with a LocalIndexStore, creates a
+    /// repo + revision with the given file entries.
+    fn setup_resolve_state(
+        files: &[shardline_index::hub::HubFileEntry],
+    ) -> (tempfile::TempDir, HubState) {
+        use shardline_index::hub::{BoxedHubStore, HubRepoType, ensure_hub_tables};
+        let ts = tempfile::tempdir().expect("tempdir");
+        let root = ts.path();
+        ensure_hub_tables(root).expect("ensure hub tables");
+        let store = shardline_index::LocalIndexStore::open(root.to_path_buf());
+        let store = BoxedHubStore::from_store(store);
+
+        store.create_repo(HubRepoType::Model, "org/repo", false).unwrap();
+        let parent = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        store.create_revision("org/repo", Some(parent), "sha_resolve", "main", "test").unwrap();
+        if !files.is_empty() {
+            store.store_files("sha_resolve", files).unwrap();
+        }
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        (ts, state)
+    }
+
+    #[test]
+    #[allow(clippy::panic, clippy::unreachable)]
+    fn resolve_file_from_store_small_inline_file() {
+        let content = b"small file content".to_vec();
+        let files = vec![shardline_index::hub::HubFileEntry {
+            path: "readme.md".into(),
+            size: content.len() as u64,
+            sha: "abc123".into(),
+            is_lfs: false,
+            inline_content: Some(content.clone()),
+        }];
+        let (_ts, state) = setup_resolve_state(&files);
+        let result = resolve_file_from_store(&state, "sha_resolve", "readme.md").unwrap();
+        match result {
+            DownloadResult::Inline { size, sha, content: c } => {
+                assert_eq!(size, content.len() as u64);
+                assert_eq!(sha, "abc123");
+                assert_eq!(c, Some(content));
+            }
+            other => unreachable!("expected Inline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::panic, clippy::unreachable)]
+    fn resolve_file_from_store_large_lfs_redirect() {
+        let size = 2_000_000u64;
+        let files = vec![shardline_index::hub::HubFileEntry {
+            path: "model.bin".into(),
+            size,
+            sha: "oid123".into(),
+            is_lfs: true,
+            inline_content: None,
+        }];
+        let (_ts, state) = setup_resolve_state(&files);
+        let result = resolve_file_from_store(&state, "sha_resolve", "model.bin").unwrap();
+        match result {
+            DownloadResult::LfsRedirect { oid, size: s } => {
+                assert_eq!(oid, "oid123");
+                assert_eq!(s, size);
+            }
+            other => unreachable!("expected LfsRedirect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_file_from_store_file_not_found() {
+        let (_ts, state) = setup_resolve_state(&[]);
+        let result = resolve_file_from_store(&state, "sha_resolve", "nonexistent.txt");
+        assert!(matches!(result, Err(HubApiError::NotFound)));
+    }
+
+    #[test]
+    #[allow(clippy::panic, clippy::unreachable)]
+    fn resolve_file_from_store_large_non_lfs_inline() {
+        let content = vec![0u8; 100_000];
+        let files = vec![shardline_index::hub::HubFileEntry {
+            path: "big.txt".into(),
+            size: content.len() as u64,
+            sha: "bigsha".into(),
+            is_lfs: false,
+            inline_content: Some(content),
+        }];
+        let (_ts, state) = setup_resolve_state(&files);
+        let result = resolve_file_from_store(&state, "sha_resolve", "big.txt").unwrap();
+        match result {
+            DownloadResult::Inline { size, .. } => {
+                // size <= MAX_INLINE_SIZE → Inline
+                assert!(size <= 1_048_576);
+            }
+            other => unreachable!("expected Inline, got {other:?}"),
+        }
+    }
 }

@@ -1387,18 +1387,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn run_local_gc_with_empty_root_returns_report() {
-        let dir = std::env::temp_dir().join(format!("gc-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
         // Create minimal chunks subdirectory so ServerObjectStore can initialize.
-        std::fs::create_dir_all(dir.join("chunks")).unwrap();
-        let result = run_local_gc(dir.clone(), LocalGcOptions::dry_run()).await;
+        std::fs::create_dir_all(root.join("chunks")).unwrap();
+        let result = run_local_gc(root, LocalGcOptions::dry_run()).await;
         assert!(result.is_ok(), "dry-run with empty root should succeed: {:?}", result);
         let report = result.unwrap();
         assert_eq!(report.scanned_records, 0);
         assert_eq!(report.orphan_chunks, 0);
         assert_eq!(report.deleted_chunks, 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── run_gc_with_stores / validate_gc_index_integrity tests ──────────

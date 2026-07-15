@@ -278,4 +278,61 @@ mod tests {
         assert_eq!(shared.len(), shared.as_slice().len());
         assert_eq!(pooled.len(), shared.len());
     }
+
+    // ------------------------------------------------------------------
+    // Runtime body-size enforcement via from_body
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn from_body_enforces_runtime_limit() {
+        use std::num::NonZeroUsize;
+
+        use axum::body::Body;
+        use futures_util::stream;
+
+        // Create a streaming body with no upper size hint so the initial
+        // `from_body` check passes, then have the stream yield enough bytes
+        // to exceed the runtime limit.
+        let chunks: Vec<Result<Bytes, axum::Error>> = vec![
+            Ok(Bytes::from(vec![0u8; 30])),
+            Ok(Bytes::from(vec![0u8; 30])),
+        ];
+        let body = Body::from_stream(stream::iter(chunks));
+        let max_bytes = NonZeroUsize::new(40).unwrap();
+        let mut reader = RequestBodyReader::from_body(body, max_bytes).unwrap();
+
+        // First read succeeds (30 bytes < 40)
+        let first = reader.next_bytes().await.unwrap();
+        assert!(first.is_some());
+
+        // Second read puts us at 60 > 40 → error
+        let second = reader.next_bytes().await;
+        assert!(matches!(
+            second,
+            Err(crate::ServerError::RequestBodyTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn from_body_stream_within_limit_succeeds() {
+        use std::num::NonZeroUsize;
+
+        use axum::body::Body;
+        use futures_util::stream;
+
+        let chunks: Vec<Result<Bytes, axum::Error>> = vec![
+            Ok(Bytes::from(vec![0u8; 20])),
+            Ok(Bytes::from(vec![0u8; 20])),
+        ];
+        let body = Body::from_stream(stream::iter(chunks));
+        let max_bytes = NonZeroUsize::new(40).unwrap(); // exactly at limit
+        let mut reader = RequestBodyReader::from_body(body, max_bytes).unwrap();
+
+        let first = reader.next_bytes().await.unwrap();
+        assert!(first.is_some());
+        let second = reader.next_bytes().await.unwrap();
+        assert!(second.is_some());
+        let third = reader.next_bytes().await.unwrap();
+        assert!(third.is_none());
+    }
 }
