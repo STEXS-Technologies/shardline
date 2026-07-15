@@ -69,3 +69,46 @@ impl StorageBackendMetrics {
         self.local_io_duration.observe(dur.as_secs_f64());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn backend_metrics_record_s3_request_increments_counter() {
+        let registry = Registry::new();
+        let metrics = StorageBackendMetrics::new(&registry);
+
+        assert_eq!(metrics.s3_requests.get(), 0);
+        metrics.record_s3_request(std::time::Duration::from_millis(50));
+        assert_eq!(metrics.s3_requests.get(), 1);
+        metrics.record_s3_request(std::time::Duration::from_millis(100));
+        assert_eq!(metrics.s3_requests.get(), 2);
+    }
+
+    #[test]
+    fn backend_metrics_record_s3_error_increments_counter() {
+        let registry = Registry::new();
+        let metrics = StorageBackendMetrics::new(&registry);
+
+        assert_eq!(metrics.s3_errors.get(), 0);
+        metrics.record_s3_error();
+        assert_eq!(metrics.s3_errors.get(), 1);
+        metrics.record_s3_error();
+        assert_eq!(metrics.s3_errors.get(), 2);
+    }
+
+    #[test]
+    fn backend_metrics_record_local_io_increments_counter() {
+        let registry = Registry::new();
+        let metrics = StorageBackendMetrics::new(&registry);
+
+        assert_eq!(metrics.local_io_operations.get(), 0);
+        metrics.record_local_io(std::time::Duration::from_millis(5));
+        assert_eq!(metrics.local_io_operations.get(), 1);
+        metrics.record_local_io(std::time::Duration::from_millis(10));
+        assert_eq!(metrics.local_io_operations.get(), 2);
+    }
+}

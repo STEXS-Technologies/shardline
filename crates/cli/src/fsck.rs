@@ -83,6 +83,14 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_fsck_with_valid_config() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = run_fsck(Some(sandbox.path())).await;
+        // On an empty deployment with a valid temp dir, fsck should complete
+        assert!(result.is_ok(), "run_fsck should succeed on empty deployment: {result:?}");
+    }
+
     #[tokio::test]
     async fn run_fsck_rejects_symlinked_root() {
         let sandbox = tempfile::tempdir().unwrap();

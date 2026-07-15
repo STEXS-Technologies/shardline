@@ -7385,6 +7385,67 @@ async fn hub_webhooks_create_list_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_webhooks_duplicate_url_returns_409() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    // Create a repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"dup-wh-team/dup-wh-model","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    let webhook_url = "https://hooks.example.com/dup-webhook";
+    let body = serde_json::json!({"url": webhook_url, "events": ["push"]}).to_string();
+
+    // First create — should succeed.
+    let resp1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/dup-wh-team/dup-wh-model/webhooks")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), StatusCode::CREATED);
+
+    // Second create (same URL) — should return 409 Conflict.
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/dup-wh-team/dup-wh-model/webhooks")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp2.status(),
+        StatusCode::CONFLICT,
+        "duplicate webhook URL should return 409, got {}",
+        resp2.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_webhooks_list_empty_for_repo_without_webhooks() {
     let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
 

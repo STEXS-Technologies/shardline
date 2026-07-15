@@ -83,6 +83,39 @@ mod tests {
         assert!(matches!(result.unwrap_err(), AuthError::ProviderError(_)));
     }
 
+    // ── hmac_mint_token_and_verify ───────────────────────────────────────
+
+    #[test]
+    fn hmac_mint_token_and_verify() {
+        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
+        let claims = test_claims();
+
+        let token = provider.mint_token(&claims).unwrap();
+        assert!(!token.is_empty());
+
+        let verified = provider.verify_token(&token).unwrap();
+        assert_eq!(verified, claims);
+    }
+
+    #[test]
+    fn hmac_verify_expired_token() {
+        let provider = LocalHmacProvider::new(VALID_KEY).unwrap();
+        let repo = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "test-owner",
+            "test-repo",
+            Some("main"),
+        )
+        .unwrap();
+        let claims = TokenClaims::new("issuer", "subject", TokenScope::Read, repo, 1).unwrap();
+        let token = provider.mint_token(&claims).unwrap();
+
+        // Current time is well past 1 second since epoch
+        let result = provider.verify_token(&token);
+        assert!(result.is_err(), "expired token should fail verification");
+        assert!(matches!(result.unwrap_err(), AuthError::ExpiredToken));
+    }
+
     // ── AuthProvider::verify_token ───────────────────────────────────────
 
     #[test]

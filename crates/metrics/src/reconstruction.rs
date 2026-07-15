@@ -67,3 +67,51 @@ impl ReconstructionMetrics {
         self.cache_misses.inc();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn reconstruction_metrics_record() {
+        let registry = Registry::new();
+        let metrics = ReconstructionMetrics::new(&registry);
+
+        assert_eq!(metrics.requests.get(), 0);
+        assert_eq!(metrics.chunks_fetched.get(), 0);
+
+        metrics.record(true, std::time::Duration::from_millis(100), 5);
+        assert_eq!(metrics.requests.get(), 1);
+        assert_eq!(metrics.chunks_fetched.get(), 5);
+
+        metrics.record(false, std::time::Duration::from_millis(200), 3);
+        assert_eq!(metrics.requests.get(), 2);
+        assert_eq!(metrics.chunks_fetched.get(), 8);
+    }
+
+    #[test]
+    fn reconstruction_metrics_record_cache_hit() {
+        let registry = Registry::new();
+        let metrics = ReconstructionMetrics::new(&registry);
+
+        assert_eq!(metrics.cache_hits.get(), 0);
+        metrics.record_cache_hit();
+        assert_eq!(metrics.cache_hits.get(), 1);
+        metrics.record_cache_hit();
+        assert_eq!(metrics.cache_hits.get(), 2);
+    }
+
+    #[test]
+    fn reconstruction_metrics_record_cache_miss() {
+        let registry = Registry::new();
+        let metrics = ReconstructionMetrics::new(&registry);
+
+        assert_eq!(metrics.cache_misses.get(), 0);
+        metrics.record_cache_miss();
+        assert_eq!(metrics.cache_misses.get(), 1);
+        metrics.record_cache_miss();
+        assert_eq!(metrics.cache_misses.get(), 2);
+    }
+}

@@ -1387,6 +1387,207 @@ async fn test_oci_role_all_serves_both() {
 }
 
 // ===========================================================================
+// 23. Reconstruction cache enabled — cold miss then hot hit
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_reconstruction_cache_hit() {
+    // Build app with reconstruction cache ENABLED (default is memory).
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Lfs])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap();
+    // NOTE: No .with_reconstruction_cache_disabled() — default is memory cache.
+
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let repo = RepositoryScope::new(
+        RepositoryProvider::Generic, "test", "test", Some("main"),
+    ).unwrap();
+    let claims = TokenClaims::new(
+        "shardline", "test", TokenScope::Write, repo, u64::MAX,
+    ).unwrap();
+    let token = provider.mint_token(&claims).unwrap();
+
+    let content = b"reconstruction-cache-hit-test";
+    let oid = sha256_hex(content);
+
+    // Upload via LFS.
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert!(
+        put_resp.status().is_success(),
+        "LFS PUT failed: {}",
+        put_resp.status()
+    );
+
+    // Read twice — cold miss then hot hit. Both should succeed.
+    for i in 0..2 {
+        let get_req = axum::http::Request::builder()
+            .method("GET")
+            .uri(&format!("/v1/lfs/objects/{oid}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let get_resp = app.clone().oneshot(get_req).await.unwrap();
+        assert_eq!(
+            get_resp.status(),
+            200,
+            "GET iteration {i} failed with status {}",
+            get_resp.status()
+        );
+        let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), content, "GET iteration {i} body mismatch");
+    }
+
+    // Also verify /readyz reports the cache backend as "memory".
+    let ready_req = axum::http::Request::builder()
+        .uri("/readyz")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let ready_resp = app.oneshot(ready_req).await.unwrap();
+    assert_eq!(ready_resp.status(), 200);
+    let ready_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(ready_resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ready_json["cache_backend"], "memory",
+        "readyz should report memory cache backend"
+    );
+}
+
+// ===========================================================================
+// 24. 409 Conflict — duplicate Hub repo creation
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_create_same_repo_twice_returns_409() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    let ns = "pg-conflict-team";
+    let name = "pg-conflict-model";
+    let model_path = format!("{ns}/{name}");
+
+    // First create — should succeed.
+    let create1 = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({"type": "model", "name": &model_path, "private": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create1.status(), 201);
+
+    // Second create (same repo) — should return 409 Conflict.
+    let create2 = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({"type": "model", "name": &model_path, "private": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create2.status(), 409, "duplicate repo creation should return 409");
+}
+
+// ===========================================================================
+// 25. Wrong-repo auth scope — 403 Forbidden
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_auth_wrong_repo_scope_returns_403() {
+    // Build an OCI app (OCI validates repository scope against the token).
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    // Mint a token scoped to a different repo (other/other), not test/test.
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let other_repo = RepositoryScope::new(
+        RepositoryProvider::Generic,
+        "other",
+        "other",
+        Some("main"),
+    )
+    .unwrap();
+    let claims = TokenClaims::new(
+        "shardline",
+        "other",
+        TokenScope::Write,
+        other_repo,
+        u64::MAX,
+    )
+    .unwrap();
+    let wrong_token = provider.mint_token(&claims).unwrap();
+
+    // Try POST blob upload to test/test with wrong-scoped token.
+    // OCI blob upload validates repository scope against the token.
+    // The OCI spec prefers 404 over 403 to avoid leaking repository existence.
+    let content = b"wrong-scope-content";
+    let digest = sha256_hex(content);
+    let post_req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/test/test/blobs/uploads/?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {wrong_token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let post_resp = app.clone().oneshot(post_req).await.unwrap();
+
+    // Token is scoped to other/other, not test/test → should fail auth/scope check.
+    // The exact status depends on implementation: 403 (forbidden) or 404 (not found).
+    assert!(
+        post_resp.status() == 403 || post_resp.status() == 404,
+        "wrong-repo-scope token should get 403 or 404, got {}",
+        post_resp.status()
+    );
+}
+
+// ===========================================================================
 // 19. More OCI error paths
 // ===========================================================================
 
@@ -2132,4 +2333,515 @@ async fn test_cross_protocol_lfs_to_oci() {
     assert_eq!(get_resp.status(), 200);
     let body = get_resp.bytes().await.unwrap();
     assert_eq!(body.as_ref(), content);
+}
+
+// ===========================================================================
+// 23. Concurrent HTTP E2E tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_lfs_upload_same_oid() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let content = b"concurrent-same-oid-content-pg";
+    let oid = sha256_hex(content);
+    let url = server.url(&format!("/v1/lfs/objects/{oid}"));
+    let token = server.auth_header().to_owned();
+
+    // 5 concurrent PUTs of the same LFS OID — all should return 200
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let url = url.clone();
+        let token = token.clone();
+        let data = content.to_vec();
+        handles.push(tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let resp = client
+                .put(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/octet-stream")
+                .body(data)
+                .send()
+                .await
+                .unwrap();
+            resp.status()
+        }));
+    }
+
+    for (i, handle) in handles.into_iter().enumerate() {
+        let status = handle.await.unwrap();
+        assert!(
+            status.is_success(),
+            "concurrent PUT {} returned {}",
+            i,
+            status
+        );
+    }
+
+    // Verify the stored content is correct
+    let client = reqwest::Client::new();
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    assert_eq!(get_resp.bytes().await.unwrap().as_ref(), content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_oci_manifest_push_and_pull() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+    let tag = "concurrent-manifest-pg";
+
+    // Prepare data: upload config and layer blobs
+    let config_data = b"{}";
+    let layer_data = b"concurrent-layer-pg";
+    let config_digest = oci_upload_blob_oneshot(&app, &token, repo, config_data).await;
+    let layer_digest = oci_upload_blob_oneshot(&app, &token, repo, layer_data).await;
+    let manifest_body = oci_manifest_json(&config_digest, &layer_digest);
+
+    // Push the manifest first
+    let put_uri = format!("/v2/{repo}/manifests/{tag}");
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&put_uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(axum::body::Body::from(manifest_body.clone()))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(put_resp.status(), 201, "manifest PUT failed");
+
+    // Spawn 3 concurrent GETs
+    let get_uri = format!("/v2/{repo}/manifests/{tag}");
+    let g1 = {
+        let app = app.clone();
+        let token = token.clone();
+        let uri = get_uri.clone();
+        tokio::spawn(async move {
+            let req = axum::http::Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            app.clone().oneshot(req).await
+        })
+    };
+    let g2 = {
+        let app = app.clone();
+        let token = token.clone();
+        let uri = get_uri.clone();
+        tokio::spawn(async move {
+            let req = axum::http::Request::builder()
+                .method("GET")
+                .uri(&uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            app.clone().oneshot(req).await
+        })
+    };
+    let g3 = {
+        let app = app.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            let req = axum::http::Request::builder()
+                .method("GET")
+                .uri(&get_uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            app.clone().oneshot(req).await
+        })
+    };
+
+    let (r1, r2, r3) = tokio::join!(g1, g2, g3);
+    for (i, result) in [r1, r2, r3].iter().enumerate() {
+        let resp = result.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(resp.status(), 200, "concurrent manifest GET {} failed", i);
+    }
+}
+
+// ===========================================================================
+// 24. Cross-protocol content sharing
+// ===========================================================================
+//
+// Each protocol uses its own storage key namespace:
+//   LFS:  protocols/lfs/{namespace}/objects/{oid}
+//   Bazel: protocols/bazel/{kind}/{namespace}/{hash}
+//   OCI:   protocols/oci/{namespace}/{repository}/{digest}
+//   Hub:   HubStore (separate SQLite/Postgres tables)
+//
+// Cross-protocol reads document namespace isolation (expect 404).
+// Same-protocol reads verify the upload was successful.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_cross_bazel_cas_to_lfs() {
+    let server = TestServer::start(&[ServerFrontend::BazelHttp, ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"bazel-cas-to-lfs-cross-pg";
+    let hash = sha256_hex(content);
+
+    // Upload via Bazel CAS
+    let put_resp = client
+        .put(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        put_resp.status().is_success(),
+        "Bazel CAS PUT failed: {}",
+        put_resp.status()
+    );
+
+    // Verify same-protocol read works
+    let bazel_get = client
+        .get(server.url(&format!("/v1/bazel/cache/cas/{hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bazel_get.status(), 200);
+    assert_eq!(bazel_get.bytes().await.unwrap().as_ref(), content);
+
+    // Cross-protocol read via LFS — different key namespace → 404
+    let lfs_get = client
+        .get(server.url(&format!("/v1/lfs/objects/{hash}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        lfs_get.status(),
+        404,
+        "LFS should not find data stored via Bazel CAS (separate key namespace)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_cross_lfs_to_oci_blob() {
+    // Use oneshot because OCI uses wildcard routes (/v2/{*path})
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "test",
+            "test",
+            Some("main"),
+        )
+        .unwrap();
+        let claims = TokenClaims::new(
+            "shardline",
+            "test",
+            TokenScope::Write,
+            repo_s,
+            u64::MAX,
+        )
+        .unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+    let _keep = Box::new(tmp);
+
+    let content = b"lfs-to-oci-cross-pg";
+    let digest = sha256_hex(content);
+    let repo = "test/test";
+
+    // Upload via LFS
+    let put_uri = format!("/v1/lfs/objects/{digest}");
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&put_uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert!(
+        put_resp.status().is_success(),
+        "LFS PUT failed: {}",
+        put_resp.status()
+    );
+
+    // Verify same-protocol read works
+    let lfs_get = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&put_uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lfs_get.status(), 200, "LFS GET after LFS upload should work");
+
+    // Cross-protocol read via OCI — different key namespace → 404
+    let get_uri = format!("/v2/{repo}/blobs/sha256:{digest}");
+    let get_req = axum::http::Request::builder()
+        .method("GET")
+        .uri(&get_uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let get_resp = app.clone().oneshot(get_req).await.unwrap();
+    assert_eq!(
+        get_resp.status(),
+        404,
+        "OCI should not find data stored via LFS (separate key namespace)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_cross_hub_lfs_to_v1_lfs() {
+    let server = TestServer::start(&[ServerFrontend::Hub, ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    let content = b"hub-lfs-to-v1-cross-pg";
+    let oid = sha256_hex(content);
+
+    // Upload via Hub's /lfs/objects/{oid}
+    let put_resp = client
+        .put(server.url(&format!("/lfs/objects/{oid}")))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        put_resp.status(),
+        200,
+        "Hub LFS PUT failed: {}",
+        put_resp.status()
+    );
+
+    // Verify same-protocol read via Hub LFS works
+    let hub_get = client
+        .get(server.url(&format!("/lfs/objects/{oid}")))
+        .header("Authorization", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hub_get.status(), 200, "Hub LFS GET should work after upload");
+    assert_eq!(hub_get.bytes().await.unwrap().as_ref(), content);
+
+    // Cross-protocol read via V1 LFS — different storage backend → 404
+    let v1_get = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        v1_get.status(),
+        404,
+        "V1 LFS should not find data stored via Hub LFS (separate storage)"
+    );
+}
+
+// ===========================================================================
+// 25. Hub API authenticated requests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_whoami_with_auth() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(server.url("/api/whoami-v2"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    // With a valid Write-scoped token, whoami returns the subject "test"
+    assert_eq!(json["name"], "test", "whoami should return subject name");
+    assert_eq!(
+        json["auth"]["type"], "token",
+        "auth.type should be 'token' with valid auth"
+    );
+    assert_eq!(
+        json["auth"]["identity"]["account"]["name"],
+        "test",
+        "account name should match subject"
+    );
+    // The whoami response with auth should include auth details
+    assert!(json.get("auth").is_some(), "auth block should be present");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_commit_with_auth() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    let ns = "hub-auth-team-pg";
+    let name = "hub-auth-model-pg";
+    let model_path = format!("{ns}/{name}");
+
+    // Create a model repo (requires Write scope)
+    let create_resp = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "type": "model",
+            "name": &model_path,
+            "private": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        create_resp.status(),
+        201,
+        "repo create should succeed with auth"
+    );
+
+    // Commit a file (requires Write scope)
+    let content_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"hub auth commit content pg",
+    );
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"auth commit\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"auth.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let commit_resp = client
+        .post(server.url(&format!("/api/models/{ns}/{name}/commit/main")))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/x-ndjson")
+        .body(ndjson)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        commit_resp.status(),
+        200,
+        "commit should succeed with auth"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_xet_read_token_with_auth() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    // Create a repo first
+    let ns = "read-token-auth-pg";
+    let name = "read-token-auth-repo";
+    let model_path = format!("{ns}/{name}");
+
+    let create_resp = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "type": "model",
+            "name": &model_path,
+            "private": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 201, "repo create should succeed");
+
+    // Request xet-read-token (requires Read scope; our Write token allows Read)
+    let token_resp = client
+        .get(server.url(&format!(
+            "/api/models/{ns}/{name}/xet-read-token/main"
+        )))
+        .header("Authorization", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_resp.status(),
+        200,
+        "xet-read-token with valid auth should return 200"
+    );
+    let json: serde_json::Value = token_resp.json().await.unwrap();
+    assert!(
+        !json["token"].as_str().unwrap().is_empty(),
+        "should return a token"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_xet_write_token_with_auth() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let client = reqwest::Client::new();
+    let auth = || format!("Bearer {}", server.auth_header());
+
+    // Create a repo first
+    let ns = "write-token-auth-pg";
+    let name = "write-token-auth-repo";
+    let model_path = format!("{ns}/{name}");
+
+    let create_resp = client
+        .post(server.url("/api/repos/create"))
+        .header("Authorization", auth())
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "type": "model",
+            "name": &model_path,
+            "private": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 201, "repo create should succeed");
+
+    // Request xet-write-token (requires Write scope)
+    let token_resp = client
+        .get(server.url(&format!(
+            "/api/models/{ns}/{name}/xet-write-token/main"
+        )))
+        .header("Authorization", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_resp.status(),
+        200,
+        "xet-write-token with valid auth should return 200"
+    );
+    let json: serde_json::Value = token_resp.json().await.unwrap();
+    assert!(
+        !json["token"].as_str().unwrap().is_empty(),
+        "should return a token"
+    );
 }

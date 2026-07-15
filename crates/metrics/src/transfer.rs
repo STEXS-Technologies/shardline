@@ -86,3 +86,54 @@ impl TransferMetrics {
         self.range_requests.inc();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn transfer_metrics_record_upload() {
+        let registry = Registry::new();
+        let metrics = TransferMetrics::new(&registry);
+
+        assert_eq!(metrics.upload_requests.get(), 0);
+        assert_eq!(metrics.upload_bytes.get(), 0);
+
+        metrics.record_upload("https", 512);
+        assert_eq!(metrics.upload_requests.get(), 1);
+        assert_eq!(metrics.upload_bytes.get(), 512);
+
+        metrics.record_upload("grpc", 256);
+        assert_eq!(metrics.upload_requests.get(), 2);
+        assert_eq!(metrics.upload_bytes.get(), 768);
+    }
+
+    #[test]
+    fn transfer_metrics_record_download() {
+        let registry = Registry::new();
+        let metrics = TransferMetrics::new(&registry);
+
+        assert_eq!(metrics.download_requests.get(), 0);
+        assert_eq!(metrics.download_bytes.get(), 0);
+
+        metrics.record_download("https", 1024);
+        assert_eq!(metrics.download_requests.get(), 1);
+        assert_eq!(metrics.download_bytes.get(), 1024);
+    }
+
+    #[test]
+    fn transfer_metrics_record_range_request() {
+        let registry = Registry::new();
+        let metrics = TransferMetrics::new(&registry);
+
+        assert_eq!(metrics.range_requests.get(), 0);
+
+        metrics.record_range_request();
+        assert_eq!(metrics.range_requests.get(), 1);
+
+        metrics.record_range_request();
+        assert_eq!(metrics.range_requests.get(), 2);
+    }
+}
