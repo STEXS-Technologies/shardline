@@ -51,10 +51,14 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Builds the Hub API router with all registered routes.
 ///
+/// `register_xet_token_routes` controls whether the `xet-read-token` and
+/// `xet-write-token` routes are registered. Set to `false` when the Xet
+/// protocol frontend is already serving these routes.
+///
 /// The returned [`Router`] is stateless (type [`Router<()>`]) and can be merged
 /// into any Axum router. Call this with the [`HubState`](routes::HubState) that
 /// should back all handlers.
-pub fn hub_routes(state: routes::HubState) -> Router {
+pub fn hub_routes(state: routes::HubState, register_xet_token_routes: bool) -> Router {
     let cors = CorsLayer::new()
         .allow_origin([
             HeaderValue::from_static("http://127.0.0.1:8080"),
@@ -74,7 +78,7 @@ pub fn hub_routes(state: routes::HubState) -> Router {
         axum::http::HeaderValue::from_static("nosniff"),
     );
 
-    routes::router()
+    routes::router(register_xet_token_routes)
         .with_state(state)
         .route_layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
         .layer(cors)

@@ -84,5 +84,5 @@ pub(crate) fn state() -> &'static HubState {
 }
 
 pub(crate) fn app() -> axum::Router {
-    shardline_hub_api::hub_routes(state().clone())
+    shardline_hub_api::hub_routes(state().clone(), true)
 }

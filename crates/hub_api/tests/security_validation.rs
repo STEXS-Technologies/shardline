@@ -566,7 +566,7 @@ async fn validate_commit_body_bounded_by_router() {
         ndjson_body.push('\n');
     }
 
-    let app = shardline_hub_api::hub_routes(state);
+    let app = shardline_hub_api::hub_routes(state, true);
     let response = app
         .oneshot(
             Request::builder()
