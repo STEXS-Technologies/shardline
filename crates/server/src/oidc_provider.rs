@@ -607,12 +607,18 @@ mod tests {
 
     // ── build_decoding_key (oidc_provider version) ───────────────────────
 
+    /// Base64url-encoded `n` (modulus) for a 2048-bit RSA test key.
+    const TEST_RSA_N: &str = "nxt2cj5UANJnsiZinun40kMn2RUbYOPK_ZBOcOYyvYxLbHjREp79U-VGx6U1lOXy7QTGndYBwXaFPvOWW6bpHL3ryFN7ql8gKKm_5C9QuRNSsEGErdtqkKz_TOIRwAGbwpGHDcW4r3QxwY2K3eTNUj2OPJ7EBcw4l-xKasO9EZWyynSb6FMtsYqIkTP2rtgsMiucZqwjnW9Y1wNisPyQO9wx5LoGdb_i6LjRnYYcdIUCMzuDkylAbV7BLxpH870eP2f5EPlTBvhkjxpYMd7v0-kjyOPKdhJ-oU_L1scO2KzGngsj5R0mRO50bbpSoFgPGWxcOuSbEXTZSGwsVJfp7w";
+
+    /// Base64url-encoded `e` (exponent = 65537) for a 2048-bit RSA test key.
+    const TEST_RSA_E: &str = "AQAB";
+
     fn sample_rsa_jwk() -> Jwk {
         Jwk {
             kid: "test".to_owned(),
             key_type: "RSA".to_owned(),
-            n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4Qy5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_owned()),
-            e: Some("AQAB".to_owned()),
+            n: Some(TEST_RSA_N.to_owned()),
+            e: Some(TEST_RSA_E.to_owned()),
             x_coord: None,
             y_coord: None,
         }
@@ -1142,5 +1148,345 @@ mod tests {
     fn oidc_provider_error_display_jwks() {
         let e = OidcProviderError::JwksFetch("500".into());
         assert_eq!(format!("{e}"), "failed to fetch JWKS keys: 500");
+    }
+
+    // ── build_decoding_key success paths ─────────────────────────────────
+
+    #[test]
+    fn build_decoding_key_rsa_with_valid_n_and_e_succeeds_for_rs256() {
+        let jwk = sample_rsa_jwk();
+        build_decoding_key(&jwk, Algorithm::RS256).expect("RS256 should succeed");
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_with_valid_n_and_e_succeeds_for_rs384() {
+        let jwk = sample_rsa_jwk();
+        build_decoding_key(&jwk, Algorithm::RS384).expect("RS384 should succeed");
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_with_valid_n_and_e_succeeds_for_rs512() {
+        let jwk = sample_rsa_jwk();
+        build_decoding_key(&jwk, Algorithm::RS512).expect("RS512 should succeed");
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_with_valid_n_and_e_succeeds_for_ps256() {
+        let jwk = sample_rsa_jwk();
+        build_decoding_key(&jwk, Algorithm::PS256).expect("PS256 should succeed");
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_with_valid_n_and_e_succeeds_for_ps384() {
+        let jwk = sample_rsa_jwk();
+        build_decoding_key(&jwk, Algorithm::PS384).expect("PS384 should succeed");
+    }
+
+    #[test]
+    fn build_decoding_key_rsa_with_valid_n_and_e_succeeds_for_ps512() {
+        let jwk = sample_rsa_jwk();
+        build_decoding_key(&jwk, Algorithm::PS512).expect("PS512 should succeed");
+    }
+
+    #[test]
+    fn build_decoding_key_ec_with_valid_x_and_y_succeeds_for_es256() {
+        let jwk = sample_ec_jwk();
+        build_decoding_key(&jwk, Algorithm::ES256).expect("ES256 should succeed");
+    }
+
+    #[test]
+    fn build_decoding_key_ec_with_valid_x_and_y_succeeds_for_es384() {
+        let jwk = sample_ec_jwk();
+        build_decoding_key(&jwk, Algorithm::ES384).expect("ES384 should succeed");
+    }
+
+    // ── Full JWT verification success ────────────────────────────────────
+
+    /// A test RSA private key (2048-bit) for signing test JWTs.
+    const TEST_RSA_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCfG3ZyPlQA0mey\n\
+JmKe6fjSQyfZFRtg48r9kE5w5jK9jEtseNESnv1T5UbHpTWU5fLtBMad1gHBdoU+\n\
+85ZbpukcvevIU3uqXyAoqb/kL1C5E1KwQYSt22qQrP9M4hHAAZvCkYcNxbivdDHB\n\
+jYrd5M1SPY48nsQFzDiX7Epqw70RlbLKdJvoUy2xioiRM/au2CwyK5xmrCOdb1jX\n\
+A2Kw/JA73DHkugZ1v+LouNGdhhx0hQIzO4OTKUBtXsEvGkfzvR4/Z/kQ+VMG+GSP\n\
+Glgx3u/T6SPI48p2En6hT8vWxw7YrMaeCyPlHSZE7nRtulKgWA8ZbFw65JsRdNlI\n\
+bCxUl+nvAgMBAAECggEAAMWfQx0mqX75YkloG+jQf8GWlH8Hl54p4o7bruFRGPAh\n\
+9hAhIUz/t3N9M7u/zegJqLKIpRahxzCYxD1ZCPlea5zlGyw0HD73tAccj0KIVJQd\n\
+FsWutbTTXcSxUIPmIPf5pQFVjC8FOV/8qqKJti1wMbD0qeTwiZAz0KfcZu41edYG\n\
+X+rQsdcPdSYtL9YXBD+f/Ygjd4yEpjbVLe6ULr4sWzr6JayU4eHoNE56vf343jor\n\
+xaUaOw3bifdkQzqztN+Xf2HDQesQrm0Y03dmCHMwYm56+sPjfxyDFtk1ohFuI3i/\n\
+0HRHuHA5SOPSK3+VrCs7ENAN+Na0w/1f55ttX2DoyQKBgQDMFC+dLEIbqSAGZ4Di\n\
+LYAL1JiqYL6kZIbZl9yWUAjNoMJpSBQ5W/NlUwOepsZH5rEDZTBEryTh3guCY25N\n\
+H2XBOau34ifMhrtW8+qHhm+eZsms5z6E5NAaXmb3ThrQJgOPy/qHtoi7ADWG5rCa\n\
+QcBc8//vTzHyJ1tNSvBHrnvKjQKBgQDHlj46DXRqPS+2sLZWGy3c1ps0KzjKFayF\n\
+PKmbRvbr210g4A+Fy8/jiURCtPDY6hf+3th1p9pQ3tZ/gisNBycG+xnP8RpeTgFq\n\
+38T5pSVHfhjwumJxySeuvekfrgcjEsOiekuXqRo/JPMS3LhkR9Fuxaotpte0BI4a\n\
+N8hFENuFawKBgQC8LQjSdpLmioY7IYlYBPiC8B9tSxO+5erqDPubpmTXpppdFdeA\n\
+JGdEUM2PptxCRFeId++QBaeOlX4rVp/IgWEEULckMWbdUoa/4N2q5a1adBEWW4vs\n\
+Ykf5aH6tHtnegI7cMwvpw8hEFidFIsZJFsPXci3WbkHxtZScqrLwhdUjqQKBgH6b\n\
+Uwv2XwPJnovQW0oR4az2Qev9AwBGcXLvgVOr15TUSaZCG/auzEg1WiTKrQGcte4K\n\
+pNs1yCqGwSCPjQmtoNcv0Db1Zdmut/14x3XpidVpKx8BzNMLXG3fsJNVDNf13j4i\n\
+P/OL5Mdrg/pSI3IRkMwo/YQKE0jxnscI3bTaNbbTAoGBAKMgiVyYl+wfFp3QV1zv\n\
+AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
++uEiJRA0Evs1Q/93dyNO45iDCIdIhtHMA/LqnlDniz0aqPOBrFgx+4PDcfUZXvgL\n\
+4FKti8JsZfXzaqRjz8KALNNV\n\
+-----END PRIVATE KEY-----";
+
+    fn test_rsa_jwk(kid: &str) -> Jwk {
+        Jwk {
+            kid: kid.to_owned(),
+            key_type: "RSA".to_owned(),
+            n: Some(TEST_RSA_N.to_owned()),
+            e: Some(TEST_RSA_E.to_owned()),
+            x_coord: None,
+            y_coord: None,
+        }
+    }
+
+    #[test]
+    fn verify_token_with_valid_rs256_jwt_succeeds() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("oidc-user"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            None,
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.issuer(), "https://issuer.example.com");
+        assert_eq!(token_claims.subject(), "oidc-user");
+    }
+
+    #[test]
+    fn verify_token_with_valid_rs256_jwt_scope_write_succeeds() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("admin-user"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+        claims.insert("scope", serde_json::json!("write"));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            None,
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.subject(), "admin-user");
+        assert_eq!(token_claims.scope(), TokenScope::Write);
+    }
+
+    #[test]
+    fn verify_token_with_valid_rs256_jwt_and_audience_succeeds() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("aud-user"));
+        claims.insert("aud", serde_json::json!("my-audience"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            Some("my-audience".to_owned()),
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.subject(), "aud-user");
+    }
+
+    #[test]
+    fn verify_token_with_expired_jwt_fails() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("test-user"));
+        claims.insert("exp", serde_json::json!(1000000000u64));
+        claims.insert("iat", serde_json::json!(900000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(
+            "https://issuer.example.com",
+            None,
+            Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+                fetched_at: Instant::now(),
+            }),
+        );
+
+        let result = provider.verify_token(&token);
+        // jsonwebtoken's internal decode rejects expired tokens first,
+        // so it surfaces as ProviderError rather than ExpiredToken.
+        assert!(result.is_err(), "expired JWT should be rejected");
+    }
+
+    // ── OidcProvider::new() success ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_with_reachable_endpoints_succeeds() {
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        // Discovery endpoint returns the JWKS URI on the same mock server
+        let jwks_url = format!("{base_url}/oauth/jwks");
+        let discovery_json = serde_json::json!({
+            "jwks_uri": jwks_url,
+            "issuer": base_url,
+        });
+
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kid": "oidc-key-1",
+                "kty": "RSA",
+                "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4Qy5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+                "e": "AQAB"
+            }]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(discovery_json),
+            )
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/oauth/jwks"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(jwks_json),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let provider = OidcProvider::new(&base_url, None)
+            .await
+            .expect("OIDC provider creation should succeed");
+
+        // Verify keys were cached
+        let guard = provider.cached_keys.lock().expect("lock not poisoned");
+        let cached = guard.as_ref().expect("cache should be populated");
+        assert_eq!(cached.keys.len(), 1);
+        assert_eq!(cached.keys[0].kid, "oidc-key-1");
+    }
+
+    #[tokio::test]
+    async fn new_with_reachable_endpoints_and_audience_succeeds() {
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        let jwks_url = format!("{base_url}/oauth/jwks");
+        let discovery_json = serde_json::json!({
+            "jwks_uri": jwks_url,
+        });
+
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kid": "k1", "kty": "RSA", "n": "n", "e": "e"
+            }]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/oauth/jwks"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&mock_server)
+            .await;
+
+        let provider = OidcProvider::new(&base_url, Some("my-app".to_owned()))
+            .await
+            .expect("OIDC provider creation with audience should succeed");
+
+        assert_eq!(provider.audience, Some("my-app".to_owned()));
+
+        // Verify keys were cached
+        let guard = provider.cached_keys.lock().expect("lock not poisoned");
+        assert!(guard.is_some());
+    }
+
+    // ── start_background_refresh ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn start_background_refresh_sets_handle_once() {
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            fetched_at: Instant::now(),
+        }));
+
+        provider.start_background_refresh();
+        assert!(provider._background_handle.get().is_some());
+
+        // Second call should not replace (OnceLock)
+        provider.start_background_refresh();
+        assert!(provider._background_handle.get().is_some());
     }
 }

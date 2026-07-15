@@ -370,9 +370,13 @@ mod provider_tests {
 
     use super::*;
     use crate::{
-        ServerError,
+        ServerError, ServerConfig, ServerBackend,
+        app::ProtocolMetrics,
+        config::AuthProviderKind,
         provider::ProviderServiceError,
         provider_events::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind},
+        reconstruction_cache::ReconstructionCacheService,
+        transfer_limiter::TransferLimiter,
     };
     use crate::app::{
         MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
@@ -1026,5 +1030,205 @@ mod provider_tests {
             Some(15)
         );
         assert_eq!(reconciled.last_drift_checked_at_unix_seconds(), Some(25));
+    }
+
+    // -----------------------------------------------------------------------
+    // authenticate_provider_token_request / issue_provider_token_response
+    // -----------------------------------------------------------------------
+
+    /// Builds a minimal AppState with provider_tokens = None for testing
+    /// the disabled-token early-return paths.
+    async fn state_without_provider_tokens() -> AppState {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let chunk_size = std::num::NonZeroUsize::new(65536).unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        )
+        .with_auth_provider(AuthProviderKind::Local)
+        .with_server_frontends(vec![crate::ServerFrontend::Xet])
+        .unwrap();
+        let backend = ServerBackend::from_config(&config).await.unwrap();
+        AppState {
+            config,
+            role: crate::ServerRole::All,
+            backend,
+            auth: None,
+            provider_tokens: None,
+            reconstruction_cache: ReconstructionCacheService::disabled(),
+            transfer_limiter: TransferLimiter::new(chunk_size, chunk_size),
+            oci_registry_token_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
+            protocol_metrics: ProtocolMetrics::default(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticate_provider_token_request_disabled_returns_error() {
+        let state = state_without_provider_tokens().await;
+        let headers = HeaderMap::new();
+        let result = authenticate_provider_token_request(&state, &headers, "github");
+        assert!(
+            matches!(result, Err(ServerError::ProviderTokensDisabled)),
+            "with provider_tokens=None, should return ProviderTokensDisabled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn issue_provider_token_response_disabled_returns_error() {
+        use crate::model::ProviderTokenIssueRequest;
+        let state = state_without_provider_tokens().await;
+        let headers = HeaderMap::new();
+        let request = ProviderTokenIssueRequest {
+            subject: String::new(),
+            owner: String::new(),
+            repo: String::new(),
+            revision: None,
+            scope: shardline_protocol::TokenScope::Read,
+        };
+        let result = issue_provider_token_response(&state, &headers, "github", &request).await;
+        assert!(
+            matches!(result, Err(ServerError::ProviderTokensDisabled)),
+            "with provider_tokens=None, should return ProviderTokensDisabled"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // reconcile_provider_repository_state_with_store
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_provider_repository_state_with_store_no_existing() {
+        use crate::model::ProviderTokenIssueResponse;
+        // When there is no existing state, reconcile is a no-op (returns Ok).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = shardline_index::LocalIndexStore::open(tmp.path().to_path_buf());
+        let issued = ProviderTokenIssueResponse {
+            token: "tok".to_owned(),
+            issuer: "iss".to_owned(),
+            subject: "sub".to_owned(),
+            provider: shardline_protocol::RepositoryProvider::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            revision: None,
+            scope: shardline_protocol::TokenScope::Read,
+            expires_at_unix_seconds: 99999,
+        };
+        let result = reconcile_provider_repository_state_with_store(&store, &issued).await;
+        assert!(result.is_ok(), "no existing state should succeed (no-op)");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_provider_repository_state_with_store_matching_noop() {
+        use crate::model::ProviderTokenIssueResponse;
+        use shardline_protocol::RepositoryProvider;
+        // When existing == reconciled the function returns early (no-op).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = shardline_index::LocalIndexStore::open(tmp.path().to_path_buf());
+
+        // Seed an existing state with reconciliation timestamps that already
+        // exceed the signal timestamps — reconcile should see no change needed.
+        let seed = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org".to_owned(),
+            "repo".to_owned(),
+            Some(100), // access_changed_at
+            None,      // revision_pushed_at
+            None,
+        )
+        .with_reconciliation(Some(200), Some(200), Some(200));
+        store
+            .upsert_provider_repository_state(&seed)
+            .await
+            .unwrap();
+
+        // Call reconcile — since the reconciled values already exceed the
+        // signals, they should match existing and return early (no-op).
+        let issued = ProviderTokenIssueResponse {
+            token: "tok".to_owned(),
+            issuer: "iss".to_owned(),
+            subject: "sub".to_owned(),
+            provider: RepositoryProvider::GitHub,
+            owner: "org".to_owned(),
+            repo: "repo".to_owned(),
+            revision: None,
+            scope: shardline_protocol::TokenScope::Read,
+            expires_at_unix_seconds: 99999,
+        };
+        let result = reconcile_provider_repository_state_with_store(&store, &issued).await;
+        assert!(result.is_ok());
+
+        // Verify the stored state was NOT updated
+        let after = store
+            .provider_repository_state(RepositoryProvider::GitHub, "org", "repo")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.last_cache_invalidated_at_unix_seconds(),
+            Some(200)
+        );
+        assert_eq!(
+            after.last_authorization_rechecked_at_unix_seconds(),
+            Some(200)
+        );
+        assert_eq!(after.last_drift_checked_at_unix_seconds(), Some(200));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_provider_repository_state_with_store_different_upserts() {
+        use crate::model::ProviderTokenIssueResponse;
+        use shardline_protocol::RepositoryProvider;
+        // When existing != reconciled, the function upserts the new state.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = shardline_index::LocalIndexStore::open(tmp.path().to_path_buf());
+
+        // Seed an existing state where authorization_rechecked_at is stale.
+        // access_changed_at=100 > authorization_rechecked_at=50 → update needed.
+        let seed = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "org-upsert".to_owned(),
+            "repo".to_owned(),
+            Some(100), // access_changed_at
+            None,      // revision_pushed_at
+            None,
+        )
+        .with_reconciliation(Some(200), Some(50), Some(200));
+
+        store
+            .upsert_provider_repository_state(&seed)
+            .await
+            .unwrap();
+
+        let issued = ProviderTokenIssueResponse {
+            token: "tok".to_owned(),
+            issuer: "iss".to_owned(),
+            subject: "sub".to_owned(),
+            provider: RepositoryProvider::GitHub,
+            owner: "org-upsert".to_owned(),
+            repo: "repo".to_owned(),
+            revision: None,
+            scope: shardline_protocol::TokenScope::Read,
+            expires_at_unix_seconds: 99999,
+        };
+
+        // Reconciliation should detect that authorization_rechecked_at=50
+        // is stale (access_changed_at=100) and upsert a new state.
+        let result = reconcile_provider_repository_state_with_store(&store, &issued).await;
+        assert!(result.is_ok());
+
+        // Verify the state was updated
+        let after = store
+            .provider_repository_state(RepositoryProvider::GitHub, "org-upsert", "repo")
+            .await
+            .unwrap()
+            .unwrap();
+        // authorization_rechecked_at should now be Some(now) instead of Some(50)
+        assert!(
+            after.last_authorization_rechecked_at_unix_seconds() != Some(50),
+            "state should have been updated with new reconciliation timestamp, got: {:?}",
+            after.last_authorization_rechecked_at_unix_seconds()
+        );
     }
 }

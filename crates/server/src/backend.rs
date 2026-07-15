@@ -938,7 +938,8 @@ mod tests {
 
     use super::{
         BenchmarkBackend, ServerBackend, compose_benchmark_object_key_prefix,
-        clear_repository_reference_probe_filter, repository_reference_probe_count,
+        clear_repository_reference_probe_filter, count_repository_reference_probe_for_tests,
+        lock_repository_reference_probe_test, repository_reference_probe_count,
         reset_repository_reference_probe_count_for_hash, server_error_to_oci,
     };
     use crate::ServerConfig;
@@ -1437,5 +1438,152 @@ mod tests {
             .unwrap();
         let result = OciBackend::copy_object_if_absent(&backend, &src, &dst);
         assert!(result.is_ok());
+    }
+
+    // ── OciBackend put_sha256_addressed_object_bytes_if_absent ───────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_backend_oci_put_sha256_addressed_object_bytes_if_absent_local() {
+        use shardline_oci_adapter::OciBackend;
+        let (backend, _tmp) = make_backend().await;
+        let body = b"oci-sha256-payload";
+        let digest_hex = "cd".repeat(32);
+        let canonical_key =
+            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let result = OciBackend::put_sha256_addressed_object_bytes_if_absent(
+            &backend,
+            &canonical_key,
+            &digest_hex,
+            body.to_vec(),
+        );
+        assert!(result.is_ok());
+        let put_outcome = result.unwrap();
+        use shardline_storage::PutOutcome;
+        assert_eq!(put_outcome, PutOutcome::Inserted);
+        // Verify the object can be read back
+        let length = backend.object_length(&canonical_key).await.unwrap();
+        assert_eq!(length, body.len() as u64);
+    }
+
+    // ── Repository reference probe tests ─────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_repository_reference_probe_directly() {
+        let _guard = lock_repository_reference_probe_test().await;
+        // Reset count and filter so other tests aren't affected
+        reset_repository_reference_probe_count_for_hash("deadbeef");
+        assert_eq!(repository_reference_probe_count(), 0);
+
+        // Call the count function directly with matching hash
+        count_repository_reference_probe_for_tests("deadbeef");
+        assert_eq!(repository_reference_probe_count(), 1);
+
+        // Call with non-matching hash — should NOT increment
+        count_repository_reference_probe_for_tests("not-matching");
+        assert_eq!(repository_reference_probe_count(), 1);
+
+        // Call with matching hash again
+        count_repository_reference_probe_for_tests("deadbeef");
+        assert_eq!(repository_reference_probe_count(), 2);
+
+        // Clean up: reset count to 0 and clear filter
+        reset_repository_reference_probe_count_for_hash("cleanup");
+        clear_repository_reference_probe_filter();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_repository_reference_probe_without_filter_counts_all() {
+        let _guard = lock_repository_reference_probe_test().await;
+        // Reset count and filter so other tests aren't affected
+        reset_repository_reference_probe_count_for_hash("x");
+        clear_repository_reference_probe_filter();
+        assert_eq!(repository_reference_probe_count(), 0);
+
+        count_repository_reference_probe_for_tests("any-hash");
+        assert_eq!(repository_reference_probe_count(), 1);
+
+        count_repository_reference_probe_for_tests("another-hash");
+        assert_eq!(repository_reference_probe_count(), 2);
+
+        // Clean up: reset count to 0 and clear filter
+        reset_repository_reference_probe_count_for_hash("cleanup");
+        clear_repository_reference_probe_filter();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_repository_reference_probe_test_acquires_lock() {
+        let guard = lock_repository_reference_probe_test().await;
+        drop(guard);
+    }
+
+    // ── server_error_to_oci remaining variants ───────────────────────────
+
+    #[test]
+    fn server_error_to_oci_maps_json() {
+        let err = ServerError::Json(serde_json::from_str::<()>("invalid").unwrap_err());
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::Json(_)));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_numeric_conversion() {
+        // Construct a TryFromIntError by attempting an invalid conversion
+        let result: Result<u32, _> = (u64::MAX).try_into();
+        let try_from_err = result.unwrap_err();
+        let err = ServerError::NumericConversion(try_from_err);
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::NumericConversion(_)));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_s3_object_store_error() {
+        use crate::error::ObjectStoreError;
+        let err = ServerError::ObjectStore(ObjectStoreError::S3(
+            shardline_storage::S3ObjectStoreError::EmptyBucket,
+        ));
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::S3ObjectStore(_)));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_invalid_manifest_reference() {
+        let err = ServerError::InvalidManifestReference;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::InvalidManifestReference));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_invalid_upload_session() {
+        let err = ServerError::InvalidUploadSession;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::InvalidUploadSession));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_too_many_upload_sessions() {
+        let err = ServerError::TooManyUploadSessions;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::TooManyUploadSessions));
+    }
+
+    #[test]
+    fn server_error_to_oci_maps_expected_body_hash_mismatch() {
+        let err = ServerError::ExpectedBodyHashMismatch;
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::ExpectedBodyHashMismatch));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn server_error_to_oci_maps_blocking_task() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let join_err = rt.block_on(async {
+            tokio::spawn(async { panic!("intentional panic for test") })
+                .await
+                .unwrap_err()
+        });
+        let err = ServerError::BlockingTask(join_err);
+        let oci = server_error_to_oci(err);
+        assert!(matches!(oci, OciAdapterError::BlockingTask(_)));
     }
 }
