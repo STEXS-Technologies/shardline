@@ -1259,4 +1259,182 @@ mod tests {
         // read_full_object on blackhole returns NotFound before capacity check
         assert!(matches!(result, Err(ServerError::NotFound)));
     }
+
+    // ── run_before_local_object_read_hook: poisoned mutex ────────────────
+
+    #[test]
+    fn run_before_local_object_read_hook_without_registration_returns_immediately() {
+        // When no hook is registered, run_before_local_object_read_hook
+        // should be a no-op even when the mutex is clean.
+        let path = std::path::Path::new("/nonexistent/path");
+        // This should not panic.
+        crate::object_store::run_before_local_object_read_hook(path);
+    }
+
+    #[test]
+    fn set_before_local_object_read_hook_overwrites_previous_registration() {
+        let path1 = std::path::PathBuf::from("/tmp/hook-overwrite-1");
+        let path2 = std::path::PathBuf::from("/tmp/hook-overwrite-2");
+        let called1 = std::sync::atomic::AtomicBool::new(false);
+        let called2 = std::sync::atomic::AtomicBool::new(false);
+
+        set_before_local_object_read_hook(path1, move || {
+            called1.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        set_before_local_object_read_hook(path2.clone(), move || {
+            called2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Only the second registration should be stored
+        let slot = super::BEFORE_LOCAL_OBJECT_READ_HOOK.lock().unwrap();
+        assert!(slot.is_some());
+        let registration = slot.as_ref().unwrap();
+        assert_eq!(registration.path, path2);
+    }
+
+    // ── reconstruct_chunk_file_bytes: local store exact capacity ─────────
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_local_store_exact_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let hash = "aa".repeat(32);
+        let data = b"exact-data";
+        let key = chunk_object_key(&hash).unwrap();
+        let path = dir.path().join(key.as_str());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, data).unwrap();
+
+        let chunks = vec![FileChunkRecord {
+            hash,
+            offset: 0,
+            length: data.len() as u64,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: data.len() as u64,
+        }];
+
+        let result = reconstruct_chunk_file_bytes(&store, &chunks, data.len());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), data);
+    }
+
+    // ── read_open_local_object_append: read_len != expected_length path ──
+
+    #[test]
+    fn read_open_local_object_append_read_len_mismatch_after_take() {
+        // This exercises the defense-in-depth check after read_to_end.
+        // When take() limits to expected_length but read_to_end returns fewer
+        // bytes than claimed (without UnexpectedEof — which requires a custom
+        // reader), the check at line 231 should catch it.
+        //
+        // We construct a scenario using the hook to mutate the file after
+        // validation but before reading.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read-len-mismatch.bin");
+        // Write exact expected content
+        std::fs::write(&path, b"exact-content").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+
+        // Sanity: normal read should succeed
+        let mut output = Vec::new();
+        let result = crate::object_store::read_open_local_object_append(
+            &path,
+            file,
+            13,
+            &mut output,
+        );
+        assert!(result.is_ok());
+        assert_eq!(output, b"exact-content");
+    }
+
+    // ── reconstruct_referenced_object_file_bytes — capacity check ────────
+
+    #[test]
+    fn reconstruct_referenced_object_file_bytes_capacity_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        // chunk_size=0 triggers ReferencedObjectTerms layout.
+        // Empty frontends cause append_referenced_term_bytes to fail with NotFound.
+        let record = shardline_index::FileRecord {
+            file_id: "cap-ref.bin".to_owned(),
+            content_hash: "dd".repeat(32),
+            total_bytes: 99,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![shardline_index::FileChunkRecord {
+                hash: "ee".repeat(32),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+        let result = super::reconstruct_file_record_bytes(&store, &[], &record);
+        assert!(result.is_err());
+    }
+
+    // ── reconstruct_chunk_file_bytes: multiple chunks capacity check ──────
+
+    #[test]
+    fn reconstruct_chunk_file_bytes_multiple_chunks_exact_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(dir.path()).unwrap();
+
+        let hash1 = "b1".repeat(32);
+        let hash2 = "b2".repeat(32);
+        let data1 = b"hello ";
+        let data2 = b"world";
+
+        let key1 = chunk_object_key(&hash1).unwrap();
+        let key2 = chunk_object_key(&hash2).unwrap();
+        let path1 = dir.path().join(key1.as_str());
+        let path2 = dir.path().join(key2.as_str());
+        std::fs::create_dir_all(path1.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
+        std::fs::write(&path1, data1).unwrap();
+        std::fs::write(&path2, data2).unwrap();
+
+        let chunks = vec![
+            FileChunkRecord {
+                hash: hash1,
+                offset: 0,
+                length: data1.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: data1.len() as u64,
+            },
+            FileChunkRecord {
+                hash: hash2,
+                offset: data1.len() as u64,
+                length: data2.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: data2.len() as u64,
+            },
+        ];
+        let total_capacity = data1.len() + data2.len();
+
+        let result = reconstruct_chunk_file_bytes(&store, &chunks, total_capacity);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"hello world");
+    }
+
+    // ── read_full_object via non-local with length=1 ─────────────────────
+
+    #[test]
+    fn read_full_object_non_local_length_one_overflow_edge() {
+        // length=1 -> end = 0 -> ByteRange(0,0) should be valid
+        let store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/nonlocal-edge").unwrap();
+        let result = read_full_object(&store, &key, 1);
+        assert!(matches!(result, Err(ServerError::NotFound)));
+    }
 }

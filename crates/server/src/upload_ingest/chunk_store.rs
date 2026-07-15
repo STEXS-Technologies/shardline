@@ -489,4 +489,62 @@ mod tests {
         assert_eq!(request.chunk_length, 0);
         assert!(!request.hash_hex.is_empty());
     }
+
+    #[tokio::test]
+    async fn blackhole_store_pooled_chunk_buffer_returns_inserted_with_reusable() {
+        let store = ServerObjectStore::blackhole();
+        let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0u8; 16]));
+        let (outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
+            .await
+            .unwrap();
+        assert!(outcome.inserted);
+        // Blackhole's put_if_absent returns true (Inserted)
+        // and the Bytes may be reusable if it has a single ref
+        assert_eq!(outcome.chunk_length, 16);
+        // reusable is Some if try_into_mut succeeds, which depends on ref count
+        // at minimum verify the function doesn't panic
+        let _ = reusable;
+    }
+
+    #[tokio::test]
+    async fn local_store_pooled_chunk_buffer_inserts_and_returns_reusable() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+        let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0xABu8; 32]));
+        let (outcome, reusable) = put_if_absent_pooled_chunk_buffer(&store, chunk)
+            .await
+            .unwrap();
+        assert!(outcome.inserted);
+        assert_eq!(outcome.chunk_length, 32);
+        // Buffer should be reusable since we have unique ownership
+        assert!(reusable.is_some());
+        if let Some(buf) = reusable {
+            assert_eq!(buf.len(), 32);
+            assert_eq!(&*buf, &[0xABu8; 32]);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_store_shared_via_pooled_fn_returns_overflow() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+        let chunk = ChunkBuffer::Shared(Bytes::from_static(b"shared data"));
+        let result = put_if_absent_pooled_chunk_buffer(&store, chunk).await;
+        assert!(matches!(result, Err(crate::ServerError::Overflow)));
+    }
+
+    // ------------------------------------------------------------------
+    // Large data edge cases
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn local_store_put_if_absent_large_chunk() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+        let data = vec![0x42u8; 65536]; // 64KB chunk
+        let chunk = ChunkBuffer::Pooled(Bytes::from(data));
+        let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
+        assert!(outcome.inserted);
+        assert_eq!(outcome.chunk_length, 65536);
+    }
 }

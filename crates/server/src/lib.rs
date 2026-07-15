@@ -146,7 +146,7 @@ pub use model::{
     ProviderTokenIssueResponse, ProviderWebhookResponse, ReadyResponse, ServerStatsResponse,
     XetCasTokenResponse,
 };
-pub(crate) use postgres_backend::PostgresBackend;
+pub use postgres_backend::PostgresBackend;
 pub use rebuild::{
     IndexRebuildIssueDetail, IndexRebuildReconstructionPlanDetail, LocalIndexRebuildIssue,
     LocalIndexRebuildIssueKind, LocalIndexRebuildReport, run_index_rebuild,

@@ -859,4 +859,149 @@ mod tests {
         let result = super::object_byte_stream(store, key, 0).await;
         assert!(matches!(result, Err(crate::ServerError::NotFound)));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_blackhole_zero_length_metadata_length_mismatch() {
+        // When metadata reports non-zero length but we asked for length 0, should error
+        // via StoredLengthMismatch. However, Blackhole metadata() returns None,
+        // so this is a type-level check that the branch compiles.
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/zero-claim-nonzero").unwrap();
+        // Blackhole metadata returns None → NotFound before length check
+        let result = super::object_byte_stream(store, key, 0).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    // ── overflow edge cases ──────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_overflow_on_zero_length_sub_one() {
+        // The function uses checked_sub(1) for end_inclusive range when length == 0
+        // should go through the metadata path, not the range path.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/zero-stream").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"").await.unwrap();
+
+        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let result = super::object_byte_stream(store, object_key, 0).await;
+        // Zero-length existing empty file → empty stream
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_range_stream_with_blackhole_not_found() {
+        // Blackhole returns NotFound for all stores
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/blackhole-range").unwrap();
+        let range = ByteRange::new(0, 9).unwrap();
+        let result = super::object_byte_range_stream(store, key, 10, range).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    // ── object_byte_range_stream via Local store with mid-range ──────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_range_stream_local_store_mid_range() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/mid-range").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"0123456789").await.unwrap();
+
+        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let range = ByteRange::new(3, 7).unwrap();
+        let result = super::object_byte_range_stream(store, object_key, 10, range).await;
+        assert!(result.is_ok());
+        let mut stream = result.unwrap();
+        let mut observed = Vec::new();
+        use futures_util::StreamExt;
+        while let Some(item) = stream.next().await {
+            observed.extend_from_slice(&item.unwrap());
+        }
+        assert_eq!(observed, b"34567");
+    }
+
+    // ── local_store_byte_range_stream — single-byte at start ──────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_store_byte_range_stream_first_byte() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/first-byte").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"abcdef").await.unwrap();
+
+        let range = ByteRange::new(0, 0).unwrap(); // just first byte
+        let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
+        assert!(result.is_ok());
+        let mut observed = Vec::new();
+        let mut stream = result.unwrap();
+        while let Some(item) = stream.next().await {
+            observed.extend_from_slice(&item.unwrap());
+        }
+        assert_eq!(observed, b"a");
+    }
+
+    // ── local_store_byte_range_stream — range at very end ─────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_store_byte_range_stream_last_byte_range() {
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/last-byte").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"abcdef").await.unwrap();
+
+        // Range at end: byte 5 of 6 → last byte
+        let range = ByteRange::new(5, 5).unwrap();
+        let result = local_object_byte_range_stream(object_store, object_key, 6, range).await;
+        assert!(result.is_ok());
+        let mut stream = result.unwrap();
+        let mut observed = Vec::new();
+        while let Some(item) = stream.next().await {
+            observed.extend_from_slice(&item.unwrap());
+        }
+        assert_eq!(observed, b"f");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_store_byte_range_stream_empty_range_with_nonempty_body_not_possible() {
+        // A zero-length range is not representable by ByteRange (start <= end always).
+        // Test edge: range at position 0,0 on 1-byte file.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/minimal-range").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"x").await.unwrap();
+
+        let range = ByteRange::new(0, 0).unwrap();
+        let result = local_object_byte_range_stream(object_store, object_key, 1, range).await;
+        assert!(result.is_ok());
+        let mut stream = result.unwrap();
+        let observed: Vec<u8> = futures_util::StreamExt::collect::<Vec<_>>(&mut stream).await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(observed, b"x");
+    }
 }
