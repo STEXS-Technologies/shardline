@@ -12,8 +12,8 @@ use hmac::Mac;
 use shardline_protocol::{SecretBytes, SecretString, TokenScope};
 use shardline_vcs::{
     BuiltInProviderCatalog, BuiltInProviderError, GitHubAdapter, ProviderKind,
-    ProviderRepositoryPolicy, ProviderSubject, ProviderTokenIssuer, RepositoryRef,
-    RepositoryVisibility, RepositoryWebhookEventKind, configured_metadata,
+    ProviderRepositoryPolicy, ProviderSubject, ProviderTokenIssuer, RepositoryAccess,
+    RepositoryRef, RepositoryVisibility, RepositoryWebhookEventKind, configured_metadata,
 };
 
 use super::{
@@ -988,4 +988,295 @@ fn optional_bounded_header_value_exact_boundary_is_ok() {
     );
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), Some(exact.as_str()));
+}
+
+// ── ProviderTokenService::from_file — API key validation ────────────────
+
+#[test]
+fn provider_service_from_file_rejects_empty_api_key() {
+    let mut config = tempfile::NamedTempFile::new().unwrap();
+    config.write_all(br#"{"providers":[]}"#).unwrap();
+    config.as_file().sync_all().unwrap();
+
+    let result = ProviderTokenService::from_file(
+        config.path(),
+        vec![],
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+    );
+
+    assert!(matches!(result, Err(ProviderServiceError::EmptyApiKey)));
+}
+
+#[test]
+fn provider_service_from_file_rejects_oversized_api_key() {
+    let mut config = tempfile::NamedTempFile::new().unwrap();
+    config.write_all(br#"{"providers":[]}"#).unwrap();
+    config.as_file().sync_all().unwrap();
+
+    let oversized = vec![0u8; MAX_PROVIDER_API_KEY_HEADER_BYTES + 1];
+    let result = ProviderTokenService::from_file(
+        config.path(),
+        oversized,
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+    );
+
+    assert!(matches!(result, Err(ProviderServiceError::ApiKeyTooLarge)));
+}
+
+// ── ProviderRegistry duplicate provider ──────────────────────────────────
+
+#[test]
+fn provider_registry_rejects_duplicate_provider() {
+    let document = ProviderConfigDocument {
+        providers: vec![
+            ProviderConfig {
+                kind: "github".to_owned(),
+                integration_subject: "github-app".to_owned(),
+                webhook_secret: Some(SecretString::from_secret("secret")),
+                repositories: vec![RepositoryPolicyConfig {
+                    owner: "team".to_owned(),
+                    name: "assets".to_owned(),
+                    visibility: "private".to_owned(),
+                    default_revision: "main".to_owned(),
+                    clone_url: "https://github.example/team/assets.git".to_owned(),
+                    read_subjects: vec!["user-1".to_owned()],
+                    write_subjects: vec!["user-1".to_owned()],
+                }],
+            },
+            ProviderConfig {
+                kind: "github".to_owned(),
+                integration_subject: "github-app-2".to_owned(),
+                webhook_secret: Some(SecretString::from_secret("secret-2")),
+                repositories: vec![],
+            },
+        ],
+    };
+
+    let result = ProviderRegistry::from_document(document);
+    assert!(matches!(result, Err(ProviderServiceError::DuplicateProvider)));
+}
+
+#[test]
+fn provider_registry_accepts_different_provider_kinds() {
+    let document = ProviderConfigDocument {
+        providers: vec![
+            ProviderConfig {
+                kind: "github".to_owned(),
+                integration_subject: "github-app".to_owned(),
+                webhook_secret: Some(SecretString::from_secret("secret")),
+                repositories: vec![],
+            },
+            ProviderConfig {
+                kind: "gitlab".to_owned(),
+                integration_subject: "gitlab-app".to_owned(),
+                webhook_secret: Some(SecretString::from_secret("secret-2")),
+                repositories: vec![],
+            },
+        ],
+    };
+
+    let result = ProviderRegistry::from_document(document);
+    assert!(result.is_ok());
+}
+
+// ── BuiltInProvider::from_config — all provider kinds ────────────────────
+
+#[test]
+fn built_in_provider_from_config_gitea() {
+    let config = ProviderConfig {
+        kind: "gitea".to_owned(),
+        integration_subject: "gitea-app".to_owned(),
+        webhook_secret: Some(SecretString::from_secret("gitea-secret")),
+        repositories: vec![RepositoryPolicyConfig {
+            owner: "team".to_owned(),
+            name: "assets".to_owned(),
+            visibility: "public".to_owned(),
+            default_revision: "main".to_owned(),
+            clone_url: "https://gitea.example/team/assets.git".to_owned(),
+            read_subjects: vec!["user-1".to_owned()],
+            write_subjects: vec!["user-1".to_owned()],
+        }],
+    };
+    let result = BuiltInProvider::from_config(config);
+    assert!(result.is_ok());
+    let provider = result.unwrap();
+    assert_eq!(provider.kind(), ProviderKind::Gitea);
+}
+
+#[test]
+fn built_in_provider_from_config_gitlab() {
+    let config = ProviderConfig {
+        kind: "gitlab".to_owned(),
+        integration_subject: "gitlab-app".to_owned(),
+        webhook_secret: Some(SecretString::from_secret("gitlab-secret")),
+        repositories: vec![RepositoryPolicyConfig {
+            owner: "team".to_owned(),
+            name: "assets".to_owned(),
+            visibility: "private".to_owned(),
+            default_revision: "main".to_owned(),
+            clone_url: "https://gitlab.example/team/assets.git".to_owned(),
+            read_subjects: vec!["user-1".to_owned()],
+            write_subjects: vec!["user-1".to_owned()],
+        }],
+    };
+    let result = BuiltInProvider::from_config(config);
+    assert!(result.is_ok());
+    let provider = result.unwrap();
+    assert_eq!(provider.kind(), ProviderKind::GitLab);
+}
+
+#[test]
+fn built_in_provider_from_config_codeberg() {
+    let config = ProviderConfig {
+        kind: "codeberg".to_owned(),
+        integration_subject: "codeberg-app".to_owned(),
+        webhook_secret: Some(SecretString::from_secret("codeberg-secret")),
+        repositories: vec![RepositoryPolicyConfig {
+            owner: "team".to_owned(),
+            name: "assets".to_owned(),
+            visibility: "internal".to_owned(),
+            default_revision: "main".to_owned(),
+            clone_url: "https://codeberg.example/team/assets.git".to_owned(),
+            read_subjects: vec!["user-1".to_owned()],
+            write_subjects: vec!["user-1".to_owned()],
+        }],
+    };
+    let result = BuiltInProvider::from_config(config);
+    assert!(result.is_ok());
+    let provider = result.unwrap();
+    assert_eq!(provider.kind(), ProviderKind::Codeberg);
+}
+
+#[test]
+fn built_in_provider_from_config_generic() {
+    let config = ProviderConfig {
+        kind: "generic".to_owned(),
+        integration_subject: "generic-app".to_owned(),
+        webhook_secret: Some(SecretString::from_secret("generic-secret")),
+        repositories: vec![RepositoryPolicyConfig {
+            owner: "team".to_owned(),
+            name: "assets".to_owned(),
+            visibility: "public".to_owned(),
+            default_revision: "main".to_owned(),
+            clone_url: "https://generic.example/team/assets.git".to_owned(),
+            read_subjects: vec!["user-1".to_owned()],
+            write_subjects: vec!["user-1".to_owned()],
+        }],
+    };
+    let result = BuiltInProvider::from_config(config);
+    assert!(result.is_ok());
+    let provider = result.unwrap();
+    assert_eq!(provider.kind(), ProviderKind::Generic);
+}
+
+// ── webhook_request — non-GitHub provider kinds ─────────────────────────
+
+#[test]
+fn webhook_request_gitea_provider() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-gitea-event", HeaderValue::from_static("push"));
+    headers.insert("x-gitea-delivery", HeaderValue::from_static("delivery-1"));
+    headers.insert(
+        "x-gitea-signature",
+        HeaderValue::from_static("sha256=abc"),
+    );
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::Gitea, &headers, body);
+    assert!(result.is_ok());
+    let request = result.unwrap();
+    assert_eq!(request.event_name(), "push");
+    assert_eq!(request.delivery_id(), "delivery-1");
+    assert!(request.signature().is_some());
+}
+
+#[test]
+fn webhook_request_gitlab_provider() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-gitlab-event", HeaderValue::from_static("push"));
+    headers.insert(
+        "x-gitlab-webhook-uuid",
+        HeaderValue::from_static("delivery-1"),
+    );
+    headers.insert("x-gitlab-token", HeaderValue::from_static("token-abc"));
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::GitLab, &headers, body);
+    assert!(result.is_ok());
+    let request = result.unwrap();
+    assert_eq!(request.event_name(), "push");
+    assert_eq!(request.delivery_id(), "delivery-1");
+    assert!(request.signature().is_some());
+}
+
+#[test]
+fn webhook_request_codeberg_provider() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-codeberg-event", HeaderValue::from_static("push"));
+    headers.insert(
+        "x-codeberg-delivery",
+        HeaderValue::from_static("delivery-1"),
+    );
+    headers.insert(
+        "x-codeberg-signature",
+        HeaderValue::from_static("sha256=abc"),
+    );
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::Codeberg, &headers, body);
+    assert!(result.is_ok());
+    let request = result.unwrap();
+    assert_eq!(request.event_name(), "push");
+    assert_eq!(request.delivery_id(), "delivery-1");
+    assert!(request.signature().is_some());
+}
+
+#[test]
+fn webhook_request_generic_provider() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-shardline-event", HeaderValue::from_static("push"));
+    headers.insert(
+        "x-shardline-delivery",
+        HeaderValue::from_static("delivery-1"),
+    );
+    headers.insert(
+        "x-shardline-signature",
+        HeaderValue::from_static("sha256=abc"),
+    );
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::Generic, &headers, body);
+    assert!(result.is_ok());
+    let request = result.unwrap();
+    assert_eq!(request.event_name(), "push");
+    assert_eq!(request.delivery_id(), "delivery-1");
+    assert!(request.signature().is_some());
+}
+
+#[test]
+fn webhook_request_generic_missing_signature() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-shardline-event", HeaderValue::from_static("push"));
+    headers.insert(
+        "x-shardline-delivery",
+        HeaderValue::from_static("delivery-1"),
+    );
+    // No signature header — optional, should be None
+    let body = b"{}";
+    let result = super::webhook_request(ProviderKind::Generic, &headers, body);
+    assert!(result.is_ok());
+    let request = result.unwrap();
+    assert!(request.signature().is_none());
+}
+
+// ── repository_access ───────────────────────────────────────────────────
+
+#[test]
+fn repository_access_read_scope() {
+    assert_eq!(super::repository_access(TokenScope::Read), RepositoryAccess::Read);
+}
+
+#[test]
+fn repository_access_write_scope() {
+    assert_eq!(super::repository_access(TokenScope::Write), RepositoryAccess::Write);
 }

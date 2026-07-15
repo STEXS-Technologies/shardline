@@ -74,6 +74,9 @@ xet-client.workspace = true
 xet-data.workspace = true
 xet-runtime.workspace = true
 
+[features]
+docker = ["shardline-test-support/docker"]
+
 [lints]
 workspace = true
 

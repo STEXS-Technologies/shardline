@@ -780,4 +780,171 @@ mod tests {
             Err(ServerError::ExpectedBodyHashMismatch)
         ));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_empty_upload_succeeds() {
+        // Empty file upload with no body chunks.
+        let object_store = ServerObjectStore::blackhole();
+        let chunk_size = NonZeroUsize::new(1024).unwrap();
+        let ingestor = FileUploadIngestor::new(chunk_size, false);
+
+        let finished = ingestor
+            .finish(&object_store, "empty.bin", None, None)
+            .await;
+        assert!(finished.is_ok());
+        let Ok((record, response)) = finished else {
+            return;
+        };
+        assert_eq!(record.total_bytes, 0);
+        assert_eq!(response.inserted_chunks, 0);
+        assert_eq!(response.reused_chunks, 0);
+        assert!(record.chunks.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_empty_upload_with_sha256_and_expected_hash() {
+        // Empty file with SHA256 computed and matching expected hash.
+        let object_store = ServerObjectStore::blackhole();
+        let chunk_size = NonZeroUsize::new(1024).unwrap();
+        let ingestor = FileUploadIngestor::new(chunk_size, true);
+
+        // SHA256 of empty string
+        let empty_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let finished = ingestor
+            .finish(&object_store, "empty-sha256.bin", None, Some(empty_sha256))
+            .await;
+        assert!(finished.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_exact_single_chunk_with_local_store() {
+        // Data exactly matching chunk size — no pending bytes, no frames crossing boundary.
+        let storage = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
+        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let mut ingestor = FileUploadIngestor::new(chunk_size, false);
+
+        ingestor
+            .ingest_body_chunk(&object_store, &Bytes::from_static(b"abcd"))
+            .await
+            .unwrap();
+        assert!(ingestor.pending.is_empty());
+
+        let finished = ingestor
+            .finish(&object_store, "single.bin", None, None)
+            .await;
+        assert!(finished.is_ok());
+        let Ok((record, response)) = finished else {
+            return;
+        };
+        assert_eq!(record.total_bytes, 4);
+        assert_eq!(response.inserted_chunks, 1);
+        assert_eq!(response.chunks.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_multiple_in_flight_chunks_exceeds_parallelism() {
+        // Submit enough chunks to exceed max_in_flight_chunks, triggering
+        // drain_completed_chunks_to_capacity. Use blackhole so chunks complete
+        // synchronously without spawn_blocking.
+        let object_store = ServerObjectStore::blackhole();
+
+        // Set max_in_flight_chunks to 2, submit 4 chunks via one body frame.
+        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let mut ingestor = FileUploadIngestor::new_with_parallelism(
+            chunk_size,
+            false,
+            NonZeroUsize::new(2).unwrap(),
+        );
+
+        // 16 bytes → 4 chunks of 4 bytes each, all synchronous via blackhole
+        ingestor
+            .ingest_body_chunk(&object_store, &Bytes::from_static(b"aaaabbbbccccdddd"))
+            .await
+            .unwrap();
+        assert!(ingestor.pending.is_empty());
+        // Blackhole processes all chunks inline, so all 4 should be completed
+        assert_eq!(ingestor.completed_chunks.len(), 4);
+
+        let finished = ingestor
+            .finish(&object_store, "multi-chunk.bin", None, None)
+            .await;
+        assert!(finished.is_ok());
+        let Ok((record, _response)) = finished else {
+            return;
+        };
+        assert_eq!(record.total_bytes, 16);
+        assert_eq!(record.chunks.len(), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_finish_with_blackhole_and_sha256_match() {
+        // Verify the SHA256 hash is computed correctly when expected matches.
+        // Use blackhole to avoid spawn_blocking complexity.
+        let object_store = ServerObjectStore::blackhole();
+        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let mut ingestor = FileUploadIngestor::new(chunk_size, true);
+
+        ingestor
+            .ingest_body_chunk(&object_store, &Bytes::from_static(b"abcd"))
+            .await
+            .unwrap();
+
+        // SHA256 of "abcd"
+        let expected = "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589";
+        let finished = ingestor
+            .finish(&object_store, "sha256-check.bin", None, Some(expected))
+            .await;
+        assert!(finished.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_recycles_pending_buffer_across_multiple_flushes() {
+        // When the pending buffer fills and is flushed multiple times,
+        // the pooled buffer should be recycled.
+        let object_store = ServerObjectStore::blackhole();
+        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let mut ingestor = FileUploadIngestor::new(chunk_size, false);
+
+        // Send 3 bytes then 5 bytes → first fills pending (3 < 4), second completes it (3+1=4)
+        // Then 1 remains pending.
+        ingestor
+            .ingest_body_chunk(&object_store, &Bytes::from_static(b"abc"))
+            .await
+            .unwrap();
+        assert_eq!(ingestor.pending.len(), 3);
+        assert_eq!(ingestor.reusable_pending_buffers.len(), 0);
+
+        ingestor
+            .ingest_body_chunk(&object_store, &Bytes::from_static(b"defg"))
+            .await
+            .unwrap();
+        // After flush, the buffer should be recycled
+        assert_eq!(ingestor.reusable_pending_buffers.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_record_completed_chunks_already_sorted() {
+        // Verify that already-sorted completed chunks don't need re-sorting.
+        let object_store = ServerObjectStore::blackhole();
+        let chunk_size = NonZeroUsize::new(2).unwrap();
+        let mut ingestor = FileUploadIngestor::new(chunk_size, false);
+
+        // Send 4 bytes → 2 chunks (both completed synchronously via blackhole)
+        ingestor
+            .ingest_body_chunk(&object_store, &Bytes::from_static(b"abcdef"))
+            .await
+            .unwrap();
+
+        // completed_chunks should already be in sequence order
+        let finished = ingestor
+            .finish(&object_store, "presorted.bin", None, None)
+            .await;
+        assert!(finished.is_ok());
+        let Ok((record, _response)) = finished else {
+            return;
+        };
+        assert_eq!(record.chunks.len(), 3);
+        assert_eq!(record.total_bytes, 6);
+    }
 }
