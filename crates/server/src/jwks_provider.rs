@@ -1688,4 +1688,191 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         provider.start_background_refresh();
         assert!(provider.background_handle.get().is_some());
     }
+
+    #[tokio::test]
+    async fn start_background_refresh_with_mock_server() {
+        let mock_server = wiremock::MockServer::start().await;
+        let url = mock_server.uri();
+
+        let jwks_json = serde_json::json!({
+            "keys": [{"kid": "bg-key", "kty": "RSA", "n": "n", "e": "e"}]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&mock_server)
+            .await;
+
+        let provider = JwksProvider {
+            client: Client::new(),
+            jwks_url: url,
+            issuer: "https://example.com".to_owned(),
+            cached_keys: Arc::new(RwLock::new(Some(CachedJwks {
+                keys: Arc::new(vec![sample_rsa_jwk()]),
+                etag: None,
+                refresh_interval: Duration::from_millis(50),
+            }))),
+            background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+
+        provider.start_background_refresh();
+        assert!(provider.background_handle.get().is_some());
+
+        // Allow at least one background refresh cycle
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // The mock server should have received at least one request from the loop
+        let requests = mock_server
+            .received_requests()
+            .await
+            .unwrap_or_default();
+        assert!(!requests.is_empty(), "background refresh should make HTTP requests");
+    }
+
+    #[tokio::test]
+    async fn refresh_keys_if_changed_with_json_parse_error() {
+        let mock_server = wiremock::MockServer::start().await;
+        let url = mock_server.uri();
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("not valid json"))
+            .mount(&mock_server)
+            .await;
+
+        let provider = JwksProvider {
+            client: Client::new(),
+            jwks_url: url,
+            issuer: "https://example.com".to_owned(),
+            cached_keys: Arc::new(RwLock::new(Some(CachedJwks {
+                keys: Arc::new(vec![sample_rsa_jwk()]),
+                etag: Some("my-etag".to_owned()),
+                refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+            }))),
+            background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+
+        let result = provider.refresh_keys_if_changed().await;
+        assert!(result.is_err(), "expected Err for JSON parse failure");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("parse"), "error should mention parse: {err}");
+    }
+
+    #[tokio::test]
+    async fn refresh_keys_if_changed_with_server_error_status() {
+        let mock_server = wiremock::MockServer::start().await;
+        let url = mock_server.uri();
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let provider = JwksProvider {
+            client: Client::new(),
+            jwks_url: url,
+            issuer: "https://example.com".to_owned(),
+            cached_keys: Arc::new(RwLock::new(Some(CachedJwks {
+                keys: Arc::new(vec![sample_rsa_jwk()]),
+                etag: Some("my-etag".to_owned()),
+                refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+            }))),
+            background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+
+        let result = provider.refresh_keys_if_changed().await;
+        assert!(result.is_err(), "expected Err for server error status");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("500"), "error should mention status code: {err}");
+    }
+
+    #[test]
+    fn verify_token_with_future_nbf_fails() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://example.com"));
+        claims.insert("sub", serde_json::json!("test-user"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+        claims.insert("nbf", serde_json::json!(9999999998u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+
+        let result = provider.verify_token(&token);
+        // The jsonwebtoken library validates nbf before our custom check runs,
+        // so this surfaces as ProviderError rather than our own InvalidToken.
+        assert!(result.is_err(), "JWT with future nbf should be rejected");
+    }
+
+    #[test]
+    fn verify_token_with_missing_exp_fails() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://example.com"));
+        claims.insert("sub", serde_json::json!("test-user"));
+        // no exp claim
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+
+        let result = provider.verify_token(&token);
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(ref msg)) if msg.contains("exp")),
+            "expected ProviderError about missing exp, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_cache_lock_contended_returns_lock_error() {
+        let provider = make_provider(Some(CachedJwks {
+            keys: Arc::new(vec![sample_rsa_jwk()]),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        }));
+
+        // Hold the write lock from the async context to force try_read contention
+        let write_guard = provider.cached_keys.write().await;
+
+        let provider_clone = provider.clone();
+        let thread_handle = std::thread::spawn(move || {
+            // This thread has no tokio runtime -> fallback retry path
+            provider_clone.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig")
+        });
+
+        // Wait for the thread to exhaust 5 retries at 10ms each
+        let result = thread_handle.join().expect("thread should not panic");
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(ref msg)) if msg.contains("contended")),
+            "expected lock contended error, got {result:?}"
+        );
+
+        drop(write_guard);
+    }
 }

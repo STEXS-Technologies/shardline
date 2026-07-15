@@ -1489,4 +1489,104 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         provider.start_background_refresh();
         assert!(provider._background_handle.get().is_some());
     }
+
+    #[tokio::test]
+    async fn start_background_refresh_with_mock_server() {
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        let jwks_url = format!("{base_url}/oauth/jwks");
+        let discovery_json = serde_json::json!({
+            "jwks_uri": jwks_url,
+        });
+
+        let jwks_json = serde_json::json!({
+            "keys": [{"kid": "oidc-bg-key", "kty": "RSA", "n": "n", "e": "e"}]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/oauth/jwks"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&mock_server)
+            .await;
+
+        let provider = OidcProvider::new(&base_url, None)
+            .await
+            .expect("OIDC provider creation should succeed");
+
+        // start_background_refresh is called inside new, so the handle is set
+        assert!(provider._background_handle.get().is_some());
+
+        // Verify keys were cached from the initial fetch (which also exercises
+        // the background refresh startup path)
+        let guard = provider.cached_keys.lock().expect("lock not poisoned");
+        let cached = guard.as_ref().expect("cache should be populated");
+        assert_eq!(cached.keys.len(), 1);
+        assert_eq!(cached.keys[0].kid, "oidc-bg-key");
+    }
+
+    #[test]
+    fn verify_token_with_future_nbf_fails() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("test-user"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+        claims.insert("nbf", serde_json::json!(9999999998u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+            fetched_at: Instant::now(),
+        }));
+
+        let result = provider.verify_token(&token);
+        // The jsonwebtoken library validates nbf before our custom check runs,
+        // so this surfaces as ProviderError rather than our own InvalidToken.
+        assert!(result.is_err(), "JWT with future nbf should be rejected");
+    }
+
+    #[test]
+    fn verify_token_with_missing_exp_fails() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!("https://issuer.example.com"));
+        claims.insert("sub", serde_json::json!("test-user"));
+        // no exp claim
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-key-1".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        let provider = make_provider_no_audience(Some(CachedJwks {
+            keys: Arc::new(vec![test_rsa_jwk("test-key-1")]),
+            fetched_at: Instant::now(),
+        }));
+
+        let result = provider.verify_token(&token);
+        assert!(
+            matches!(result, Err(AuthError::ProviderError(ref msg)) if msg.contains("exp")),
+            "expected ProviderError about missing exp, got {result:?}"
+        );
+    }
 }
