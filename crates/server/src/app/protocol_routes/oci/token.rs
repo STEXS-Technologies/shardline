@@ -760,6 +760,19 @@ mod tests {
         assert_eq!(scope, Some(TokenScope::Write));
     }
 
+    #[test]
+    fn parse_scopes_write_remains_write() {
+        // Line 230: when the existing scope is already Write, keep Write
+        // even if a subsequent scope is also Write (e.g. two push scopes).
+        let scopes = vec![
+            "repository:repo:push".to_owned(),
+            "repository:repo:push".to_owned(),
+        ];
+        let (scope, repo) = parse_oci_registry_token_scopes(&scopes).unwrap();
+        assert_eq!(scope, Some(TokenScope::Write));
+        assert_eq!(repo, Some("repo".to_owned()));
+    }
+
     // ── parse_oci_registry_actions additional edge cases ────────────────────
 
     #[test]

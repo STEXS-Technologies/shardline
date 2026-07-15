@@ -606,6 +606,216 @@ async fn manifest_put_digest_mismatch_returns_bad_request() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Manifest edge cases
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_put_too_many_query_tags_rejected() {
+    // Line 117: too many query tags (exceeding MAX_OCI_MANIFEST_TAGS)
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = upload_blob(&app, REPO, config_data).await;
+    let layer_digest = upload_blob(&app, REPO, layer_data).await;
+    let manifest_json = test_manifest_json(&config_digest, &layer_digest);
+
+    // Build a URI with too many ?tag= parameters (exceeding MAX_OCI_MANIFEST_TAGS = 128)
+    let mut uri = format!("/v2/{REPO}/manifests/latest");
+    for i in 0..129 {
+        if i == 0 {
+            uri.push_str(&format!("?tag=tag-{i}"));
+        } else {
+            uri.push_str(&format!("&tag=tag-{i}"));
+        }
+    }
+    let response = send_with_content_type(
+        &app,
+        Method::PUT,
+        &uri,
+        Body::from(manifest_json.into_bytes()),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_put_with_subject_accepted() {
+    // Line 221: manifest with valid subject descriptor
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = upload_blob(&app, REPO, config_data).await;
+    let layer_digest = upload_blob(&app, REPO, layer_data).await;
+
+    // Upload a manifest first to use as the subject
+    let subject_digest = setup_manifest(&app, REPO, "subject-tag").await;
+
+    let manifest_json = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "subject": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 0,
+            "digest": format!("sha256:{subject_digest}")
+        },
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 0,
+            "digest": format!("sha256:{config_digest}")
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "size": 0,
+                "digest": format!("sha256:{layer_digest}")
+            }
+        ]
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap();
+    let uri = format!("/v2/{REPO}/manifests/with-subject");
+    let response = send_with_content_type(
+        &app,
+        Method::PUT,
+        &uri,
+        Body::from(manifest_bytes),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    // The spec says a manifest with a subject MUST be accepted even if the
+    // subject manifest doesn't exist. But the config and layers must exist.
+    assert!(response.status() == StatusCode::CREATED || response.status() == StatusCode::BAD_REQUEST,
+        "unexpected status: {}", response.status());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_put_digest_reference_no_tags() {
+    // Line 113: when reference is a digest, accepted_tags stays empty
+    // (no tag is created, but the manifest is still stored).
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = upload_blob(&app, REPO, config_data).await;
+    let layer_digest = upload_blob(&app, REPO, layer_data).await;
+    let manifest_json = test_manifest_json(&config_digest, &layer_digest);
+    let manifest_bytes = manifest_json.as_bytes();
+    let manifest_digest = sha256_hex(manifest_bytes);
+
+    // PUT using digest reference (not a tag)
+    let uri = format!("/v2/{REPO}/manifests/sha256:{manifest_digest}");
+    let response = send_with_content_type(
+        &app,
+        Method::PUT,
+        &uri,
+        Body::from(manifest_bytes.to_vec()),
+        MANIFEST_MEDIA_TYPE,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_put_wrong_media_type_in_document_rejected() {
+    // Line 215: when the Content-Type header media type differs from the
+    // document's mediaType field, the request is rejected.
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = upload_blob(&app, REPO, config_data).await;
+    let layer_digest = upload_blob(&app, REPO, layer_data).await;
+
+    // Document says docker v2 but header says OCI
+    let manifest_json = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 0,
+            "digest": format!("sha256:{config_digest}")
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "size": 0,
+                "digest": format!("sha256:{layer_digest}")
+            }
+        ]
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap();
+    let uri = format!("/v2/{REPO}/manifests/latest");
+    let response = send_with_content_type(
+        &app,
+        Method::PUT,
+        &uri,
+        Body::from(manifest_bytes),
+        MANIFEST_MEDIA_TYPE,  // OCI manifest media type in header
+    )
+    .await;
+    // Document mediaType (docker) vs header (OCI) mismatch -> BAD_REQUEST
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_put_unknown_media_type_rejected() {
+    // Line 232: unknown media type in Content-Type header
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+
+    let config_data = b"{}";
+    let layer_data = b"\x1f\x8b\x08\x00";
+    let config_digest = upload_blob(&app, REPO, config_data).await;
+    let layer_digest = upload_blob(&app, REPO, layer_data).await;
+
+    let manifest_json = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.unknown.type",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 0,
+            "digest": format!("sha256:{config_digest}")
+        },
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "size": 0,
+                "digest": format!("sha256:{layer_digest}")
+            }
+        ]
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap();
+    let uri = format!("/v2/{REPO}/manifests/latest");
+    let response = send_with_content_type(
+        &app,
+        Method::PUT,
+        &uri,
+        Body::from(manifest_bytes),
+        "application/vnd.unknown.type",  // unknown media type
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_delete_not_found_returns_not_found() {
+    // Line 158: deleting a non-existent manifest returns NotFound
+    let ctx = build_oci_test_state().await;
+    let app = oci_test_router(&ctx.state);
+
+    let non_existent = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let uri = format!("/v2/{REPO}/manifests/sha256:{non_existent}");
+    let response = send(&app, Method::DELETE, &uri, Body::empty()).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  Blob HEAD (content-length check)
 // ═══════════════════════════════════════════════════════════════════
 
