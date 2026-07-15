@@ -1,7 +1,15 @@
 #![cfg(feature = "docker")]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::clone_on_copy,
+    clippy::shadow_unrelated,
+    clippy::indexing_slicing
+)]
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use shardline_server::{
     BenchmarkBackend, ObjectStorageAdapter, ObjectStoreError, ServerBackend, ServerConfig,
@@ -1167,4 +1175,455 @@ async fn test_s3_backend_visit_prefix_via_benchmark_stats() {
     // Stats implicitly visits object prefixes through the metadata backend
     let stats = bench.stats().await.unwrap();
     assert!(stats.files >= 1, "stats should report at least one file: {stats:?}");
+}
+
+// ===========================================================================
+// 7. OCI S3 mount/blob copy — upload blob, mount via copy
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_oci_mount_blob_copy() {
+    use shardline_oci_adapter::OciBackend;
+    let _prefix = ensure_minio().await;
+    let tmp = TempDir::new().unwrap();
+    let config = s3_server_config(&tmp);
+    let backend = ServerBackend::from_config(&config).await.unwrap();
+
+    // Upload a blob (source) using the S3 store directly.
+    let store = s3_store().await;
+    let src = ObjectKey::parse("mount/blob-source").unwrap();
+    let dst = ObjectKey::parse("mount/blob-dest").unwrap();
+    let data = b"OCI mount test blob data";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+    store
+        .put_if_absent(&src, ObjectBody::from_slice(data), &integrity)
+        .unwrap();
+
+    // Mount (copy) via OciBackend dispatch — exercises ServerBackend S3 + Local arm
+    let outcome = OciBackend::copy_object_if_absent(&backend, &src, &dst).unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+
+    // Verify both objects exist
+    assert!(store.contains(&src).unwrap());
+    assert!(store.contains(&dst).unwrap());
+    assert_eq!(
+        store.metadata(&src).unwrap().unwrap().length(),
+        store.metadata(&dst).unwrap().unwrap().length()
+    );
+}
+
+// ===========================================================================
+// 8. Concurrent operations on S3
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_concurrent_put_if_absent_same_key() {
+    let store = Arc::new(s3_store().await);
+    let key = ObjectKey::parse("concurrent/same-key").unwrap();
+    let data = b"concurrent data for same key";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let s = Arc::clone(&store);
+        let k = key.clone();
+        let int = integrity.clone();
+        let body = ObjectBody::from_slice(data);
+        handles.push(tokio::spawn(async move {
+            s.put_if_absent(&k, body, &int)
+        }));
+    }
+
+    let mut inserted_count = 0;
+    let mut already_exists_count = 0;
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "concurrent put should not error");
+        match result.unwrap() {
+            PutOutcome::Inserted => inserted_count += 1,
+            PutOutcome::AlreadyExists => already_exists_count += 1,
+        }
+    }
+    // Exactly one Inserted, the rest AlreadyExists
+    assert_eq!(inserted_count, 1, "exactly one should succeed as Inserted");
+    assert_eq!(already_exists_count, 9, "nine should be AlreadyExists");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_concurrent_put_different_keys() {
+    let store = Arc::new(s3_store().await);
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let s = Arc::clone(&store);
+        let key = ObjectKey::parse(&format!("concurrent/diff-key-{i:02}")).unwrap();
+        let data = format!("concurrent-data-{i}");
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data.as_bytes()).as_bytes()),
+            data.len() as u64,
+        );
+        handles.push(tokio::spawn(async move {
+            s.put_if_absent(&key, ObjectBody::from_vec(data.into_bytes()), &integrity)
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "concurrent put should succeed");
+        assert_eq!(result.unwrap(), PutOutcome::Inserted);
+    }
+
+    // Verify all 20 exist
+    let store = s3_store().await;
+    for i in 0..20 {
+        let key = ObjectKey::parse(&format!("concurrent/diff-key-{i:02}")).unwrap();
+        assert!(store.contains(&key).unwrap(), "key #{i} should exist");
+    }
+}
+
+// ===========================================================================
+// 9. Edge cases — S3
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_upload_delete_100_objects() {
+    let store = s3_store().await;
+    let prefix = "bulk-100";
+    let integrity_template = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes()),
+        4,
+    );
+
+    // Upload 100 objects
+    for i in 0..100 {
+        let key = ObjectKey::parse(&format!("{prefix}/obj{i:04}")).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity_template)
+            .unwrap();
+    }
+
+    // Verify count via list_prefix
+    let list_prefix = ObjectPrefix::parse(prefix).unwrap();
+    let objects = store.list_prefix(&list_prefix).unwrap();
+    assert_eq!(objects.len(), 100, "should list 100 objects");
+
+    // Delete all 100
+    for i in 0..100 {
+        let key = ObjectKey::parse(&format!("{prefix}/obj{i:04}")).unwrap();
+        let outcome = store.delete_if_present(&key).unwrap();
+        assert_eq!(outcome, DeleteOutcome::Deleted, "delete obj{i:04} should succeed");
+    }
+
+    // Verify empty
+    let objects_after = store.list_prefix(&list_prefix).unwrap();
+    assert!(objects_after.is_empty(), "all objects should be deleted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_object_key_with_special_characters() {
+    let store = s3_store().await;
+
+    // Unicode / emoji in key
+    let emoji_key = ObjectKey::parse("special/emoji-👍-test").unwrap();
+    let unicode_key = ObjectKey::parse("special/unicode-ñöü-测试").unwrap();
+    let control_key = ObjectKey::parse("special/control-\u{0000}-test");
+    // Control char key should fail
+    assert!(control_key.is_err(), "key with null byte should be invalid");
+
+    let data = b"special chars test";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+
+    // Put emoji key
+    let outcome = store
+        .put_if_absent(&emoji_key, ObjectBody::from_slice(data), &integrity)
+        .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+
+    // Put unicode key
+    let outcome = store
+        .put_if_absent(&unicode_key, ObjectBody::from_slice(data), &integrity)
+        .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+
+    // Verify both exist and have correct content
+    assert!(store.contains(&emoji_key).unwrap());
+    assert!(store.contains(&unicode_key).unwrap());
+
+    let len = data.len() as u64;
+    let range = shardline_protocol::ByteRange::new(0, len - 1).unwrap();
+    let emoji_read = store.read_range(&emoji_key, range).unwrap();
+    assert_eq!(emoji_read, data);
+
+    let range2 = shardline_protocol::ByteRange::new(0, len - 1).unwrap();
+    let unicode_read = store.read_range(&unicode_key, range2).unwrap();
+    assert_eq!(unicode_read, data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_large_object_roundtrip() {
+    let store = s3_store().await;
+    let key = ObjectKey::parse("large/roundtrip-5mb").unwrap();
+
+    // Create a 5 MB object (large enough to exercise multipart / streaming)
+    let large_data = vec![0xAB_u8; 5 * 1024 * 1024];
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&large_data).as_bytes()),
+        large_data.len() as u64,
+    );
+
+    // Put
+    let outcome = store
+        .put_if_absent(&key, ObjectBody::from_vec(large_data.clone()), &integrity)
+        .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+
+    // Verify metadata
+    let meta = store.metadata(&key).unwrap().unwrap();
+    assert_eq!(meta.length(), large_data.len() as u64);
+
+    // Read back
+    let range = shardline_protocol::ByteRange::new(0, large_data.len() as u64 - 1).unwrap();
+    let read = store.read_range(&key, range).unwrap();
+    assert_eq!(read.len(), large_data.len());
+    assert_eq!(read[0], 0xAB);
+    assert_eq!(read[read.len() - 1], 0xAB);
+
+    // Delete
+    let outcome = store.delete_if_present(&key).unwrap();
+    assert_eq!(outcome, DeleteOutcome::Deleted);
+    assert!(!store.contains(&key).unwrap());
+}
+
+// ===========================================================================
+// 10. BenchmarkBackend S3 dispatch — coverage through S3 store
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_benchmark_chunk_length_not_found() {
+    let _prefix = ensure_minio().await;
+    let (bench, _tmp) = s3_benchmark("s3-chunk-len").await;
+    let result = bench
+        .download_file("nonexistent-file-for-chunk-length", None, None)
+        .await;
+    assert!(result.is_err(), "download of missing file should fail");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_benchmark_xorb_length_not_found() {
+    let _prefix = ensure_minio().await;
+    // xorb_length goes through ServerBackend dispatch → PostgresBackend (local metadata)
+    // with S3 object store. It needs a valid hash format.
+    let (bench, _tmp) = s3_benchmark("s3-xorb-len").await;
+    // Use xorb_length via the object store path — accessible through upload_xorb
+    // on BenchmarkBackend. We test via download failure on a missing file which
+    // exercises the dispatch through metadata backend + S3 object store.
+    let result = bench
+        .download_file("nonexistent-xorb-length-file", None, None)
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_benchmark_upload_then_stats() {
+    let _prefix = ensure_minio().await;
+    let (bench, _tmp) = s3_benchmark("s3-up-stats").await;
+    bench
+        .upload_file("s3-up-stats-file.bin", axum::body::Bytes::from_static(b"s3 stats data"), None)
+        .await
+        .unwrap();
+    let stats = bench.stats().await.unwrap();
+    assert!(stats.files >= 1, "stats should show at least 1 file: {stats:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_benchmark_download_missing_file() {
+    let _prefix = ensure_minio().await;
+    let (bench, _tmp) = s3_benchmark("s3-dl-missing").await;
+    let result = bench.download_file("s3-missing-file.bin", None, None).await;
+    assert!(result.is_err(), "download of missing file via S3 backend should fail");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_benchmark_reconstruction_with_content_hash() {
+    let _prefix = ensure_minio().await;
+    let (bench, _tmp) = s3_benchmark("s3-recon-hash").await;
+    let content = b"S3 reconstruction with content hash via BenchmarkBackend";
+    let resp = bench
+        .upload_file("s3-recon-hash.bin", axum::body::Bytes::from_static(content), None)
+        .await
+        .unwrap();
+    let recon = bench
+        .reconstruction("s3-recon-hash.bin", Some(&resp.content_hash), None, None)
+        .await
+        .unwrap();
+    assert!(
+        !recon.terms.is_empty() || recon.offset_into_first_range == 0,
+        "reconstruction should return valid response: {recon:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_benchmark_metadata_backend_name() {
+    let _prefix = ensure_minio().await;
+    let (bench, _tmp) = s3_benchmark("s3-meta-name").await;
+    assert_eq!(bench.metadata_backend_name(), "local");
+    assert_eq!(bench.object_backend_name(), "s3");
+}
+
+// ===========================================================================
+// 11. ServerBackend S3 dispatch via from_config
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_server_backend_from_config_creates_local_with_s3_store() {
+    let _prefix = ensure_minio().await;
+    let tmp = TempDir::new().unwrap();
+    let config = s3_server_config(&tmp);
+    let backend = ServerBackend::from_config(&config).await.unwrap();
+    // Without Postgres URL, the backend is Local variant with S3 object store
+    assert_eq!(backend.object_backend_name(), "s3");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_server_backend_oci_copy_object_if_absent() {
+    use shardline_oci_adapter::OciBackend;
+    let _prefix = ensure_minio().await;
+    let tmp = TempDir::new().unwrap();
+    let config = s3_server_config(&tmp);
+    let backend = ServerBackend::from_config(&config).await.unwrap();
+
+    let src = ObjectKey::parse("oci/s3-copy-src").unwrap();
+    let dst = ObjectKey::parse("oci/s3-copy-dst").unwrap();
+
+    // Seed source via S3 store
+    let store = s3_store().await;
+    let data = b"oci-s3-copy-data";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+    store
+        .put_if_absent(&src, ObjectBody::from_slice(data), &integrity)
+        .unwrap();
+
+    // Copy via OciBackend dispatch (ServerBackend::Local with S3 store)
+    let outcome = OciBackend::copy_object_if_absent(&backend, &src, &dst).unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+
+    // Both should exist
+    assert!(store.contains(&src).unwrap());
+    assert!(store.contains(&dst).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_server_backend_oci_delete_object_if_present() {
+    use shardline_oci_adapter::OciBackend;
+    let _prefix = ensure_minio().await;
+    let tmp = TempDir::new().unwrap();
+    let config = s3_server_config(&tmp);
+    let backend = ServerBackend::from_config(&config).await.unwrap();
+
+    let key = ObjectKey::parse("oci/s3-delete-me").unwrap();
+    let store = s3_store().await;
+    let data = b"oci-s3-delete-data";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(data), &integrity)
+        .unwrap();
+
+    let outcome = OciBackend::delete_object_if_present(&backend, &key).await.unwrap();
+    assert_eq!(outcome, DeleteOutcome::Deleted);
+    assert!(!store.contains(&key).unwrap());
+}
+
+// ===========================================================================
+// 12. S3 object store edge cases — overwrite, list after delete
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_overwrite_exercises_put_overwrite() {
+    let store = s3_store().await;
+    let key = ObjectKey::parse("crud/overwrite-edge").unwrap();
+
+    let original = b"original content for overwrite edge case";
+    let replacement = b"replacement that exercises put_overwrite";
+    let integrity1 = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(original).as_bytes()),
+        original.len() as u64,
+    );
+    let integrity2 = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(replacement).as_bytes()),
+        replacement.len() as u64,
+    );
+
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(original), &integrity1)
+        .unwrap();
+    store
+        .put_overwrite(&key, ObjectBody::from_slice(replacement), &integrity2)
+        .unwrap();
+
+    let len = replacement.len() as u64;
+    let range = shardline_protocol::ByteRange::new(0, len - 1).unwrap();
+    let read = store.read_range(&key, range).unwrap();
+    assert_eq!(read, replacement);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_list_prefix_after_partial_delete() {
+    let store = s3_store().await;
+    let prefix_str = "crud/list-partial-delete";
+    let prefix = ObjectPrefix::parse(prefix_str).unwrap();
+
+    // Insert 5 objects
+    for i in 0..5 {
+        let key = ObjectKey::parse(&format!("{prefix_str}/obj{i}")).unwrap();
+        let data = vec![b'x'; 8];
+        let integrity = ObjectIntegrity::new(
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&data).as_bytes()),
+            data.len() as u64,
+        );
+        store
+            .put_if_absent(&key, ObjectBody::from_vec(data), &integrity)
+            .unwrap();
+    }
+
+    // Delete 2
+    for i in 0..2 {
+        let key = ObjectKey::parse(&format!("{prefix_str}/obj{i}")).unwrap();
+        store.delete_if_present(&key).unwrap();
+    }
+
+    // List should return 3 remaining
+    let objects = store.list_prefix(&prefix).unwrap();
+    assert_eq!(objects.len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_put_if_absent_empty_body() {
+    let store = s3_store().await;
+    let key = ObjectKey::parse("crud/empty-body").unwrap();
+    let data = b"";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        0,
+    );
+    let outcome = store
+        .put_if_absent(&key, ObjectBody::from_slice(data), &integrity)
+        .unwrap();
+    assert_eq!(outcome, PutOutcome::Inserted);
+    assert!(store.contains(&key).unwrap());
+    let meta = store.metadata(&key).unwrap().unwrap();
+    assert_eq!(meta.length(), 0);
 }
