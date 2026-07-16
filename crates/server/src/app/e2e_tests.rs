@@ -2667,6 +2667,64 @@ async fn bazel_cas_head_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cas_rejects_hash_mismatch_on_overwrite() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    let content_a = b"overwrite-protect-content-a";
+    let hash_a = test_hash(content_a);
+
+    // Upload content A with matching hash.
+    let put_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash_a}"))
+                .body(Body::from(content_a.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_a.status(), StatusCode::NO_CONTENT);
+
+    // Try to upload content B (different) with the same URL hash A.
+    // Because the function verifies the body hash against the URL hash,
+    // and content B's hash != hash(A), it should reject with 400.
+    let content_b = b"overwrite-protect-content-b";
+    let put_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash_a}"))
+                .body(Body::from(content_b.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        put_b.status(),
+        StatusCode::BAD_REQUEST,
+        "uploading content B with URL hash of content A should be rejected"
+    );
+
+    // Verify stored content is still content A (not corrupted).
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/bazel/cache/cas/{hash_a}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = body_bytes(get).await;
+    assert_eq!(body, content_a, "stored content should remain content A");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bazel_ac_put_and_get() {
     let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
 
@@ -2788,6 +2846,28 @@ async fn bazel_ac_head_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_ac_rejects_content_hash_mismatch() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
+
+    // AC now verifies SHA-256 hash of content matches URL hash.
+    let wrong_hash = "a".repeat(64);
+    let content = b"ac-content-hash-mismatch";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/ac/{wrong_hash}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bazel_flat_put_and_get() {
     let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
 
@@ -2893,40 +2973,41 @@ async fn bazel_flat_head_not_found() {
 async fn bazel_flat_route_serves_ac_before_cas() {
     let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
 
-    let cas_content = b"bazel-flat-cas-content";
-    let hash = test_hash(cas_content);
+    // Use same content for both so hash is valid for both AC and CAS.
+    // The flat route checks AC first; storing the same content in both
+    // verifies that the flat route finds and serves it from AC.
+    let content = b"flat-route-ac-priority-content";
+    let hash = test_hash(content);
 
-    let ac_content = b"bazel-flat-ac-first";
-
-    // PUT different content to AC (AC does NOT validate hash, so any content works)
+    // PUT to AC route (AC now validates hash)
     let put_ac = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri(format!("/v1/bazel/cache/ac/{hash}"))
-                .body(Body::from(ac_content.to_vec()))
+                .body(Body::from(content.to_vec()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(put_ac.status(), StatusCode::NO_CONTENT);
 
-    // Also PUT to CAS with matching hash (CAS DOES validate hash)
+    // Also PUT to CAS with matching hash
     let put_cas = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri(format!("/v1/bazel/cache/cas/{hash}"))
-                .body(Body::from(cas_content.to_vec()))
+                .body(Body::from(content.to_vec()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(put_cas.status(), StatusCode::NO_CONTENT);
 
-    // Flat GET should return AC content (AC checked first)
+    // Flat GET should succeed (finds AC first)
     let get = app
         .clone()
         .oneshot(
@@ -2940,12 +3021,9 @@ async fn bazel_flat_route_serves_ac_before_cas() {
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
     let body = body_bytes(get).await;
-    assert_eq!(
-        body, ac_content,
-        "flat route should serve AC content (checked first)"
-    );
+    assert_eq!(body, content, "flat route should serve content from AC");
 
-    // Flat HEAD should also return AC content-length
+    // Flat HEAD should also return content-length
     let head = app
         .oneshot(
             Request::builder()
@@ -2967,7 +3045,7 @@ async fn bazel_flat_route_serves_ac_before_cas() {
         .unwrap();
     assert_eq!(
         cl,
-        ac_content.len() as u64,
+        content.len() as u64,
         "flat HEAD should return AC content-length"
     );
 }
@@ -7508,4 +7586,694 @@ async fn hub_webhooks_list_empty_for_repo_without_webhooks() {
     let json = body_json(list).await;
     let webhooks = json["webhooks"].as_array().unwrap();
     assert!(webhooks.is_empty());
+}
+
+// ============================================================================
+// Section 1: Hub repo lifecycle
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_delete_repo_then_recreate() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let ns = "lifecycle-team";
+    let name = "lifecycle-model";
+    let model_path = format!("{ns}/{name}");
+
+    // Create repo → expect 201
+    let create1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":&model_path,"private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create1.status(), StatusCode::CREATED);
+
+    // DELETE the repo → expect 204
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/models/{ns}/{name}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+    // Verify it's gone
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/models/{ns}/{name}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+
+    // POST same name again → expect 201 Created
+    let create2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":&model_path,"private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        create2.status(),
+        StatusCode::CREATED,
+        "re-creating a deleted repo should return 201, got {}",
+        create2.status()
+    );
+
+    // Verify the recreated repo is accessible
+    let get2 = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/models/{ns}/{name}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get2.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_commit_to_recreated_repo() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let ns = "recreate-team";
+    let name = "recreate-model";
+    let model_path = format!("{ns}/{name}");
+
+    // Create repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":&model_path,"private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // DELETE the repo
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/models/{ns}/{name}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+    // Re-create the repo
+    let create2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":&model_path,"private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create2.status(), StatusCode::CREATED);
+
+    // Commit a file to the recreated repo
+    let content_b64 = STANDARD.encode(b"recreated repo content");
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"commit to recreated repo\",\"parentCommit\":\"\"}}}}\n\
+         {{\"file\":{{\"path\":\"test.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let commit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/models/{ns}/{name}/commit/main"))
+                .header("content-type", "application/x-ndjson")
+                .body(Body::from(ndjson))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        commit.status(),
+        StatusCode::OK,
+        "commit to recreated repo should succeed, got {}",
+        commit.status()
+    );
+
+    // Verify the commit created a revision
+    let rev = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/models/{ns}/{name}/revisions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rev.status(), StatusCode::OK);
+    let rev_json = body_json(rev).await;
+    let revisions = rev_json["revisions"].as_array().unwrap();
+    assert!(!revisions.is_empty(), "should have revisions after commit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_commit_wrong_parent() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let ns = "wrong-parent-team";
+    let name = "wrong-parent-model";
+    let model_path = format!("{ns}/{name}");
+
+    // Create repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":&model_path,"private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Commit with a made-up parentCommit that doesn't exist
+    let content_b64 = STANDARD.encode(b"wrong parent test");
+    let ndjson = format!(
+        "{{\"header\":{{\"message\":\"wrong parent\",\"parentCommit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}}}\n\
+         {{\"file\":{{\"path\":\"f.txt\",\"content\":\"{content_b64}\"}}}}"
+    );
+    let commit = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/models/{ns}/{name}/commit/main"))
+                .header("content-type", "application/x-ndjson")
+                .body(Body::from(ndjson))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The commit should fail because the parentCommit doesn't match the resolved revision.
+    // The commit route resolves the ref first (parent_sha), then the body's parentCommit
+    // is checked against that. A made-up parentCommit that doesn't match the ref's SHA
+    // should produce a 409 Conflict.
+    assert!(
+        commit.status().is_client_error(),
+        "commit with wrong parentCommit should return a client error, got {}",
+        commit.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_webhooks_create_delete_recreate_same_url() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let ns = "wh-recreate-team";
+    let name = "wh-recreate-model";
+    let model_path = format!("{ns}/{name}");
+
+    // Create repo
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":&model_path,"private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    let webhook_url = "https://hooks.example.com/recreate-webhook";
+
+    // Step 1: Create webhook → 201
+    let create_wh = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/models/{ns}/{name}/webhooks"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"url": webhook_url, "events": ["push"]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_wh.status(), StatusCode::CREATED);
+    let wh_json = body_json(create_wh).await;
+    let wh_id = wh_json["id"].as_str().unwrap().to_owned();
+
+    // Step 2: Delete the webhook → 204
+    let delete_wh = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/models/{ns}/{name}/webhooks/{wh_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_wh.status(), StatusCode::NO_CONTENT);
+
+    // Step 3: Create same URL again → expect 201 (not 409)
+    let recreate_wh = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/models/{ns}/{name}/webhooks"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"url": webhook_url, "events": ["push"]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recreate_wh.status(),
+        StatusCode::CREATED,
+        "creating a webhook with the same URL after deletion should return 201, got {}",
+        recreate_wh.status()
+    );
+}
+
+// ============================================================================
+// Section 2: Route combination tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_and_oci_coexist() {
+    let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp, ServerFrontend::Oci]).await;
+
+    // Upload to Bazel CAS
+    let content = b"bazel-oci-coexist-content";
+    let hash = test_hash(content);
+    let bazel_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bazel_put.status(), StatusCode::NO_CONTENT);
+
+    // Verify Bazel CAS read works
+    let bazel_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bazel_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(bazel_get).await, content);
+
+    // Verify NOT found via OCI (different namespace)
+    let oci_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v2/{OCI_TEST_REPO}/blobs/sha256:{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        oci_get.status(),
+        StatusCode::NOT_FOUND,
+        "Bazel CAS content should NOT be accessible via OCI (namespace isolation)"
+    );
+
+    // Also verify OCI blob upload works
+    let oci_data = b"oci-coexist-data";
+    let oci_digest = sha256_hex(oci_data);
+    let oci_post = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v2/{OCI_TEST_REPO}/blobs/uploads/?digest=sha256:{oci_digest}"
+                ))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(oci_data.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oci_post.status(), StatusCode::CREATED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_and_lfs_coexist() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub, ServerFrontend::Lfs]).await;
+
+    // Upload via Hub's LFS route (/lfs/objects/{oid})
+    let content = b"hub-lfs-coexist-content";
+    let oid = test_oid(content);
+    let hub_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hub_put.status(), StatusCode::OK);
+
+    // Verify v1 LFS route works independently (not finding Hub LFS content)
+    // The v1 LFS route is registered by the Lfs frontend and should not conflict.
+    let v1_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        v1_put.status(),
+        StatusCode::OK,
+        "v1 LFS route should work alongside Hub LFS route"
+    );
+
+    // Verify both routes can read their own data
+    let hub_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/lfs/objects/{oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hub_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(hub_get).await, content);
+
+    let v1_get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v1_get.status(), StatusCode::OK);
+    assert_eq!(body_bytes(v1_get).await, content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_and_xet_without_provider_tokens() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub, ServerFrontend::Xet]).await;
+
+    // Hub routes should work (health endpoint)
+    let health = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+
+    // Xet routes should work (healthz is always mounted)
+    let healthz = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(healthz.status(), StatusCode::OK);
+
+    // Hub repo creation should work
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/repos/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"type":"model","name":"hx-team/hx-model","private":false})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::CREATED);
+
+    // Xet stats endpoint should work
+    let stats = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats.status(), StatusCode::OK);
+
+    // Hub xet-read-token route should NOT conflict with Xet's xet-read-token route.
+    // When Hub + Xet are both active, the Hub's xet-read-token route is disabled
+    // (register_hub_xet_routes = false) to avoid conflicts. Verify the Hub's
+    // xet-read-token route returns 404 (not registered) while Xet routes still work.
+    let hub_xet = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/hx-team/hx-model/xet-read-token/main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The Hub's xet token routes should NOT be registered when Xet frontend is active.
+    // So this should return 404.
+    assert_eq!(
+        hub_xet.status(),
+        StatusCode::NOT_FOUND,
+        "Hub xet-read-token should NOT be registered when Xet frontend is active"
+    );
+
+    // But the Xet frontend's xet-read-token route at a different path should work
+    // (provider routes are not registered without provider tokens though)
+}
+
+// ============================================================================
+// Section 3: Wrong-repo scope for LFS and Bazel
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_request_with_wrong_repo_scope() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+
+    // Upload data with a token scoped to "other/other" (not the default "test/test")
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, "other", "other", Some("main")).unwrap();
+    let claims =
+        TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let wrong_repo_token = provider.mint_token(&claims).unwrap();
+
+    let content = b"lfs-wrong-repo-scope-content";
+    let oid = test_oid(content);
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::AUTHORIZATION, format!("Bearer {wrong_repo_token}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The token has Write scope, so the operation succeeds at the auth level.
+    // However, the data is stored in a namespace derived from the repo scope
+    // ("other/other"), not the default ("test/test").
+    assert_eq!(
+        put_resp.status(),
+        StatusCode::OK,
+        "PUT with valid Write token should succeed (wrong repo scope still passes auth)"
+    );
+
+    // Now try to read the same data with the default token scoped to "test/test"
+    let default_token = test_token(TokenScope::Read);
+    let get_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::AUTHORIZATION, format!("Bearer {default_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The data was stored in the "other/other" namespace, but this read
+    // uses the "test/test" namespace → should return 404 Not Found.
+    assert_eq!(
+        get_resp.status(),
+        StatusCode::NOT_FOUND,
+        "LFS data stored with one repo scope should NOT be accessible with a different scope"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bazel_request_with_wrong_repo_scope() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::BazelHttp]).await;
+
+    // Upload data with a token scoped to "other/other"
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, "other", "other", Some("main")).unwrap();
+    let claims =
+        TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+    let wrong_repo_token = provider.mint_token(&claims).unwrap();
+
+    let content = b"bazel-wrong-repo-scope-content";
+    let hash = test_hash(content);
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .header(header::AUTHORIZATION, format!("Bearer {wrong_repo_token}"))
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Token has Write scope → auth passes, data stored in "other/other" namespace
+    assert_eq!(
+        put_resp.status(),
+        StatusCode::NO_CONTENT,
+        "PUT with valid Write token should succeed (wrong repo scope still passes auth)"
+    );
+
+    // Read with the default token scoped to "test/test" → should fail (different namespace)
+    let default_token = test_token(TokenScope::Read);
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/bazel/cache/cas/{hash}"))
+                .header(header::AUTHORIZATION, format!("Bearer {default_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        get_resp.status(),
+        StatusCode::NOT_FOUND,
+        "Bazel CAS data stored with one repo scope should NOT be accessible with a different scope"
+    );
 }

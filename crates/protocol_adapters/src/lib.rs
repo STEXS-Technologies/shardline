@@ -431,4 +431,26 @@ mod tests {
         assert!(validate_content_hash("short").is_err());
         assert!(validate_content_hash(&uppercase).is_err());
     }
+
+    // ── Null byte rejection ────────────────────────────────────────────────
+
+    #[test]
+    fn lfs_oid_with_null_byte_rejected() {
+        // Null byte is not a valid hex character → rejected by validate_content_hash.
+        let oid_with_null = format!("{}aa\0", "a".repeat(61));
+        assert!(lfs_object_key(&oid_with_null, None).is_err());
+    }
+
+    #[test]
+    fn bazel_hash_with_null_byte_rejected() {
+        let hash_with_null = format!("{}aa\0", "a".repeat(61));
+        assert!(bazel_cache_object_key(BazelCacheKind::Cas, &hash_with_null, None).is_err());
+        assert!(bazel_cache_object_key(BazelCacheKind::Ac, &hash_with_null, None).is_err());
+    }
+
+    #[test]
+    fn validate_content_hash_rejects_null_byte() {
+        let hash_with_null = format!("{}aa\0", "a".repeat(61));
+        assert!(validate_content_hash(&hash_with_null).is_err());
+    }
 }

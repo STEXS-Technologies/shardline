@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use sha2::{Digest, Sha256};
 use shardline_protocol::TokenScope;
 
 use crate::{
@@ -57,6 +58,11 @@ pub(crate) async fn bazel_put_ac(
     )?;
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let bytes = read_body_to_bytes(&mut body).await?;
+    // Verify the content hash matches the URL hash.
+    let observed = hex::encode(Sha256::digest(&bytes));
+    if observed != hash {
+        return Err(ServerError::ExpectedBodyHashMismatch);
+    }
     let _stored = state
         .backend
         .put_object_bytes_if_absent(&object_key, bytes)?;
@@ -291,6 +297,7 @@ mod tests {
         http::{Request, StatusCode},
         routing::{get},
     };
+    use sha2::{Digest, Sha256};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use shardline_protocol_adapters::ProtocolError;
     use tempfile::TempDir;
@@ -374,8 +381,7 @@ mod tests {
     }
 
     fn test_content_hash() -> String {
-        use sha2::Digest;
-        hex::encode(sha2::Sha256::digest(b"bazel-test-content"))
+        hex::encode(Sha256::digest(b"bazel-test-content"))
     }
 
     // =========================================================================
@@ -425,7 +431,7 @@ mod tests {
     async fn ac_put_and_get_happy_path() {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state.clone());
-        let hash = test_hash();
+        let hash = test_content_hash(); // Use content-matching hash
         let content = test_content();
 
         // PUT
@@ -487,7 +493,7 @@ mod tests {
     async fn ac_put_is_idempotent() {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state);
-        let hash = test_hash();
+        let hash = test_content_hash(); // Use content-matching hash
         let content = test_content();
 
         // PUT twice
@@ -516,6 +522,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r2.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac_rejects_content_hash_mismatch() {
+        let (state, _tmp) = build_test_state().await;
+        let app = bazel_router(state);
+
+        // Hash that does NOT match the content -> should fail with hash mismatch
+        let wrong_hash = "b".repeat(64);
+        let content = test_content();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/bazel/cache/ac/{wrong_hash}"))
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // AC now verifies SHA-256 hash of content matches URL hash
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     // =========================================================================
@@ -719,7 +749,8 @@ mod tests {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state.clone());
         let content = b"ac-content".to_vec();
-        let hash = test_hash(); // Not a valid SHA-256 of content, but AC doesn't verify
+        // AC now verifies SHA-256 hash, so use a content-matching hash
+        let hash = hex::encode(Sha256::digest(&content));
 
         // PUT to AC route
         let put_resp = app

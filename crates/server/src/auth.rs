@@ -509,4 +509,66 @@ mod tests {
         // Verify the arc points to the same provider
         assert!(std::sync::Arc::ptr_eq(&auth.provider, &arc));
     }
+
+    // ── Repeated Authorization header tests ────────────────────────────────
+
+    #[test]
+    fn authorize_picks_first_of_two_separate_authorization_headers() {
+        // When a client sends two separate Authorization headers, `HeaderMap::get()`
+        // returns the first one.  This test validates that behavior.
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
+
+        // Create two Authorization headers via `append`.
+        let mut headers = HeaderMap::new();
+        // A valid token is appended first.
+        let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let repository =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
+        let claims = TokenClaims::new(
+            "local", "provider-user-1", TokenScope::Write, repository, u64::MAX,
+        )
+        .unwrap();
+        let valid_token = signer.sign(&claims).unwrap();
+
+        headers.append(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {valid_token}")).unwrap());
+        // Append a second (invalid) header — should be ignored.
+        headers.append(AUTHORIZATION, HeaderValue::from_static("Bearer invalid-token-here"));
+
+        // Headers.get() returns the first entry — the valid token.
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(
+            result.is_ok(),
+            "first Authorization header should be used, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn authorize_rejects_comma_separated_bearer_in_one_header() {
+        // RFC 7230 §3.2.2 allows combining multiple header values into a single
+        // comma-separated value.  If a client sends
+        // `Authorization: Bearer token1, Bearer token2`, the token after
+        // comma + space contains whitespace and MUST be rejected.
+        let auth = ServerAuth::new(b"test-signing-key-32-bytes-long!!").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer valid-token, Bearer invalid-token"),
+        );
+
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(
+            matches!(result, Err(ServerError::InvalidAuthorizationHeader)),
+            "comma-separated Bearer tokens should be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_comma_space_in_token() {
+        // Even without the second "Bearer" prefix, a comma + space triggers the
+        // whitespace rejection in parse_bearer_token.
+        use super::parse_bearer_token;
+        let result = parse_bearer_token("Bearer token1, token2");
+        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+    }
 }

@@ -52,7 +52,7 @@ async fn ensure_pg() -> &'static str {
                         pool.close().await;
                         return (stack, url);
                     }
-                    Err(e) => {
+        Err(e) => {
                         last_err = Some(e);
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
@@ -2514,6 +2514,163 @@ async fn test_concurrent_oci_manifest_push_and_pull() {
 }
 
 // ===========================================================================
+// 7. Overwrite prevention across protocols — all three protocols store
+//    the same content under different key namespaces without shadowing.
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_overwrite_prevention_across_lfs_oci_bazel() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::BazelHttp, ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic, "test", "test", Some("main"),
+        ).unwrap();
+        let claims = TokenClaims::new(
+            "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+        ).unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+    let _keep = Box::new(tmp);
+
+    // Same content uploaded via each protocol.
+    let content = b"cross-protocol-shadow-test-content";
+    let hash = sha256_hex(content);
+    let repo = "test/test";
+
+    // 1. Upload via LFS
+    let lfs_put = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&format!("/v1/lfs/objects/{hash}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/octet-stream")
+                .body(axum::body::Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        lfs_put.status().is_success(),
+        "LFS PUT failed: {}",
+        lfs_put.status()
+    );
+
+    // 2. Upload via OCI (monolithic blob upload)
+    let oci_put = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(&format!("/v2/{repo}/blobs/uploads/?digest=sha256:{hash}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/octet-stream")
+                .body(axum::body::Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        oci_put.status(),
+        201,
+        "OCI blob upload failed: {}",
+        oci_put.status()
+    );
+
+    // 3. Upload via Bazel CAS
+    let bazel_put = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(&format!("/v1/bazel/cache/cas/{hash}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/octet-stream")
+                .body(axum::body::Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        bazel_put.status().is_success(),
+        "Bazel CAS PUT failed: {}",
+        bazel_put.status()
+    );
+
+    // 4. Verify LFS read returns correct content
+    let lfs_get = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&format!("/v1/lfs/objects/{hash}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lfs_get.status(), 200, "LFS GET should succeed");
+    let lfs_body = axum::body::to_bytes(lfs_get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(lfs_body.as_ref(), content, "LFS content mismatch");
+
+    // 5. Verify OCI read returns correct content
+    let oci_get = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&format!("/v2/{repo}/blobs/sha256:{hash}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oci_get.status(), 200, "OCI GET should succeed");
+    let oci_body = axum::body::to_bytes(oci_get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(oci_body.as_ref(), content, "OCI content mismatch");
+
+    // 6. Verify Bazel CAS read returns correct content
+    let bazel_get = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(&format!("/v1/bazel/cache/cas/{hash}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bazel_get.status(), 200, "Bazel CAS GET should succeed");
+    let bazel_body = axum::body::to_bytes(bazel_get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(bazel_body.as_ref(), content, "Bazel CAS content mismatch");
+}
+
+// ===========================================================================
 // 24. Cross-protocol content sharing
 // ===========================================================================
 //
@@ -2955,7 +3112,59 @@ async fn test_cors_headers_hub_api() {
 }
 
 // ===========================================================================
-// 30. Concurrent Hub commit + revisions read
+// 30. Very long URL path — server must not crash
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_very_long_url_path_does_not_crash() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    // Build a 100KB path by repeating a path segment.
+    let long_segment = "a".repeat(100_000);
+    let uri = format!("/v1/lfs/objects/{long_segment}");
+
+    // Send the request.  The server should not crash regardless of how hyper
+    // / axum handles the oversized URI.  A 414 URI Too Long or a connection
+    // reset are both acceptable — the server process must stay alive.
+    let resp = client
+        .get(server.url(&uri))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) => {
+            // Hyper may reject the oversize URI before it reaches the handler,
+            // returning 414 or 400.  The server stays alive.
+            let status = r.status();
+            assert!(
+                status.is_server_error() || status.is_client_error() || status.is_redirection(),
+                "unexpected success status for 100KB URL path: {status}"
+            );
+            // Verify the server is still healthy after handling the long URL.
+            let health = client
+                .get(server.url("/healthz"))
+                .send()
+                .await
+                .expect("server should still be alive after long URL");
+            assert_eq!(health.status(), 200);
+        }
+        Err(_e) => {
+            // A connection error is also acceptable as long as the server
+            // process is not killed.  Verify health still works.
+            let health = client
+                .get(server.url("/healthz"))
+                .send()
+                .await
+                .expect("server should still be alive after long URL");
+            assert_eq!(health.status(), 200);
+        }
+    }
+}
+
+// ===========================================================================
+// 31. Concurrent Hub commit + revisions read
 // ===========================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3279,4 +3488,898 @@ async fn test_hub_xet_write_token_with_auth() {
         !json["token"].as_str().unwrap().is_empty(),
         "should return a token"
     );
+}
+
+// ===========================================================================
+// Section 4: Boundary tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_batch_exactly_max_objects() {
+    // MAX_LFS_BATCH_OBJECTS = 1024. Sending exactly 1024 should succeed (not 422).
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let objects: Vec<serde_json::Value> = (0..1024)
+        .map(|i| serde_json::json!({"oid": format!("{:064x}", i), "size": 100}))
+        .collect();
+    let body = serde_json::json!({
+        "operation": "download",
+        "objects": objects
+    });
+
+    let resp = client
+        .post(server.url("/v1/lfs/objects/batch"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "batch with exactly 1024 objects should succeed, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_tags_list_max_page_size() {
+    // MAX_OCI_TAG_LIST_PAGE_SIZE = 256. Request ?n=256 → should return 200.
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+    let _ = Box::new(tmp);
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic,
+            "test",
+            "test",
+            Some("main"),
+        )
+        .unwrap();
+        let claims = TokenClaims::new(
+            "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+        )
+        .unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+
+    // Push a few manifests so there's at least 1 tag to list
+    let repo = "test/test";
+    let config_data = b"{}";
+    let layer_data = b"max-page-layer";
+
+    // Upload blobs for manifest
+    let config_digest = {
+        let uri = format!("/v2/{repo}/blobs/uploads/?digest=sha256:{}", sha256_hex(config_data));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(axum::body::Body::from(config_data.to_vec()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 201);
+        sha256_hex(config_data)
+    };
+    let layer_digest = {
+        let uri = format!("/v2/{repo}/blobs/uploads/?digest=sha256:{}", sha256_hex(layer_data));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream")
+            .body(axum::body::Body::from(layer_data.to_vec()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 201);
+        sha256_hex(layer_data)
+    };
+
+    let manifest_body = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 0,
+            "digest": format!("sha256:{config_digest}")
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": 0,
+            "digest": format!("sha256:{layer_digest}")
+        }]
+    }).to_string();
+
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v2/{repo}/manifests/max-page-tag"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+        .body(axum::body::Body::from(manifest_body))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(put_resp.status(), 201);
+
+    // Request tags list with ?n=256 (max page size)
+    let list_req = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/tags/list?n=256"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let list_resp = app.clone().oneshot(list_req).await.unwrap();
+    assert_eq!(
+        list_resp.status(),
+        200,
+        "tags list with n=256 should return 200, got {}",
+        list_resp.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_provider_token_request_at_max_body() {
+    // MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES = 16384. Send a body exactly at the limit.
+    let mut builder = TestServerBuilder::new(&[ServerFrontend::Xet])
+        .with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    // Build a body near the 16384 byte limit.
+    // Subject must be in the provider config's read_subjects: "test-user".
+    // We pad with a long "extra" field that serde ignores.
+    let base = serde_json::json!({
+        "subject": "test-user",
+        "owner": "test",
+        "repo": "test",
+        "revision": serde_json::Value::Null,
+        "scope": "Read",
+        "extra": "",
+    });
+    let base_str = serde_json::to_string(&base).unwrap();
+    let pad_len = 16378usize.saturating_sub(base_str.len());
+    let extra = "x".repeat(pad_len);
+    let body = serde_json::json!({
+        "subject": "test-user",
+        "owner": "test",
+        "repo": "test",
+        "revision": serde_json::Value::Null,
+        "scope": "Read",
+        "extra": extra,
+    });
+    let body_str = serde_json::to_string(&body).unwrap();
+    assert!(
+        body_str.len() <= 16384,
+        "body length {} should not exceed 16384",
+        body_str.len()
+    );
+    assert!(
+        body_str.len() >= 16370,
+        "body length {} should be near the 16384 limit",
+        body_str.len()
+    );
+
+    let resp = client
+        .post(server.url("/v1/providers/generic/tokens"))
+        .header("x-shardline-provider-key", "test-api-key")
+        .header("Content-Type", "application/json")
+        .body(body_str.clone())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "provider token request at max body size should return 200, got {} (body len = {})",
+        resp.status(),
+        body_str.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_large_object_binary_content() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    // Upload 5MB of binary content (null bytes, non-UTF-8)
+    let content: Vec<u8> = {
+        let mut data = Vec::with_capacity(5 * 1024 * 1024);
+        // Fill with null bytes interspersed with non-UTF-8 byte sequences
+        for i in 0..(5 * 1024 * 1024) {
+            match i % 4 {
+                0 => data.push(0x00),
+                1 => data.push(0xFF),
+                2 => data.push(0xAB),
+                _ => data.push(0x00),
+            }
+        }
+        data
+    };
+    let oid = sha256_hex(&content);
+
+    // PUT the binary content
+    let put_resp = client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.clone())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        put_resp.status().is_success(),
+        "binary 5MB LFS PUT failed: {}",
+        put_resp.status()
+    );
+
+    // GET the content back and verify roundtrip
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.len(), content.len(), "binary content size mismatch");
+    assert_eq!(body.as_ref(), content.as_slice(), "binary content mismatch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_upload_zero_byte_file() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"";
+    let oid = sha256_hex(content);
+
+    // PUT 0-byte file
+    let put_resp = client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        put_resp.status().is_success(),
+        "0-byte LFS PUT failed: {}",
+        put_resp.status()
+    );
+
+    // GET back and verify
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), content, "0-byte file roundtrip failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_upload_one_byte_file() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"X";
+    let oid = sha256_hex(content);
+
+    // PUT 1-byte file
+    let put_resp = client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        put_resp.status().is_success(),
+        "1-byte LFS PUT failed: {}",
+        put_resp.status()
+    );
+
+    // GET back and verify
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.len(), 1);
+    assert_eq!(body.as_ref(), content, "1-byte file roundtrip failed");
+}
+
+// ===========================================================================
+// Section 5: Concurrent tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_lfs_upload_idempotency() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let content = b"concurrent-idempotency-content-pg";
+    let oid = sha256_hex(content);
+    let url = server.url(&format!("/v1/lfs/objects/{oid}"));
+    let token = server.auth_header().to_owned();
+
+    // 5 concurrent PUTs to the same LFS OID — all should return 200
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let url = url.clone();
+        let token = token.clone();
+        let data = content.to_vec();
+        handles.push(tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let resp = client
+                .put(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/octet-stream")
+                .body(data)
+                .send()
+                .await
+                .unwrap();
+            resp.status()
+        }));
+    }
+
+    for (i, handle) in handles.into_iter().enumerate() {
+        let status = handle.await.unwrap();
+        assert!(
+            status.is_success(),
+            "concurrent LFS PUT {} returned {}",
+            i,
+            status
+        );
+    }
+
+    // Verify the stored content is correct
+    let client = reqwest::Client::new();
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    assert_eq!(get_resp.bytes().await.unwrap().as_ref(), content);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_hub_repo_creation() {
+    let server = TestServer::start(&[ServerFrontend::Hub]).await;
+    let _client = reqwest::Client::new();
+    let base_url = server.base_url.clone();
+    let token = server.auth_header().to_owned();
+
+    let ns = "concurrent-create-pg";
+    let name = "concurrent-create-repo";
+    let model_path = format!("{ns}/{name}");
+
+    // 5 concurrent POST /api/repos/create with the same name
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let url = format!("{base_url}/api/repos/create");
+        let token = token.clone();
+        let body = serde_json::json!({
+            "type": "model",
+            "name": &model_path,
+            "private": false,
+        });
+        handles.push(tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            resp.status()
+        }));
+    }
+
+    let mut success_count = 0u32;
+    let mut conflict_count = 0u32;
+    for handle in handles {
+        let status = handle.await.unwrap();
+        match status.as_u16() {
+            201 => success_count += 1,
+            409 => conflict_count += 1,
+            other => panic!("unexpected status code {other} for concurrent repo creation"),
+        }
+    }
+
+    assert!(
+        success_count >= 1,
+        "at least 1 concurrent create should succeed (201), got {success_count}"
+    );
+    assert_eq!(
+        success_count + conflict_count,
+        5,
+        "all 5 concurrent creates should return either 201 or 409"
+    );
+}
+
+// ===========================================================================
+// 36. OCI session state machine — invalid transitions
+// ===========================================================================
+
+/// Extracts the session ID from the Location header of an OCI upload session response.
+fn oci_session_id(resp: &axum::http::Response<axum::body::Body>) -> String {
+    let location = resp.headers().get("location").unwrap().to_str().unwrap().to_owned();
+    location.split('/').next_back().unwrap().to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_session_patch_after_complete() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    // Full session: POST -> PATCH -> PUT
+    let post_req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let post_resp = app.clone().oneshot(post_req).await.unwrap();
+    assert_eq!(post_resp.status(), 202, "POST should create session");
+    let session_id = oci_session_id(&post_resp);
+
+    let data = b"session data";
+    let patch_req = axum::http::Request::builder()
+        .method("PATCH")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(data.to_vec()))
+        .unwrap();
+    let patch_resp = app.clone().oneshot(patch_req).await.unwrap();
+    assert_eq!(patch_resp.status(), 202, "PATCH should succeed");
+
+    let digest = sha256_hex(data);
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(put_resp.status(), 201, "PUT should finalize session");
+
+    // PATCH after complete -> 404
+    let patch_after = axum::http::Request::builder()
+        .method("PATCH")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(b"extra".to_vec()))
+        .unwrap();
+    let patch_after_resp = app.clone().oneshot(patch_after).await.unwrap();
+    assert_eq!(patch_after_resp.status(), 404, "PATCH after complete should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_session_put_after_complete() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    let post_req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let post_resp = app.clone().oneshot(post_req).await.unwrap();
+    assert_eq!(post_resp.status(), 202);
+    let session_id = oci_session_id(&post_resp);
+
+    let data = b"put-after-complete-data";
+    let patch_req = axum::http::Request::builder()
+        .method("PATCH")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(data.to_vec()))
+        .unwrap();
+    let _ = app.clone().oneshot(patch_req).await.unwrap();
+
+    let digest = sha256_hex(data);
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(put_resp.status(), 201);
+
+    let put_again = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let put_again_resp = app.clone().oneshot(put_again).await.unwrap();
+    assert_eq!(put_again_resp.status(), 404, "PUT after complete should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_session_get_after_complete() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    let post_req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let post_resp = app.clone().oneshot(post_req).await.unwrap();
+    assert_eq!(post_resp.status(), 202);
+    let session_id = oci_session_id(&post_resp);
+
+    let data = b"get-after-complete";
+    let patch_req = axum::http::Request::builder()
+        .method("PATCH")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(data.to_vec()))
+        .unwrap();
+    let _ = app.clone().oneshot(patch_req).await.unwrap();
+
+    let digest = sha256_hex(data);
+    let put_req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}?digest=sha256:{digest}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_req).await.unwrap();
+    assert_eq!(put_resp.status(), 201);
+
+    let get_after = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let get_after_resp = app.clone().oneshot(get_after).await.unwrap();
+    assert_eq!(get_after_resp.status(), 404, "GET after complete should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_session_patch_after_delete() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    let post_req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let post_resp = app.clone().oneshot(post_req).await.unwrap();
+    assert_eq!(post_resp.status(), 202);
+    let session_id = oci_session_id(&post_resp);
+
+    let delete_req = axum::http::Request::builder()
+        .method("DELETE")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let delete_resp = app.clone().oneshot(delete_req).await.unwrap();
+    assert_eq!(delete_resp.status(), 204, "DELETE should succeed");
+
+    let patch_after = axum::http::Request::builder()
+        .method("PATCH")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(b"data".to_vec()))
+        .unwrap();
+    let patch_after_resp = app.clone().oneshot(patch_after).await.unwrap();
+    assert_eq!(patch_after_resp.status(), 404, "PATCH after delete should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oci_session_patch_empty_body() {
+    let (app, token) = oci_oneshot_app().await;
+    let repo = "test/test";
+
+    let post_req = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", "0")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let post_resp = app.clone().oneshot(post_req).await.unwrap();
+    assert_eq!(post_resp.status(), 202);
+    let session_id = oci_session_id(&post_resp);
+
+    let patch_empty = axum::http::Request::builder()
+        .method("PATCH")
+        .uri(&format!("/v2/{repo}/blobs/uploads/{session_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", "0")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let patch_empty_resp = app.clone().oneshot(patch_empty).await.unwrap();
+    assert_eq!(patch_empty_resp.status(), 202, "PATCH with empty body should return 202");
+}
+
+// ===========================================================================
+// 37. LFS state machine tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_put_after_patch() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let partial = b"partial-chunk-";
+    let final_content = b"complete-content-from-put";
+    let oid = sha256_hex(final_content);
+    let total = final_content.len() as u64;
+
+    let patch_range = format!("bytes 0-{}/{}", partial.len() as u64 - 1, total);
+    let patch_resp = client
+        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &patch_range)
+        .body(partial.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), 200, "PATCH should succeed");
+
+    let put_resp = client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", final_content.len().to_string())
+        .body(final_content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(put_resp.status().is_success(), "PUT should succeed");
+
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), final_content, "GET should return PUT content");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_patch_after_put() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let original = b"original-content-from-put";
+    let oid = sha256_hex(original);
+
+    let put_resp = client
+        .put(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .body(original.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(put_resp.status().is_success(), "PUT should succeed");
+
+    // PATCH additional bytes at a non-zero offset. The PATCH handler creates a
+    // temp file, writes the chunk, and when the chunk is "final" it assembles
+    // the file and stores it. Since the temp file starts sparse (null bytes at
+    // the unfilled offsets), the assembled content's hash will not match the
+    // OID — the PATCH finalize must reject with a 4xx.
+    let extra = b"-patched";
+    let total = (original.len() + extra.len()) as u64;
+    let patch_range = format!("bytes {}-{}/{}", original.len(), total - 1, total);
+    let patch_resp = client
+        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &patch_range)
+        .body(extra.to_vec())
+        .send()
+        .await
+        .unwrap();
+    // The assembled temp file has null bytes from 0..original.len() plus
+    // "-patched" at the end; the stored content under the canonical key
+    // (from the PUT) does not match. The object store's put_if_absent
+    // detects the mismatch via ensure_file_matches_bytes and returns an
+    // error. Accept any non-success status.
+    assert!(
+        !patch_resp.status().is_success(),
+        "PATCH after PUT should not succeed (content mismatch), got {}",
+        patch_resp.status()
+    );
+
+    // Verify the stored content is still the original PUT content (unchanged).
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), original, "stored content should remain unchanged after failed PATCH");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_patch_non_existent_oid() {
+    let server = TestServer::start(&[ServerFrontend::Lfs]).await;
+    let client = reqwest::Client::new();
+
+    let content = b"new-oid-patch-content";
+    let oid = sha256_hex(content);
+    let total = content.len() as u64;
+
+    let patch_range = format!("bytes 0-{}/{}", total - 1, total);
+    let patch_resp = client
+        .patch(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Range", &patch_range)
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), 200, "PATCH on non-existent OID should succeed");
+
+    let get_resp = client
+        .get(server.url(&format!("/v1/lfs/objects/{oid}")))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), content);
+}
+
+// ===========================================================================
+// 38. Bazel + OCI coexistence
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_bazel_and_oci_coexist() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::BazelHttp, ServerFrontend::Oci])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic, "test", "test", Some("main"),
+        ).unwrap();
+        let claims = TokenClaims::new(
+            "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+        ).unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+    let _keep = Box::new(tmp);
+
+    let repo = "test/test";
+    let content = b"coexistence-test-content";
+    let hash = sha256_hex(content);
+
+    // Upload to Bazel CAS
+    let bazel_put = axum::http::Request::builder()
+        .method("PUT")
+        .uri(&format!("/v1/bazel/cache/cas/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let bazel_put_resp = app.clone().oneshot(bazel_put).await.unwrap();
+    assert!(bazel_put_resp.status().is_success(), "Bazel CAS PUT failed: {}", bazel_put_resp.status());
+
+    // Upload same content to OCI blob (different key namespace)
+    let oci_put = axum::http::Request::builder()
+        .method("POST")
+        .uri(&format!("/v2/{repo}/blobs/uploads/?digest=sha256:{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(axum::body::Body::from(content.to_vec()))
+        .unwrap();
+    let oci_put_resp = app.clone().oneshot(oci_put).await.unwrap();
+    assert_eq!(oci_put_resp.status(), 201, "OCI blob upload should succeed");
+
+    // Bazel GET works
+    let bazel_get = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v1/bazel/cache/cas/{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let bazel_get_resp = app.clone().oneshot(bazel_get).await.unwrap();
+    assert_eq!(bazel_get_resp.status(), 200, "Bazel CAS GET should work");
+    let bazel_body = axum::body::to_bytes(bazel_get_resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(bazel_body.as_ref(), content);
+
+    // OCI GET works
+    let oci_get = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v2/{repo}/blobs/sha256:{hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let oci_get_resp = app.clone().oneshot(oci_get).await.unwrap();
+    assert_eq!(oci_get_resp.status(), 200, "OCI blob GET should work");
+    let oci_body = axum::body::to_bytes(oci_get_resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(oci_body.as_ref(), content);
+
+    // Namespace isolation
+    let different_hash = sha256_hex(b"different-content");
+    let bazel_get_missing = axum::http::Request::builder()
+        .method("GET")
+        .uri(&format!("/v1/bazel/cache/cas/{different_hash}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let bazel_missing_resp = app.clone().oneshot(bazel_get_missing).await.unwrap();
+    assert_eq!(bazel_missing_resp.status(), 404, "Bazel should not find non-Bazel content");
 }
