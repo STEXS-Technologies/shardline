@@ -274,15 +274,26 @@ pub async fn serve_with_listener(
     config: ServerConfig,
     listener: TcpListener,
 ) -> Result<(), ServerError> {
-    let app = router(config).await?;
+    let app = router(config.clone()).await?;
     tracing::info!("router initialized, starting HTTP serve");
+    let shutdown_timeout = config.shutdown_timeout();
     let shutdown_signal = async {
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("shutdown signal received, draining connections");
     };
-    serve_http(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    let serve = serve_http(listener, app).with_graceful_shutdown(shutdown_signal);
+    if let Some(timeout) = shutdown_timeout {
+        tokio::select! {
+            result = serve => {
+                result.map_err(ServerError::from)?;
+            }
+            () = tokio::time::sleep(timeout) => {
+                tracing::warn!("graceful shutdown timed out after {timeout:?}, aborting");
+            }
+        }
+    } else {
+        serve.await.map_err(ServerError::from)?;
+    }
     Ok(())
 }
 
