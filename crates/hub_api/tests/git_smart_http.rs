@@ -724,6 +724,188 @@ async fn receive_pack_rejects_non_fast_forward_push() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn receive_pack_deletes_branch_without_removing_commit_history() {
+    setup();
+    let uid = std::process::id();
+    let repo_id = format!("test-{}/delete-branch", uid);
+    let _ = create_repo_and_commit(
+        "models",
+        &format!("test-{uid}"),
+        "delete-branch",
+        vec![],
+        "Initial",
+    );
+    let null_sha = "0000000000000000000000000000000000000000";
+
+    let (objects, commit_sha) =
+        build_simple_commit("feature.txt", b"feature content", "Feature", None);
+    let commit_sha_hex = hex::encode(commit_sha);
+    let create_body =
+        build_receive_pack_with_objects(null_sha, "refs/heads/feature", &objects, &commit_sha);
+    let create_response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/models/test-{uid}/delete-branch/git-receive-pack"))
+                .header("content-type", "application/x-git-receive-pack")
+                .body(Body::from(create_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let create_body = String::from_utf8(collect_body_bytes(create_response).await).unwrap();
+    assert!(
+        create_body.contains("ok refs/heads/feature"),
+        "feature push should succeed: {create_body}"
+    );
+
+    let delete_body = build_receive_pack_request(&commit_sha_hex, null_sha, "refs/heads/feature");
+    let delete_response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/models/test-{uid}/delete-branch/git-receive-pack"))
+                .header("content-type", "application/x-git-receive-pack")
+                .body(Body::from(delete_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::OK);
+    let delete_body = String::from_utf8(collect_body_bytes(delete_response).await).unwrap();
+    assert!(
+        delete_body.contains("ok refs/heads/feature"),
+        "branch deletion should succeed: {delete_body}"
+    );
+
+    let state = common::state();
+    assert_eq!(
+        state
+            .store
+            .resolve_revision(&repo_id, "refs/heads/feature")
+            .unwrap(),
+        None,
+        "deleted branch must no longer resolve"
+    );
+    assert_eq!(
+        state
+            .store
+            .resolve_revision(&repo_id, &commit_sha_hex)
+            .unwrap()
+            .as_deref(),
+        Some(commit_sha_hex.as_str()),
+        "deleting a ref must retain immutable commit history"
+    );
+
+    let refs_response = app()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/models/test-{uid}/delete-branch/info/refs?service=git-upload-pack"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let refs_body = String::from_utf8(collect_body_bytes(refs_response).await).unwrap();
+    assert!(
+        !refs_body.contains("refs/heads/feature"),
+        "deleted branch must not be advertised: {refs_body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn receive_pack_rejects_stale_or_default_branch_deletion() {
+    setup();
+    let uid = std::process::id();
+    let repo_id = format!("test-{}/delete-protection", uid);
+    let _ = create_repo_and_commit(
+        "models",
+        &format!("test-{uid}"),
+        "delete-protection",
+        vec![],
+        "Initial",
+    );
+    let null_sha = "0000000000000000000000000000000000000000";
+
+    let (objects, commit_sha) =
+        build_simple_commit("feature.txt", b"feature content", "Feature", None);
+    let commit_sha_hex = hex::encode(commit_sha);
+    let create_body =
+        build_receive_pack_with_objects(null_sha, "refs/heads/feature", &objects, &commit_sha);
+    let _ = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/models/test-{uid}/delete-protection/git-receive-pack"
+                ))
+                .body(Body::from(create_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let stale_delete = build_receive_pack_request(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        null_sha,
+        "refs/heads/feature",
+    );
+    let stale_response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/models/test-{uid}/delete-protection/git-receive-pack"
+                ))
+                .body(Body::from(stale_delete))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let stale_body = String::from_utf8(collect_body_bytes(stale_response).await).unwrap();
+    assert!(
+        stale_body.contains("ng refs/heads/feature"),
+        "stale deletion must be rejected: {stale_body}"
+    );
+    assert_eq!(
+        common::state()
+            .store
+            .resolve_revision(&repo_id, "refs/heads/feature")
+            .unwrap(),
+        Some(commit_sha_hex.clone()),
+        "stale deletion must leave the ref intact"
+    );
+
+    let current_main = common::state()
+        .store
+        .resolve_revision(&repo_id, "main")
+        .unwrap()
+        .expect("main ref exists");
+    let default_delete = build_receive_pack_request(&current_main, null_sha, "refs/heads/main");
+    let default_response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/models/test-{uid}/delete-protection/git-receive-pack"
+                ))
+                .body(Body::from(default_delete))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let default_body = String::from_utf8(collect_body_bytes(default_response).await).unwrap();
+    assert!(
+        default_body.contains("ng refs/heads/main"),
+        "default branch deletion must be rejected: {default_body}"
+    );
+}
+
 // ---- Git tags ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

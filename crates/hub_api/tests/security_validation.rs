@@ -221,6 +221,12 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
             PRIMARY KEY (repo_id, sha),
             FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+            repo_id TEXT NOT NULL,
+            ref_name TEXT NOT NULL,
+            sha TEXT NOT NULL,
+            PRIMARY KEY (repo_id, ref_name)
+        );
         CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
             id TEXT PRIMARY KEY,
             repo_id TEXT NOT NULL,
@@ -505,6 +511,12 @@ async fn validate_commit_body_bounded_by_router() {
                 created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
                 PRIMARY KEY (repo_id, sha),
                 FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+                repo_id TEXT NOT NULL,
+                ref_name TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                PRIMARY KEY (repo_id, ref_name)
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
                 commit_sha TEXT NOT NULL,

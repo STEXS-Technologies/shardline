@@ -91,6 +91,11 @@ file is auto-generated when LFS files are present.
 | `/{type}/{ns}/{repo}/HEAD` | GET | Git HEAD reference |
 | `/{type}/{ns}/{repo}/git-upload-pack` | POST | Git clone/fetch (upload-pack) |
 | `/{type}/{ns}/{repo}/git-receive-pack` | POST | Git push (receive-pack) |
+
+Git Smart HTTP supports safe branch and tag deletion through the normal Git
+zero-SHA receive-pack update. Deletion is compare-and-delete atomic, so stale
+pushes cannot remove a ref that has advanced; the default `main` branch is
+protected. Removing a ref does not remove the immutable commit history.
 | `/objects/batch` | POST | LFS batch request |
 | `/lfs/objects/{oid}` | PUT | Upload an LFS object |
 | `/lfs/objects/{oid}` | GET | Download an LFS object |

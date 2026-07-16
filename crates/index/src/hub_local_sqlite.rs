@@ -4,7 +4,10 @@ use rusqlite::{Connection, params};
 use shardline_protocol::unix_now_seconds_lossy;
 
 use crate::{
-    hub::{HubFileEntry, HubRepo, HubRepoType, HubRevision, HubStore, HubWebhook},
+    hub::{
+        HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore, HubWebhook,
+        canonical_ref_name,
+    },
     local_sqlite::{LocalIndexStore, LocalIndexStoreError, i64_to_u64, u64_to_i64},
 };
 
@@ -59,6 +62,11 @@ pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::erro
         );
         CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
             ON shardline_hub_revisions (repo_id, ref_name);
+        CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+            repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
+            PRIMARY KEY (repo_id, ref_name),
+            FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
             commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
             sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
@@ -106,6 +114,10 @@ impl HubStore for LocalIndexStore {
             "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
              VALUES (?1, 'main', ?2, NULL, NULL, ?3)",
             params![name, initial_sha, u64_to_i64(now)?],
+        )?;
+        tx.execute(
+            "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, 'main', ?2)",
+            params![name, initial_sha],
         )?;
         tx.commit()?;
         Ok(HubRepo {
@@ -245,24 +257,32 @@ impl HubStore for LocalIndexStore {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error> {
+        let ref_name = canonical_ref_name(ref_name);
         let conn = open_hub_connection_rw(self.root())?;
         let tx = conn.unchecked_transaction()?;
 
         // Optimistic concurrency check
         if let Some(parent) = parent_sha {
-            let current_head: Option<String> = tx
+            let current_ref: Option<String> = tx
                 .query_row(
-                    "SELECT default_branch FROM shardline_hub_repos WHERE repo_id = ?1",
-                    params![repo_id],
+                    "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
+                    params![repo_id, ref_name],
                     |row| row.get(0),
                 )
                 .optional()?;
-            match current_head {
-                Some(head) if head != parent => {
+            match current_ref {
+                Some(current) if current != parent => {
                     return Err(rusqlite::Error::QueryReturnedNoRows.into());
                 }
                 None => {
-                    return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                    let parent_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM shardline_hub_revisions WHERE repo_id = ?1 AND sha = ?2)",
+                        params![repo_id, parent],
+                        |row| row.get(0),
+                    )?;
+                    if !parent_exists {
+                        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+                    }
                 }
                 _ => {}
             }
@@ -270,18 +290,24 @@ impl HubStore for LocalIndexStore {
 
         let now = unix_now_seconds_lossy();
 
-        // Update repo HEAD
-        tx.execute(
-            "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
-             WHERE repo_id = ?3",
-            params![new_sha, u64_to_i64(now)?, repo_id],
-        )?;
+        if ref_name == "main" {
+            tx.execute(
+                "UPDATE shardline_hub_repos SET default_branch = ?1, updated_at_unix_seconds = ?2
+                 WHERE repo_id = ?3",
+                params![new_sha, u64_to_i64(now)?, repo_id],
+            )?;
+        }
 
         // Insert revision
         tx.execute(
             "INSERT INTO shardline_hub_revisions (repo_id, ref_name, sha, parent_sha, message, created_at_unix_seconds)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![repo_id, ref_name, new_sha, parent_sha, message, u64_to_i64(now)?],
+        )?;
+        tx.execute(
+            "INSERT INTO shardline_hub_refs (repo_id, ref_name, sha) VALUES (?1, ?2, ?3)
+             ON CONFLICT(repo_id, ref_name) DO UPDATE SET sha = excluded.sha",
+            params![repo_id, ref_name, new_sha],
         )?;
 
         tx.commit()?;
@@ -294,6 +320,47 @@ impl HubStore for LocalIndexStore {
             message: Some(message.to_owned()),
             created_at_unix_seconds: now,
         })
+    }
+
+    fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
+        let conn = open_hub_connection(self.root())?;
+        let mut stmt = conn.prepare(
+            "SELECT repo_id, ref_name, sha FROM shardline_hub_refs WHERE repo_id = ?1 ORDER BY ref_name",
+        )?;
+        let rows = stmt.query_map(params![repo_id], |row| {
+            Ok(HubRef {
+                repo_id: row.get(0)?,
+                ref_name: row.get(1)?,
+                sha: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn delete_ref(
+        &self,
+        repo_id: &str,
+        ref_name: &str,
+        expected_sha: &str,
+    ) -> Result<(), Self::Error> {
+        let ref_name = canonical_ref_name(ref_name);
+        if ref_name == "main" || ref_name == "HEAD" {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "default branch cannot be deleted".to_owned(),
+            )
+            .into());
+        }
+        let conn = open_hub_connection_rw(self.root())?;
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "DELETE FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2 AND sha = ?3",
+            params![repo_id, ref_name, expected_sha],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
@@ -348,12 +415,12 @@ impl HubStore for LocalIndexStore {
             return Ok(Some(revision.to_owned()));
         }
 
-        // Ref name match
+        // Active ref-name match
+        let ref_name = canonical_ref_name(revision);
         let sha: Option<String> = conn
             .query_row(
-                "SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1 AND ref_name = ?2
-                 ORDER BY created_at_unix_seconds DESC LIMIT 1",
-                params![repo_id, revision],
+                "SELECT sha FROM shardline_hub_refs WHERE repo_id = ?1 AND ref_name = ?2",
+                params![repo_id, ref_name],
                 |row| row.get(0),
             )
             .optional()?;
@@ -444,6 +511,10 @@ impl HubStore for LocalIndexStore {
         // Delete file entries for all revisions in this repo
         tx.execute(
             "DELETE FROM shardline_hub_file_entries WHERE commit_sha IN (SELECT sha FROM shardline_hub_revisions WHERE repo_id = ?1)",
+            params![repo_id],
+        )?;
+        tx.execute(
+            "DELETE FROM shardline_hub_refs WHERE repo_id = ?1",
             params![repo_id],
         )?;
         // Delete revisions
@@ -616,6 +687,13 @@ mod tests {
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
                 ON shardline_hub_revisions (repo_id, ref_name);
+            CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+                repo_id TEXT NOT NULL,
+                ref_name TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                PRIMARY KEY (repo_id, ref_name),
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
                 commit_sha TEXT NOT NULL,
                 path TEXT NOT NULL,
@@ -914,6 +992,94 @@ mod tests {
             .resolve_revision("org/model", "")
             .expect("resolve empty");
         assert!(sha.is_some());
+    }
+
+    #[test]
+    fn delete_ref_removes_only_the_active_ref_and_preserves_commit_history() {
+        let (_ts, store) = make_store();
+        store
+            .create_repo(HubRepoType::Model, "org/model", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        store
+            .create_revision(
+                "org/model",
+                Some(initial_sha),
+                "feature-sha",
+                "feature",
+                "feature commit",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .resolve_revision("org/model", "refs/heads/feature")
+                .unwrap(),
+            Some("feature-sha".to_owned())
+        );
+        assert!(
+            store
+                .list_refs("org/model")
+                .unwrap()
+                .iter()
+                .any(|reference| reference.ref_name == "feature")
+        );
+
+        store
+            .delete_ref("org/model", "refs/heads/feature", "feature-sha")
+            .unwrap();
+
+        assert_eq!(
+            store.resolve_revision("org/model", "feature").unwrap(),
+            None,
+            "deleted branch must no longer resolve"
+        );
+        assert_eq!(
+            store.resolve_revision("org/model", "feature-sha").unwrap(),
+            Some("feature-sha".to_owned()),
+            "ref deletion must retain immutable commit history"
+        );
+        assert!(
+            !store
+                .list_refs("org/model")
+                .unwrap()
+                .iter()
+                .any(|reference| reference.ref_name == "feature")
+        );
+    }
+
+    #[test]
+    fn delete_ref_rejects_stale_and_default_branch_requests() {
+        let (_ts, store) = make_store();
+        store
+            .create_repo(HubRepoType::Model, "org/model", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        store
+            .create_revision(
+                "org/model",
+                Some(initial_sha),
+                "feature-sha",
+                "feature",
+                "feature commit",
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .delete_ref("org/model", "feature", "stale-sha")
+                .is_err()
+        );
+        assert_eq!(
+            store.resolve_revision("org/model", "feature").unwrap(),
+            Some("feature-sha".to_owned()),
+            "stale deletion must not alter the branch"
+        );
+        assert!(
+            store
+                .delete_ref("org/model", "refs/heads/main", initial_sha)
+                .is_err()
+        );
     }
 
     #[test]
