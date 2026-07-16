@@ -32,11 +32,7 @@ fn s3_config(stack: &DockerLocalStack, key_prefix: Option<&str>) -> Option<S3Obj
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_bucket_not_found() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -70,11 +66,7 @@ fn chunk_hash(data: &[u8]) -> shardline_protocol::ShardlineHash {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_put_and_read_roundtrip() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -115,11 +107,7 @@ async fn s3_put_and_read_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_put_is_idempotent() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -147,11 +135,7 @@ async fn s3_put_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_put_overwrite_replaces_content() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -186,11 +170,7 @@ async fn s3_put_overwrite_replaces_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_list_prefix_filters_by_prefix() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -224,33 +204,28 @@ async fn s3_list_prefix_filters_by_prefix() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn s3_delete_missing_returns_not_found() {
-        let Some(stack) = DockerLocalStack::builder()
-            .with_minio()
-            .start()
-            .unwrap()
-        else {
-            eprintln!("skipping: docker not available");
-            return;
-        };
-        let Some(config) = s3_config(&stack, Some("test-delete-missing")) else {
-            return;
-        };
-        let store = S3ObjectStore::new(config).unwrap();
-        let key = ObjectKey::parse("ab/nonexistent").unwrap();
-        // S3 delete on a non-existent key returns success (no error).
-        // Different S3 adapters may return NotFound or Deleted.
-        let result = store.delete_if_present(&key);
-        assert!(result.is_ok(), "delete on missing key should succeed: {result:?}");
-    }
+async fn s3_delete_missing_returns_not_found() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-delete-missing")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ab/nonexistent").unwrap();
+    // S3 delete on a non-existent key returns success (no error).
+    // Different S3 adapters may return NotFound or Deleted.
+    let result = store.delete_if_present(&key);
+    assert!(
+        result.is_ok(),
+        "delete on missing key should succeed: {result:?}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_read_missing_returns_not_found() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -266,11 +241,7 @@ async fn s3_read_missing_returns_not_found() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_copy_object_if_absent() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -305,11 +276,7 @@ async fn s3_copy_object_if_absent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_visit_prefix_collects_all_entries() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -323,14 +290,20 @@ async fn minio_visit_prefix_collects_all_entries() {
 
     let key_a = ObjectKey::parse("ab/aaa").unwrap();
     let key_b = ObjectKey::parse("ab/bbb").unwrap();
-    store.put_if_absent(&key_a, ObjectBody::from_slice(body), &integrity).unwrap();
-    store.put_if_absent(&key_b, ObjectBody::from_slice(body), &integrity).unwrap();
+    store
+        .put_if_absent(&key_a, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+    store
+        .put_if_absent(&key_b, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
 
     let mut visited = Vec::new();
-    store.visit_prefix(&prefix, |meta| {
-        visited.push(meta.key().as_str().to_owned());
-        Ok::<_, shardline_storage::S3ObjectStoreError>(())
-    }).unwrap();
+    store
+        .visit_prefix(&prefix, |meta| {
+            visited.push(meta.key().as_str().to_owned());
+            Ok::<_, shardline_storage::S3ObjectStoreError>(())
+        })
+        .unwrap();
     assert_eq!(visited.len(), 2);
     assert!(visited.contains(&"ab/aaa".to_owned()));
     assert!(visited.contains(&"ab/bbb".to_owned()));
@@ -338,11 +311,7 @@ async fn minio_visit_prefix_collects_all_entries() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_stream_range_returns_partial_content() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -354,7 +323,9 @@ async fn minio_stream_range_returns_partial_content() {
     let body = b"abcdefghijklmnopqrstuvwxyz";
     let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
 
-    store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
 
     // Read middle range (bytes 5-14 = "fghijklmno")
     let range = shardline_protocol::ByteRange::new(5, 14).unwrap();
@@ -364,11 +335,7 @@ async fn minio_stream_range_returns_partial_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_list_flat_namespace_page_supports_pagination() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -383,7 +350,9 @@ async fn minio_list_flat_namespace_page_supports_pagination() {
     // Insert 5 keys
     for i in 0..5u8 {
         let key = ObjectKey::parse(&format!("pg/key{i:02}")).unwrap();
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
     }
 
     // Get full page (limit=10)
@@ -392,17 +361,15 @@ async fn minio_list_flat_namespace_page_supports_pagination() {
 
     // Get with start_after
     let key_after = ObjectKey::parse("pg/key02").unwrap();
-    let after_page = store.list_flat_namespace_page(&prefix, Some(&key_after), 10).unwrap();
+    let after_page = store
+        .list_flat_namespace_page(&prefix, Some(&key_after), 10)
+        .unwrap();
     assert_eq!(after_page.len(), 2); // key03, key04
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_put_file_if_absent_stores_file_content() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -418,18 +385,16 @@ async fn minio_put_file_if_absent_stores_file_content() {
     let dir = tempfile::TempDir::new().unwrap();
     let file_path = dir.path().join("test-file.bin");
     std::fs::write(&file_path, body).unwrap();
-    let outcome = store.put_file_if_absent(&key, &file_path, &integrity).unwrap();
+    let outcome = store
+        .put_file_if_absent(&key, &file_path, &integrity)
+        .unwrap();
     assert!(matches!(outcome, PutOutcome::Inserted));
     assert!(store.contains(&key).unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_put_overwrite_integrity_rejects_bad_hash() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -441,7 +406,9 @@ async fn minio_put_overwrite_integrity_rejects_bad_hash() {
     let body = b"valid content";
     let valid_integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
 
-    store.put_if_absent(&key, ObjectBody::from_slice(body), &valid_integrity).unwrap();
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &valid_integrity)
+        .unwrap();
 
     // Overwrite with wrong hash
     let bad_integrity = ObjectIntegrity::new(chunk_hash(b"wrong data"), 100);
@@ -452,11 +419,7 @@ async fn minio_put_overwrite_integrity_rejects_bad_hash() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_content_addressed_upload_roundtrip() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -468,7 +431,10 @@ async fn minio_content_addressed_upload_roundtrip() {
     let body = b"content addressed upload test data";
 
     // Step 1: begin content-addressed upload
-    let result = store.begin_content_addressed_upload(&canonical_key).await.unwrap();
+    let result = store
+        .begin_content_addressed_upload(&canonical_key)
+        .await
+        .unwrap();
     let (mut writer, temp_key) = match result {
         shardline_storage::BeginMultipartUploadResult::AlreadyExists => {
             // Already exists is fine — the content is the same
@@ -484,7 +450,10 @@ async fn minio_content_addressed_upload_roundtrip() {
     writer.write(body);
 
     // Step 3: finish — finalize multipart and promote temp to canonical
-    let outcome = store.finish_content_addressed_upload(writer, &temp_key, &canonical_key).await.unwrap();
+    let outcome = store
+        .finish_content_addressed_upload(writer, &temp_key, &canonical_key)
+        .await
+        .unwrap();
     assert!(matches!(outcome, PutOutcome::Inserted));
 
     // Step 4: verify content
@@ -497,11 +466,7 @@ async fn minio_content_addressed_upload_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_content_addressed_upload_already_exists_idempotent() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -514,20 +479,21 @@ async fn minio_content_addressed_upload_already_exists_idempotent() {
     let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
 
     // First, put the content directly
-    store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
 
     // Then begin a content-addressed upload — should return AlreadyExists
     let result = store.begin_content_addressed_upload(&key).await.unwrap();
-    assert!(matches!(result, shardline_storage::BeginMultipartUploadResult::AlreadyExists));
+    assert!(matches!(
+        result,
+        shardline_storage::BeginMultipartUploadResult::AlreadyExists
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minio_put_content_addressed_file_stores_and_verifies() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -543,7 +509,9 @@ async fn minio_put_content_addressed_file_stores_and_verifies() {
     let file_path = dir.path().join("source.bin");
     std::fs::write(&file_path, body).unwrap();
 
-    let outcome = store.put_content_addressed_file(&key, &file_path, &integrity).unwrap();
+    let outcome = store
+        .put_content_addressed_file(&key, &file_path, &integrity)
+        .unwrap();
     assert!(matches!(outcome, PutOutcome::Inserted));
 
     // Verify content
@@ -553,17 +521,15 @@ async fn minio_put_content_addressed_file_stores_and_verifies() {
     assert_eq!(data, body);
 
     // Second call should return AlreadyExists
-    let outcome2 = store.put_content_addressed_file(&key, &file_path, &integrity).unwrap();
+    let outcome2 = store
+        .put_content_addressed_file(&key, &file_path, &integrity)
+        .unwrap();
     assert!(matches!(outcome2, PutOutcome::AlreadyExists));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_list_empty_bucket() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -573,16 +539,15 @@ async fn s3_list_empty_bucket() {
     let store = S3ObjectStore::new(config).unwrap();
     let prefix = ObjectPrefix::parse("nonexistent/").unwrap();
     let results = store.list_prefix(&prefix).unwrap();
-    assert!(results.is_empty(), "expected empty list for non-existent prefix");
+    assert!(
+        results.is_empty(),
+        "expected empty list for non-existent prefix"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_list_with_prefix_matches_exact_prefix() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -597,9 +562,15 @@ async fn s3_list_with_prefix_matches_exact_prefix() {
     let key_bar = ObjectKey::parse("pfx/bar").unwrap();
     let key_other = ObjectKey::parse("other/baz").unwrap();
 
-    store.put_if_absent(&key_foo, ObjectBody::from_slice(body), &integrity).unwrap();
-    store.put_if_absent(&key_bar, ObjectBody::from_slice(body), &integrity).unwrap();
-    store.put_if_absent(&key_other, ObjectBody::from_slice(body), &integrity).unwrap();
+    store
+        .put_if_absent(&key_foo, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+    store
+        .put_if_absent(&key_bar, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+    store
+        .put_if_absent(&key_other, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
 
     // List with matching prefix
     let prefix = ObjectPrefix::parse("pfx/").unwrap();
@@ -616,11 +587,7 @@ async fn s3_list_with_prefix_matches_exact_prefix() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_rename_object_via_copy_and_delete() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -634,7 +601,9 @@ async fn s3_rename_object_via_copy_and_delete() {
     let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
 
     // Put source
-    store.put_if_absent(&src, ObjectBody::from_slice(body), &integrity).unwrap();
+    store
+        .put_if_absent(&src, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
     assert!(store.contains(&src).unwrap());
 
     // Copy to destination
@@ -660,11 +629,7 @@ async fn s3_rename_object_via_copy_and_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_copy_object_preserves_content() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -677,7 +642,9 @@ async fn s3_copy_object_preserves_content() {
     let body = b"copy content verification";
     let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
 
-    store.put_if_absent(&src, ObjectBody::from_slice(body), &integrity).unwrap();
+    store
+        .put_if_absent(&src, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
     store.copy_object_if_absent(&src, &dst).unwrap();
 
     // Verify both original and copy are intact
@@ -697,11 +664,7 @@ async fn s3_copy_object_preserves_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_metadata_roundtrip() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -713,7 +676,9 @@ async fn s3_metadata_roundtrip() {
     let body = b"metadata roundtrip content";
     let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
 
-    store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
 
     let meta = store.metadata(&key).unwrap().unwrap();
     assert_eq!(meta.key().as_str(), "meta/test-file");
@@ -724,11 +689,7 @@ async fn s3_metadata_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_multipart_upload_edge_small_chunks() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -767,11 +728,7 @@ async fn s3_multipart_upload_edge_small_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_concurrent_read_write() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -813,11 +770,7 @@ async fn s3_concurrent_read_write() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_delete_non_existent_returns_not_found() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -829,16 +782,15 @@ async fn s3_delete_non_existent_returns_not_found() {
     // S3 delete on a non-existent key is a no-op that returns success.
     // MinIO returns DeleteOutcome::Deleted; other providers may return NotFound.
     let result = store.delete_if_present(&key);
-    assert!(result.is_ok(), "delete on missing key should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "delete on missing key should succeed: {result:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_large_content_roundtrip() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -870,11 +822,7 @@ async fn s3_large_content_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s3_special_character_keys() {
-    let Some(stack) = DockerLocalStack::builder()
-        .with_minio()
-        .start()
-        .unwrap()
-    else {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
         eprintln!("skipping: docker not available");
         return;
     };
@@ -915,5 +863,3 @@ async fn s3_special_character_keys() {
         );
     }
 }
-
-

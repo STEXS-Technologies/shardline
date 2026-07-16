@@ -300,8 +300,8 @@ mod tests {
 
     use shardline_server::{
         BackupManifestReport, ConfigCheckReport, DatabaseMigrationCommand, DatabaseMigrationReport,
-        DatabaseMigrationStatusEntry, FsckIssueDetail, FsckIssueKind, LifecycleRepairReport,
-        IndexRebuildIssueDetail, LocalFsckIssue, LocalFsckReport, LocalGcReport,
+        DatabaseMigrationStatusEntry, FsckIssueDetail, FsckIssueKind, IndexRebuildIssueDetail,
+        LifecycleRepairReport, LocalFsckIssue, LocalFsckReport, LocalGcReport,
         LocalIndexRebuildIssue, LocalIndexRebuildIssueKind, LocalIndexRebuildReport,
         StorageMigrationReport,
     };

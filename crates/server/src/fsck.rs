@@ -107,8 +107,12 @@ mod tests {
         let root = temp.path().to_path_buf();
         let bind_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let chunk_size = NonZeroUsize::new(4096).unwrap();
-        let _config =
-            ServerConfig::new(bind_addr, "http://127.0.0.1:8080".to_owned(), root, chunk_size);
+        let _config = ServerConfig::new(
+            bind_addr,
+            "http://127.0.0.1:8080".to_owned(),
+            root,
+            chunk_size,
+        );
         let result = tempfile::tempdir();
         assert!(result.is_ok());
         let report = tempfile::tempdir().map(|_dir| {
@@ -152,7 +156,8 @@ mod tests {
 
     #[test]
     fn from_fsck_error_local_object_store_maps_correctly() {
-        let local_err = shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("store err"));
+        let local_err =
+            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("store err"));
         let fsck_err = FsckError::LocalObjectStore(local_err);
         let server_err: ServerError = fsck_err.into();
         assert!(matches!(
@@ -210,18 +215,16 @@ mod tests {
 
     #[test]
     fn from_fsck_error_object_store_not_found() {
-        let fsck_err = FsckError::ObjectStore(
-            shardline_server_core::ServerObjectStoreError::NotFound,
-        );
+        let fsck_err =
+            FsckError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound);
         let server_err: ServerError = fsck_err.into();
         assert!(matches!(server_err, ServerError::NotFound));
     }
 
     #[test]
     fn from_fsck_error_object_store_overflow() {
-        let fsck_err = FsckError::ObjectStore(
-            shardline_server_core::ServerObjectStoreError::Overflow,
-        );
+        let fsck_err =
+            FsckError::ObjectStore(shardline_server_core::ServerObjectStoreError::Overflow);
         let server_err: ServerError = fsck_err.into();
         assert!(matches!(server_err, ServerError::Overflow));
     }
@@ -249,9 +252,8 @@ mod tests {
 
     #[test]
     fn from_fsck_error_object_store_local() {
-        let local_err = shardline_storage::LocalObjectStoreError::Io(
-            std::io::Error::other("local store err"),
-        );
+        let local_err =
+            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local store err"));
         let fsck_err = FsckError::ObjectStore(
             shardline_server_core::ServerObjectStoreError::Local(local_err),
         );
@@ -265,9 +267,8 @@ mod tests {
     #[test]
     fn from_fsck_error_object_store_s3() {
         let s3_err = shardline_storage::S3ObjectStoreError::IncompleteCredentials;
-        let fsck_err = FsckError::ObjectStore(
-            shardline_server_core::ServerObjectStoreError::S3(s3_err),
-        );
+        let fsck_err =
+            FsckError::ObjectStore(shardline_server_core::ServerObjectStoreError::S3(s3_err));
         let server_err: ServerError = fsck_err.into();
         assert!(matches!(
             server_err,
@@ -278,9 +279,8 @@ mod tests {
     #[test]
     fn from_fsck_error_object_store_io() {
         let io_err = std::io::Error::other("object store io");
-        let fsck_err = FsckError::ObjectStore(
-            shardline_server_core::ServerObjectStoreError::Io(io_err),
-        );
+        let fsck_err =
+            FsckError::ObjectStore(shardline_server_core::ServerObjectStoreError::Io(io_err));
         let server_err: ServerError = fsck_err.into();
         assert!(matches!(server_err, ServerError::Io(_)));
     }

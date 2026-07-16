@@ -156,10 +156,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::FileVersionQuery;
-    use crate::{
-        ServerConfig, ServerFrontend, ServerRole,
-        app::AppState,
-    };
+    use crate::{ServerConfig, ServerFrontend, ServerRole, app::AppState};
 
     #[test]
     fn file_version_query_debug_format() {
@@ -203,9 +200,12 @@ mod tests {
     #[test]
     fn file_version_query_deserialize_from_url_query() {
         // Verify deserialization from URL query string via axum::extract::Query
-        let query: Query<FileVersionQuery> =
-            Query::try_from_uri(&"http://example.com/path?content_hash=abc123".parse().unwrap())
-                .unwrap();
+        let query: Query<FileVersionQuery> = Query::try_from_uri(
+            &"http://example.com/path?content_hash=abc123"
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(query.content_hash.as_deref(), Some("abc123"));
     }
 
@@ -219,8 +219,7 @@ mod tests {
     #[test]
     fn file_version_query_deserialize_from_url_query_with_empty_hash() {
         let query: Query<FileVersionQuery> =
-            Query::try_from_uri(&"http://example.com/path?content_hash=".parse().unwrap())
-                .unwrap();
+            Query::try_from_uri(&"http://example.com/path?content_hash=".parse().unwrap()).unwrap();
         assert_eq!(query.content_hash.as_deref(), Some(""));
     }
 
@@ -263,8 +262,8 @@ mod tests {
     }
 
     fn reconstruction_router(state: Arc<AppState>) -> Router {
+        use super::{batch_reconstruction, reconstruction, reconstruction_v2};
         use axum::routing::get;
-        use super::{reconstruction, reconstruction_v2, batch_reconstruction};
 
         Router::new()
             .route("/reconstruction/{file_id}", get(reconstruction))

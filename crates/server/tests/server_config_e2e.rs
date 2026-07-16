@@ -15,7 +15,7 @@
 use std::num::NonZeroUsize;
 
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server::{ServerConfig, ServerFrontend, ServerRole, ServerConfigError, app};
+use shardline_server::{ServerConfig, ServerConfigError, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -49,21 +49,9 @@ async fn test_server_body_limit_exceeded() {
 
     // Mint a token
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-    let repo = RepositoryScope::new(
-        RepositoryProvider::Generic,
-        "test",
-        "test",
-        Some("main"),
-    )
-    .unwrap();
-    let claims = TokenClaims::new(
-        "shardline",
-        "test",
-        TokenScope::Write,
-        repo,
-        u64::MAX,
-    )
-    .unwrap();
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
     let token = provider.mint_token(&claims).unwrap();
 
     let oid = "a".repeat(64);

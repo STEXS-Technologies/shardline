@@ -6,7 +6,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use sha2::{Digest, Sha256};
 use shardline_protocol::TokenScope;
 
 use crate::{
@@ -58,11 +57,8 @@ pub(crate) async fn bazel_put_ac(
     )?;
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let bytes = read_body_to_bytes(&mut body).await?;
-    // Verify the content hash matches the URL hash.
-    let observed = hex::encode(Sha256::digest(&bytes));
-    if observed != hash {
-        return Err(ServerError::ExpectedBodyHashMismatch);
-    }
+    // Action Cache keys identify actions, not the serialized action result.
+    // Unlike CAS, the action key is therefore not expected to hash the body.
     let _stored = state
         .backend
         .put_object_bytes_if_absent(&object_key, bytes)?;
@@ -190,7 +186,8 @@ pub(crate) async fn bazel_get(
         BazelCacheKind::Ac,
         &hash,
         auth.as_ref().map(scope_from_auth),
-    ) && state.backend.object_length(&ac_key).await.is_ok() {
+    ) && state.backend.object_length(&ac_key).await.is_ok()
+    {
         return direct_object_response(
             &state,
             &headers,
@@ -254,7 +251,8 @@ pub(crate) async fn bazel_head(
         BazelCacheKind::Ac,
         &hash,
         auth.as_ref().map(scope_from_auth),
-    ) && let Ok(total_length) = state.backend.object_length(&ac_key).await {
+    ) && let Ok(total_length) = state.backend.object_length(&ac_key).await
+    {
         return Ok((
             StatusCode::OK,
             [
@@ -295,7 +293,7 @@ mod tests {
         Router,
         body::Body,
         http::{Request, StatusCode},
-        routing::{get},
+        routing::get,
     };
     use sha2::{Digest, Sha256};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
@@ -304,13 +302,13 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        BazelCacheKind, ServerConfig, ServerFrontend, ServerRole,
-        app::AppState, bazel_cache_object_key,
+        BazelCacheKind, ServerConfig, ServerFrontend, ServerRole, app::AppState,
+        bazel_cache_object_key,
     };
 
     use super::{
-        bazel_get_ac, bazel_get_cas, bazel_get, bazel_head_ac, bazel_head_cas, bazel_head,
-        bazel_put_ac, bazel_put_cas, bazel_put,
+        bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas,
+        bazel_put, bazel_put_ac, bazel_put_cas,
     };
 
     #[allow(dead_code)]
@@ -431,7 +429,7 @@ mod tests {
     async fn ac_put_and_get_happy_path() {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state.clone());
-        let hash = test_content_hash(); // Use content-matching hash
+        let hash = "a".repeat(64); // An action digest is independent of the action result.
         let content = test_content();
 
         // PUT
@@ -493,7 +491,7 @@ mod tests {
     async fn ac_put_is_idempotent() {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state);
-        let hash = test_content_hash(); // Use content-matching hash
+        let hash = "a".repeat(64);
         let content = test_content();
 
         // PUT twice
@@ -525,27 +523,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ac_rejects_content_hash_mismatch() {
+    async fn ac_accepts_an_action_digest_that_does_not_match_the_result_body() {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state);
 
-        // Hash that does NOT match the content -> should fail with hash mismatch
-        let wrong_hash = "b".repeat(64);
+        // An Action Cache digest names an action rather than its result body.
+        let action_hash = "b".repeat(64);
         let content = test_content();
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/v1/bazel/cache/ac/{wrong_hash}"))
+                    .uri(format!("/v1/bazel/cache/ac/{action_hash}"))
                     .body(Body::from(content))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        // AC now verifies SHA-256 hash of content matches URL hash
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     // =========================================================================
@@ -749,8 +746,7 @@ mod tests {
         let (state, _tmp) = build_test_state().await;
         let app = bazel_router(state.clone());
         let content = b"ac-content".to_vec();
-        // AC now verifies SHA-256 hash, so use a content-matching hash
-        let hash = hex::encode(Sha256::digest(&content));
+        let hash = "c".repeat(64);
 
         // PUT to AC route
         let put_resp = app

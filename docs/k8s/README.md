@@ -171,3 +171,30 @@ kubectl patch cronjob shardline-gc -n shardline -p '{"spec":{"suspend":false}}'
 ```
 
 For the broader production operating model, see [Operations](../OPERATIONS.md).
+
+## Disposable `kind` Smoke Test
+
+The repository ships a CI-grade smoke test for the scaled deployment profile. It builds the
+current Docker image, creates a temporary `kind` cluster, starts Postgres, Redis, and MinIO
+inside the cluster, creates the S3 bucket and metadata schema, and deploys the production
+manifests through a small test overlay.
+
+Run it from the repository root when `docker`, `kind`, `kubectl`, `cargo`, and `python3` are
+available:
+
+```bash
+scripts/k8s/kind-smoke.sh
+```
+
+The test validates both role-specific readiness responses, provider-token issuance, an
+authenticated xorb upload through the transfer Service, shard registration through the API
+Service, a ranged transfer download, API statistics, metrics authentication, and that API and
+transfer routes remain separated. It uses one low-resource replica of each Shardline role and
+does not require an ingress controller; the script port-forwards each Service directly.
+
+The cluster name is unique by default and is deleted on success, failure, or interruption.
+The locally built smoke image and port-forward processes are also removed. On failure, the
+script preserves Kubernetes diagnostics in a temporary directory (or in
+`SHARDLINE_KIND_LOG_DIR` when set) before deleting the cluster. Set
+`SHARDLINE_KIND_CLUSTER_NAME` only when a predictable, still-disposable name is required; the
+script refuses to reuse an existing cluster.

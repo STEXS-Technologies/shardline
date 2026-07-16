@@ -1733,7 +1733,10 @@ mod tests {
 
     #[test]
     fn shard_metadata_limits_default_matches_const() {
-        assert_eq!(ShardMetadataLimits::default(), DEFAULT_SHARD_METADATA_LIMITS);
+        assert_eq!(
+            ShardMetadataLimits::default(),
+            DEFAULT_SHARD_METADATA_LIMITS
+        );
     }
 
     // ── AuthError Display ────────────────────────────────────────────────
@@ -1787,7 +1790,8 @@ mod tests {
 
     #[test]
     fn auth_error_from_token_codec_error_claims() {
-        let err: AuthError = TokenCodecError::Claims(shardline_protocol::TokenClaimsError::EmptyIssuer).into();
+        let err: AuthError =
+            TokenCodecError::Claims(shardline_protocol::TokenClaimsError::EmptyIssuer).into();
         assert!(matches!(err, AuthError::InvalidToken));
     }
 
@@ -1814,12 +1818,18 @@ mod tests {
 
     #[test]
     fn server_object_store_error_display_not_found() {
-        assert_eq!(ServerObjectStoreError::NotFound.to_string(), "content not found");
+        assert_eq!(
+            ServerObjectStoreError::NotFound.to_string(),
+            "content not found"
+        );
     }
 
     #[test]
     fn server_object_store_error_display_overflow() {
-        assert_eq!(ServerObjectStoreError::Overflow.to_string(), "arithmetic overflow");
+        assert_eq!(
+            ServerObjectStoreError::Overflow.to_string(),
+            "arithmetic overflow"
+        );
     }
 
     #[test]
@@ -2000,11 +2010,10 @@ mod tests {
         let store = ServerObjectStore::blackhole();
         let prefix = ObjectPrefix::parse("").unwrap();
         let mut count = 0u64;
-        let result: Result<(), ServerObjectStoreError> = store
-            .visit_prefix(&prefix, |_meta| {
-                count += 1;
-                Ok(())
-            });
+        let result: Result<(), ServerObjectStoreError> = store.visit_prefix(&prefix, |_meta| {
+            count += 1;
+            Ok(())
+        });
         assert!(result.is_ok());
         assert_eq!(count, 0);
     }
@@ -2014,9 +2023,7 @@ mod tests {
         use shardline_storage::ObjectPrefix;
         let store = ServerObjectStore::blackhole();
         let prefix = ObjectPrefix::parse("").unwrap();
-        let result = store
-            .list_flat_namespace_page(&prefix, None, 10)
-            .unwrap();
+        let result = store.list_flat_namespace_page(&prefix, None, 10).unwrap();
         assert!(result.is_empty());
     }
 
@@ -2043,12 +2050,18 @@ mod tests {
         // Minimum hex boundary
         let hash = "0000000000000000000000000000000000000000000000000000000000000000";
         let key = chunk_object_key(hash).unwrap();
-        assert_eq!(key.as_str(), "00/0000000000000000000000000000000000000000000000000000000000000000");
+        assert_eq!(
+            key.as_str(),
+            "00/0000000000000000000000000000000000000000000000000000000000000000"
+        );
 
         // Maximum hex boundary
         let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         let key = chunk_object_key(hash).unwrap();
-        assert_eq!(key.as_str(), "ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        assert_eq!(
+            key.as_str(),
+            "ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
     }
 
     #[test]
@@ -2067,7 +2080,9 @@ mod tests {
 
     #[test]
     fn chunk_hash_from_chunk_key_if_present_hash_does_not_start_with_prefix() {
-        let key = ObjectKey::parse("aa/bbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc").unwrap();
+        let key =
+            ObjectKey::parse("aa/bbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                .unwrap();
         let result = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
         assert_eq!(result, None);
     }
@@ -2312,10 +2327,22 @@ mod tests {
 
     #[test]
     fn server_object_store_error_display_all_variants() {
-        assert_eq!(ServerObjectStoreError::NotFound.to_string(), "content not found");
-        assert_eq!(ServerObjectStoreError::Overflow.to_string(), "arithmetic overflow");
-        assert_eq!(ServerObjectStoreError::InvalidContentHash.to_string(), "content hash must be 64 hexadecimal characters");
-        assert_eq!(ServerObjectStoreError::StoredObjectLengthMismatch.to_string(), "stored object length did not match indexed metadata");
+        assert_eq!(
+            ServerObjectStoreError::NotFound.to_string(),
+            "content not found"
+        );
+        assert_eq!(
+            ServerObjectStoreError::Overflow.to_string(),
+            "arithmetic overflow"
+        );
+        assert_eq!(
+            ServerObjectStoreError::InvalidContentHash.to_string(),
+            "content hash must be 64 hexadecimal characters"
+        );
+        assert_eq!(
+            ServerObjectStoreError::StoredObjectLengthMismatch.to_string(),
+            "stored object length did not match indexed metadata"
+        );
     }
 
     // ── InvalidLifecycleMetadataError Display all variants ───────────────
@@ -2367,7 +2394,10 @@ mod tests {
             maximum_bytes: 512,
         };
         let msg = err.to_string();
-        assert_eq!(msg, "stored file metadata exceeded the bounded parser ceiling");
+        assert_eq!(
+            msg,
+            "stored file metadata exceeded the bounded parser ceiling"
+        );
     }
 
     #[test]
@@ -2537,8 +2567,10 @@ mod tests {
 
     #[test]
     fn s3_operations_return_s3_error() {
-        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, S3ObjectStoreConfig};
         use shardline_protocol::ByteRange;
+        use shardline_storage::{
+            ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, S3ObjectStoreConfig,
+        };
         let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
         let store = ServerObjectStore::s3(config).unwrap();
         let key = ObjectKey::parse("aa/hash").unwrap();
@@ -2620,8 +2652,8 @@ mod tests {
         let config = S3ObjectStoreConfig::new("test-bucket".to_owned(), "us-east-1".to_owned());
         let store = ServerObjectStore::s3(config).unwrap();
         let prefix = ObjectPrefix::parse("aa/").unwrap();
-        let result: Result<(), ServerObjectStoreError> = store
-            .visit_prefix(&prefix, |_meta| Ok(()));
+        let result: Result<(), ServerObjectStoreError> =
+            store.visit_prefix(&prefix, |_meta| Ok(()));
         assert!(matches!(result, Err(ServerObjectStoreError::S3(_))));
     }
 
@@ -2652,7 +2684,9 @@ mod tests {
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+                .unwrap();
 
         // Not present yet
         assert!(matches!(store.contains(&key), Ok(false)));
@@ -2660,7 +2694,9 @@ mod tests {
         // Insert
         let body = b"present";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 7);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         // Now present
         assert!(matches!(store.contains(&key), Ok(true)));
@@ -2671,7 +2707,9 @@ mod tests {
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+                .unwrap();
 
         // None for missing
         assert!(matches!(store.metadata(&key), Ok(None)));
@@ -2679,7 +2717,9 @@ mod tests {
         // Insert
         let body = b"meta-test";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 9);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         // Some for existing
         let meta = store.metadata(&key).unwrap();
@@ -2689,19 +2729,33 @@ mod tests {
 
     #[test]
     fn local_list_prefix_returns_objects() {
-        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore};
+        use shardline_storage::{
+            ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore,
+        };
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key1 = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
-        let key2 = ObjectKey::parse("aa/2222111111111111111111111111111111111111111111111111111111111111").unwrap();
-        let key3 = ObjectKey::parse("bb/1111111111111111111111111111111111111111111111111111111111111111").unwrap();
+        let key1 =
+            ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+                .unwrap();
+        let key2 =
+            ObjectKey::parse("aa/2222111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
+        let key3 =
+            ObjectKey::parse("bb/1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
 
         let body = b"data";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
 
-        store.put_if_absent(&key1, ObjectBody::from_slice(body), &integrity).unwrap();
-        store.put_if_absent(&key2, ObjectBody::from_slice(body), &integrity).unwrap();
-        store.put_if_absent(&key3, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key1, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
+        store
+            .put_if_absent(&key2, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
+        store
+            .put_if_absent(&key3, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         let aa_prefix = ObjectPrefix::parse("aa/").unwrap();
         let results = store.list_prefix(&aa_prefix).unwrap();
@@ -2710,21 +2764,33 @@ mod tests {
 
     #[test]
     fn local_delete_if_present_deletes() {
-        use shardline_storage::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+        use shardline_storage::{
+            DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore,
+        };
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+                .unwrap();
 
         // NotFound for missing
-        assert!(matches!(store.delete_if_present(&key), Ok(DeleteOutcome::NotFound)));
+        assert!(matches!(
+            store.delete_if_present(&key),
+            Ok(DeleteOutcome::NotFound)
+        ));
 
         // Insert
         let body = b"delete-me";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 9);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         // Now delete
-        assert!(matches!(store.delete_if_present(&key), Ok(DeleteOutcome::Deleted)));
+        assert!(matches!(
+            store.delete_if_present(&key),
+            Ok(DeleteOutcome::Deleted)
+        ));
     }
 
     #[test]
@@ -2732,19 +2798,22 @@ mod tests {
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix};
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+                .unwrap();
 
         let body = b"visit";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 5);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         let prefix = ObjectPrefix::parse("aa/").unwrap();
         let mut count = 0u64;
-        let result: Result<(), ServerObjectStoreError> = store
-            .visit_prefix(&prefix, |_meta| {
-                count += 1;
-                Ok(())
-            });
+        let result: Result<(), ServerObjectStoreError> = store.visit_prefix(&prefix, |_meta| {
+            count += 1;
+            Ok(())
+        });
         assert!(result.is_ok());
         assert_eq!(count, 1);
     }
@@ -2754,11 +2823,15 @@ mod tests {
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix};
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+                .unwrap();
 
         let body = b"page";
         let integrity = ObjectIntegrity::new(chunk_hash(body), 4);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         let prefix = ObjectPrefix::parse("aa/").unwrap();
         let results = store.list_flat_namespace_page(&prefix, None, 10).unwrap();
@@ -2770,7 +2843,9 @@ mod tests {
         use shardline_storage::{ObjectIntegrity, ObjectKey, PutOutcome};
         let storage = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(storage.path().join("objects")).unwrap();
-        let key = ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff").unwrap();
+        let key =
+            ObjectKey::parse("aa/1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff")
+                .unwrap();
 
         let tmp = shardline_test_support::TempStorage::new();
         let file_path = tmp.path().join("test.bin");
@@ -2805,7 +2880,11 @@ mod tests {
         let large_body = vec![0xabu8; 16 * 1024 * 1024];
         let integrity = ObjectIntegrity::new(chunk_hash(&large_body), large_body.len() as u64);
         store
-            .put_if_absent(&key, shardline_storage::ObjectBody::from_slice(&large_body), &integrity)
+            .put_if_absent(
+                &key,
+                shardline_storage::ObjectBody::from_slice(&large_body),
+                &integrity,
+            )
             .unwrap();
 
         let p = path;

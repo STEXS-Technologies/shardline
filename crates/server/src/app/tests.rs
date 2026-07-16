@@ -1,11 +1,16 @@
-use std::{fmt::Write, num::NonZeroUsize};
+use std::{fmt::Write, num::NonZeroUsize, time::Duration};
 
 use axum::{
-    Router, body::Body, http::{HeaderMap, Request, StatusCode, header}, middleware, routing::get,
+    Router,
+    body::Body,
+    http::{HeaderMap, Request, StatusCode, header},
+    middleware,
+    routing::get,
 };
 use shardline_index::ProviderRepositoryState;
 use shardline_protocol::RepositoryProvider;
 use tempfile::TempDir;
+use tokio::{net::TcpListener, sync::oneshot, time::timeout};
 use tower::ServiceExt;
 
 use super::{
@@ -14,12 +19,9 @@ use super::{
     MAX_PROVIDER_WEBHOOK_BODY_BYTES, bounded_api_body_limit, extract_provider_subject,
     latest_lifecycle_signal_at, parse_batch_reconstruction_query,
     reconciled_provider_repository_state, router, security_headers_middleware,
-    validate_provider_name_path,
+    serve_with_listener_until, validate_provider_name_path,
 };
-use crate::{
-    ServerConfig, ServerError, ServerFrontend, ServerRole,
-    config::AuthProviderKind,
-};
+use crate::{ServerConfig, ServerError, ServerFrontend, ServerRole, config::AuthProviderKind};
 
 #[test]
 fn provider_subject_extraction_rejects_oversized_query_subject() {
@@ -169,12 +171,7 @@ async fn security_headers_middleware_adds_xss_protection_headers() {
         .layer(middleware::from_fn(security_headers_middleware));
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/test")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -184,10 +181,7 @@ async fn security_headers_middleware_adds_xss_protection_headers() {
         headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
         "nosniff"
     );
-    assert_eq!(
-        headers.get(header::X_FRAME_OPTIONS).unwrap(),
-        "DENY"
-    );
+    assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
     assert_eq!(
         headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
         "max-age=31536000"
@@ -233,10 +227,7 @@ async fn security_headers_middleware_does_not_overwrite_existing_headers() {
 
 // ── Router construction ──────────────────────────────────────────────────
 
-async fn build_test_router(
-    frontends: &[ServerFrontend],
-    role: ServerRole,
-) -> (Router, TempDir) {
+async fn build_test_router(frontends: &[ServerFrontend], role: ServerRole) -> (Router, TempDir) {
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();
     let config = ServerConfig::new(
@@ -262,21 +253,36 @@ async fn router_builds_with_xet_frontend() {
     // healthz and readyz are always registered
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert!(resp.status() == StatusCode::OK || resp.status() == StatusCode::NOT_FOUND);
@@ -336,10 +342,7 @@ async fn router_xet_transfer_routes_are_registered() {
         .await
         .unwrap();
     // Route is registered — returns 404 (hash not found) or 401 (needs auth)
-    assert!(
-        resp.status() == StatusCode::NOT_FOUND
-            || resp.status() == StatusCode::UNAUTHORIZED
-    );
+    assert!(resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -390,12 +393,7 @@ async fn router_oci_routes_are_registered() {
     // OCI v2 root (requires auth → returns 401 when no auth configured)
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v2/")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/v2/").body(Body::empty()).unwrap())
         .await
         .unwrap();
     // Route is registered — auth returns 401 Unauthorized challenge
@@ -427,12 +425,7 @@ async fn router_oci_api_role_has_v2_token_and_root() {
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v2/")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/v2/").body(Body::empty()).unwrap())
         .await
         .unwrap();
     // Route is registered but requires auth → 401
@@ -518,10 +511,7 @@ async fn router_responses_include_security_headers() {
         headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
         "nosniff"
     );
-    assert_eq!(
-        headers.get(header::X_FRAME_OPTIONS).unwrap(),
-        "DENY"
-    );
+    assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
 }
 
 // ── bounded_api_body_limit edge cases ────────────────────────────────────
@@ -561,7 +551,9 @@ async fn auth_provider_local_without_signing_key_returns_none() {
     assert!(
         matches!(
             app.err().unwrap(),
-            ServerError::Config(crate::config::ServerConfigError::MissingTokenSigningKeyForServedRoutes)
+            ServerError::Config(
+                crate::config::ServerConfigError::MissingTokenSigningKeyForServedRoutes
+            )
         ),
         "should fail with MissingTokenSigningKeyForServedRoutes"
     );
@@ -708,4 +700,63 @@ async fn serve_accepts_valid_config_and_fails_on_bind_conflict() {
         "router should build successfully, got: {:?}",
         app.err()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_timeout_starts_after_the_shutdown_signal() {
+    let tmp = TempDir::new().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config = ServerConfig::new(
+        addr,
+        format!("http://{addr}"),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_token_signing_key(vec![0_u8; 32])
+    .unwrap()
+    .with_shutdown_timeout(Duration::from_millis(40));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(serve_with_listener_until(config, listener, async move {
+        let _ignored = shutdown_rx.await;
+    }));
+    let client = reqwest::Client::new();
+
+    let mut became_healthy = false;
+    for _attempt in 0..20 {
+        if let Ok(response) = client.get(format!("http://{addr}/healthz")).send().await
+            && response.status() == StatusCode::OK
+        {
+            became_healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        became_healthy,
+        "server should become healthy before shutdown"
+    );
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let response = client.get(format!("http://{addr}/healthz")).send().await;
+    assert!(response.is_ok(), "server must not time out before shutdown");
+    let Ok(response) = response else {
+        return;
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let _ignored = shutdown_tx.send(());
+    let result = timeout(Duration::from_secs(1), server).await;
+    assert!(
+        result.is_ok(),
+        "server should drain after the shutdown signal"
+    );
+    let Ok(result) = result else {
+        return;
+    };
+    assert!(result.is_ok(), "server task should not panic");
+    let Ok(result) = result else {
+        return;
+    };
+    assert!(result.is_ok(), "server should exit cleanly: {result:?}");
 }

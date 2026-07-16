@@ -152,9 +152,7 @@ fn record_identity_key(record: &FileRecord) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use shardline_index::{
-        FileChunkRecord, MemoryRecordStore, RecordMutation, RecordTraversal,
-    };
+    use shardline_index::{FileChunkRecord, MemoryRecordStore, RecordMutation, RecordTraversal};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use shardline_vcs::{ProviderKind, RepositoryRef};
 
@@ -170,13 +168,8 @@ mod tests {
             total_bytes: 8,
             chunk_size: 4,
             repository_scope: Some(
-                RepositoryScope::new(
-                    RepositoryProvider::GitHub,
-                    "owner",
-                    "repo",
-                    Some("main"),
-                )
-                .unwrap(),
+                RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some("main"))
+                    .unwrap(),
             ),
             chunks: vec![FileChunkRecord {
                 hash: "b".repeat(64),
@@ -193,32 +186,28 @@ mod tests {
     #[test]
     fn record_belongs_to_repository_matching() {
         let record = test_record();
-        let repository =
-            RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
         assert!(record_belongs_to_repository(&record, &repository));
     }
 
     #[test]
     fn record_belongs_to_repository_mismatched_owner() {
         let record = test_record();
-        let repository =
-            RepositoryRef::new(ProviderKind::GitHub, "other-owner", "repo").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "other-owner", "repo").unwrap();
         assert!(!record_belongs_to_repository(&record, &repository));
     }
 
     #[test]
     fn record_belongs_to_repository_mismatched_name() {
         let record = test_record();
-        let repository =
-            RepositoryRef::new(ProviderKind::GitHub, "owner", "other-repo").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "other-repo").unwrap();
         assert!(!record_belongs_to_repository(&record, &repository));
     }
 
     #[test]
     fn record_belongs_to_repository_mismatched_provider() {
         let record = test_record();
-        let repository =
-            RepositoryRef::new(ProviderKind::GitLab, "owner", "repo").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitLab, "owner", "repo").unwrap();
         assert!(!record_belongs_to_repository(&record, &repository));
     }
 
@@ -243,8 +232,7 @@ mod tests {
             repository_scope: None,
             ..test_record()
         };
-        let repository =
-            RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
         assert!(!record_belongs_to_repository(&record, &repository));
     }
 
@@ -294,13 +282,9 @@ mod tests {
 
     #[test]
     fn repository_record_scope_maps_correctly() {
-        let repository =
-            RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
         let scope = repository_record_scope(&repository);
-        assert_eq!(
-            scope.provider(),
-            RepositoryProvider::GitHub
-        );
+        assert_eq!(scope.provider(), RepositoryProvider::GitHub);
     }
 
     #[test]
@@ -361,18 +345,15 @@ mod tests {
     fn record_identity_key_without_revision_uses_latest() {
         let record = super::FileRecord {
             repository_scope: Some(
-                RepositoryScope::new(
-                    RepositoryProvider::GitHub,
-                    "owner",
-                    "repo",
-                    None,
-                )
-                .unwrap(),
+                RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap(),
             ),
             ..test_record()
         };
         let key = record_identity_key(&record);
-        assert!(key.contains("latest"), "expected 'latest' in identity key, got {key:?}");
+        assert!(
+            key.contains("latest"),
+            "expected 'latest' in identity key, got {key:?}"
+        );
         assert!(!key.contains("main"));
     }
 
@@ -468,8 +449,7 @@ mod tests {
             ),
             ..test_record()
         };
-        let new_repo =
-            RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
+        let new_repo = RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
         let renamed = renamed_file_record(&record, &new_repo).unwrap();
         let scope = renamed.repository_scope.unwrap();
         assert_eq!(scope.revision(), Some("feature-x"));

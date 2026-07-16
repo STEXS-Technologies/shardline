@@ -589,10 +589,7 @@ mod tests {
             "delivery-1".to_owned(),
             10,
         );
-        assert_eq!(
-            delivery,
-            Err(WebhookDeliveryError::EmptyRepositoryOwner)
-        );
+        assert_eq!(delivery, Err(WebhookDeliveryError::EmptyRepositoryOwner));
     }
 
     #[test]
@@ -662,12 +659,16 @@ mod tests {
             Some("refs/heads/main".to_owned()),
         );
         let reconciled = state.with_reconciliation(None, None, None);
-        assert!(reconciled
-            .last_cache_invalidated_at_unix_seconds()
-            .is_none());
-        assert!(reconciled
-            .last_authorization_rechecked_at_unix_seconds()
-            .is_none());
+        assert!(
+            reconciled
+                .last_cache_invalidated_at_unix_seconds()
+                .is_none()
+        );
+        assert!(
+            reconciled
+                .last_authorization_rechecked_at_unix_seconds()
+                .is_none()
+        );
         assert!(reconciled.last_drift_checked_at_unix_seconds().is_none());
     }
 
@@ -689,13 +690,7 @@ mod tests {
     #[test]
     fn retention_hold_without_release_is_active_indefinitely() {
         let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
-        let hold = RetentionHold::new(
-            key,
-            "infinite hold".to_owned(),
-            10,
-            None,
-        )
-        .unwrap();
+        let hold = RetentionHold::new(key, "infinite hold".to_owned(), 10, None).unwrap();
         assert!(hold.is_active_at(0));
         assert!(hold.is_active_at(u64::MAX));
     }
@@ -703,28 +698,22 @@ mod tests {
     #[test]
     fn retention_hold_release_at_exact_boundary_is_inactive() {
         let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
-        let hold = RetentionHold::new(
-            key,
-            "exact release".to_owned(),
-            10,
-            Some(20),
-        )
-        .unwrap();
-        assert!(!hold.is_active_at(20), "hold with release_at=20 should be inactive at t=20");
-        assert!(!hold.is_active_at(21), "hold with release_at=20 should be inactive at t=21");
+        let hold = RetentionHold::new(key, "exact release".to_owned(), 10, Some(20)).unwrap();
+        assert!(
+            !hold.is_active_at(20),
+            "hold with release_at=20 should be inactive at t=20"
+        );
+        assert!(
+            !hold.is_active_at(21),
+            "hold with release_at=20 should be inactive at t=21"
+        );
     }
 
     #[test]
     fn retention_hold_reason_preserves_non_whitespace_strings() {
         let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
         let reason = "  spaced out  ";
-        let hold = RetentionHold::new(
-            key,
-            reason.to_owned(),
-            10,
-            None,
-        )
-        .unwrap();
+        let hold = RetentionHold::new(key, reason.to_owned(), 10, None).unwrap();
         assert_eq!(hold.reason(), "  spaced out  ");
     }
 
@@ -757,8 +746,14 @@ mod tests {
             Some("refs/heads/main".to_owned()),
         );
         let reconciled = state.with_reconciliation(Some(30), Some(40), Some(50));
-        assert_eq!(reconciled.last_cache_invalidated_at_unix_seconds(), Some(30));
-        assert_eq!(reconciled.last_authorization_rechecked_at_unix_seconds(), Some(40));
+        assert_eq!(
+            reconciled.last_cache_invalidated_at_unix_seconds(),
+            Some(30)
+        );
+        assert_eq!(
+            reconciled.last_authorization_rechecked_at_unix_seconds(),
+            Some(40)
+        );
         assert_eq!(reconciled.last_drift_checked_at_unix_seconds(), Some(50));
     }
 
@@ -774,7 +769,11 @@ mod tests {
         );
         let reconciled = state.with_reconciliation(Some(1), None, Some(3));
         assert_eq!(reconciled.last_cache_invalidated_at_unix_seconds(), Some(1));
-        assert!(reconciled.last_authorization_rechecked_at_unix_seconds().is_none());
+        assert!(
+            reconciled
+                .last_authorization_rechecked_at_unix_seconds()
+                .is_none()
+        );
         assert_eq!(reconciled.last_drift_checked_at_unix_seconds(), Some(3));
     }
 }

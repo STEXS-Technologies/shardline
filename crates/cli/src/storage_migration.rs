@@ -800,9 +800,7 @@ mod tests {
 
     #[test]
     fn s3_credential_size_within_limit_accepts_exact_maximum() {
-        assert!(
-            super::ensure_s3_credential_size_within_limit("test".to_owned(), 4096).is_ok()
-        );
+        assert!(super::ensure_s3_credential_size_within_limit("test".to_owned(), 4096).is_ok());
     }
 
     // ── StorageMigrationRuntimeError Display ───────────────────────────────
@@ -820,8 +818,9 @@ mod tests {
 
     #[test]
     fn runtime_error_missing_s3_env_display() {
-        let err =
-            StorageMigrationRuntimeError::MissingS3Env("SHARDLINE_MIGRATE_FROM_S3_BUCKET".to_owned());
+        let err = StorageMigrationRuntimeError::MissingS3Env(
+            "SHARDLINE_MIGRATE_FROM_S3_BUCKET".to_owned(),
+        );
         let msg = format!("{err}");
         assert!(msg.contains("SHARDLINE_MIGRATE_FROM_S3_BUCKET"));
     }
@@ -955,21 +954,13 @@ mod tests {
     #[test]
     fn endpoint_with_s3_adapter_rejects_missing_env() {
         // S3 endpoint without env vars should error
-        let result = super::endpoint(
-            ObjectStorageAdapter::S3,
-            None,
-            "source",
-        );
+        let result = super::endpoint(ObjectStorageAdapter::S3, None, "source");
         assert!(result.is_err());
     }
 
     #[test]
     fn endpoint_with_local_adapter_rejects_missing_root_when_source() {
-        let result = super::endpoint(
-            ObjectStorageAdapter::Local,
-            None,
-            "source",
-        );
+        let result = super::endpoint(ObjectStorageAdapter::Local, None, "source");
         // If effective_root works, returns Ok; otherwise errors
         let _ = result;
     }
@@ -997,10 +988,7 @@ mod tests {
 
         let result = super::ensure_s3_credential_path_is_regular(&link);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().kind(),
-            std::io::ErrorKind::InvalidInput
-        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]

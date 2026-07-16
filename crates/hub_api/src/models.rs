@@ -861,7 +861,9 @@ mod tests {
 
     #[test]
     fn repo_response_security_status_default_is_empty_object() {
-        let resp: RepoResponse = serde_json::from_str(r#"{"id":"r","type":"model","private":false,"url":"/models/r"}"#).unwrap();
+        let resp: RepoResponse =
+            serde_json::from_str(r#"{"id":"r","type":"model","private":false,"url":"/models/r"}"#)
+                .unwrap();
         assert_eq!(resp.security_status, serde_json::json!({}));
     }
 

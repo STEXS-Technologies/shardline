@@ -233,7 +233,14 @@ mod tests {
         };
         let result = super::scope_namespace(Some(&scope));
         // Returns a SHA-256 hex string of the scoped provider+owner+name
-        assert_eq!(result.len(), 64, "scope namespace should be a 64-char hex hash");
-        assert!(result.chars().all(|c| c.is_ascii_hexdigit()), "scope namespace should be hex: {result}");
+        assert_eq!(
+            result.len(),
+            64,
+            "scope namespace should be a 64-char hex hash"
+        );
+        assert!(
+            result.chars().all(|c| c.is_ascii_hexdigit()),
+            "scope namespace should be hex: {result}"
+        );
     }
 }

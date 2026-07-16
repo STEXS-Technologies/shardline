@@ -101,11 +101,11 @@ pub fn resolve_platform_symlinks(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
-    use std::path::Path;
     #[cfg(unix)]
     use std::fs::create_dir_all;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    use std::path::Path;
 
     use super::{
         DirectoryPathError, ensure_directory_path_components_are_not_symlinked,

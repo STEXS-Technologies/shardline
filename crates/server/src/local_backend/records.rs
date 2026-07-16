@@ -222,7 +222,10 @@ mod tests {
     async fn read_record_rejects_invalid_content_hash() {
         let (_tmp, store) = make_temp_record_store();
         let result = read_record(&store, "test.txt", Some("badhash"), None).await;
-        assert!(matches!(result, Err(crate::ServerError::InvalidContentHash)));
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::InvalidContentHash)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -292,7 +295,10 @@ mod tests {
     async fn repository_references_xorb_false_for_wrong_hash() {
         let (_tmp, store) = make_temp_record_store();
         let scope = make_scope();
-        let record = make_record(&scope, "1111aaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff0000");
+        let record = make_record(
+            &scope,
+            "1111aaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff0000",
+        );
         shardline_index::RecordMutation::write_latest_record(&store, &record)
             .await
             .unwrap();

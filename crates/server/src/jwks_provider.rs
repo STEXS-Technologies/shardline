@@ -229,33 +229,32 @@ impl JwksProvider {
         payload_b64: &str,
         signature_b64: &str,
     ) -> Result<TokenClaims, AuthError> {
-        let keys = tokio::runtime::Handle::try_current()
-            .map_or_else(
-                |_| {
-                    // Fallback: read from cache synchronously (background refresh
-                    // task keeps keys fresh).  If the cache is empty, fail.
-                    // Retry try_read a few times to tolerate transient write-lock
-                    // contention during key rotation.
-                    const MAX_RETRIES: usize = 5;
-                    const RETRY_DELAY_MS: u64 = 10;
-                    let mut attempt: usize = 0;
-                    loop {
-                        if let Ok(guard) = self.cached_keys.try_read() {
-                            break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
-                                AuthError::ProviderError("JWKS keys not available".to_owned())
-                            });
-                        }
-                        attempt = attempt.wrapping_add(1);
-                        if attempt >= MAX_RETRIES {
-                            break Err(AuthError::ProviderError(
-                                "JWKS cache lock contended".to_owned(),
-                            ));
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+        let keys = tokio::runtime::Handle::try_current().map_or_else(
+            |_| {
+                // Fallback: read from cache synchronously (background refresh
+                // task keeps keys fresh).  If the cache is empty, fail.
+                // Retry try_read a few times to tolerate transient write-lock
+                // contention during key rotation.
+                const MAX_RETRIES: usize = 5;
+                const RETRY_DELAY_MS: u64 = 10;
+                let mut attempt: usize = 0;
+                loop {
+                    if let Ok(guard) = self.cached_keys.try_read() {
+                        break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
+                            AuthError::ProviderError("JWKS keys not available".to_owned())
+                        });
                     }
-                },
-                |handle| handle.block_on(self.get_or_refresh_keys()),
-            )?;
+                    attempt = attempt.wrapping_add(1);
+                    if attempt >= MAX_RETRIES {
+                        break Err(AuthError::ProviderError(
+                            "JWKS cache lock contended".to_owned(),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                }
+            },
+            |handle| handle.block_on(self.get_or_refresh_keys()),
+        )?;
 
         let header_json = base64_decode_url(header_b64)
             .map_err(|e| AuthError::ProviderError(format!("invalid JWT header: {e}")))?;
@@ -574,7 +573,10 @@ mod tests {
     fn parse_cache_max_age_valid() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("cache-control", "max-age=300".parse().unwrap());
-        assert_eq!(parse_cache_max_age(&headers), Some(Duration::from_secs(300)));
+        assert_eq!(
+            parse_cache_max_age(&headers),
+            Some(Duration::from_secs(300))
+        );
     }
 
     #[test]
@@ -615,9 +617,14 @@ mod tests {
     #[test]
     fn parse_cache_max_age_multiple_directives() {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers
-            .insert("cache-control", "public, max-age=300, must-revalidate".parse().unwrap());
-        assert_eq!(parse_cache_max_age(&headers), Some(Duration::from_secs(300)));
+        headers.insert(
+            "cache-control",
+            "public, max-age=300, must-revalidate".parse().unwrap(),
+        );
+        assert_eq!(
+            parse_cache_max_age(&headers),
+            Some(Duration::from_secs(300))
+        );
     }
 
     #[test]
@@ -876,11 +883,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[tokio::test]
     async fn new_with_unreachable_url_returns_error() {
-        let result = JwksProvider::new(
-            "http://127.0.0.1:1/nonexistent-jwks",
-            "https://example.com",
-        )
-        .await;
+        let result =
+            JwksProvider::new("http://127.0.0.1:1/nonexistent-jwks", "https://example.com").await;
         assert!(result.is_err(), "expected Err for unreachable URL");
         if let Err(err) = result {
             assert!(
@@ -892,11 +896,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[tokio::test]
     async fn new_with_unreachable_url_error_message_non_empty() {
-        let result = JwksProvider::new(
-            "http://127.0.0.1:1/nonexistent-jwks",
-            "https://example.com",
-        )
-        .await;
+        let result =
+            JwksProvider::new("http://127.0.0.1:1/nonexistent-jwks", "https://example.com").await;
         assert!(result.is_err());
         if let Err(err) = result {
             let msg = format!("{}", err);
@@ -1013,7 +1014,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             etag: None,
             refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
         }));
-        let result = provider.verify_token("eyJhbGciOiAiTUFDU0hBMjU2IiwgImtpZCI6ICJ0ZXN0In0.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiTUFDU0hBMjU2IiwgImtpZCI6ICJ0ZXN0In0.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -1033,7 +1035,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             etag: None,
             refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
         }));
-        let result = provider.verify_token("eyJhbGciOiAiRWREU0EiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiRWREU0EiLCAia2lkIjogInRlc3QifQ.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -1055,7 +1058,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             etag: None,
             refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
         }));
-        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInVua25vd24ifQ.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInVua25vd24ifQ.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -1083,7 +1087,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
         }));
         // Header: {"alg":"RS256","kid":"test"}
-        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -1098,7 +1103,8 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             etag: None,
             refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
         }));
-        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -1114,9 +1120,14 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let provider = make_provider(None);
         let repo = RepositoryScope::new(RepositoryProvider::Generic, "owner", "repo", Some("main"))
             .expect("valid repo scope");
-        let claims =
-            TokenClaims::new("https://issuer.example.com", "user", TokenScope::Read, repo, 9999999999)
-                .expect("valid claims");
+        let claims = TokenClaims::new(
+            "https://issuer.example.com",
+            "user",
+            TokenScope::Read,
+            repo,
+            9999999999,
+        )
+        .expect("valid claims");
         let result = provider.mint_token(&claims);
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
@@ -1478,7 +1489,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_valid_rs256_jwt_succeeds() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         // Build claims that pass all validation checks.
@@ -1487,10 +1498,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             "iss",
             serde_json::Value::String("https://example.com".to_owned()),
         );
-        claims.insert(
-            "sub",
-            serde_json::Value::String("test-user".to_owned()),
-        );
+        claims.insert("sub", serde_json::Value::String("test-user".to_owned()));
         // exp in the far future
         claims.insert("exp", serde_json::json!(9999999999u64));
         // iat in the past
@@ -1520,7 +1528,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_valid_rs256_jwt_scope_write() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1553,7 +1561,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_expired_jwt_fails() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1583,7 +1591,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_future_iat_fails() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1660,10 +1668,9 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .mount(&mock_server)
             .await;
 
-        let provider =
-            JwksProvider::new(&url, "https://issuer.example.com")
-                .await
-                .expect("should succeed");
+        let provider = JwksProvider::new(&url, "https://issuer.example.com")
+            .await
+            .expect("should succeed");
 
         let guard = provider.cached_keys.read().await;
         let cached = guard.as_ref().expect("cache should be populated");
@@ -1723,11 +1730,11 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // The mock server should have received at least one request from the loop
-        let requests = mock_server
-            .received_requests()
-            .await
-            .unwrap_or_default();
-        assert!(!requests.is_empty(), "background refresh should make HTTP requests");
+        let requests = mock_server.received_requests().await.unwrap_or_default();
+        assert!(
+            !requests.is_empty(),
+            "background refresh should make HTTP requests"
+        );
     }
 
     // ── E2E token verification with mock JWKS provider ────────────────────
@@ -1767,7 +1774,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let provider = make_provider(Some(jwks));
 
         // Sign a valid JWT with the matching RSA key
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1851,12 +1858,15 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let result = provider.refresh_keys_if_changed().await;
         assert!(result.is_err(), "expected Err for server error status");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("500"), "error should mention status code: {err}");
+        assert!(
+            err.contains("500"),
+            "error should mention status code: {err}"
+        );
     }
 
     #[test]
     fn verify_token_with_future_nbf_fails() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1887,7 +1897,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_missing_exp_fails() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();

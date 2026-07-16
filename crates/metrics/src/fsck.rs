@@ -16,8 +16,7 @@ impl FsckMetrics {
             HistogramOpts::new("shardline_fsck_duration_seconds", "Fsck duration")
                 .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]),
         );
-        let errors_found =
-            must_counter("shardline_fsck_errors_found_total", "Fsck errors found");
+        let errors_found = must_counter("shardline_fsck_errors_found_total", "Fsck errors found");
 
         registry.register(Box::new(runs.clone())).ok();
         registry.register(Box::new(duration.clone())).ok();

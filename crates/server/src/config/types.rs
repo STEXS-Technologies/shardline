@@ -1462,10 +1462,7 @@ mod config_types_tests {
             NonZeroUsize::new(4096).unwrap(),
         )
         .with_object_storage(ObjectStorageAdapter::S3, None);
-        assert_eq!(
-            config.object_storage_adapter(),
-            ObjectStorageAdapter::S3
-        );
+        assert_eq!(config.object_storage_adapter(), ObjectStorageAdapter::S3);
     }
 
     #[test]
@@ -1932,10 +1929,7 @@ mod config_types_tests {
     #[test]
     fn server_config_validate_runtime_requirements_rejects_passthrough_on_non_loopback() {
         let config = ServerConfig::new(
-            SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
-                8080,
-            ),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080),
             "http://localhost:8080".to_owned(),
             PathBuf::from("/tmp/test"),
             NonZeroUsize::new(4096).unwrap(),
@@ -1946,9 +1940,7 @@ mod config_types_tests {
         let result = config.validate_runtime_requirements();
         assert!(matches!(
             result,
-            Err(ServerConfigError::PassthroughProviderRequiresLoopbackBind {
-                ..
-            })
+            Err(ServerConfigError::PassthroughProviderRequiresLoopbackBind { .. })
         ));
     }
 
@@ -2052,7 +2044,11 @@ mod config_types_tests {
         ]);
         assert_eq!(
             result,
-            vec![ServerFrontend::Hub, ServerFrontend::Oci, ServerFrontend::Xet]
+            vec![
+                ServerFrontend::Hub,
+                ServerFrontend::Oci,
+                ServerFrontend::Xet
+            ]
         );
     }
 
@@ -2097,8 +2093,7 @@ mod config_types_tests {
 
     #[test]
     fn server_config_error_display_bind_address() {
-        let err =
-            ServerConfigError::BindAddress("127.0.0.1".parse::<SocketAddr>().unwrap_err());
+        let err = ServerConfigError::BindAddress("127.0.0.1".parse::<SocketAddr>().unwrap_err());
         let display = err.to_string();
         assert_eq!(display, "invalid bind address");
     }
@@ -2154,12 +2149,9 @@ mod config_types_tests {
     #[test]
     fn server_config_error_display_passthrough_provider_requires_loopback_bind() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-        let err = ServerConfigError::PassthroughProviderRequiresLoopbackBind {
-            bind_addr: addr,
-        };
+        let err = ServerConfigError::PassthroughProviderRequiresLoopbackBind { bind_addr: addr };
         let display = err.to_string();
-        assert!(display
-            .contains("passthrough auth provider requires a loopback bind address"));
+        assert!(display.contains("passthrough auth provider requires a loopback bind address"));
         assert!(display.contains("10.0.0.1"));
     }
 
@@ -2192,19 +2184,13 @@ mod config_types_tests {
     #[test]
     fn server_config_error_display_empty_provider_api_key() {
         let err = ServerConfigError::EmptyProviderApiKey;
-        assert_eq!(
-            err.to_string(),
-            "provider bootstrap key must not be empty"
-        );
+        assert_eq!(err.to_string(), "provider bootstrap key must not be empty");
     }
 
     #[test]
     fn server_config_error_display_empty_provider_token_issuer() {
         let err = ServerConfigError::EmptyProviderTokenIssuer;
-        assert_eq!(
-            err.to_string(),
-            "provider token issuer must not be empty"
-        );
+        assert_eq!(err.to_string(), "provider token issuer must not be empty");
     }
 
     #[test]
@@ -2311,9 +2297,8 @@ mod config_types_tests {
 
     #[test]
     fn server_config_error_display_max_request_body_bytes() {
-        let err = ServerConfigError::MaxRequestBodyBytes(
-            "not-a-number".parse::<usize>().unwrap_err(),
-        );
+        let err =
+            ServerConfigError::MaxRequestBodyBytes("not-a-number".parse::<usize>().unwrap_err());
         assert_eq!(err.to_string(), "invalid max request body size");
     }
 
@@ -2328,9 +2313,7 @@ mod config_types_tests {
 
     #[test]
     fn server_config_error_display_max_shard_files() {
-        let err = ServerConfigError::MaxShardFiles(
-            "not-a-number".parse::<usize>().unwrap_err(),
-        );
+        let err = ServerConfigError::MaxShardFiles("not-a-number".parse::<usize>().unwrap_err());
         assert_eq!(err.to_string(), "invalid max shard file section count");
     }
 
@@ -2345,9 +2328,7 @@ mod config_types_tests {
 
     #[test]
     fn server_config_error_display_max_shard_xorbs() {
-        let err = ServerConfigError::MaxShardXorbs(
-            "not-a-number".parse::<usize>().unwrap_err(),
-        );
+        let err = ServerConfigError::MaxShardXorbs("not-a-number".parse::<usize>().unwrap_err());
         assert_eq!(err.to_string(), "invalid max shard xorb section count");
     }
 
@@ -2382,13 +2363,9 @@ mod config_types_tests {
 
     #[test]
     fn server_config_error_display_max_shard_xorb_chunks() {
-        let err = ServerConfigError::MaxShardXorbChunks(
-            "not-a-number".parse::<usize>().unwrap_err(),
-        );
-        assert_eq!(
-            err.to_string(),
-            "invalid max shard xorb chunk record count"
-        );
+        let err =
+            ServerConfigError::MaxShardXorbChunks("not-a-number".parse::<usize>().unwrap_err());
+        assert_eq!(err.to_string(), "invalid max shard xorb chunk record count");
     }
 
     #[test]
@@ -2437,17 +2414,13 @@ mod config_types_tests {
     #[test]
     fn server_config_error_display_invalid_reconstruction_cache_adapter() {
         let err = ServerConfigError::InvalidReconstructionCacheAdapter;
-        assert_eq!(
-            err.to_string(),
-            "invalid reconstruction cache adapter"
-        );
+        assert_eq!(err.to_string(), "invalid reconstruction cache adapter");
     }
 
     #[test]
     fn server_config_error_display_reconstruction_cache_ttl() {
-        let err = ServerConfigError::ReconstructionCacheTtl(
-            "not-a-number".parse::<u64>().unwrap_err(),
-        );
+        let err =
+            ServerConfigError::ReconstructionCacheTtl("not-a-number".parse::<u64>().unwrap_err());
         assert_eq!(err.to_string(), "invalid reconstruction cache ttl");
     }
 
@@ -2482,9 +2455,8 @@ mod config_types_tests {
 
     #[test]
     fn server_config_error_display_oci_upload_session_ttl() {
-        let err = ServerConfigError::OciUploadSessionTtl(
-            "not-a-number".parse::<u64>().unwrap_err(),
-        );
+        let err =
+            ServerConfigError::OciUploadSessionTtl("not-a-number".parse::<u64>().unwrap_err());
         assert_eq!(err.to_string(), "invalid oci upload session ttl");
     }
 
@@ -2502,10 +2474,7 @@ mod config_types_tests {
         let err = ServerConfigError::OciUploadMaxActiveSessions(
             "not-a-number".parse::<usize>().unwrap_err(),
         );
-        assert_eq!(
-            err.to_string(),
-            "invalid oci upload max active sessions"
-        );
+        assert_eq!(err.to_string(), "invalid oci upload max active sessions");
     }
 
     #[test]
@@ -2519,9 +2488,8 @@ mod config_types_tests {
 
     #[test]
     fn server_config_error_display_oci_registry_token_ttl() {
-        let err = ServerConfigError::OciRegistryTokenTtl(
-            "not-a-number".parse::<u64>().unwrap_err(),
-        );
+        let err =
+            ServerConfigError::OciRegistryTokenTtl("not-a-number".parse::<u64>().unwrap_err());
         assert_eq!(err.to_string(), "invalid oci registry token ttl");
     }
 
@@ -2575,10 +2543,7 @@ mod config_types_tests {
     #[test]
     fn server_config_error_display_empty_index_postgres_url() {
         let err = ServerConfigError::EmptyIndexPostgresUrl;
-        assert_eq!(
-            err.to_string(),
-            "postgres metadata url must not be empty"
-        );
+        assert_eq!(err.to_string(), "postgres metadata url must not be empty");
     }
 
     #[test]
@@ -2874,7 +2839,9 @@ mod config_types_tests {
         let called_clone = called.clone();
         slot.push(super::SecretFileReadHookRegistration {
             path: path.clone(),
-            hook: Box::new(move || { called_clone.store(true, std::sync::atomic::Ordering::SeqCst); }),
+            hook: Box::new(move || {
+                called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
         });
         let hook = take_secret_file_read_hook_for_path(&mut slot, &path);
         assert!(hook.is_some());

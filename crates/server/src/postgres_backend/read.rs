@@ -619,16 +619,21 @@ mod tests {
     fn map_record_store_error_sqlx() {
         let error = PostgresMetadataStoreError::Sqlx(Box::new(sqlx::Error::PoolClosed));
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn map_record_store_error_json() {
-        let error = PostgresMetadataStoreError::Json(
-            serde_json::from_str::<()>("invalid").unwrap_err(),
-        );
+        let error =
+            PostgresMetadataStoreError::Json(serde_json::from_str::<()>("invalid").unwrap_err());
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
@@ -637,25 +642,30 @@ mod tests {
             shardline_protocol::HashParseError::InvalidLength,
         );
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn map_record_store_error_object_key() {
-        let error = PostgresMetadataStoreError::ObjectKey(
-            shardline_storage::ObjectKeyError::Empty,
-        );
+        let error = PostgresMetadataStoreError::ObjectKey(shardline_storage::ObjectKeyError::Empty);
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn map_record_store_error_range() {
-        let error = PostgresMetadataStoreError::Range(
-            shardline_protocol::RangeError::Inverted,
-        );
+        let error = PostgresMetadataStoreError::Range(shardline_protocol::RangeError::Inverted);
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
@@ -664,7 +674,10 @@ mod tests {
             shardline_index::RetentionHoldError::EmptyReason,
         );
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
@@ -673,7 +686,10 @@ mod tests {
             shardline_index::QuarantineCandidateError::InvertedTimeline,
         );
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
@@ -682,30 +698,40 @@ mod tests {
             shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
         );
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn map_record_store_error_integer_out_of_range() {
         let error = PostgresMetadataStoreError::IntegerOutOfRange;
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn map_record_store_error_invalid_record_kind() {
         let error = PostgresMetadataStoreError::InvalidRecordKind;
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn map_record_store_error_invalid_repo_type() {
-        let error = PostgresMetadataStoreError::InvalidRepoType(
-            "unknown".to_owned(),
-        );
+        let error = PostgresMetadataStoreError::InvalidRepoType("unknown".to_owned());
         let result = map_record_store_error(error);
-        assert!(matches!(result, ServerError::Index(IndexError::PostgresMetadata(_))));
+        assert!(matches!(
+            result,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
@@ -901,7 +927,11 @@ mod tests {
         assert_eq!(found.len(), 3, "should find 3 objects under test/prefix/");
         assert!(found.iter().any(|k: &String| k.contains("test/prefix/a")));
         assert!(found.iter().any(|k: &String| k.contains("test/prefix/b")));
-        assert!(found.iter().any(|k: &String| k.contains("test/prefix/sub/c")));
+        assert!(
+            found
+                .iter()
+                .any(|k: &String| k.contains("test/prefix/sub/c"))
+        );
     }
 
     #[tokio::test]
@@ -1000,14 +1030,13 @@ mod tests {
     /// Helper to open a LocalRecordStore in a temp dir.
     fn local_record_store() -> (LocalRecordStore, TempDir) {
         let storage = TempDir::new().expect("temp dir");
-        (LocalRecordStore::open(storage.path().to_path_buf()), storage)
+        (
+            LocalRecordStore::open(storage.path().to_path_buf()),
+            storage,
+        )
     }
 
-    fn test_file_record(
-        file_id: &str,
-        content_hash: &str,
-        scope: &RepositoryScope,
-    ) -> FileRecord {
+    fn test_file_record(file_id: &str, content_hash: &str, scope: &RepositoryScope) -> FileRecord {
         FileRecord {
             file_id: file_id.to_owned(),
             content_hash: content_hash.to_owned(),
@@ -1110,9 +1139,15 @@ mod tests {
         let rec2 = test_file_record("file2.bin", &make_hash('b'), &scope_a);
         let rec3 = test_file_record("file3.bin", &make_hash('c'), &scope_b);
 
-        RecordMutation::write_latest_record(&store, &rec1).await.unwrap();
-        RecordMutation::write_latest_record(&store, &rec2).await.unwrap();
-        RecordMutation::write_latest_record(&store, &rec3).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec1)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &rec2)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &rec3)
+            .await
+            .unwrap();
 
         let locators = RecordTraversal::list_latest_record_locators(&store)
             .await
@@ -1132,16 +1167,18 @@ mod tests {
         let rec_in_scope = test_file_record("in-scope.bin", &make_hash('a'), &scope);
         let rec_other = test_file_record("other.bin", &make_hash('b'), &other_scope);
 
-        RecordMutation::write_latest_record(&store, &rec_in_scope).await.unwrap();
-        RecordMutation::write_latest_record(&store, &rec_other).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec_in_scope)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &rec_other)
+            .await
+            .unwrap();
 
         let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&scope);
-        let repo_locators = RecordTraversal::list_repository_latest_record_locators(
-            &store,
-            &repo_scope,
-        )
-        .await
-        .expect("list repo scope");
+        let repo_locators =
+            RecordTraversal::list_repository_latest_record_locators(&store, &repo_scope)
+                .await
+                .expect("list repo scope");
         assert_eq!(repo_locators.len(), 1);
     }
 
@@ -1149,22 +1186,27 @@ mod tests {
     async fn record_scan_different_revisions_same_repository() {
         let (store, _storage) = local_record_store();
         let main_scope = test_scope();
-        let release_scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", Some("release"))
-                .unwrap();
+        let release_scope = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "test-owner",
+            "test-repo",
+            Some("release"),
+        )
+        .unwrap();
         let rec_main = test_file_record("main-file.bin", &make_hash('a'), &main_scope);
         let rec_release = test_file_record("release-file.bin", &make_hash('b'), &release_scope);
 
-        RecordMutation::write_latest_record(&store, &rec_main).await.unwrap();
-        RecordMutation::write_latest_record(&store, &rec_release).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec_main)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &rec_release)
+            .await
+            .unwrap();
 
         let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&main_scope);
-        let locators = RecordTraversal::list_repository_latest_record_locators(
-            &store,
-            &repo_scope,
-        )
-        .await
-        .expect("list repo (all revisions)");
+        let locators = RecordTraversal::list_repository_latest_record_locators(&store, &repo_scope)
+            .await
+            .expect("list repo (all revisions)");
         // Both revisions share the same repository scope key.
         assert_eq!(locators.len(), 2);
     }
@@ -1177,7 +1219,9 @@ mod tests {
         let scope = test_scope();
         let record = test_file_record("test/delete-me.bin", &make_hash('x'), &scope);
 
-        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
         let locator = RecordTraversal::latest_record_locator(&store, &record);
 
         // Delete it.
@@ -1208,7 +1252,9 @@ mod tests {
         let scope = test_scope();
         let record = test_file_record("test/recreate.bin", &make_hash('z'), &scope);
 
-        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
         let locator = RecordTraversal::latest_record_locator(&store, &record);
 
         RecordMutation::delete_record_locator(&store, &locator)
@@ -1216,7 +1262,9 @@ mod tests {
             .expect("delete");
 
         // Rewrite the same record.
-        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
         let exists = RecordTraversal::record_locator_exists(&store, &locator)
             .await
             .expect("exists after rewrite");
@@ -1233,8 +1281,12 @@ mod tests {
         let rec2 = test_file_record("v2.bin", &make_hash('b'), &scope);
 
         // Write version records.
-        RecordMutation::write_version_record(&store, &rec1).await.unwrap();
-        RecordMutation::write_version_record(&store, &rec2).await.unwrap();
+        RecordMutation::write_version_record(&store, &rec1)
+            .await
+            .unwrap();
+        RecordMutation::write_version_record(&store, &rec2)
+            .await
+            .unwrap();
 
         let v_locators = RecordTraversal::list_version_record_locators(&store)
             .await
@@ -1261,15 +1313,18 @@ mod tests {
         let rec = test_file_record("file.bin", &make_hash('a'), &scope);
         let other_rec = test_file_record("other.bin", &make_hash('b'), &other_scope);
 
-        RecordMutation::write_version_record(&store, &rec).await.unwrap();
-        RecordMutation::write_version_record(&store, &other_rec).await.unwrap();
+        RecordMutation::write_version_record(&store, &rec)
+            .await
+            .unwrap();
+        RecordMutation::write_version_record(&store, &other_rec)
+            .await
+            .unwrap();
 
         let repo_scope = shardline_index::RepositoryRecordScope::from_repository_scope(&scope);
-        let locators = RecordTraversal::list_repository_version_record_locators(
-            &store, &repo_scope,
-        )
-        .await
-        .expect("list repo versions");
+        let locators =
+            RecordTraversal::list_repository_version_record_locators(&store, &repo_scope)
+                .await
+                .expect("list repo versions");
         assert_eq!(locators.len(), 1);
     }
 
@@ -1281,7 +1336,9 @@ mod tests {
         let scope = test_scope();
         let record = test_file_record("test/timestamp.bin", &make_hash('t'), &scope);
 
-        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
         let locator = RecordTraversal::latest_record_locator(&store, &record);
 
         let duration = RecordTraversal::modified_since_epoch(&store, &locator)
@@ -1313,7 +1370,10 @@ mod tests {
         let latest = RecordTraversal::latest_record_locator(&store, &record);
         let version = RecordTraversal::version_record_locator(&store, &record);
         // Latest and version locators should be different for the same record.
-        assert_ne!(latest, version, "latest and version locator keys must differ");
+        assert_ne!(
+            latest, version,
+            "latest and version locator keys must differ"
+        );
     }
 
     // ===== Edge: empty records, zero-byte records =====
@@ -1331,7 +1391,9 @@ mod tests {
             chunks: Vec::new(),
         };
 
-        RecordMutation::write_latest_record(&store, &record).await.unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
         let locator = RecordTraversal::latest_record_locator(&store, &record);
         let bytes = RecordTraversal::read_record_bytes(&store, &locator)
             .await
@@ -1356,7 +1418,9 @@ mod tests {
                 &make_hash(char::from(b'a' + i)),
                 &scope,
             );
-            RecordMutation::write_latest_record(&store, &rec).await.unwrap();
+            RecordMutation::write_latest_record(&store, &rec)
+                .await
+                .unwrap();
         }
         for i in 0..2 {
             let rec = test_file_record(
@@ -1364,23 +1428,23 @@ mod tests {
                 &make_hash(char::from(b'x' + i)),
                 &scope,
             );
-            RecordMutation::write_version_record(&store, &rec).await.unwrap();
+            RecordMutation::write_version_record(&store, &rec)
+                .await
+                .unwrap();
         }
 
         // Count latest records in the repository.
-        let latest_locators = RecordTraversal::list_repository_latest_record_locators(
-            &store, &repo_scope,
-        )
-        .await
-        .expect("list repo latest");
+        let latest_locators =
+            RecordTraversal::list_repository_latest_record_locators(&store, &repo_scope)
+                .await
+                .expect("list repo latest");
         assert_eq!(latest_locators.len(), 3);
 
         // Count version records in the repository.
-        let version_locators = RecordTraversal::list_repository_version_record_locators(
-            &store, &repo_scope,
-        )
-        .await
-        .expect("list repo versions");
+        let version_locators =
+            RecordTraversal::list_repository_version_record_locators(&store, &repo_scope)
+                .await
+                .expect("list repo versions");
         assert_eq!(version_locators.len(), 2);
     }
 
@@ -1395,11 +1459,10 @@ mod tests {
             .expect("list repo latest empty");
         assert!(latest.is_empty());
 
-        let versions = RecordTraversal::list_repository_version_record_locators(
-            &store, &repo_scope,
-        )
-        .await
-        .expect("list repo versions empty");
+        let versions =
+            RecordTraversal::list_repository_version_record_locators(&store, &repo_scope)
+                .await
+                .expect("list repo versions empty");
         assert!(versions.is_empty());
     }
 
@@ -1407,16 +1470,24 @@ mod tests {
     async fn repository_metadata_inventory_mixed_repositories() {
         let (store, _storage) = local_record_store();
         let scope_a = test_scope();
-        let scope_b =
-            RepositoryScope::new(RepositoryProvider::GitHub, "owner-b", "repo-b", Some("main"))
-                .unwrap();
+        let scope_b = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "owner-b",
+            "repo-b",
+            Some("main"),
+        )
+        .unwrap();
         let repo_a = shardline_index::RepositoryRecordScope::from_repository_scope(&scope_a);
         let repo_b = shardline_index::RepositoryRecordScope::from_repository_scope(&scope_b);
 
         let rec_a = test_file_record("a.bin", &make_hash('1'), &scope_a);
         let rec_b = test_file_record("b.bin", &make_hash('2'), &scope_b);
-        RecordMutation::write_latest_record(&store, &rec_a).await.unwrap();
-        RecordMutation::write_latest_record(&store, &rec_b).await.unwrap();
+        RecordMutation::write_latest_record(&store, &rec_a)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &rec_b)
+            .await
+            .unwrap();
 
         assert_eq!(
             RecordTraversal::list_repository_latest_record_locators(&store, &repo_a)
@@ -1449,18 +1520,14 @@ mod tests {
     #[tokio::test]
     async fn file_total_bytes_rejects_invalid_file_id() {
         let (backend, _root) = make_backend().await;
-        let result = backend
-            .file_total_bytes("../traverse", None, None)
-            .await;
+        let result = backend.file_total_bytes("../traverse", None, None).await;
         assert!(matches!(result, Err(ServerError::InvalidFileId)));
     }
 
     #[tokio::test]
     async fn download_file_rejects_invalid_file_id() {
         let (backend, _root) = make_backend().await;
-        let result = backend
-            .download_file("\0null", None, None)
-            .await;
+        let result = backend.download_file("\0null", None, None).await;
         assert!(matches!(result, Err(ServerError::InvalidFileId)));
     }
 
@@ -1594,9 +1661,7 @@ mod tests {
     #[tokio::test]
     async fn download_file_without_content_hash_fails_without_postgres() {
         let (backend, _root) = make_backend().await;
-        let result = backend
-            .download_file("test-file.bin", None, None)
-            .await;
+        let result = backend.download_file("test-file.bin", None, None).await;
         assert!(result.is_err());
         assert!(!matches!(result, Err(ServerError::InvalidFileId)));
     }
@@ -1607,12 +1672,7 @@ mod tests {
     async fn read_chunk_for_file_version_rejects_invalid_file_id() {
         let (backend, _root) = make_backend().await;
         let result = backend
-            .read_chunk_for_file_version(
-                &make_hash('a'),
-                "/bad/path",
-                &make_hash('b'),
-                None,
-            )
+            .read_chunk_for_file_version(&make_hash('a'), "/bad/path", &make_hash('b'), None)
             .await;
         assert!(matches!(result, Err(ServerError::InvalidFileId)));
     }

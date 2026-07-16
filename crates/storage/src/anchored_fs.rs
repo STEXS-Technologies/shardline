@@ -611,7 +611,7 @@ mod tests {
     }
 
     // ── open_anchored_target ─────────────────────────────────────────────
-    
+
     #[test]
     fn open_anchored_target_nested_path() {
         let root = tempdir().unwrap();
@@ -1090,7 +1090,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let parent = fs::OpenOptions::new().read(true).open(dir.path()).unwrap();
 
-        let result = rename_at(&parent, OsStr::new("nonexistent.txt"), OsStr::new("new.txt"));
+        let result = rename_at(
+            &parent,
+            OsStr::new("nonexistent.txt"),
+            OsStr::new("new.txt"),
+        );
         assert!(result.is_err());
     }
 

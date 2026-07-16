@@ -257,7 +257,10 @@ mod tests {
             },
         );
         assert!(result.is_ok());
-        assert!(!visited, "visitor should not be called without Xet frontend");
+        assert!(
+            !visited,
+            "visitor should not be called without Xet frontend"
+        );
     }
 
     #[test]
@@ -285,15 +288,10 @@ mod tests {
         let object_store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("some/key").unwrap();
         let mut visited = false;
-        let result = visit_protocol_object_member_chunks(
-            &[],
-            &object_store,
-            &key,
-            |_hash| {
-                visited = true;
-                Ok(())
-            },
-        );
+        let result = visit_protocol_object_member_chunks(&[], &object_store, &key, |_hash| {
+            visited = true;
+            Ok(())
+        });
         assert!(result.is_ok());
         assert!(!visited);
     }
@@ -326,6 +324,10 @@ mod tests {
         // still contain only one xorb key (deduplication via contains check).
         let frontends = [ServerFrontend::Xet, ServerFrontend::Xet];
         let keys = optional_chunk_container_keys(&frontends, VALID_HASH).unwrap();
-        assert_eq!(keys.len(), 1, "duplicate Xet frontends must not produce duplicates");
+        assert_eq!(
+            keys.len(),
+            1,
+            "duplicate Xet frontends must not produce duplicates"
+        );
     }
 }

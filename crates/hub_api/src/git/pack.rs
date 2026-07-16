@@ -296,8 +296,7 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             let mut shift = 0;
             for i in 0..4 {
                 if cmd & (1 << i) != 0 {
-                    let offset_byte =
-                        delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+                    let offset_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
                     copy_offset |= (offset_byte as usize).wrapping_shl(shift);
                     pos = pos.wrapping_add(1);
                     shift = shift.wrapping_add(8);
@@ -307,8 +306,7 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
             shift = 0;
             for i in 4..7 {
                 if cmd & (1 << i) != 0 {
-                    let size_byte =
-                        delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
+                    let size_byte = delta.get(pos).copied().ok_or(PackError::InvalidDelta)?;
                     copy_size |= (size_byte as usize).wrapping_shl(shift);
                     pos = pos.wrapping_add(1);
                     shift = shift.wrapping_add(8);
@@ -335,7 +333,8 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
                 return Err(PackError::InvalidDelta);
             }
             result.extend_from_slice(
-                delta.get(pos..pos.wrapping_add(insert_size))
+                delta
+                    .get(pos..pos.wrapping_add(insert_size))
                     .ok_or(PackError::InvalidDelta)?,
             );
             pos = pos.wrapping_add(insert_size);
@@ -718,10 +717,7 @@ mod tests {
     #[test]
     fn pack_error_display_shift_overflow() {
         let err = PackError::ShiftOverflow;
-        assert_eq!(
-            err.to_string(),
-            "variable-length integer shift overflow"
-        );
+        assert_eq!(err.to_string(), "variable-length integer shift overflow");
     }
 
     #[test]

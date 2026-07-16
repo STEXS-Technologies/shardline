@@ -11,11 +11,11 @@
     clippy::or_fun_call
 )]
 
-use std::num::{NonZeroU64, NonZeroUsize};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{ServerConfig, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_test_support::DockerLocalStack;
+use std::num::{NonZeroU64, NonZeroUsize};
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
@@ -44,7 +44,9 @@ async fn ensure_stack() -> (&'static str, &'static str) {
             for _ in 0..5 {
                 match sqlx::PgPool::connect(&pg_url).await {
                     Ok(pool) => {
-                        shardline_server::apply_database_migrations(&pool).await.unwrap();
+                        shardline_server::apply_database_migrations(&pool)
+                            .await
+                            .unwrap();
                         pool.close().await;
                         let redis_url = stack.redis_url().unwrap();
                         return (stack, pg_url, redis_url);
@@ -131,15 +133,11 @@ async fn test_server_with_redis_cache_xet_request() {
 
     let token = {
         let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s = RepositoryScope::new(
-            RepositoryProvider::Generic,
-            "test",
-            "test",
-            Some("main"),
-        )
-        .unwrap();
-        let claims = TokenClaims::new("shardline", "test", TokenScope::Read, repo_s, u64::MAX)
-            .unwrap();
+        let repo_s =
+            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
+                .unwrap();
+        let claims =
+            TokenClaims::new("shardline", "test", TokenScope::Read, repo_s, u64::MAX).unwrap();
         provider.mint_token(&claims).unwrap()
     };
 
@@ -184,13 +182,9 @@ async fn test_server_with_redis_cache_hub_lfs() {
 
     let token = {
         let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
-        let repo_s = RepositoryScope::new(
-            RepositoryProvider::Generic,
-            "test",
-            "test",
-            Some("main"),
-        )
-        .unwrap();
+        let repo_s =
+            RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
+                .unwrap();
         let claims =
             TokenClaims::new("shardline", "test", TokenScope::Write, repo_s, u64::MAX).unwrap();
         provider.mint_token(&claims).unwrap()

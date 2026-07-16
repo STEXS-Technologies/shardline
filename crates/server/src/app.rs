@@ -12,6 +12,7 @@ pub use provider::{
 pub use reconstruction_helpers::{full_byte_stream_response, parse_batch_reconstruction_query};
 
 use std::{
+    future::Future,
     num::NonZeroUsize,
     sync::{
         Arc,
@@ -22,15 +23,15 @@ use std::{
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::{HeaderMap, header},
+    http::{HeaderMap, Method, header},
     middleware::{self, Next},
     routing::{get, head, post},
     serve as serve_http,
 };
 use shardline_protocol::{RepositoryScope, TokenScope};
 use tokio::net::TcpListener;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     ServerConfig, ServerError,
@@ -193,6 +194,18 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         protocol_metrics: ProtocolMetrics::default(),
     });
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers(Any);
+
     let mut app = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -231,9 +244,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
                 xet_frontend_enabled = true;
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
-            ServerFrontend::Lfs
-            | ServerFrontend::BazelHttp
-            | ServerFrontend::Oci => {
+            ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
                 app = register_frontend_routes(app, *frontend, role, &state);
             }
         }
@@ -244,11 +255,16 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .with_state(state);
 
     // Merge hub routes (Router<()>) into the main app (Router<()>).
-    Ok(if let Some(hs) = hub_state {
+    let app = if let Some(hs) = hub_state {
         app.merge(shardline_hub_api::hub_routes(hs, !xet_frontend_enabled))
     } else {
         app
-    })
+    };
+
+    // Apply CORS after every optional frontend has been registered and the Hub
+    // router has been merged, so preflight and normal requests are covered by
+    // the same policy regardless of which protocol owns the route.
+    Ok(app.layer(cors))
 }
 
 /// Runs the Shardline HTTP server.
@@ -274,20 +290,46 @@ pub async fn serve_with_listener(
     config: ServerConfig,
     listener: TcpListener,
 ) -> Result<(), ServerError> {
+    serve_with_listener_until(config, listener, async {
+        tokio::signal::ctrl_c().await.ok();
+    })
+    .await
+}
+
+/// Runs the server until the supplied shutdown signal resolves.
+///
+/// Keeping the signal injectable lets the shutdown timeout be exercised without
+/// delivering a process-wide signal during tests.
+async fn serve_with_listener_until<F>(
+    config: ServerConfig,
+    listener: TcpListener,
+    shutdown_signal: F,
+) -> Result<(), ServerError>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let app = router(config.clone()).await?;
     tracing::info!("router initialized, starting HTTP serve");
     let shutdown_timeout = config.shutdown_timeout();
-    let shutdown_signal = async {
-        tokio::signal::ctrl_c().await.ok();
+    let (shutdown_started_tx, shutdown_started_rx) = oneshot::channel();
+    let graceful_shutdown = async move {
+        shutdown_signal.await;
         tracing::info!("shutdown signal received, draining connections");
+        let _ignored = shutdown_started_tx.send(());
     };
-    let serve = serve_http(listener, app).with_graceful_shutdown(shutdown_signal);
+    let serve = serve_http(listener, app).with_graceful_shutdown(graceful_shutdown);
     if let Some(timeout) = shutdown_timeout {
         tokio::select! {
             result = serve => {
                 result.map_err(ServerError::from)?;
             }
-            () = tokio::time::sleep(timeout) => {
+            () = async {
+                if shutdown_started_rx.await.is_ok() {
+                    tokio::time::sleep(timeout).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
                 tracing::warn!("graceful shutdown timed out after {timeout:?}, aborting");
             }
         }

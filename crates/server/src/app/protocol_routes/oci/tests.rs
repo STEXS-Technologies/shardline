@@ -688,8 +688,11 @@ async fn manifest_put_with_subject_accepted() {
     .await;
     // The spec says a manifest with a subject MUST be accepted even if the
     // subject manifest doesn't exist. But the config and layers must exist.
-    assert!(response.status() == StatusCode::CREATED || response.status() == StatusCode::BAD_REQUEST,
-        "unexpected status: {}", response.status());
+    assert!(
+        response.status() == StatusCode::CREATED || response.status() == StatusCode::BAD_REQUEST,
+        "unexpected status: {}",
+        response.status()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -756,7 +759,7 @@ async fn manifest_put_wrong_media_type_in_document_rejected() {
         Method::PUT,
         &uri,
         Body::from(manifest_bytes),
-        MANIFEST_MEDIA_TYPE,  // OCI manifest media type in header
+        MANIFEST_MEDIA_TYPE, // OCI manifest media type in header
     )
     .await;
     // Document mediaType (docker) vs header (OCI) mismatch -> BAD_REQUEST
@@ -797,7 +800,7 @@ async fn manifest_put_unknown_media_type_rejected() {
         Method::PUT,
         &uri,
         Body::from(manifest_bytes),
-        "application/vnd.unknown.type",  // unknown media type
+        "application/vnd.unknown.type", // unknown media type
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);

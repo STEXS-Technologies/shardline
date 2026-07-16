@@ -258,7 +258,8 @@ mod tests {
     #[test]
     fn load_server_config_accepts_non_existent_root_override() {
         // A non-existent path with a real parent should succeed.
-        let loaded = super::load_server_config(Some(&PathBuf::from("/tmp/__shardline_test_void__")));
+        let loaded =
+            super::load_server_config(Some(&PathBuf::from("/tmp/__shardline_test_void__")));
         assert!(loaded.is_ok());
     }
 

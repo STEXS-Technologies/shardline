@@ -80,10 +80,7 @@ mod tests {
 
     // ---- helpers ----
 
-    fn serialize_test_shard(
-        file_infos: Vec<MDBFileInfo>,
-        xorb_infos: Vec<MDBXorbInfo>,
-    ) -> Vec<u8> {
+    fn serialize_test_shard(file_infos: Vec<MDBFileInfo>, xorb_infos: Vec<MDBXorbInfo>) -> Vec<u8> {
         let mut shard = MDBInMemoryShard::default();
         for file_info in file_infos {
             assert!(shard.add_file_reconstruction_info(file_info).is_ok());
@@ -92,9 +89,7 @@ mod tests {
             assert!(shard.add_xorb_block(xorb_info).is_ok());
         }
         let mut serialized = Vec::new();
-        assert!(
-            MDBShardInfo::serialize_from(&mut serialized, &shard, None).is_ok()
-        );
+        assert!(MDBShardInfo::serialize_from(&mut serialized, &shard, None).is_ok());
         serialized
     }
 
@@ -112,7 +107,10 @@ mod tests {
         let hash = serialized.hash.hex();
 
         let result = store_uploaded_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "store_uploaded_xorb_bytes failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "store_uploaded_xorb_bytes failed: {result:?}"
+        );
         let response = result.unwrap();
         assert!(response.was_inserted);
     }
@@ -128,7 +126,8 @@ mod tests {
                 .unwrap();
         let wrong_hash = "00".repeat(32);
 
-        let result = store_uploaded_xorb_bytes(&object_store, &wrong_hash, &serialized.serialized_data);
+        let result =
+            store_uploaded_xorb_bytes(&object_store, &wrong_hash, &serialized.serialized_data);
         assert!(result.is_err(), "expected error for wrong hash");
     }
 
@@ -149,7 +148,10 @@ mod tests {
 
         let second = store_uploaded_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
         assert!(second.is_ok());
-        assert!(!second.unwrap().was_inserted, "second insert should report was_inserted=false");
+        assert!(
+            !second.unwrap().was_inserted,
+            "second insert should report was_inserted=false"
+        );
     }
 
     #[test]
@@ -168,7 +170,10 @@ mod tests {
         let hash = "ab".repeat(32);
 
         let result = store_uploaded_xorb_bytes(&object_store, &hash, b"");
-        assert!(result.is_err(), "expected error for empty body with valid hash");
+        assert!(
+            result.is_err(),
+            "expected error for empty body with valid hash"
+        );
     }
 
     // ---- register_uploaded_shard_bytes ----
@@ -192,9 +197,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -221,7 +224,10 @@ mod tests {
             },
         ));
 
-        assert!(result.is_ok(), "register_uploaded_shard_bytes failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "register_uploaded_shard_bytes failed: {result:?}"
+        );
         let response = result.unwrap();
         assert_eq!(response.result, 1, "expected newly inserted shard");
 
@@ -252,9 +258,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -298,9 +302,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -361,9 +363,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -373,7 +373,8 @@ mod tests {
             }],
         );
 
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", None);
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "test-owner", "test-repo", None);
         assert!(scope.is_ok());
         let Ok(scope) = scope else {
             return;
@@ -389,10 +390,7 @@ mod tests {
             |records, _mappings| {
                 committed = true;
                 assert_eq!(records.len(), 1);
-                assert_eq!(
-                    records[0].repository_scope,
-                    Some(scope.clone())
-                );
+                assert_eq!(records[0].repository_scope, Some(scope.clone()));
                 async { Ok(()) }
             },
         ));

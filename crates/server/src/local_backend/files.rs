@@ -369,7 +369,11 @@ mod tests {
 
         // Upload a file, then verify chunk length and read_chunk work.
         let uploaded = backend
-            .upload_file("test.bin", axum::body::Bytes::from_static(b"hello-chunk-data"), None)
+            .upload_file(
+                "test.bin",
+                axum::body::Bytes::from_static(b"hello-chunk-data"),
+                None,
+            )
             .await
             .unwrap();
         let chunk = uploaded.chunks.first().unwrap();
@@ -395,7 +399,11 @@ mod tests {
 
         let content = b"version-specific-data";
         let uploaded = backend
-            .upload_file("versioned.bin", axum::body::Bytes::from_static(content), None)
+            .upload_file(
+                "versioned.bin",
+                axum::body::Bytes::from_static(content),
+                None,
+            )
             .await
             .unwrap();
         let chunk = uploaded.chunks.first().unwrap();

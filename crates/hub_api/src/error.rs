@@ -257,12 +257,16 @@ mod tests {
             HubApiError::SigningKeyError("key not found".into()).to_string(),
             "token signing key is misconfigured: key not found"
         );
-        assert!(HubApiError::Io(std::io::Error::other("disk full"))
-            .to_string()
-            .contains("io error: disk full"));
-        assert!(HubApiError::Json(serde_json::from_str::<()>("bad").unwrap_err())
-            .to_string()
-            .contains("json error"));
+        assert!(
+            HubApiError::Io(std::io::Error::other("disk full"))
+                .to_string()
+                .contains("io error: disk full")
+        );
+        assert!(
+            HubApiError::Json(serde_json::from_str::<()>("bad").unwrap_err())
+                .to_string()
+                .contains("json error")
+        );
     }
 
     #[test]
@@ -278,7 +282,10 @@ mod tests {
         let json_err = serde_json::from_str::<serde_json::Value>("{broken").unwrap_err();
         let err = HubApiError::Json(json_err);
         let msg = err.to_string();
-        assert!(msg.contains("json error"), "expected json error, got: {msg}");
+        assert!(
+            msg.contains("json error"),
+            "expected json error, got: {msg}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -327,7 +334,10 @@ mod tests {
         ];
         // Add variants using From conversions
         cases.push((std::io::Error::other("io").into(), "Io"));
-        cases.push((serde_json::from_str::<()>("bad").unwrap_err().into(), "Json"));
+        cases.push((
+            serde_json::from_str::<()>("bad").unwrap_err().into(),
+            "Json",
+        ));
         cases.push((
             crate::git::pktline::PktLineError::PayloadTooLarge { size: 100, max: 50 }.into(),
             "PktLine",

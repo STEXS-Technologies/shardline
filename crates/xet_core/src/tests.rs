@@ -16,13 +16,14 @@ use crate::metadata_shard::{
     },
     file_structs::{
         FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt, FileVerificationEntry,
-        MDBFileInfo, MDBFileInfoView, MDB_FILE_FLAG_METADATA_EXT_MASK,
-        MDB_FILE_FLAG_VERIFICATION_MASK, MDB_FILE_FLAG_WITH_METADATA_EXT,
-        MDB_FILE_FLAG_WITH_VERIFICATION,
+        MDB_FILE_FLAG_METADATA_EXT_MASK, MDB_FILE_FLAG_VERIFICATION_MASK,
+        MDB_FILE_FLAG_WITH_METADATA_EXT, MDB_FILE_FLAG_WITH_VERIFICATION, MDBFileInfo,
+        MDBFileInfoView,
     },
     shard_format::{MDBShardFileFooter, MDBShardFileHeader, MDBShardInfo},
     xorb_structs::{MDBXorbInfo, MDBXorbInfoView, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
 };
+use crate::utils::serialization_utils::write_u32;
 use crate::xorb_object::{
     Chunk, CompressionScheme, RawXorbData,
     compression_scheme::{lz4_compress_from_slice, lz4_decompress_from_slice},
@@ -37,7 +38,6 @@ use crate::xorb_object::{
         reconstruct_xorb_with_footer,
     },
 };
-use crate::utils::serialization_utils::write_u32;
 
 // ============================================================================
 // DataHash / MerkleHash tests
@@ -560,7 +560,9 @@ fn compression_scheme_decompress_from_reader_roundtrips() {
         let compressed = scheme.compress_from_slice(data).unwrap();
         let mut reader = Cursor::new(&*compressed);
         let mut writer = Vec::new();
-        scheme.decompress_from_reader(&mut reader, &mut writer).unwrap();
+        scheme
+            .decompress_from_reader(&mut reader, &mut writer)
+            .unwrap();
         assert_eq!(&writer, data, "decompress_from_reader {scheme:?} failed");
     }
 }
@@ -2469,7 +2471,8 @@ fn serialization_write_read_hash_roundtrip() {
     let mut buf = Vec::new();
     crate::utils::serialization_utils::write_hash(&mut buf, &hash).unwrap();
     assert_eq!(buf.len(), 32);
-    let val = crate::utils::serialization_utils::read_hash(&mut std::io::Cursor::new(&buf)).unwrap();
+    let val =
+        crate::utils::serialization_utils::read_hash(&mut std::io::Cursor::new(&buf)).unwrap();
     assert_eq!(val, hash);
 }
 
@@ -2478,7 +2481,8 @@ fn serialization_write_read_hash_default() {
     let hash = DataHash::default();
     let mut buf = Vec::new();
     crate::utils::serialization_utils::write_hash(&mut buf, &hash).unwrap();
-    let val = crate::utils::serialization_utils::read_hash(&mut std::io::Cursor::new(&buf)).unwrap();
+    let val =
+        crate::utils::serialization_utils::read_hash(&mut std::io::Cursor::new(&buf)).unwrap();
     assert_eq!(val, hash);
 }
 
@@ -2489,7 +2493,8 @@ fn serialization_write_read_bytes_roundtrip() {
     crate::utils::serialization_utils::write_bytes(&mut buf, original).unwrap();
     assert_eq!(buf, original);
     let mut out = vec![0u8; original.len()];
-    crate::utils::serialization_utils::read_bytes(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    crate::utils::serialization_utils::read_bytes(&mut std::io::Cursor::new(&buf), &mut out)
+        .unwrap();
     assert_eq!(&out, original);
 }
 
@@ -2499,7 +2504,8 @@ fn serialization_write_read_bytes_empty() {
     crate::utils::serialization_utils::write_bytes(&mut buf, b"").unwrap();
     assert!(buf.is_empty());
     let mut out = [0u8; 0];
-    crate::utils::serialization_utils::read_bytes(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    crate::utils::serialization_utils::read_bytes(&mut std::io::Cursor::new(&buf), &mut out)
+        .unwrap();
 }
 
 #[test]
@@ -2509,7 +2515,8 @@ fn serialization_write_read_u32s_roundtrip() {
     crate::utils::serialization_utils::write_u32s(&mut buf, &original).unwrap();
     assert_eq!(buf.len(), original.len() * 4);
     let mut out = vec![0u32; original.len()];
-    crate::utils::serialization_utils::read_u32s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    crate::utils::serialization_utils::read_u32s(&mut std::io::Cursor::new(&buf), &mut out)
+        .unwrap();
     assert_eq!(out, original);
 }
 
@@ -2519,7 +2526,8 @@ fn serialization_write_read_u32s_empty() {
     crate::utils::serialization_utils::write_u32s(&mut buf, &[]).unwrap();
     assert!(buf.is_empty());
     let mut out: Vec<u32> = Vec::new();
-    crate::utils::serialization_utils::read_u32s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    crate::utils::serialization_utils::read_u32s(&mut std::io::Cursor::new(&buf), &mut out)
+        .unwrap();
     assert!(out.is_empty());
 }
 
@@ -2530,7 +2538,8 @@ fn serialization_write_read_u64s_roundtrip() {
     crate::utils::serialization_utils::write_u64s(&mut buf, &original).unwrap();
     assert_eq!(buf.len(), original.len() * 8);
     let mut out = vec![0u64; original.len()];
-    crate::utils::serialization_utils::read_u64s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    crate::utils::serialization_utils::read_u64s(&mut std::io::Cursor::new(&buf), &mut out)
+        .unwrap();
     assert_eq!(out, original);
 }
 
@@ -2540,7 +2549,8 @@ fn serialization_write_read_u64s_empty() {
     crate::utils::serialization_utils::write_u64s(&mut buf, &[]).unwrap();
     assert!(buf.is_empty());
     let mut out: Vec<u64> = Vec::new();
-    crate::utils::serialization_utils::read_u64s(&mut std::io::Cursor::new(&buf), &mut out).unwrap();
+    crate::utils::serialization_utils::read_u64s(&mut std::io::Cursor::new(&buf), &mut out)
+        .unwrap();
     assert!(out.is_empty());
 }
 
@@ -2657,7 +2667,10 @@ fn deserialize_chunks_to_writer_multiple_chunks() {
     assert!(compressed > 0);
     let expected = [chunk1.as_slice(), chunk2.as_slice()].concat();
     assert_eq!(writer, expected);
-    assert_eq!(indices, vec![0, chunk1.len() as u32, (chunk1.len() + chunk2.len()) as u32]);
+    assert_eq!(
+        indices,
+        vec![0, chunk1.len() as u32, (chunk1.len() + chunk2.len()) as u32]
+    );
 }
 
 // ============================================================================
@@ -2738,8 +2751,7 @@ fn compression_scheme_decompress_from_reader_empty() {
 fn compression_scheme_decompress_from_reader_auto_errors() {
     let mut reader = std::io::Cursor::new(b"anything");
     let mut writer = Vec::new();
-    let result = CompressionScheme::Auto
-        .decompress_from_reader(&mut reader, &mut writer);
+    let result = CompressionScheme::Auto.decompress_from_reader(&mut reader, &mut writer);
     assert!(result.is_err());
 }
 
@@ -2838,7 +2850,9 @@ fn mdb_shard_info_read_all_file_info_sections_multiple() {
     let mut buf = Vec::new();
     file1.serialize(&mut buf).unwrap();
     file2.serialize(&mut buf).unwrap();
-    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    FileDataSequenceHeader::bookend()
+        .serialize(&mut buf)
+        .unwrap();
 
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
@@ -2875,7 +2889,9 @@ fn mdb_shard_info_read_all_xorb_blocks_full_multiple() {
     let mut buf = Vec::new();
     xorb1.serialize(&mut buf).unwrap();
     xorb2.serialize(&mut buf).unwrap();
-    XorbChunkSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    XorbChunkSequenceHeader::bookend()
+        .serialize(&mut buf)
+        .unwrap();
 
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
@@ -2893,7 +2909,10 @@ fn mdb_shard_info_read_all_file_info_sections_breaks_on_partial_error() {
     let file1 = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
         segments: vec![FileDataSequenceEntry::new(
-            MerkleHash::default(), 100u32, 0u32, 50u32,
+            MerkleHash::default(),
+            100u32,
+            0u32,
+            50u32,
         )],
         verification: vec![],
         metadata_ext: None,
@@ -2915,7 +2934,9 @@ fn mdb_shard_info_read_all_xorb_blocks_full_breaks_on_partial_error() {
     let xorb1 = MDBXorbInfo {
         metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x1"), 1u32, 100u32),
         chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c1"), 100u32, 0u32,
+            compute_data_hash(b"c1"),
+            100u32,
+            0u32,
         )],
     };
     let mut buf = Vec::new();
@@ -2926,7 +2947,11 @@ fn mdb_shard_info_read_all_xorb_blocks_full_breaks_on_partial_error() {
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
     let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor).unwrap();
-    assert_eq!(xorb_infos.len(), 1, "should return the first valid xorb info");
+    assert_eq!(
+        xorb_infos.len(),
+        1,
+        "should return the first valid xorb info"
+    );
     assert_eq!(xorb_infos[0].chunks.len(), 1);
 }
 
@@ -2984,14 +3009,8 @@ fn mdb_file_info_view_byte_size_with_verification() {
 
     use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
     let view = MDBFileInfoView::new(bytes::Bytes::from(buf)).unwrap();
-    assert_eq!(
-        view.byte_size(true),
-        (1 + 2 + 2) * MDB_FILE_INFO_ENTRY_SIZE
-    );
-    assert_eq!(
-        view.byte_size(false),
-        (1 + 2) * MDB_FILE_INFO_ENTRY_SIZE
-    );
+    assert_eq!(view.byte_size(true), (1 + 2 + 2) * MDB_FILE_INFO_ENTRY_SIZE);
+    assert_eq!(view.byte_size(false), (1 + 2) * MDB_FILE_INFO_ENTRY_SIZE);
 }
 
 // ============================================================================
@@ -3028,8 +3047,8 @@ fn data_hash_error_impl_source() {
 
 #[test]
 fn data_hash_hash_impl() {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let a = DataHash::from([1u64, 2, 3, 4]);
     let b = DataHash::from([1u64, 2, 3, 4]);
     let mut ha = DefaultHasher::new();
@@ -3348,7 +3367,12 @@ fn xorb_object_info_v1_deserialize_wrong_hashes_version() {
     let mut cursor = Cursor::new(buf);
     let result = XorbObjectInfoV1::deserialize(&mut cursor);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Hash Metadata Section"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Hash Metadata Section")
+    );
 }
 
 #[test]
@@ -3365,7 +3389,12 @@ fn xorb_object_info_v1_deserialize_wrong_boundaries_version() {
     let mut cursor = Cursor::new(buf);
     let result = XorbObjectInfoV1::deserialize(&mut cursor);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Boundaries Metadata Section"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Boundaries Metadata Section")
+    );
 }
 
 #[test]
@@ -3615,12 +3644,10 @@ fn serialized_xorb_object_from_xorb_without_footer() {
 
 #[test]
 fn serialized_xorb_object_from_xorb_with_footer_and_lz4() {
-    let chunks = vec![
-        Chunk {
-            hash: compute_data_hash(b"x1"),
-            data: vec![0xABu8; 200].into(),
-        },
-    ];
+    let chunks = vec![Chunk {
+        hash: compute_data_hash(b"x1"),
+        data: vec![0xABu8; 200].into(),
+    }];
     let raw = RawXorbData::from_chunks(&chunks, vec![0]);
     let serialized = SerializedXorbObject::from_xorb_with_compression(
         raw,
@@ -3770,7 +3797,10 @@ fn mdb_shard_info_load_from_reader_file_info_break_on_error_with_data() {
     let file = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
         segments: vec![FileDataSequenceEntry::new(
-            MerkleHash::default(), 100u32, 0u32, 0u32,
+            MerkleHash::default(),
+            100u32,
+            0u32,
+            0u32,
         )],
         verification: vec![],
         metadata_ext: None,
@@ -3795,7 +3825,9 @@ fn mdb_shard_info_load_from_reader_xorb_info_error_when_empty() {
     let mut buf = Vec::new();
     MDBShardFileHeader::default().serialize(&mut buf).unwrap();
     // Write a valid file bookend
-    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    FileDataSequenceHeader::bookend()
+        .serialize(&mut buf)
+        .unwrap();
     // Then garbage for xorb info section
     buf.extend_from_slice(b"GARBAGE XORB DATA");
     let mut cursor = Cursor::new(buf);
@@ -3810,12 +3842,16 @@ fn mdb_shard_info_load_from_reader_xorb_info_error_when_non_empty() {
     let mut buf = Vec::new();
     MDBShardFileHeader::default().serialize(&mut buf).unwrap();
     // Valid file bookend
-    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    FileDataSequenceHeader::bookend()
+        .serialize(&mut buf)
+        .unwrap();
     // Valid xorb info
     let xorb = MDBXorbInfo {
         metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 100u32),
         chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c"), 100u32, 0u32,
+            compute_data_hash(b"c"),
+            100u32,
+            0u32,
         )],
     };
     xorb.serialize(&mut buf).unwrap();
@@ -3836,22 +3872,31 @@ fn mdb_shard_info_load_from_reader_full_roundtrip() {
     let file = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false),
         segments: vec![FileDataSequenceEntry::new(
-            MerkleHash::default(), 100u32, 0u32, 50u32,
+            MerkleHash::default(),
+            100u32,
+            0u32,
+            50u32,
         )],
         verification: vec![],
         metadata_ext: None,
     };
     file.serialize(&mut buf).unwrap();
-    FileDataSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    FileDataSequenceHeader::bookend()
+        .serialize(&mut buf)
+        .unwrap();
 
     let xorb = MDBXorbInfo {
         metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 100u32),
         chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c"), 100u32, 0u32,
+            compute_data_hash(b"c"),
+            100u32,
+            0u32,
         )],
     };
     xorb.serialize(&mut buf).unwrap();
-    XorbChunkSequenceHeader::bookend().serialize(&mut buf).unwrap();
+    XorbChunkSequenceHeader::bookend()
+        .serialize(&mut buf)
+        .unwrap();
 
     // Footer (for roundtrip we don't need real footer values)
     MDBShardFileFooter::default().serialize(&mut buf).unwrap();
@@ -3929,7 +3974,10 @@ fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_set_overrides_hash() 
 
 #[test]
 fn compression_scheme_try_from_auto_is_99() {
-    assert_eq!(CompressionScheme::try_from(99u8).unwrap(), CompressionScheme::Auto);
+    assert_eq!(
+        CompressionScheme::try_from(99u8).unwrap(),
+        CompressionScheme::Auto
+    );
 }
 
 #[test]
@@ -3961,7 +4009,9 @@ fn compression_scheme_compress_auto_delegates() {
     let data = b"auto compression delegation test";
     let compressed = CompressionScheme::Auto.compress_from_slice(data).unwrap();
     // Auto resolves to LZ4, so LZ4 can decompress it
-    let decompressed = CompressionScheme::LZ4.decompress_from_slice(&compressed).unwrap();
+    let decompressed = CompressionScheme::LZ4
+        .decompress_from_slice(&compressed)
+        .unwrap();
     assert_eq!(&*decompressed, data);
 }
 
@@ -4023,7 +4073,10 @@ fn mdb_file_info_num_bytes_with_metadata_ext() {
     let info = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, true),
         segments: vec![FileDataSequenceEntry::new(
-            MerkleHash::default(), 100u32, 0u32, 50u32,
+            MerkleHash::default(),
+            100u32,
+            0u32,
+            50u32,
         )],
         verification: vec![],
         metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),

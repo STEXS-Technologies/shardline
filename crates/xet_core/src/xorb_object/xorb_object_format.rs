@@ -643,8 +643,7 @@ impl SerializedXorbObject {
             .iter()
             .map(|chunk_data| crate::merklehash::compute_data_hash(chunk_data))
             .collect();
-        xorb_object_info.unpacked_chunk_offsets =
-            xorb.xorb_info.chunk_boundaries.to_vec();
+        xorb_object_info.unpacked_chunk_offsets = xorb.xorb_info.chunk_boundaries.to_vec();
 
         let size_upper_bound = xorb.num_bytes()
             + size_of::<XorbObjectInfoV1>()

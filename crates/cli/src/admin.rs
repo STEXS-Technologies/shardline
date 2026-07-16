@@ -408,7 +408,14 @@ mod tests {
         let linked = symlink(std::path::Path::new("..data").join("real.key"), &link);
         assert!(linked.is_ok());
 
-        let minted = mint_admin_token(&link, "issuer", "subject", TokenScope::Read, make_test_repository(), 60);
+        let minted = mint_admin_token(
+            &link,
+            "issuer",
+            "subject",
+            TokenScope::Read,
+            make_test_repository(),
+            60,
+        );
 
         assert!(minted.is_ok());
     }
@@ -426,7 +433,14 @@ mod tests {
         let linked = symlink(outside.path(), &link);
         assert!(linked.is_ok());
 
-        let minted = mint_admin_token(&link, "issuer", "subject", TokenScope::Read, make_test_repository(), 60);
+        let minted = mint_admin_token(
+            &link,
+            "issuer",
+            "subject",
+            TokenScope::Read,
+            make_test_repository(),
+            60,
+        );
 
         assert!(matches!(
             minted,
@@ -524,10 +538,7 @@ mod tests {
             u64::MAX,
         );
 
-        assert!(matches!(
-            token,
-            Err(super::AdminTokenError::TtlOverflow)
-        ));
+        assert!(matches!(token, Err(super::AdminTokenError::TtlOverflow)));
     }
 
     #[test]

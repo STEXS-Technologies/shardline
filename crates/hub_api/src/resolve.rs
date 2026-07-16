@@ -278,9 +278,13 @@ mod tests {
         let store = shardline_index::LocalIndexStore::open(root.to_path_buf());
         let store = BoxedHubStore::from_store(store);
 
-        store.create_repo(HubRepoType::Model, "org/repo", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "org/repo", false)
+            .unwrap();
         let parent = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
-        store.create_revision("org/repo", Some(parent), "sha_resolve", "main", "test").unwrap();
+        store
+            .create_revision("org/repo", Some(parent), "sha_resolve", "main", "test")
+            .unwrap();
         if !files.is_empty() {
             store.store_files("sha_resolve", files).unwrap();
         }
@@ -306,7 +310,11 @@ mod tests {
         let (_ts, state) = setup_resolve_state(&files);
         let result = resolve_file_from_store(&state, "sha_resolve", "readme.md").unwrap();
         match result {
-            DownloadResult::Inline { size, sha, content: c } => {
+            DownloadResult::Inline {
+                size,
+                sha,
+                content: c,
+            } => {
                 assert_eq!(size, content.len() as u64);
                 assert_eq!(sha, "abc123");
                 assert_eq!(c, Some(content));

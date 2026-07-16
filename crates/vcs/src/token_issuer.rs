@@ -425,12 +425,16 @@ mod tests {
     fn provider_token_issuance_error_display_all_variants() {
         let cases: &[(ProviderTokenIssuanceError, &str)] = &[
             (ProviderTokenIssuanceError::LifetimeOverflow, "overflow"),
-            (ProviderTokenIssuanceError::Codec(
-                shardline_protocol::TokenCodecError::Expired,
-            ), "codec"),
-            (ProviderTokenIssuanceError::Claims(
-                shardline_protocol::TokenClaimsError::EmptyIssuer,
-            ), "claims"),
+            (
+                ProviderTokenIssuanceError::Codec(shardline_protocol::TokenCodecError::Expired),
+                "codec",
+            ),
+            (
+                ProviderTokenIssuanceError::Claims(
+                    shardline_protocol::TokenClaimsError::EmptyIssuer,
+                ),
+                "claims",
+            ),
         ];
         for (error, substring) in cases {
             let msg = error.to_string();
@@ -448,7 +452,8 @@ mod tests {
             "test-issuer",
             b"a]32-byte-signing-key-for-testing!",
             NonZeroU64::new(3600).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(issuer.issuer(), "test-issuer");
         assert_eq!(issuer.ttl_seconds().get(), 3600);
     }
@@ -465,7 +470,8 @@ mod tests {
             "issuer",
             b"a]32-byte-signing-key-for-testing!",
             NonZeroU64::new(3600).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         let subject = ProviderSubject::new("user-1").unwrap();
         let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets").unwrap();
         let revision = RevisionRef::new("refs/heads/main").unwrap();
@@ -487,7 +493,8 @@ mod tests {
             "issuer",
             b"a]32-byte-signing-key-for-testing!",
             NonZeroU64::new(3600).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         let subject = ProviderSubject::new("user-2").unwrap();
         let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
         let revision = RevisionRef::new("refs/heads/main").unwrap();
@@ -498,7 +505,10 @@ mod tests {
             access: RepositoryAccess::Write,
         };
         let token = issuer.issue_at(&grant, 100).unwrap();
-        assert_eq!(token.claims().scope(), shardline_protocol::TokenScope::Write);
+        assert_eq!(
+            token.claims().scope(),
+            shardline_protocol::TokenScope::Write
+        );
         assert_eq!(token.claims().expires_at_unix_seconds(), 100 + 3600);
     }
 
@@ -525,7 +535,8 @@ mod tests {
             "test",
             b"a]32-byte-signing-key-for-testing!",
             NonZeroU64::MIN,
-        ).unwrap();
+        )
+        .unwrap();
         let subject = ProviderSubject::new("sub").unwrap();
         let repository = RepositoryRef::new(ProviderKind::Generic, "team", "repo").unwrap();
         let revision = RevisionRef::new("refs/heads/main").unwrap();

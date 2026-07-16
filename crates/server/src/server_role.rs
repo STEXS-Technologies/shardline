@@ -106,10 +106,7 @@ mod tests {
             ServerRole::parse("invalid"),
             Err(ServerRoleParseError)
         ));
-        assert!(matches!(
-            ServerRole::parse(""),
-            Err(ServerRoleParseError)
-        ));
+        assert!(matches!(ServerRole::parse(""), Err(ServerRoleParseError)));
     }
 
     #[test]

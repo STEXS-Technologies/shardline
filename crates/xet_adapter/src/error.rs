@@ -102,17 +102,46 @@ mod tests {
     #[test]
     fn xet_adapter_error_display_all_variants() {
         let cases: &[(XetAdapterError, &str)] = &[
-            (XetAdapterError::Io(std::io::Error::other("test")), "storage"),
-            (XetAdapterError::NumericConversion(u64::try_from(-1i32).unwrap_err()), "bounds"),
-            (XetAdapterError::HashParse(HashParseError::InvalidLength), "hash"),
-            (XetAdapterError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound), "object"),
-            (XetAdapterError::LocalObjectStore(LocalObjectStoreError::Io(std::io::Error::other("test"))), "storage"),
-            (XetAdapterError::S3ObjectStore(S3ObjectStoreError::Io(std::io::Error::other("test"))), "s3"),
+            (
+                XetAdapterError::Io(std::io::Error::other("test")),
+                "storage",
+            ),
+            (
+                XetAdapterError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+                "bounds",
+            ),
+            (
+                XetAdapterError::HashParse(HashParseError::InvalidLength),
+                "hash",
+            ),
+            (
+                XetAdapterError::ObjectStore(
+                    shardline_server_core::ServerObjectStoreError::NotFound,
+                ),
+                "object",
+            ),
+            (
+                XetAdapterError::LocalObjectStore(LocalObjectStoreError::Io(
+                    std::io::Error::other("test"),
+                )),
+                "storage",
+            ),
+            (
+                XetAdapterError::S3ObjectStore(S3ObjectStoreError::Io(std::io::Error::other(
+                    "test",
+                ))),
+                "s3",
+            ),
             (XetAdapterError::InvalidContentHash, "64"),
             (XetAdapterError::InvalidXorbPrefix, "prefix"),
             (XetAdapterError::XorbHashMismatch, "hash"),
             (XetAdapterError::InvalidSerializedXorb, "xorb"),
-            (XetAdapterError::InvalidSerializedShard(InvalidSerializedShardError::ParserRejectedMetadata), "shard"),
+            (
+                XetAdapterError::InvalidSerializedShard(
+                    InvalidSerializedShardError::ParserRejectedMetadata,
+                ),
+                "shard",
+            ),
             (XetAdapterError::MissingReferencedXorb, "xorb"),
             (XetAdapterError::TooManyShardTerms, "shard"),
             (XetAdapterError::NotFound, "found"),
@@ -156,16 +185,15 @@ mod tests {
     #[test]
     fn from_xorb_parse_error_invalid_format() {
         let err: XetAdapterError =
-            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed).into();
+            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed)
+                .into();
         assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
     }
 
     #[test]
     fn from_xorb_parse_error_numeric_conversion() {
-        let err: XetAdapterError = XorbParseError::NumericConversion(
-            u64::try_from(-1i32).unwrap_err(),
-        )
-        .into();
+        let err: XetAdapterError =
+            XorbParseError::NumericConversion(u64::try_from(-1i32).unwrap_err()).into();
         assert!(matches!(err, XetAdapterError::InvalidSerializedXorb));
     }
 

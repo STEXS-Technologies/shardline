@@ -247,7 +247,7 @@ mod tests {
             offset: 0,
             length: 1024,
             range_start: 10,
-            range_end: 10,  // empty range: range_end == range_start
+            range_end: 10, // empty range: range_end == range_start
             packed_start: 0,
             packed_end: 1024,
         };
@@ -271,7 +271,7 @@ mod tests {
             offset: 0,
             length: 1024,
             range_start: 20,
-            range_end: 10,  // inverted: end < start
+            range_end: 10, // inverted: end < start
             packed_start: 0,
             packed_end: 1024,
         };

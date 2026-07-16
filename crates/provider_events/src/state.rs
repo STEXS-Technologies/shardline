@@ -172,9 +172,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use shardline_index::{
-    LifecycleStore, MemoryIndexStore, ProviderRepositoryState,
-};
+    use shardline_index::{LifecycleStore, MemoryIndexStore, ProviderRepositoryState};
     use shardline_protocol::RepositoryProvider;
     use shardline_vcs::{
         ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind,
@@ -356,10 +354,7 @@ mod tests {
         assert_eq!(new.last_access_changed_at_unix_seconds(), Some(100));
         assert_eq!(new.last_revision_pushed_at_unix_seconds(), Some(200));
         assert_eq!(new.last_pushed_revision(), Some("refs/heads/main"));
-        assert_eq!(
-            new.last_cache_invalidated_at_unix_seconds(),
-            Some(300)
-        );
+        assert_eq!(new.last_cache_invalidated_at_unix_seconds(), Some(300));
         assert_eq!(
             new.last_authorization_rechecked_at_unix_seconds(),
             Some(400)

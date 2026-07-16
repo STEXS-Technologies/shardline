@@ -1398,10 +1398,7 @@ mod tests {
     #[test]
     fn reconstruction_plan_detail_display_non_contiguous() {
         let detail = IndexRebuildReconstructionPlanDetail::NonContiguousChunkOffsets;
-        assert_eq!(
-            detail.to_string(),
-            "record chunks are not contiguous"
-        );
+        assert_eq!(detail.to_string(), "record chunks are not contiguous");
     }
 
     #[test]
@@ -1466,7 +1463,10 @@ mod tests {
             repository_scope: None,
             chunks: Vec::new(),
         };
-        record_store.write_latest_record(&stale_record).await.unwrap();
+        record_store
+            .write_latest_record(&stale_record)
+            .await
+            .unwrap();
 
         let report = run_index_rebuild_with_stores(
             &record_store,
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rebuild_dedupe_shard_mappings_with_valid_shard_unchanged_mapping() {
-        use shardline_index::{parse_xet_hash_hex, DedupeShardMapping};
+        use shardline_index::{DedupeShardMapping, parse_xet_hash_hex};
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
         use shardline_xet_core::{
             merklehash::{compute_data_hash, file_hash, xorb_hash},
@@ -1729,12 +1729,10 @@ mod tests {
         shard
             .add_xorb_block(MDBXorbInfo {
                 metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard_bytes = shard.to_bytes().unwrap();
@@ -1762,8 +1760,7 @@ mod tests {
 
         // Insert a matching dedupe mapping so the rebuild finds it unchanged
         let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-        let existing_mapping =
-            DedupeShardMapping::new(shardline_chunk_hash, shard_key.clone());
+        let existing_mapping = DedupeShardMapping::new(shardline_chunk_hash, shard_key.clone());
         index_store
             .upsert_dedupe_shard_mapping(&existing_mapping)
             .unwrap();
@@ -1787,7 +1784,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping() {
-        use shardline_index::{parse_xet_hash_hex, DedupeShardMapping, DedupeStore};
+        use shardline_index::{DedupeShardMapping, DedupeStore, parse_xet_hash_hex};
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
         use shardline_xet_core::{
             merklehash::{compute_data_hash, file_hash, xorb_hash},
@@ -1821,12 +1818,10 @@ mod tests {
         shard
             .add_xorb_block(MDBXorbInfo {
                 metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard_bytes = shard.to_bytes().unwrap();
@@ -1857,11 +1852,11 @@ mod tests {
         // differs from the existing mapping (pointing to a fake shard) and will
         // upsert the correct one.
         let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-        let fake_shard_key =
-            ObjectKey::parse("shards/ab/a_different_shard.shard").unwrap();
-        let old_mapping =
-            DedupeShardMapping::new(shardline_chunk_hash, fake_shard_key);
-        index_store.upsert_dedupe_shard_mapping(&old_mapping).unwrap();
+        let fake_shard_key = ObjectKey::parse("shards/ab/a_different_shard.shard").unwrap();
+        let old_mapping = DedupeShardMapping::new(shardline_chunk_hash, fake_shard_key);
+        index_store
+            .upsert_dedupe_shard_mapping(&old_mapping)
+            .unwrap();
 
         let mut report = empty_report();
         rebuild_dedupe_shard_mappings(
@@ -1900,7 +1895,7 @@ mod tests {
         // Two shards sharing the same chunk hash. The first visited (lexicographically
         // smaller key) inserts into `desired`; the second hits the
         // `Some(existing) if existing.shard_object_key() <= new => {}` arm (lines 524-526).
-        use shardline_index::{parse_xet_hash_hex, DedupeShardMapping};
+        use shardline_index::{DedupeShardMapping, parse_xet_hash_hex};
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
         use shardline_xet_core::{
             merklehash::{compute_data_hash, file_hash, xorb_hash},
@@ -1933,17 +1928,11 @@ mod tests {
             .unwrap();
         shard1
             .add_xorb_block(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(
-                    xorb_hash,
-                    1_u32,
-                    chunk_data.len() as u32,
-                ),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard1_bytes = shard1.to_bytes().unwrap();
@@ -1967,17 +1956,11 @@ mod tests {
             .unwrap();
         shard2
             .add_xorb_block(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(
-                    xorb_hash,
-                    1_u32,
-                    chunk_data.len() as u32,
-                ),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard2_bytes = shard2.to_bytes().unwrap();
@@ -2018,8 +2001,7 @@ mod tests {
 
         // Also add a matching dedupe mapping so the rebuild finds it unchanged
         let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-        let existing_mapping =
-            DedupeShardMapping::new(shardline_chunk_hash, key1.clone());
+        let existing_mapping = DedupeShardMapping::new(shardline_chunk_hash, key1.clone());
         index_store
             .upsert_dedupe_shard_mapping(&existing_mapping)
             .unwrap();
@@ -2043,8 +2025,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_smaller_key()
-    {
+    async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_smaller_key() {
         // Two shards sharing the same chunk hash. The first visited has a larger key,
         // so when the second (smaller key) is processed, it replaces the larger key
         // in `desired` (the `_` arm of the match, lines 527-528).
@@ -2081,17 +2062,11 @@ mod tests {
             .unwrap();
         shard_big
             .add_xorb_block(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(
-                    xorb_hash,
-                    1_u32,
-                    chunk_data.len() as u32,
-                ),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard_big_bytes = shard_big.to_bytes().unwrap();
@@ -2114,17 +2089,11 @@ mod tests {
             .unwrap();
         shard_small
             .add_xorb_block(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(
-                    xorb_hash,
-                    1_u32,
-                    chunk_data.len() as u32,
-                ),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard_small_bytes = shard_small.to_bytes().unwrap();
@@ -2138,8 +2107,7 @@ mod tests {
         let object_store = ServerObjectStore::local(&object_root).unwrap();
 
         // Store larger-key shard first ("zz" > "aa")
-        let key_big =
-            ObjectKey::parse(&format!("shards/zz/{}", chunk_hash_hex)).unwrap();
+        let key_big = ObjectKey::parse(&format!("shards/zz/{}", chunk_hash_hex)).unwrap();
         object_store
             .put_overwrite(
                 &key_big,
@@ -2152,8 +2120,7 @@ mod tests {
             .unwrap();
 
         // Store smaller-key shard second ("aa" < "zz")
-        let key_small =
-            ObjectKey::parse(&format!("shards/aa/{}", chunk_hash_hex)).unwrap();
+        let key_small = ObjectKey::parse(&format!("shards/aa/{}", chunk_hash_hex)).unwrap();
         object_store
             .put_overwrite(
                 &key_small,
@@ -2185,15 +2152,10 @@ mod tests {
 
         // Verify the stored mapping uses the smaller key
         let shardline_chunk_hash = parse_xet_hash_hex(&chunk_hash_hex).unwrap();
-        let stored = shardline_index::DedupeStore::dedupe_shard_mapping(
-            &index_store,
-            &shardline_chunk_hash,
-        )
-        .unwrap();
-        assert!(
-            stored.is_some(),
-            "mapping should exist after rebuild"
-        );
+        let stored =
+            shardline_index::DedupeStore::dedupe_shard_mapping(&index_store, &shardline_chunk_hash)
+                .unwrap();
+        assert!(stored.is_some(), "mapping should exist after rebuild");
         if let Some(stored) = stored {
             assert_eq!(
                 stored.shard_object_key(),
@@ -2208,7 +2170,6 @@ mod tests {
         // Exercise the Err(error) => return Err(error.into()) path (line 517).
         // We write a valid shard but use ShardMetadataLimits with max_files=1
         // while the shard contains 2 file records, triggering TooManyShardTerms.
-        use std::num::NonZeroUsize;
         use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
         use shardline_xet_core::{
             merklehash::{compute_data_hash, file_hash, xorb_hash},
@@ -2218,6 +2179,7 @@ mod tests {
                 xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
             },
         };
+        use std::num::NonZeroUsize;
 
         // Build a valid shard with two file records (different file content)
         // and one xorb block. With max_files = NonZeroUsize::MIN (=1),
@@ -2296,13 +2258,14 @@ mod tests {
                 shardline_server_core::DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS,
                 shardline_server_core::DEFAULT_MAX_SHARD_XORB_CHUNKS,
             );
-            let result = shardline_xet_adapter::retained_shard_chunk_hashes(
-                &shard_bytes,
-                tight_limits,
-            );
+            let result =
+                shardline_xet_adapter::retained_shard_chunk_hashes(&shard_bytes, tight_limits);
             let err = result.unwrap_err();
             assert!(
-                matches!(err, shardline_xet_adapter::XetAdapterError::TooManyShardTerms),
+                matches!(
+                    err,
+                    shardline_xet_adapter::XetAdapterError::TooManyShardTerms
+                ),
                 "expected TooManyShardTerms, got: {err:?}"
             );
         }
@@ -2315,8 +2278,7 @@ mod tests {
         std::fs::create_dir_all(&object_root).unwrap();
         let object_store = ServerObjectStore::local(&object_root).unwrap();
 
-        let shard_key =
-            ObjectKey::parse(&format!("shards/ab/{}", chunk_hash_hex)).unwrap();
+        let shard_key = ObjectKey::parse(&format!("shards/ab/{}", chunk_hash_hex)).unwrap();
         object_store
             .put_overwrite(
                 &shard_key,
@@ -2336,19 +2298,16 @@ mod tests {
         );
 
         let mut report = empty_report();
-        let result = rebuild_dedupe_shard_mappings(
-            &index_store,
-            &object_store,
-            tight_limits,
-            &mut report,
-        )
-        .await;
+        let result =
+            rebuild_dedupe_shard_mappings(&index_store, &object_store, tight_limits, &mut report)
+                .await;
 
         let err = result.unwrap_err();
         assert!(
-            matches!(&err, RebuildError::XetAdapter(
-                shardline_xet_adapter::XetAdapterError::TooManyShardTerms
-            )),
+            matches!(
+                &err,
+                RebuildError::XetAdapter(shardline_xet_adapter::XetAdapterError::TooManyShardTerms)
+            ),
             "expected TooManyShardTerms error, got: {err:?}"
         );
         // One shard was scanned before the error occurred
@@ -2382,10 +2341,7 @@ mod tests {
             .put_overwrite(
                 &bad_key,
                 ObjectBody::from_slice(b"not a shard"),
-                &ObjectIntegrity::new(
-                    shardline_server_core::chunk_hash(b"not a shard"),
-                    11,
-                ),
+                &ObjectIntegrity::new(shardline_server_core::chunk_hash(b"not a shard"), 11),
             )
             .unwrap();
 

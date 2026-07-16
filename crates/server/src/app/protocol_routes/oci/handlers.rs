@@ -277,7 +277,10 @@ fn collect_digest_refs<'value>(value: &'value serde_json::Value, out: &mut Vec<&
                 collect_digest_refs(v, out);
             }
         }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::String(_) => {}
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
     }
 }
 

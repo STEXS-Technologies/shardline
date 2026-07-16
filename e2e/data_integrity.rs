@@ -3,7 +3,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use reqwest::Client;
 use sha2::Digest;
-use shardline_server::{LocalGcOptions, ServerConfig, ServerFrontend, ServerRole, serve_with_listener};
+use shardline_server::{ServerConfig, ServerFrontend, ServerRole, serve_with_listener};
 use tokio::net::TcpListener;
 
 async fn start_server() -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
@@ -3940,7 +3940,7 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     let content = b"dedup storage accounting content";
     let oid = hex::encode(sha2::Sha256::digest(content));
 
-    for i in 0..3 {
+    for _ in 0..3 {
         client
             .put(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Authorization", format!("Bearer {token}"))
@@ -3958,6 +3958,7 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     // Dedup: uploading the same content 3 times should NOT increase chunk count
     // The first upload creates chunks, subsequent uploads reuse them
     assert_eq!(after_chunks, before_chunks, "dedup failed: chunks increased from {before_chunks} to {after_chunks}");
+    assert_eq!(after_files, before_files, "LFS uploads should not create index file records");
 
     server.abort();
 }
@@ -4155,7 +4156,7 @@ async fn xet_shard_empty_accepted() {
     let client = Client::new();
 
     use shardline_xet_core::metadata_shard::{shard_format::MDBShardInfo, shard_in_memory::MDBInMemoryShard};
-    let mut shard = MDBInMemoryShard::default();
+    let shard = MDBInMemoryShard::default();
     let mut empty_bytes = Vec::new();
     let serialized = MDBShardInfo::serialize_from(&mut empty_bytes, &shard, None);
     assert!(serialized.is_ok(), "empty shard serialization should succeed");
@@ -4839,7 +4840,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
         sweep: true,
         retention_seconds: 0,
     };
-    let report = shardline_server::run_gc(
+    let _report = shardline_server::run_gc(
         ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             "http://gc.local".to_owned(),
@@ -5027,14 +5028,13 @@ async fn hub_dataset_and_model_operations() {
         .send().await.unwrap();
     assert_eq!(lfs_upload.status(), 200, "lfs object upload: {}", lfs_upload.status());
 
-    // Duplicate repo creation should fail (BUG #4). Currently returns 500
-    // because no dedicated 409 error variant exists in the Hub API.
+    // Duplicate repository creation is a client conflict, not a server error.
     let dup_repo = client
         .post(format!("{base_url}/api/repos/create"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
         .send().await.unwrap();
-    assert!(dup_repo.status().is_server_error(), "duplicate repo creation should fail: {}", dup_repo.status());
+    assert_eq!(dup_repo.status(), 409, "duplicate repo creation should return 409");
 
     server.abort();
 }
@@ -5496,7 +5496,6 @@ async fn oci_tag_list_empty_after_delete() {
     let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
     let bytes = serde_json::to_vec(&manifest).unwrap();
-    let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
     client.put(format!("{base_url}/v2/{repo}/manifests/mytag"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
@@ -6517,7 +6516,7 @@ async fn gc_does_not_remove_referenced_chunks() {
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
     .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap();
-    let report = shardline_server::run_gc(gc_config, shardline_server::LocalGcOptions {
+    let _report = shardline_server::run_gc(gc_config, shardline_server::LocalGcOptions {
         mark: true, sweep: true, retention_seconds: 0,
     }).await.unwrap();
 
@@ -7622,7 +7621,7 @@ async fn xet_multi_file_shard_reconstruct_each_independently() {
         file_hashes.push(file_hash);
     }
 
-    for (i, content) in files.iter().enumerate() {
+    for (i, _) in files.iter().enumerate() {
         let recon = client.get(format!("{base_url}/v1/reconstructions/{}", file_hashes[i]))
             .header("Authorization", format!("Bearer {xet_token}"))
             .send().await.unwrap();

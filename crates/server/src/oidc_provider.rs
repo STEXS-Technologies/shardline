@@ -740,7 +740,11 @@ mod tests {
 
     // ── OidcProvider construction helpers ────────────────────────────────
 
-    fn make_provider(issuer: &str, audience: Option<String>, cached: Option<CachedJwks>) -> OidcProvider {
+    fn make_provider(
+        issuer: &str,
+        audience: Option<String>,
+        cached: Option<CachedJwks>,
+    ) -> OidcProvider {
         OidcProvider {
             client: Client::new(),
             issuer: issuer.to_owned(),
@@ -764,7 +768,10 @@ mod tests {
         assert!(result.is_err(), "expected Err for unreachable issuer");
         if let Err(err) = result {
             assert!(
-                matches!(err, OidcProviderError::DiscoveryFetch(_) | OidcProviderError::HttpClient(_)),
+                matches!(
+                    err,
+                    OidcProviderError::DiscoveryFetch(_) | OidcProviderError::HttpClient(_)
+                ),
                 "expected DiscoveryFetch or HttpClient, got {err:?}"
             );
         }
@@ -809,7 +816,10 @@ mod tests {
                 .checked_sub(Duration::from_secs(7200))
                 .unwrap_or_else(Instant::now),
         }));
-        assert!(provider.get_cached_keys().is_none(), "expired cache should return None");
+        assert!(
+            provider.get_cached_keys().is_none(),
+            "expired cache should return None"
+        );
     }
 
     #[test]
@@ -822,7 +832,10 @@ mod tests {
             keys: Arc::new(vec![sample_rsa_jwk()]),
             fetched_at: just_inside,
         }));
-        assert!(provider.get_cached_keys().is_some(), "cache just inside TTL should return keys");
+        assert!(
+            provider.get_cached_keys().is_some(),
+            "cache just inside TTL should return keys"
+        );
     }
 
     // ── OidcProvider::verify_token ───────────────────────────────────────
@@ -941,7 +954,8 @@ mod tests {
             keys: Arc::new(vec![]),
             fetched_at: Instant::now(),
         }));
-        let result = provider.verify_token("eyJhbGciOiAiTUFDU0hBMjU2IiwgImtpZCI6ICJ0ZXN0In0.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiTUFDU0hBMjU2IiwgImtpZCI6ICJ0ZXN0In0.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -959,7 +973,8 @@ mod tests {
             keys: Arc::new(vec![]),
             fetched_at: Instant::now(),
         }));
-        let result = provider.verify_token("eyJhbGciOiAiRWREU0EiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiRWREU0EiLCAia2lkIjogInRlc3QifQ.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -979,7 +994,8 @@ mod tests {
             }]),
             fetched_at: Instant::now(),
         }));
-        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInVua25vd24ifQ.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInVua25vd24ifQ.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -1004,7 +1020,8 @@ mod tests {
             }]),
             fetched_at: Instant::now(),
         }));
-        let result = provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
+        let result =
+            provider.verify_token("eyJhbGciOiAiUlMyNTYiLCAia2lkIjogInRlc3QifQ.payload.sig");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
             "expected ProviderError, got {result:?}"
@@ -1016,7 +1033,11 @@ mod tests {
     #[test]
     fn verify_token_with_audience_and_no_keys_returns_provider_error() {
         // Provider configured with audience, but no keys cached
-        let provider = make_provider("https://issuer.example.com", Some("my-audience".to_owned()), None);
+        let provider = make_provider(
+            "https://issuer.example.com",
+            Some("my-audience".to_owned()),
+            None,
+        );
         let result = provider.verify_token("aaa.bbb.ccc");
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
@@ -1033,9 +1054,14 @@ mod tests {
         let provider = make_provider_no_audience(None);
         let repo = RepositoryScope::new(RepositoryProvider::Generic, "owner", "repo", Some("main"))
             .expect("valid repo scope");
-        let claims =
-            TokenClaims::new("https://issuer.example.com", "user", TokenScope::Read, repo, 9999999999)
-                .expect("valid claims");
+        let claims = TokenClaims::new(
+            "https://issuer.example.com",
+            "user",
+            TokenScope::Read,
+            repo,
+            9999999999,
+        )
+        .expect("valid claims");
         let result = provider.mint_token(&claims);
         assert!(
             matches!(result, Err(AuthError::ProviderError(_))),
@@ -1245,7 +1271,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_valid_rs256_jwt_succeeds() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1280,7 +1306,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_valid_rs256_jwt_scope_write_succeeds() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1316,7 +1342,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_valid_rs256_jwt_and_audience_succeeds() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1351,7 +1377,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_expired_jwt_fails() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1406,20 +1432,16 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         });
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(discovery_json),
-            )
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
             .mount(&mock_server)
             .await;
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/oauth/jwks"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(jwks_json),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
             .mount(&mock_server)
             .await;
 
@@ -1451,7 +1473,9 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         });
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
             .mount(&mock_server)
             .await;
@@ -1505,7 +1529,9 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         });
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
             .mount(&mock_server)
             .await;
@@ -1556,7 +1582,9 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         });
 
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
+            .and(wiremock::matchers::path(
+                "/.well-known/openid-configuration",
+            ))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
             .mount(&mock_server)
             .await;
@@ -1572,7 +1600,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             .expect("OIDC provider creation should succeed");
 
         // Sign a valid JWT with the matching RSA key
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1599,7 +1627,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_future_nbf_fails() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();
@@ -1629,7 +1657,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
 
     #[test]
     fn verify_token_with_missing_exp_fails() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         use std::collections::BTreeMap;
 
         let mut claims = BTreeMap::new();

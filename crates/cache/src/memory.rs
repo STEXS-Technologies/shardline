@@ -612,11 +612,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Task2: get() should hit the internal 30-second timeout
-        let result = tokio::time::timeout(
-            Duration::from_secs(35),
-            cache.get(&key),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_secs(35), cache.get(&key)).await;
 
         #[allow(clippy::panic, clippy::match_wild_err_arm)]
         match result {
@@ -626,7 +622,9 @@ mod tests {
             }
             Ok(Err(e)) => panic!("get returned unexpected error: {e}"),
             Err(_elapsed) => {
-                panic!("get did not complete within 35 seconds (internal 30s timeout should have fired)");
+                panic!(
+                    "get did not complete within 35 seconds (internal 30s timeout should have fired)"
+                );
             }
         }
 
@@ -1187,10 +1185,7 @@ mod tests {
         // round never cascade into another round's 30-second timeout.
         let mut handles = Vec::new();
         for i in 0..1000 {
-            let key = ReconstructionCacheKey::latest(
-                &format!("disappearing-loader-{i}"),
-                None,
-            );
+            let key = ReconstructionCacheKey::latest(&format!("disappearing-loader-{i}"), None);
 
             // Failing get_or_load — fast 10 µs sleep
             let c1 = std::sync::Arc::clone(&cache);
@@ -1360,14 +1355,8 @@ mod tests {
 
         // keys[0] is gone, keys[1] and keys[2] are present
         assert_eq!(cache.get(&keys[0]).await.unwrap(), None);
-        assert_eq!(
-            cache.get(&keys[1]).await.unwrap(),
-            Some(b"b".to_vec())
-        );
-        assert_eq!(
-            cache.get(&keys[2]).await.unwrap(),
-            Some(b"c".to_vec())
-        );
+        assert_eq!(cache.get(&keys[1]).await.unwrap(), Some(b"b".to_vec()));
+        assert_eq!(cache.get(&keys[2]).await.unwrap(), Some(b"c".to_vec()));
     }
 
     // ── get_or_load write-lock re-check hit ───────────────────────────────
@@ -1395,9 +1384,7 @@ mod tests {
                     .get_or_load(&k1, || {
                         Box::pin(async {
                             tokio::time::sleep(Duration::from_micros(20)).await;
-                            Ok::<_, ReconstructionCacheError>(
-                                format!("loaded-{i}").into_bytes(),
-                            )
+                            Ok::<_, ReconstructionCacheError>(format!("loaded-{i}").into_bytes())
                         })
                     })
                     .await;
@@ -1653,8 +1640,7 @@ mod tests {
         let mut handles = Vec::new();
 
         for i in 0..3000 {
-            let key =
-                ReconstructionCacheKey::latest(&format!("contention-{i}"), None);
+            let key = ReconstructionCacheKey::latest(&format!("contention-{i}"), None);
 
             // Fast-failing get_or_load — creates a loading entry that
             // vanishes quickly.
@@ -1723,8 +1709,7 @@ mod tests {
             // Each key gets a short-TTL entry via the main cache (1s TTL).
             // By the time operations race, the entry may be expired,
             // exercising the should_remove check in the phantom path.
-            let key =
-                ReconstructionCacheKey::latest(&format!("phantom-exp-{i}"), None);
+            let key = ReconstructionCacheKey::latest(&format!("phantom-exp-{i}"), None);
 
             // Seed: put with 1s TTL
             let c = std::sync::Arc::clone(&cache);

@@ -105,8 +105,8 @@ mod tests {
     async fn get_with_scope_returns_none() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
         let cache = DisabledReconstructionCache::new();
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
-            .unwrap();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main")).unwrap();
         let key = ReconstructionCacheKey::latest("scoped-file", Some(&scope));
         let result = cache.get(&key).await;
         assert!(result.is_ok());
@@ -134,8 +134,8 @@ mod tests {
     async fn delete_with_scoped_key_returns_false() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
         let cache = DisabledReconstructionCache::new();
-        let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "proj", None)
-            .unwrap();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "group", "proj", None).unwrap();
         let key = ReconstructionCacheKey::latest("scoped", Some(&scope));
         let result = cache.delete(&key).await;
         assert!(result.is_ok());

@@ -541,10 +541,7 @@ mod tests {
     async fn write_backup_manifest_writes_valid_json_with_local_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let config = crate::ServerConfig::new(
-            std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                8080,
-            ),
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
             std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
@@ -784,16 +781,17 @@ mod tests {
         // the manifest should fail with a connection error (not panic).
         let tmp = tempfile::tempdir().unwrap();
         let mut config = crate::ServerConfig::new(
-            std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                8080,
-            ),
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
             std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
         );
-        config = config.with_index_postgres_url("postgres://localhost:5432/test".to_owned()).unwrap();
-        config = config.with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap();
+        config = config
+            .with_index_postgres_url("postgres://localhost:5432/test".to_owned())
+            .unwrap();
+        config = config
+            .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+            .unwrap();
         let mut buffer = Vec::new();
         let result = write_backup_manifest(config, &mut buffer).await;
         // Should fail because no real Postgres is available.

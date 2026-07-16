@@ -109,7 +109,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{render_completion, render_manpage, write_completion, CliArtifactError};
+    use super::{CliArtifactError, render_completion, render_manpage, write_completion};
     use crate::command::CompletionShell;
 
     #[test]
@@ -138,29 +138,53 @@ mod tests {
     #[test]
     fn elvish_completion_contains_shardline() {
         let output = write_completion_to_string(CompletionShell::Elvish);
-        assert!(output.contains("shardline"), "Elvish completion should mention shardline");
-        assert!(output.contains("edit:"), "Elvish completion should contain edit: namespace");
+        assert!(
+            output.contains("shardline"),
+            "Elvish completion should mention shardline"
+        );
+        assert!(
+            output.contains("edit:"),
+            "Elvish completion should contain edit: namespace"
+        );
     }
 
     #[test]
     fn fish_completion_contains_shardline() {
         let output = write_completion_to_string(CompletionShell::Fish);
-        assert!(output.contains("shardline"), "Fish completion should mention shardline");
-        assert!(output.contains("complete"), "Fish completion should contain complete statement");
+        assert!(
+            output.contains("shardline"),
+            "Fish completion should mention shardline"
+        );
+        assert!(
+            output.contains("complete"),
+            "Fish completion should contain complete statement"
+        );
     }
 
     #[test]
     fn powershell_completion_contains_shardline() {
         let output = write_completion_to_string(CompletionShell::PowerShell);
-        assert!(output.contains("shardline"), "PowerShell completion should mention shardline");
-        assert!(output.contains("Register-ArgumentCompleter"), "PowerShell should register an argument completer");
+        assert!(
+            output.contains("shardline"),
+            "PowerShell completion should mention shardline"
+        );
+        assert!(
+            output.contains("Register-ArgumentCompleter"),
+            "PowerShell should register an argument completer"
+        );
     }
 
     #[test]
     fn zsh_completion_contains_shardline() {
         let output = write_completion_to_string(CompletionShell::Zsh);
-        assert!(output.contains("shardline"), "Zsh completion should mention shardline");
-        assert!(output.contains("#compdef"), "Zsh completion should have compdef directive");
+        assert!(
+            output.contains("shardline"),
+            "Zsh completion should mention shardline"
+        );
+        assert!(
+            output.contains("#compdef"),
+            "Zsh completion should have compdef directive"
+        );
     }
 
     // ── CliArtifactError Display / Debug ──────────────────────────────────

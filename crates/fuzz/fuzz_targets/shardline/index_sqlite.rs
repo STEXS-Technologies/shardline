@@ -35,12 +35,14 @@ fuzz_target!(|data: &str| {
         &shardline_index::FileId::new(shardline_protocol::ShardlineHash::from_bytes([1; 32])),
         &shardline_index::FileReconstruction::new(vec![]),
     ));
-    drop(record_store.commit_file_version_metadata(&shardline_index::FileRecord {
-        file_id: data.to_owned(),
-        content_hash: "a".repeat(64),
-        total_bytes: 0,
-        chunk_size: 0,
-        repository_scope: None,
-        chunks: vec![],
-    }));
+    drop(
+        record_store.commit_file_version_metadata(&shardline_index::FileRecord {
+            file_id: data.to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![],
+        }),
+    );
 });

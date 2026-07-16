@@ -509,12 +509,7 @@ mod tests {
     #[test]
     fn optional_s3_secret_both_none_returns_none() {
         use super::optional_s3_secret_from_sources;
-        let result = optional_s3_secret_from_sources(
-            "TEST_ENV",
-            None,
-            "TEST_FILE_ENV",
-            None,
-        );
+        let result = optional_s3_secret_from_sources("TEST_ENV", None, "TEST_FILE_ENV", None);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
@@ -536,9 +531,7 @@ mod tests {
         };
         let bucket: Result<String, _> = Ok("my-bucket".to_owned());
 
-        let result = configure_s3_object_store_config(bucket, inputs, || {
-            Ok((None, None, None))
-        });
+        let result = configure_s3_object_store_config(bucket, inputs, || Ok((None, None, None)));
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bucket(), "my-bucket");
@@ -585,15 +578,15 @@ mod tests {
         };
         let bucket: Result<String, _> = Err(ServerConfigError::MissingS3Bucket);
 
-        let result = configure_s3_object_store_config(bucket, inputs, || {
-            Ok((None, None, None))
-        });
+        let result = configure_s3_object_store_config(bucket, inputs, || Ok((None, None, None)));
         assert!(result.is_err());
     }
 
     #[test]
     fn configure_s3_object_store_config_allow_http_parse_err() {
-        use super::{PendingS3ObjectStoreConfig, ServerConfigError, configure_s3_object_store_config};
+        use super::{
+            PendingS3ObjectStoreConfig, ServerConfigError, configure_s3_object_store_config,
+        };
 
         let inputs = PendingS3ObjectStoreConfig {
             region: "us-east-1".to_owned(),
@@ -604,9 +597,7 @@ mod tests {
         };
         let bucket: Result<String, _> = Ok("bucket".to_owned());
 
-        let result = configure_s3_object_store_config(bucket, inputs, || {
-            Ok((None, None, None))
-        });
+        let result = configure_s3_object_store_config(bucket, inputs, || Ok((None, None, None)));
         assert!(result.is_err());
     }
 
@@ -709,20 +700,22 @@ mod tests {
 
     #[test]
     fn configure_s3_object_store_config_virtual_hosted_parse_err() {
-        use super::{PendingS3ObjectStoreConfig, ServerConfigError, configure_s3_object_store_config};
+        use super::{
+            PendingS3ObjectStoreConfig, ServerConfigError, configure_s3_object_store_config,
+        };
 
         let inputs = PendingS3ObjectStoreConfig {
             region: "us-east-1".to_owned(),
             endpoint: None,
             key_prefix: None,
             allow_http: Ok(None),
-            virtual_hosted_style_request: Err(ServerConfigError::InvalidS3VirtualHostedStyleRequest),
+            virtual_hosted_style_request: Err(
+                ServerConfigError::InvalidS3VirtualHostedStyleRequest,
+            ),
         };
         let bucket: Result<String, _> = Ok("bucket".to_owned());
 
-        let result = configure_s3_object_store_config(bucket, inputs, || {
-            Ok((None, None, None))
-        });
+        let result = configure_s3_object_store_config(bucket, inputs, || Ok((None, None, None)));
         assert!(result.is_err());
     }
 
@@ -863,7 +856,11 @@ mod tests {
         );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("UTF-8") || err_msg.contains("utf-8") || err_msg.contains("S3CredentialUtf8"));
+        assert!(
+            err_msg.contains("UTF-8")
+                || err_msg.contains("utf-8")
+                || err_msg.contains("S3CredentialUtf8")
+        );
     }
 
     // ── open_secret_file — symlink escaping parent directory ────────────────
@@ -871,8 +868,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn open_secret_file_symlink_outside_parent_is_err() {
-        use std::os::unix::fs::symlink;
         use super::open_secret_file;
+        use std::os::unix::fs::symlink;
 
         // Create a parent directory and a target file outside it
         let parent = tempfile::tempdir().unwrap();
@@ -1096,23 +1093,43 @@ mod tests {
     #[allow(clippy::undocumented_unsafe_blocks)]
     fn load_s3_object_store_config_with_key_prefix() {
         // SAFETY: serialized env var test
-        unsafe { std::env::set_var("SHARDLINE_S3_BUCKET", "test-bucket"); }
-        unsafe { std::env::set_var("SHARDLINE_S3_KEY_PREFIX", "shardline/"); }
-        unsafe { std::env::set_var("SHARDLINE_S3_REGION", "eu-west-1"); }
-        unsafe { std::env::set_var("SHARDLINE_S3_ENDPOINT", "https://s3.example.com"); }
+        unsafe {
+            std::env::set_var("SHARDLINE_S3_BUCKET", "test-bucket");
+        }
+        unsafe {
+            std::env::set_var("SHARDLINE_S3_KEY_PREFIX", "shardline/");
+        }
+        unsafe {
+            std::env::set_var("SHARDLINE_S3_REGION", "eu-west-1");
+        }
+        unsafe {
+            std::env::set_var("SHARDLINE_S3_ENDPOINT", "https://s3.example.com");
+        }
         // Remove any credential overrides
-        unsafe { std::env::remove_var("SHARDLINE_S3_ACCESS_KEY_ID"); }
-        unsafe { std::env::remove_var("SHARDLINE_S3_SECRET_ACCESS_KEY"); }
+        unsafe {
+            std::env::remove_var("SHARDLINE_S3_ACCESS_KEY_ID");
+        }
+        unsafe {
+            std::env::remove_var("SHARDLINE_S3_SECRET_ACCESS_KEY");
+        }
         let result = super::load_s3_object_store_config_from_env();
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bucket(), "test-bucket");
         assert!(config.key_prefix().is_some());
         // Cleanup
-        unsafe { std::env::remove_var("SHARDLINE_S3_BUCKET"); }
-        unsafe { std::env::remove_var("SHARDLINE_S3_KEY_PREFIX"); }
-        unsafe { std::env::remove_var("SHARDLINE_S3_REGION"); }
-        unsafe { std::env::remove_var("SHARDLINE_S3_ENDPOINT"); }
+        unsafe {
+            std::env::remove_var("SHARDLINE_S3_BUCKET");
+        }
+        unsafe {
+            std::env::remove_var("SHARDLINE_S3_KEY_PREFIX");
+        }
+        unsafe {
+            std::env::remove_var("SHARDLINE_S3_REGION");
+        }
+        unsafe {
+            std::env::remove_var("SHARDLINE_S3_ENDPOINT");
+        }
     }
 
     // ── configure_provider_runtime_from_paths — TTL zero ──────────────────

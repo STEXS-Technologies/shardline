@@ -47,12 +47,20 @@ name = "k8s_cluster_protocol_e2e"
 path = "k8s_cluster_protocol_e2e.rs"
 
 [[test]]
+name = "kind_deployment_smoke"
+path = "kind_deployment_smoke.rs"
+
+[[test]]
 name = "data_integrity"
 path = "data_integrity.rs"
 
 [[test]]
 name = "hub_api_e2e"
 path = "hub_api_e2e.rs"
+
+[[test]]
+name = "mixed_protocol_soak"
+path = "mixed_protocol_soak.rs"
 
 [dependencies]
 shardline-server = { path = "../crates/server" }

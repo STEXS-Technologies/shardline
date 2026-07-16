@@ -1,6 +1,7 @@
 use std::{
     io::{Error as IoError, ErrorKind},
     process::{Command, Output},
+    sync::{Mutex, Once, OnceLock},
     thread::sleep,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,6 +29,9 @@ const POSTGRES_DATABASE: &str = "shardline";
 const MINIO_ROOT_USER: &str = "minio";
 const MINIO_ROOT_PASSWORD: &str = "miniosecret";
 const DEFAULT_S3_BUCKET: &str = "shardline-e2e";
+
+static PROCESS_CLEANUP_CONTAINERS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static PROCESS_CLEANUP_REGISTERED: Once = Once::new();
 
 /// Containerized service stack for self-contained end-to-end tests.
 #[derive(Debug)]
@@ -121,18 +125,123 @@ impl DockerLocalStack {
             .map_or(0_u128, |duration| duration.as_nanos());
         format!("{prefix}/{unix_nanos}")
     }
+
+    /// Stops the Postgres service while retaining its container and data for a
+    /// later [`Self::start_postgres`] call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IoError`] when Postgres is not configured or Docker cannot
+    /// stop the service.
+    pub fn stop_postgres(&self) -> Result<(), IoError> {
+        let service = self
+            .postgres
+            .as_ref()
+            .ok_or_else(|| IoError::new(ErrorKind::NotFound, "postgres is not configured"))?;
+        stop_container(&service.container_name)
+    }
+
+    /// Starts a previously stopped Postgres service and waits until it accepts
+    /// database connections. Docker may assign a new host port, so callers must
+    /// retrieve [`Self::postgres_url`] again after this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IoError`] when Postgres is not configured, Docker cannot
+    /// start the service, or it does not become ready in time.
+    pub fn start_postgres(&mut self) -> Result<(), IoError> {
+        let service = self
+            .postgres
+            .as_mut()
+            .ok_or_else(|| IoError::new(ErrorKind::NotFound, "postgres is not configured"))?;
+        start_container(&service.container_name)?;
+        wait_for_postgres(&service.container_name)?;
+        service.host_port = docker_published_port(&service.container_name, 5432)?;
+        Ok(())
+    }
+
+    /// Stops the MinIO service while retaining its container and data for a
+    /// later [`Self::start_minio`] call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IoError`] when MinIO is not configured or Docker cannot
+    /// stop the service.
+    pub fn stop_minio(&self) -> Result<(), IoError> {
+        let service = self
+            .minio
+            .as_ref()
+            .ok_or_else(|| IoError::new(ErrorKind::NotFound, "minio is not configured"))?;
+        stop_container(&service.container_name)
+    }
+
+    /// Starts a previously stopped MinIO service and waits until its S3 API is
+    /// available again. Docker may assign a new host port, so callers must
+    /// retrieve [`Self::s3_raw_config`] again after this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IoError`] when MinIO is not configured, Docker cannot start
+    /// the service, or it does not become ready in time.
+    pub fn start_minio(&mut self) -> Result<(), IoError> {
+        let service = self
+            .minio
+            .as_mut()
+            .ok_or_else(|| IoError::new(ErrorKind::NotFound, "minio is not configured"))?;
+        start_container(&service.container_name)?;
+        wait_for_minio(&service.container_name)?;
+        service.host_port = docker_published_port(&service.container_name, 9000)?;
+        Ok(())
+    }
+
+    /// Stops the Redis service while retaining its container and data for a
+    /// later [`Self::start_redis`] call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IoError`] when Redis is not configured or Docker cannot
+    /// stop the service.
+    pub fn stop_redis(&self) -> Result<(), IoError> {
+        let service = self
+            .redis
+            .as_ref()
+            .ok_or_else(|| IoError::new(ErrorKind::NotFound, "redis is not configured"))?;
+        stop_container(&service.container_name)
+    }
+
+    /// Starts a previously stopped Redis service and waits until it responds to
+    /// a ping. Docker may assign a new host port, so callers must retrieve
+    /// [`Self::redis_url`] again after this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IoError`] when Redis is not configured, Docker cannot start
+    /// the service, or it does not become ready in time.
+    pub fn start_redis(&mut self) -> Result<(), IoError> {
+        let service = self
+            .redis
+            .as_mut()
+            .ok_or_else(|| IoError::new(ErrorKind::NotFound, "redis is not configured"))?;
+        start_container(&service.container_name)?;
+        wait_for_redis(&service.container_name)?;
+        service.host_port = docker_published_port(&service.container_name, 6379)?;
+        Ok(())
+    }
 }
 
 impl Drop for DockerLocalStack {
     fn drop(&mut self) {
         if let Some(service) = self.postgres.take() {
             let _ignored = remove_container(&service.container_name);
+            untrack_container_for_process_cleanup(&service.container_name);
         }
         if let Some(service) = self.minio.take() {
             let _ignored = remove_container(&service.container_name);
+            untrack_container_for_process_cleanup(&service.container_name);
         }
         if let Some(service) = self.redis.take() {
             let _ignored = remove_container(&service.container_name);
+            untrack_container_for_process_cleanup(&service.container_name);
         }
     }
 }
@@ -173,27 +282,32 @@ impl DockerLocalStackBuilder {
         }
 
         let run_id = unique_run_id();
-        let postgres = if self.postgres {
-            Some(start_postgres_service(&run_id)?)
-        } else {
-            None
+        let mut stack = DockerLocalStack {
+            postgres: None,
+            minio: None,
+            redis: None,
         };
-        let minio = if self.minio {
-            Some(start_minio_service(&run_id)?)
-        } else {
-            None
-        };
-        let redis = if self.redis {
-            Some(start_redis_service(&run_id)?)
-        } else {
-            None
-        };
+        if self.postgres {
+            stack.postgres = Some(start_postgres_service(&run_id)?);
+        }
+        if self.minio {
+            stack.minio = Some(start_minio_service(&run_id)?);
+        }
+        if self.redis {
+            stack.redis = Some(start_redis_service(&run_id)?);
+        }
 
-        Ok(Some(DockerLocalStack {
-            postgres,
-            minio,
-            redis,
-        }))
+        if let Some(service) = stack.postgres.as_ref() {
+            track_container_for_process_cleanup(&service.container_name);
+        }
+        if let Some(service) = stack.minio.as_ref() {
+            track_container_for_process_cleanup(&service.container_name);
+        }
+        if let Some(service) = stack.redis.as_ref() {
+            track_container_for_process_cleanup(&service.container_name);
+        }
+
+        Ok(Some(stack))
     }
 }
 
@@ -203,7 +317,6 @@ fn start_postgres_service(run_id: &str) -> Result<PostgresService, IoError> {
         Command::new("docker")
             .arg("run")
             .arg("-d")
-            .arg("--rm")
             .arg("--name")
             .arg(&container_name)
             .arg("-e")
@@ -217,28 +330,17 @@ fn start_postgres_service(run_id: &str) -> Result<PostgresService, IoError> {
             .arg(POSTGRES_IMAGE),
         "start postgres container",
     )?;
-    let host_port = docker_published_port(&container_name, 5432)?;
-    wait_for(
-        || {
-            run_command(
-                Command::new("docker")
-                    .arg("exec")
-                    .arg(&container_name)
-                    .arg("pg_isready")
-                    .arg("-U")
-                    .arg(POSTGRES_USER)
-                    .arg("-d")
-                    .arg(POSTGRES_DATABASE),
-            )
-            .is_ok_and(|output| output.status.success())
-        },
-        "postgres readiness",
-    )?;
+    let service = (|| {
+        let host_port = docker_published_port(&container_name, 5432)?;
+        wait_for_postgres(&container_name)?;
 
-    Ok(PostgresService {
-        container_name,
-        host_port,
-    })
+        Ok(PostgresService {
+            container_name: container_name.clone(),
+            host_port,
+        })
+    })();
+    remove_container_after_start_failure(&container_name, &service);
+    service
 }
 
 fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
@@ -247,7 +349,6 @@ fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
         Command::new("docker")
             .arg("run")
             .arg("-d")
-            .arg("--rm")
             .arg("--name")
             .arg(&container_name)
             .arg("-e")
@@ -265,42 +366,33 @@ fn start_minio_service(run_id: &str) -> Result<MinioService, IoError> {
             .arg(":9001"),
         "start minio container",
     )?;
-    let host_port = docker_published_port(&container_name, 9000)?;
-    let mc_host = format!("http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@127.0.0.1:{host_port}");
-    wait_for(
-        || {
-            run_command(Command::new("docker").arg("logs").arg(&container_name)).is_ok_and(
-                |output| {
-                    let combined = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                    output.status.success() && combined.contains("API:")
-                },
-            )
-        },
-        "minio readiness",
-    )?;
-    run_command_checked(
-        Command::new("docker")
-            .arg("run")
-            .arg("--rm")
-            .arg("--network")
-            .arg("host")
-            .arg("-e")
-            .arg(format!("MC_HOST_local={mc_host}"))
-            .arg(MINIO_MC_IMAGE)
-            .arg("mb")
-            .arg("--ignore-existing")
-            .arg(format!("local/{DEFAULT_S3_BUCKET}")),
-        "create minio bucket",
-    )?;
+    let service = (|| {
+        let host_port = docker_published_port(&container_name, 9000)?;
+        let mc_host =
+            format!("http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@127.0.0.1:{host_port}");
+        wait_for_minio(&container_name)?;
+        run_command_checked(
+            Command::new("docker")
+                .arg("run")
+                .arg("--rm")
+                .arg("--network")
+                .arg("host")
+                .arg("-e")
+                .arg(format!("MC_HOST_local={mc_host}"))
+                .arg(MINIO_MC_IMAGE)
+                .arg("mb")
+                .arg("--ignore-existing")
+                .arg(format!("local/{DEFAULT_S3_BUCKET}")),
+            "create minio bucket",
+        )?;
 
-    Ok(MinioService {
-        container_name,
-        host_port,
-    })
+        Ok(MinioService {
+            container_name: container_name.clone(),
+            host_port,
+        })
+    })();
+    remove_container_after_start_failure(&container_name, &service);
+    service
 }
 
 fn start_redis_service(run_id: &str) -> Result<RedisService, IoError> {
@@ -309,7 +401,6 @@ fn start_redis_service(run_id: &str) -> Result<RedisService, IoError> {
         Command::new("docker")
             .arg("run")
             .arg("-d")
-            .arg("--rm")
             .arg("--name")
             .arg(&container_name)
             .arg("-p")
@@ -317,25 +408,17 @@ fn start_redis_service(run_id: &str) -> Result<RedisService, IoError> {
             .arg(REDIS_IMAGE),
         "start redis container",
     )?;
-    let host_port = docker_published_port(&container_name, 6379)?;
-    wait_for(
-        || {
-            run_command(
-                Command::new("docker")
-                    .arg("exec")
-                    .arg(&container_name)
-                    .arg("redis-cli")
-                    .arg("ping"),
-            )
-            .is_ok_and(|output| output.status.success())
-        },
-        "redis readiness",
-    )?;
+    let service = (|| {
+        let host_port = docker_published_port(&container_name, 6379)?;
+        wait_for_redis(&container_name)?;
 
-    Ok(RedisService {
-        container_name,
-        host_port,
-    })
+        Ok(RedisService {
+            container_name: container_name.clone(),
+            host_port,
+        })
+    })();
+    remove_container_after_start_failure(&container_name, &service);
+    service
 }
 
 fn unique_run_id() -> String {
@@ -374,6 +457,117 @@ fn remove_container(container_name: &str) -> Result<(), IoError> {
         "remove container",
     )?;
     Ok(())
+}
+
+fn stop_container(container_name: &str) -> Result<(), IoError> {
+    run_command_checked(
+        Command::new("docker").arg("stop").arg(container_name),
+        "stop container",
+    )?;
+    Ok(())
+}
+
+fn start_container(container_name: &str) -> Result<(), IoError> {
+    run_command_checked(
+        Command::new("docker").arg("start").arg(container_name),
+        "start container",
+    )?;
+    Ok(())
+}
+
+fn wait_for_postgres(container_name: &str) -> Result<(), IoError> {
+    wait_for(
+        || {
+            run_command(
+                Command::new("docker")
+                    .arg("exec")
+                    .arg(container_name)
+                    .arg("pg_isready")
+                    .arg("-U")
+                    .arg(POSTGRES_USER)
+                    .arg("-d")
+                    .arg(POSTGRES_DATABASE),
+            )
+            .is_ok_and(|output| output.status.success())
+        },
+        "postgres readiness",
+    )
+}
+
+fn wait_for_minio(container_name: &str) -> Result<(), IoError> {
+    wait_for(
+        || {
+            run_command(
+                Command::new("docker")
+                    .arg("exec")
+                    .arg(container_name)
+                    .arg("curl")
+                    .arg("--fail")
+                    .arg("--silent")
+                    .arg("http://127.0.0.1:9000/minio/health/live"),
+            )
+            .is_ok_and(|output| output.status.success())
+        },
+        "minio readiness",
+    )
+}
+
+fn wait_for_redis(container_name: &str) -> Result<(), IoError> {
+    wait_for(
+        || {
+            run_command(
+                Command::new("docker")
+                    .arg("exec")
+                    .arg(container_name)
+                    .arg("redis-cli")
+                    .arg("ping"),
+            )
+            .is_ok_and(|output| output.status.success())
+        },
+        "redis readiness",
+    )
+}
+
+fn remove_container_after_start_failure<T>(container_name: &str, result: &Result<T, IoError>) {
+    if result.is_err() {
+        let _ignored = remove_container(container_name);
+    }
+}
+
+fn track_container_for_process_cleanup(container_name: &str) {
+    PROCESS_CLEANUP_REGISTERED.call_once(|| {
+        // SAFETY: `cleanup_tracked_containers` has the C ABI, captures no state, and
+        // is valid for the entire lifetime of this process.
+        let result = unsafe { libc::atexit(cleanup_tracked_containers) };
+        debug_assert_eq!(result, 0, "register container cleanup with atexit");
+    });
+    let containers = PROCESS_CLEANUP_CONTAINERS.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(mut containers) = containers.lock() else {
+        return;
+    };
+    containers.push(container_name.to_owned());
+}
+
+fn untrack_container_for_process_cleanup(container_name: &str) {
+    let Some(containers) = PROCESS_CLEANUP_CONTAINERS.get() else {
+        return;
+    };
+    let Ok(mut containers) = containers.lock() else {
+        return;
+    };
+    containers.retain(|tracked_name| tracked_name != container_name);
+}
+
+extern "C" fn cleanup_tracked_containers() {
+    let Some(containers) = PROCESS_CLEANUP_CONTAINERS.get() else {
+        return;
+    };
+    let Ok(mut containers) = containers.lock() else {
+        return;
+    };
+    while let Some(container_name) = containers.pop() {
+        let _ignored = remove_container(&container_name);
+    }
 }
 
 fn wait_for(mut check: impl FnMut() -> bool, description: &str) -> Result<(), IoError> {

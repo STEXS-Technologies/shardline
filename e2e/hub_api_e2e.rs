@@ -2754,7 +2754,7 @@ async fn hub_resolve_returns_inline_file_content() {
     create_model_repo(base_url, token).await;
 
     let file_content = b"# README\n\nThis is the resolved content.\n";
-    let commit_sha = commit_inline_file(
+    commit_inline_file(
         base_url,
         token,
         "models",

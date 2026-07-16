@@ -63,8 +63,7 @@ mod tests {
     #[allow(clippy::wildcard_enum_match_arm, clippy::panic)]
     fn map_symlinked_component() {
         let path = PathBuf::from("/test");
-        let result =
-            super::map_directory_path_error(DirectoryPathError::SymlinkedComponent(path));
+        let result = super::map_directory_path_error(DirectoryPathError::SymlinkedComponent(path));
         let msg = match &result {
             ServerError::Io(e) if e.kind() == ErrorKind::InvalidData => e.to_string(),
             other => panic!("expected Io(InvalidData), got {other:?}"),

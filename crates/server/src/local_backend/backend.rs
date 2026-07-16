@@ -296,7 +296,10 @@ mod tests {
             packed_start: 0,
             packed_end: 10,
         }];
-        assert_ne!(content_hash(10, 10, &chunks_a), content_hash(10, 10, &chunks_b));
+        assert_ne!(
+            content_hash(10, 10, &chunks_a),
+            content_hash(10, 10, &chunks_b)
+        );
     }
 
     #[test]
@@ -318,10 +321,7 @@ mod tests {
             packed_end: 10,
         }];
         // Different total_bytes should produce different hashes
-        assert_ne!(
-            content_hash(10, 10, &chunks),
-            content_hash(20, 10, &chunks)
-        );
+        assert_ne!(content_hash(10, 10, &chunks), content_hash(20, 10, &chunks));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -468,7 +468,11 @@ mod tests {
         .await
         .unwrap();
         let result = backend.ready().await;
-        assert!(result.is_ok(), "ready() with blackhole store should succeed since metadata returns Ok(None), got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "ready() with blackhole store should succeed since metadata returns Ok(None), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]

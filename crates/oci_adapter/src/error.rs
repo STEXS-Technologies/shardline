@@ -186,9 +186,9 @@ mod tests {
 
     #[test]
     fn s3_object_store_error_display_message() {
-        let err = OciAdapterError::S3ObjectStore(
-            shardline_storage::S3ObjectStoreError::Io(std::io::Error::other("test")),
-        );
+        let err = OciAdapterError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
+            std::io::Error::other("test"),
+        ));
         assert_eq!(
             err.to_string(),
             "s3 object storage adapter operation failed"
@@ -197,9 +197,9 @@ mod tests {
 
     #[test]
     fn local_object_store_error_display_message() {
-        let err = OciAdapterError::LocalObjectStore(
-            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("test")),
-        );
+        let err = OciAdapterError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
+            std::io::Error::other("test"),
+        ));
         assert_eq!(
             err.to_string(),
             "local object storage adapter operation failed"
@@ -208,12 +208,8 @@ mod tests {
 
     #[test]
     fn object_prefix_error_display_message() {
-        let err =
-            OciAdapterError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath);
-        assert_eq!(
-            err.to_string(),
-            "object storage prefix validation failed"
-        );
+        let err = OciAdapterError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath);
+        assert_eq!(err.to_string(), "object storage prefix validation failed");
     }
 
     #[test]
@@ -260,12 +256,12 @@ mod tests {
             OciAdapterError::Json(serde_json::from_str::<serde_json::Value>("bad").unwrap_err()),
             OciAdapterError::NumericConversion(u8::try_from(-1i32).unwrap_err()),
             OciAdapterError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound),
-            OciAdapterError::S3ObjectStore(
-                shardline_storage::S3ObjectStoreError::Io(std::io::Error::other("test")),
-            ),
-            OciAdapterError::LocalObjectStore(
-                shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("test")),
-            ),
+            OciAdapterError::S3ObjectStore(shardline_storage::S3ObjectStoreError::Io(
+                std::io::Error::other("test"),
+            )),
+            OciAdapterError::LocalObjectStore(shardline_storage::LocalObjectStoreError::Io(
+                std::io::Error::other("test"),
+            )),
             OciAdapterError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath),
             OciAdapterError::NotFound,
             OciAdapterError::Overflow,
@@ -280,7 +276,10 @@ mod tests {
 
         for variant in &variants {
             let msg = variant.to_string();
-            assert!(!msg.is_empty(), "Display message was empty for: {variant:?}");
+            assert!(
+                !msg.is_empty(),
+                "Display message was empty for: {variant:?}"
+            );
         }
 
         // BlockingTask variant needs a real JoinError, verify Display non-empty
@@ -291,7 +290,10 @@ mod tests {
                 let join_err = handle.await.unwrap_err();
                 let err = OciAdapterError::BlockingTask(join_err);
                 let msg = err.to_string();
-                assert!(!msg.is_empty(), "Display message was empty for BlockingTask");
+                assert!(
+                    !msg.is_empty(),
+                    "Display message was empty for BlockingTask"
+                );
             });
         });
         // If spawning fails in test context, that's OK — we tested the other variants

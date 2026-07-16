@@ -305,7 +305,9 @@ mod tests {
     #[test]
     fn scope_namespace_with_repository_scope() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
         let ns = scope_namespace(Some(&scope));
         // Should be a 64-char hex string (SHA-256)
         assert_eq!(ns.len(), 64);
@@ -315,7 +317,8 @@ mod tests {
     #[test]
     fn scope_namespace_without_revision() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
         let ns = scope_namespace(Some(&scope));
         assert_eq!(ns.len(), 64);
     }
@@ -348,11 +351,10 @@ mod tests {
     #[test]
     fn validate_oci_repository_scope_rejects_non_matching() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
-        let result = validate_oci_repository_scope::<ValidateContentHashError>(
-            "other/repo",
-            Some(&scope),
-        );
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let result =
+            validate_oci_repository_scope::<ValidateContentHashError>("other/repo", Some(&scope));
         assert!(result.is_err());
     }
 

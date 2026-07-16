@@ -1581,13 +1581,24 @@ mod tests {
         let integrity = ObjectIntegrity::new(super::chunk_hash(body), 11);
 
         // Put source
-        assert!(matches!(store.put_if_absent(&source, ObjectBody::from_slice(body), &integrity), Ok(PutOutcome::Inserted)));
+        assert!(matches!(
+            store.put_if_absent(&source, ObjectBody::from_slice(body), &integrity),
+            Ok(PutOutcome::Inserted)
+        ));
         // Copy to dest
-        assert!(matches!(store.copy_object_if_absent(&source, &dest), Ok(PutOutcome::Inserted)));
+        assert!(matches!(
+            store.copy_object_if_absent(&source, &dest),
+            Ok(PutOutcome::Inserted)
+        ));
         // Second copy is idempotent
-        assert!(matches!(store.copy_object_if_absent(&source, &dest), Ok(PutOutcome::AlreadyExists)));
+        assert!(matches!(
+            store.copy_object_if_absent(&source, &dest),
+            Ok(PutOutcome::AlreadyExists)
+        ));
         // Dest is readable and matches
-        let dest_data = store.read_range(&dest, ByteRange::new(0, 10).unwrap()).unwrap();
+        let dest_data = store
+            .read_range(&dest, ByteRange::new(0, 10).unwrap())
+            .unwrap();
         assert_eq!(dest_data, body);
     }
 
@@ -1608,7 +1619,9 @@ mod tests {
         let key = ObjectKey::parse("ab/self").unwrap();
         let body = b"self copy data";
         let integrity = ObjectIntegrity::new(super::chunk_hash(body), 14);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         let result = store.copy_object_if_absent(&key, &key);
         assert!(matches!(result, Ok(PutOutcome::AlreadyExists)));
@@ -1632,10 +1645,27 @@ mod tests {
         let original = b"original content";
         let replacement = b"replacement content";
 
-        store.put_if_absent(&key, ObjectBody::from_slice(original), &ObjectIntegrity::new(super::chunk_hash(original), original.len() as u64)).unwrap();
-        store.put_overwrite(&key, ObjectBody::from_slice(replacement), &ObjectIntegrity::new(super::chunk_hash(replacement), replacement.len() as u64)).unwrap();
+        store
+            .put_if_absent(
+                &key,
+                ObjectBody::from_slice(original),
+                &ObjectIntegrity::new(super::chunk_hash(original), original.len() as u64),
+            )
+            .unwrap();
+        store
+            .put_overwrite(
+                &key,
+                ObjectBody::from_slice(replacement),
+                &ObjectIntegrity::new(super::chunk_hash(replacement), replacement.len() as u64),
+            )
+            .unwrap();
 
-        let data = store.read_range(&key, ByteRange::new(0, replacement.len() as u64 - 1).unwrap()).unwrap();
+        let data = store
+            .read_range(
+                &key,
+                ByteRange::new(0, replacement.len() as u64 - 1).unwrap(),
+            )
+            .unwrap();
         assert_eq!(data, replacement);
     }
 
@@ -1649,15 +1679,21 @@ mod tests {
         let body = b"data";
         let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
 
-        store.put_if_absent(&key_a, ObjectBody::from_slice(body), &integrity).unwrap();
-        store.put_if_absent(&key_b, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key_a, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
+        store
+            .put_if_absent(&key_b, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         // List with no start_after returns both
         let page = store.list_flat_namespace_page(&prefix, None, 10).unwrap();
         assert_eq!(page.len(), 2);
 
         // List with start_after returns remaining
-        let page = store.list_flat_namespace_page(&prefix, Some(&key_a), 10).unwrap();
+        let page = store
+            .list_flat_namespace_page(&prefix, Some(&key_a), 10)
+            .unwrap();
         assert_eq!(page.len(), 1);
     }
 
@@ -1668,7 +1704,10 @@ mod tests {
         let prefix = ObjectPrefix::parse("ab/").unwrap();
         let key = ObjectKey::parse("cd/outsider").unwrap();
         let result = store.list_flat_namespace_page(&prefix, Some(&key), 10);
-        assert!(matches!(result, Err(LocalObjectStoreError::InvalidStartAfter)));
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::InvalidStartAfter)
+        ));
     }
 
     #[test]
@@ -1718,7 +1757,9 @@ mod tests {
         let key = ObjectKey::parse("ab/readable").unwrap();
         let body = b"data for file open";
         let integrity = ObjectIntegrity::new(super::chunk_hash(body), body.len() as u64);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         let mut file = store.open_object_file(&key).unwrap();
         use std::io::Read;
@@ -1738,8 +1779,14 @@ mod tests {
         std::fs::write(&tmp, b"actual-body").unwrap();
         let integrity = ObjectIntegrity::new(super::chunk_hash(b"actual-body"), 999);
         let result = store.put_temporary_file_if_absent(&key, &tmp, &integrity);
-        assert!(matches!(result, Err(LocalObjectStoreError::IntegrityLengthMismatch)));
-        assert!(tmp.exists(), "temporary file should not be removed on rejected integrity");
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::IntegrityLengthMismatch)
+        ));
+        assert!(
+            tmp.exists(),
+            "temporary file should not be removed on rejected integrity"
+        );
     }
 
     // ── put_temporary_file_if_absent rejects wrong hash ─────────────────────
@@ -1754,7 +1801,10 @@ mod tests {
         let wrong_hash = super::chunk_hash(b"different-body");
         let integrity = ObjectIntegrity::new(wrong_hash, 11);
         let result = store.put_temporary_file_if_absent(&key, &tmp, &integrity);
-        assert!(matches!(result, Err(LocalObjectStoreError::IntegrityHashMismatch)));
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::IntegrityHashMismatch)
+        ));
         assert!(tmp.exists());
     }
 
@@ -1828,50 +1878,77 @@ mod tests {
 
     #[test]
     fn local_store_error_display_io() {
-        let err = LocalObjectStoreError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope"));
-        assert!(err.to_string().contains("local object store operation failed"));
+        let err = LocalObjectStoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "nope",
+        ));
+        assert!(
+            err.to_string()
+                .contains("local object store operation failed")
+        );
     }
 
     #[test]
     fn local_store_error_display_integrity_length_mismatch() {
         let err = LocalObjectStoreError::IntegrityLengthMismatch;
-        assert_eq!(err.to_string(), "object body length did not match expected integrity");
+        assert_eq!(
+            err.to_string(),
+            "object body length did not match expected integrity"
+        );
     }
 
     #[test]
     fn local_store_error_display_integrity_hash_mismatch() {
         let err = LocalObjectStoreError::IntegrityHashMismatch;
-        assert_eq!(err.to_string(), "object body hash did not match expected integrity");
+        assert_eq!(
+            err.to_string(),
+            "object body hash did not match expected integrity"
+        );
     }
 
     #[test]
     fn local_store_error_display_existing_object_conflict() {
         let err = LocalObjectStoreError::ExistingObjectConflict;
-        assert_eq!(err.to_string(), "object key already exists with conflicting bytes");
+        assert_eq!(
+            err.to_string(),
+            "object key already exists with conflicting bytes"
+        );
     }
 
     #[test]
     fn local_store_error_display_range_out_of_bounds() {
         let err = LocalObjectStoreError::RangeOutOfBounds;
-        assert_eq!(err.to_string(), "requested byte range exceeded stored object length");
+        assert_eq!(
+            err.to_string(),
+            "requested byte range exceeded stored object length"
+        );
     }
 
     #[test]
     fn local_store_error_display_invalid_stored_key() {
         let err = LocalObjectStoreError::InvalidStoredKey;
-        assert_eq!(err.to_string(), "stored object path could not be represented as a valid object key");
+        assert_eq!(
+            err.to_string(),
+            "stored object path could not be represented as a valid object key"
+        );
     }
 
     #[test]
     fn local_store_error_display_invalid_object_path() {
         let err = LocalObjectStoreError::InvalidObjectPath;
-        assert_eq!(err.to_string(), "validated object key could not be mapped to a local path");
+        assert_eq!(
+            err.to_string(),
+            "validated object key could not be mapped to a local path"
+        );
     }
 
     #[test]
     fn local_store_error_display_invalid_start_after() {
         let err = LocalObjectStoreError::InvalidStartAfter;
-        assert_eq!(err.to_string(), "start_after key is outside the requested prefix");
+        assert_eq!(
+            err.to_string(),
+            "start_after key is outside the requested prefix"
+        );
     }
 
     // ── chunk_hash ───────────────────────────────────────────────────────────
@@ -2047,7 +2124,7 @@ mod tests {
     #[test]
     fn local_map_directory_path_error_symlink_variant() {
         let result = super::map_directory_path_error(
-            crate::DirectoryPathError::SymlinkedComponent(PathBuf::from("/link"))
+            crate::DirectoryPathError::SymlinkedComponent(PathBuf::from("/link")),
         );
         assert!(matches!(result, LocalObjectStoreError::InvalidObjectPath));
     }
@@ -2055,25 +2132,21 @@ mod tests {
     #[test]
     fn local_map_directory_path_error_non_dir_variant() {
         let result = super::map_directory_path_error(
-            crate::DirectoryPathError::NonDirectoryComponent(PathBuf::from("/file"))
+            crate::DirectoryPathError::NonDirectoryComponent(PathBuf::from("/file")),
         );
         assert!(matches!(result, LocalObjectStoreError::InvalidObjectPath));
     }
 
     #[test]
     fn local_map_directory_path_error_unsupported_prefix_variant() {
-        let result = super::map_directory_path_error(
-            crate::DirectoryPathError::UnsupportedPrefix
-        );
+        let result = super::map_directory_path_error(crate::DirectoryPathError::UnsupportedPrefix);
         assert!(matches!(result, LocalObjectStoreError::InvalidObjectPath));
     }
 
     #[test]
     fn local_map_directory_path_error_io_variant() {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let result = super::map_directory_path_error(
-            crate::DirectoryPathError::Io(io_err)
-        );
+        let result = super::map_directory_path_error(crate::DirectoryPathError::Io(io_err));
         assert!(matches!(result, LocalObjectStoreError::Io(_)));
     }
 
@@ -2090,43 +2163,64 @@ mod tests {
     #[test]
     fn local_error_display_integrity_length_mismatch() {
         let err = LocalObjectStoreError::IntegrityLengthMismatch;
-        assert_eq!(err.to_string(), "object body length did not match expected integrity");
+        assert_eq!(
+            err.to_string(),
+            "object body length did not match expected integrity"
+        );
     }
 
     #[test]
     fn local_error_display_integrity_hash_mismatch() {
         let err = LocalObjectStoreError::IntegrityHashMismatch;
-        assert_eq!(err.to_string(), "object body hash did not match expected integrity");
+        assert_eq!(
+            err.to_string(),
+            "object body hash did not match expected integrity"
+        );
     }
 
     #[test]
     fn local_error_display_existing_object_conflict() {
         let err = LocalObjectStoreError::ExistingObjectConflict;
-        assert_eq!(err.to_string(), "object key already exists with conflicting bytes");
+        assert_eq!(
+            err.to_string(),
+            "object key already exists with conflicting bytes"
+        );
     }
 
     #[test]
     fn local_error_display_range_out_of_bounds() {
         let err = LocalObjectStoreError::RangeOutOfBounds;
-        assert_eq!(err.to_string(), "requested byte range exceeded stored object length");
+        assert_eq!(
+            err.to_string(),
+            "requested byte range exceeded stored object length"
+        );
     }
 
     #[test]
     fn local_error_display_invalid_stored_key() {
         let err = LocalObjectStoreError::InvalidStoredKey;
-        assert_eq!(err.to_string(), "stored object path could not be represented as a valid object key");
+        assert_eq!(
+            err.to_string(),
+            "stored object path could not be represented as a valid object key"
+        );
     }
 
     #[test]
     fn local_error_display_invalid_object_path() {
         let err = LocalObjectStoreError::InvalidObjectPath;
-        assert_eq!(err.to_string(), "validated object key could not be mapped to a local path");
+        assert_eq!(
+            err.to_string(),
+            "validated object key could not be mapped to a local path"
+        );
     }
 
     #[test]
     fn local_error_display_invalid_start_after() {
         let err = LocalObjectStoreError::InvalidStartAfter;
-        assert_eq!(err.to_string(), "start_after key is outside the requested prefix");
+        assert_eq!(
+            err.to_string(),
+            "start_after key is outside the requested prefix"
+        );
     }
 
     #[test]
@@ -2159,7 +2253,10 @@ mod tests {
         let prefix = ObjectPrefix::parse("ns1/").unwrap();
         let bad_key = ObjectKey::parse("ns2/outside").unwrap();
         let result = store.list_flat_namespace_page(&prefix, Some(&bad_key), 10);
-        assert!(matches!(result, Err(LocalObjectStoreError::InvalidStartAfter)));
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::InvalidStartAfter)
+        ));
     }
 
     // ── existing_object_outcome with temporary_bytes ──────────────────────────
@@ -2261,7 +2358,9 @@ mod tests {
         let key = ObjectKey::parse("a/b/c/d/file.xorb").unwrap();
         let body = b"data";
         let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         let d_dir = storage.path().join("a/b/c/d");
         assert!(d_dir.exists());
@@ -2270,8 +2369,14 @@ mod tests {
 
         // All empty ancestors should be cleaned up
         assert!(!d_dir.exists(), "empty leaf dir should be removed");
-        assert!(!storage.path().join("a/b/c").exists(), "empty parent dir should be removed");
-        assert!(!storage.path().join("a/b").exists(), "empty grandparent dir should be removed");
+        assert!(
+            !storage.path().join("a/b/c").exists(),
+            "empty parent dir should be removed"
+        );
+        assert!(
+            !storage.path().join("a/b").exists(),
+            "empty grandparent dir should be removed"
+        );
         // Root-level dir may still exist if other tests create files there
     }
 
@@ -2282,7 +2387,9 @@ mod tests {
         let key = ObjectKey::parse("file.xorb").unwrap();
         let body = b"data";
         let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
 
         store.delete_if_present(&key).unwrap();
 
@@ -2298,11 +2405,13 @@ mod tests {
         let store = LocalObjectStore::new(storage.path_buf()).unwrap();
         // Create a file and a subdirectory under the prefix
         let file_key = ObjectKey::parse("ns/afile.xorb").unwrap();
-        store.put_if_absent(
-            &file_key,
-            ObjectBody::from_slice(b"data"),
-            &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
-        ).unwrap();
+        store
+            .put_if_absent(
+                &file_key,
+                ObjectBody::from_slice(b"data"),
+                &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
+            )
+            .unwrap();
         // Create a subdirectory entry via the filesystem
         let dir = storage.path().join("ns").join("subdir");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2319,15 +2428,20 @@ mod tests {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let key = ObjectKey::parse("test/small.xorb").unwrap();
-        store.put_if_absent(
-            &key,
-            ObjectBody::from_slice(b"abc"),
-            &ObjectIntegrity::new(super::chunk_hash(b"abc"), 3),
-        ).unwrap();
+        store
+            .put_if_absent(
+                &key,
+                ObjectBody::from_slice(b"abc"),
+                &ObjectIntegrity::new(super::chunk_hash(b"abc"), 3),
+            )
+            .unwrap();
         // ByteRange(0, u64::MAX) is valid, but len() returns None due to overflow
         let range = ByteRange::new(0, u64::MAX).unwrap();
         let result = store.read_range(&key, range);
-        assert!(matches!(result, Err(LocalObjectStoreError::RangeOutOfBounds)));
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::RangeOutOfBounds)
+        ));
     }
 
     // ── read_range past end of file returns RangeOutOfBounds ─────────────────
@@ -2359,15 +2473,20 @@ mod tests {
         let storage = shardline_test_support::TempStorage::new();
         let store = LocalObjectStore::new(storage.path_buf()).unwrap();
         let key = ObjectKey::parse("test/short.xorb").unwrap();
-        store.put_if_absent(
-            &key,
-            ObjectBody::from_slice(b"abc"),
-            &ObjectIntegrity::new(super::chunk_hash(b"abc"), 3),
-        ).unwrap();
+        store
+            .put_if_absent(
+                &key,
+                ObjectBody::from_slice(b"abc"),
+                &ObjectIntegrity::new(super::chunk_hash(b"abc"), 3),
+            )
+            .unwrap();
         // Request more bytes than the file contains
         let range = ByteRange::new(1, 10).unwrap();
         let result = store.read_range(&key, range);
-        assert!(matches!(result, Err(LocalObjectStoreError::RangeOutOfBounds)));
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::RangeOutOfBounds)
+        ));
     }
 
     #[cfg(unix)]
@@ -2379,7 +2498,9 @@ mod tests {
         let key = ObjectKey::parse("locked_dir/file.xorb").unwrap();
         let body = b"data";
         let integrity = ObjectIntegrity::new(super::chunk_hash(body), 4);
-        store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
         // Remove write permission from the parent directory
         let parent = storage.path().join("locked_dir");
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -2412,11 +2533,13 @@ mod tests {
 
         // Create a regular file in the prefix
         let file_key = ObjectKey::parse("pfx/regular.xorb").unwrap();
-        store.put_if_absent(
-            &file_key,
-            ObjectBody::from_slice(b"data"),
-            &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
-        ).unwrap();
+        store
+            .put_if_absent(
+                &file_key,
+                ObjectBody::from_slice(b"data"),
+                &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
+            )
+            .unwrap();
 
         // Create a FIFO (named pipe) in the prefix directory - not a regular file
         let fifo_path = storage.path().join("pfx/fifo_entry");

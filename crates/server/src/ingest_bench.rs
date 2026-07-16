@@ -132,13 +132,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_without_storage_rejects_invalid_file_id() {
         let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
-        let result = ingest_without_storage(
-            chunk_size,
-            "../invalid",
-            Bytes::from_static(b"test"),
-            None,
-        )
-        .await;
+        let result =
+            ingest_without_storage(chunk_size, "../invalid", Bytes::from_static(b"test"), None)
+                .await;
         assert!(result.is_err());
     }
 
@@ -169,7 +165,10 @@ mod tests {
             Some("0000000000000000000000000000000000000000000000000000000000000000"),
         )
         .await;
-        assert!(matches!(result, Err(crate::ServerError::ExpectedBodyHashMismatch)));
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ExpectedBodyHashMismatch)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

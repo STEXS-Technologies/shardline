@@ -73,6 +73,11 @@ pub(super) async fn read_chunk(
 ) -> Result<Response, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     validate_hash_path(&hash)?;
+
+    // Do not query repository references for an object that is absent. Besides
+    // avoiding unnecessary metadata work, this makes unknown hashes
+    // indistinguishable from inaccessible ones without scanning repositories.
+    let _stored_length = state.backend.chunk_length(&hash).await?;
     if let Some(auth) = auth.as_ref() {
         let reachable = state
             .backend
@@ -418,7 +423,10 @@ mod tests {
     #[test]
     fn metrics_content_type_is_correct() {
         // Verify the content-type header constant matches expectations
-        assert_eq!("text/plain; version=0.0.4; charset=utf-8", "text/plain; version=0.0.4; charset=utf-8");
+        assert_eq!(
+            "text/plain; version=0.0.4; charset=utf-8",
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
     }
 
     #[test]

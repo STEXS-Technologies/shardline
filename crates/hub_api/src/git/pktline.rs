@@ -383,8 +383,16 @@ mod tests {
         // Lossy output: "\x00\x01\x02\u{FFFD}" = 6 UTF-8 bytes
         // Total string: "0008" (4) + 6 = 10
         let encoded = encode_line_bytes(b"\x00\x01\x02\xff").expect("binary bytes should encode");
-        assert!(encoded.starts_with("0008"), "expected '0008' prefix, got: {encoded}");
-        assert_eq!(encoded.len(), 10, "expected 10 total chars, got: {encoded} (len={})", encoded.len());
+        assert!(
+            encoded.starts_with("0008"),
+            "expected '0008' prefix, got: {encoded}"
+        );
+        assert_eq!(
+            encoded.len(),
+            10,
+            "expected 10 total chars, got: {encoded} (len={})",
+            encoded.len()
+        );
     }
 
     #[test]
@@ -511,7 +519,10 @@ mod tests {
         // Total string length: 4 + 65516 = 65520
         // len = 65516 + 4 = 65520 = 0xFFF0
         assert_eq!(result.len(), 65520);
-        assert!(result.starts_with("fff0"), "expected 'fff0' prefix, got start of: {result}");
+        assert!(
+            result.starts_with("fff0"),
+            "expected 'fff0' prefix, got start of: {result}"
+        );
     }
 
     #[test]

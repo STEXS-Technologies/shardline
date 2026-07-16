@@ -493,7 +493,10 @@ mod tests {
 
         let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
 
-        assert!(matches!(response, Err(XetAdapterError::FileRecordInvariant(_))));
+        assert!(matches!(
+            response,
+            Err(XetAdapterError::FileRecordInvariant(_))
+        ));
     }
 
     #[test]
@@ -566,7 +569,10 @@ mod tests {
             None,
         );
 
-        assert!(matches!(response, Err(XetAdapterError::FileRecordInvariant(_))));
+        assert!(matches!(
+            response,
+            Err(XetAdapterError::FileRecordInvariant(_))
+        ));
     }
 
     #[test]

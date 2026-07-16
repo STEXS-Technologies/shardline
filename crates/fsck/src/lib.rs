@@ -1170,7 +1170,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(report.is_clean(), "empty stores should produce clean report");
+        assert!(
+            report.is_clean(),
+            "empty stores should produce clean report"
+        );
         assert_eq!(report.latest_records, 0);
         assert_eq!(report.version_records, 0);
         assert_eq!(report.inspected_dedupe_shard_mappings, 0);
@@ -1315,7 +1318,10 @@ mod tests {
         let cases: &[(FsckReconstructionPlanDetail, &str)] = &[
             (FsckReconstructionPlanDetail::ChunkHashInvalid, "hash"),
             (FsckReconstructionPlanDetail::EmptyChunk, "empty"),
-            (FsckReconstructionPlanDetail::NonContiguousChunkOffsets, "contiguous"),
+            (
+                FsckReconstructionPlanDetail::NonContiguousChunkOffsets,
+                "contiguous",
+            ),
             (FsckReconstructionPlanDetail::InvalidChunkRange, "range"),
             (FsckReconstructionPlanDetail::InvalidPackedRange, "range"),
             (FsckReconstructionPlanDetail::LengthOverflow, "overflow"),
@@ -1348,10 +1354,24 @@ mod tests {
     fn fsck_error_display_all_variants() {
         let cases: &[(FsckError, &str)] = &[
             (FsckError::Io(std::io::Error::other("test")), "storage"),
-            (FsckError::Json(serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err()), "json"),
-            (FsckError::NumericConversion(u64::try_from(-1i32).unwrap_err()), "bounds"),
+            (
+                FsckError::Json(
+                    serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err(),
+                ),
+                "json",
+            ),
+            (
+                FsckError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+                "bounds",
+            ),
             (FsckError::Overflow, "overflow"),
-            (FsckError::StoredFileMetadataTooLarge { observed_bytes: 999, maximum_bytes: 100 }, "ceiling"),
+            (
+                FsckError::StoredFileMetadataTooLarge {
+                    observed_bytes: 999,
+                    maximum_bytes: 100,
+                },
+                "ceiling",
+            ),
         ];
         for (error, substring) in cases {
             let msg = error.to_string();
@@ -1418,10 +1438,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean(), "expected issues for missing shard object");
+        assert!(
+            !report.is_clean(),
+            "expected issues for missing shard object"
+        );
         assert_eq!(report.inspected_dedupe_shard_mappings, 1);
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingDedupeShardObject),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingDedupeShardObject),
             "expected MissingDedupeShardObject issue, got: {:#?}",
             report.issues
         );
@@ -1468,10 +1494,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean(), "expected issues for invalid retained shard");
+        assert!(
+            !report.is_clean(),
+            "expected issues for invalid retained shard"
+        );
         assert_eq!(report.inspected_dedupe_shard_mappings, 1);
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidRetainedShard),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidRetainedShard),
             "expected InvalidRetainedShard issue, got: {:#?}",
             report.issues
         );
@@ -1494,7 +1526,9 @@ mod tests {
         let hash = ShardlineHash::from_bytes([99; 32]);
         let file_id = FileId::new(hash);
         let reconstruction = FileReconstruction::new(vec![]);
-        index_store.insert_reconstruction(&file_id, &reconstruction).unwrap();
+        index_store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .unwrap();
 
         let report = run_fsck_with_stores(
             &record_store,
@@ -1506,10 +1540,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean(), "expected issues for empty reconstruction");
+        assert!(
+            !report.is_clean(),
+            "expected issues for empty reconstruction"
+        );
         assert_eq!(report.inspected_reconstructions, 1);
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::EmptyReconstruction),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::EmptyReconstruction),
             "expected EmptyReconstruction issue, got: {:#?}",
             report.issues
         );
@@ -1837,8 +1877,7 @@ mod tests {
     #[test]
     fn fsck_error_display_s3_object_store() {
         use shardline_storage::S3ObjectStoreError;
-        let err =
-            FsckError::S3ObjectStore(S3ObjectStoreError::IncompleteCredentials);
+        let err = FsckError::S3ObjectStore(S3ObjectStoreError::IncompleteCredentials);
         let msg = err.to_string();
         assert!(msg.contains("s3 object"), "msg: {msg}");
     }
@@ -1869,9 +1908,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn run_fsck_with_missing_reconstruction_detected() {
-        use shardline_index::{
-            FileId, FileReconstruction, ReconstructionTerm, StoredObjectId,
-        };
+        use shardline_index::{FileId, FileReconstruction, ReconstructionTerm, StoredObjectId};
         use shardline_protocol::ChunkRange;
         let storage = shardline_test_support::TempStorage::new();
         let root = storage.path().to_path_buf();
@@ -1888,7 +1925,9 @@ mod tests {
         let chunk_range = ChunkRange::new(0, 1).unwrap();
         let term = ReconstructionTerm::new(object_id, chunk_range, 100);
         let reconstruction = FileReconstruction::new(vec![term]);
-        index_store.insert_reconstruction(&file_id, &reconstruction).unwrap();
+        index_store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .unwrap();
 
         let report = run_fsck_with_stores(
             &record_store,
@@ -1901,10 +1940,12 @@ mod tests {
         .unwrap();
 
         assert!(!report.is_clean());
-        assert!(report
-            .issues
-            .iter()
-            .any(|i| i.kind == FsckIssueKind::MissingReconstructionXorb));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingReconstructionXorb)
+        );
     }
 
     // ── run_fsck_with_invalid_dedupe_shard_mapping (hash not in shard) ─
@@ -1951,19 +1992,21 @@ mod tests {
         shard
             .add_xorb_block(MDBXorbInfo {
                 metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u32, chunk_data.len() as u32),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard_bytes = shard.to_bytes().unwrap();
         let shard_chunk_hash_hex = chunk_hash.hex();
 
         // Store the shard in object storage
-        let shard_key_str = format!("shards/{}/{}", &shard_chunk_hash_hex[..2], shard_chunk_hash_hex);
+        let shard_key_str = format!(
+            "shards/{}/{}",
+            &shard_chunk_hash_hex[..2],
+            shard_chunk_hash_hex
+        );
         let shard_key = ObjectKey::parse(&shard_key_str).unwrap();
         let shard_path = object_root.join(shard_key.as_str());
         if let Some(parent) = shard_path.parent() {
@@ -1989,10 +2032,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!report.is_clean(), "expected issues for invalid dedupe shard mapping");
+        assert!(
+            !report.is_clean(),
+            "expected issues for invalid dedupe shard mapping"
+        );
         assert_eq!(report.inspected_dedupe_shard_mappings, 1);
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidDedupeShardMapping),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidDedupeShardMapping),
             "expected InvalidDedupeShardMapping, got: {:#?}",
             report.issues
         );
@@ -2042,12 +2091,10 @@ mod tests {
         shard
             .add_xorb_block(MDBXorbInfo {
                 metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u32, chunk_data.len() as u32),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk_hash,
-                    chunk_data.len() as u32,
-                    0_u32,
-                )
-                .with_global_dedup_flag(true)],
+                chunks: vec![
+                    XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                        .with_global_dedup_flag(true),
+                ],
             })
             .unwrap();
         let shard_bytes = shard.to_bytes().unwrap();
@@ -2113,13 +2160,19 @@ mod tests {
         assert_eq!(report.inspected_dedupe_shard_mappings, 1);
         // No InvalidDedupeShardMapping issues
         assert!(
-            !report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidDedupeShardMapping),
+            !report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidDedupeShardMapping),
             "unexpected InvalidDedupeShardMapping: {:#?}",
             report.issues
         );
         // Should have MissingVersionRecord since no version was written
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
             "expected MissingVersionRecord"
         );
     }
@@ -2175,8 +2228,12 @@ mod tests {
                 packed_end: chunk_data.len() as u64,
             }],
         };
-        RecordMutation::write_version_record(&record_store, &record).await.unwrap();
-        RecordMutation::write_latest_record(&record_store, &record).await.unwrap();
+        RecordMutation::write_version_record(&record_store, &record)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&record_store, &record)
+            .await
+            .unwrap();
 
         let report = run_fsck_with_stores(
             &record_store,
@@ -2194,15 +2251,19 @@ mod tests {
         assert_eq!(report.inspected_chunk_references, 2); // one from latest, one from version
         // No MissingVersionRecord issues — we have both latest and version
         assert!(
-            !report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            !report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
             "expected no MissingVersionRecord with both records present"
         );
         // Should not have chunk hash or length issues
         assert!(
-            !report.issues.iter().any(|i| matches!(i.kind,
+            !report.issues.iter().any(|i| matches!(
+                i.kind,
                 FsckIssueKind::ChunkHashMismatch
-                | FsckIssueKind::ChunkLengthMismatch
-                | FsckIssueKind::MissingChunk
+                    | FsckIssueKind::ChunkLengthMismatch
+                    | FsckIssueKind::MissingChunk
             )),
             "expected no chunk integrity issues: {:#?}",
             report.issues
@@ -2246,8 +2307,12 @@ mod tests {
                 packed_end: chunk_data.len() as u64,
             }],
         };
-        RecordMutation::write_version_record(&record_store, &record).await.unwrap();
-        RecordMutation::write_latest_record(&record_store, &record).await.unwrap();
+        RecordMutation::write_version_record(&record_store, &record)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&record_store, &record)
+            .await
+            .unwrap();
 
         let report = run_fsck_with_stores(
             &record_store,
@@ -2261,7 +2326,10 @@ mod tests {
 
         // Should detect chunk hash mismatch
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
             "expected ChunkHashMismatch issue for corrupted chunk: {:#?}",
             report.issues
         );

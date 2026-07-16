@@ -769,10 +769,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         assert!(matches!(
-            ensure_manifest_representation_is_acceptable(
-                &headers,
-                "applicationjson"
-            ),
+            ensure_manifest_representation_is_acceptable(&headers, "applicationjson"),
             Err(ServerError::InvalidManifestReference)
         ));
     }
@@ -783,9 +780,7 @@ mod tests {
     fn accept_header_value_without_slash_skipped() {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("bogus, application/json"));
-        assert!(
-            ensure_manifest_representation_is_acceptable(&headers, "application/json").is_ok()
-        );
+        assert!(ensure_manifest_representation_is_acceptable(&headers, "application/json").is_ok());
     }
 
     // ── validate_oci_descriptor: subject field (line 221) ──────────────
@@ -827,8 +822,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             ACCEPT,
-            HeaderValue::from_maybe_shared(Bytes::from_static(b"\xff\xfe\xfd"))
-                .unwrap(),
+            HeaderValue::from_maybe_shared(Bytes::from_static(b"\xff\xfe\xfd")).unwrap(),
         );
         assert!(matches!(
             ensure_manifest_representation_is_acceptable(

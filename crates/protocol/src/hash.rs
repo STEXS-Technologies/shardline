@@ -194,11 +194,19 @@ mod tests {
             [0u8; 32],
             [1u8; 32],
             [0xffu8; 32],
-            [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+            [
+                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0x00, 0x11, 0x22, 0x33,
+                0x44, 0x55, 0x66, 0x77,
+            ],
         ];
         for bytes in cases {
             let hash = ShardlineHash::from_bytes(bytes);
-            assert_eq!(hash.as_bytes(), &bytes, "from_bytes/as_bytes roundtrip failed for {bytes:?}");
+            assert_eq!(
+                hash.as_bytes(),
+                &bytes,
+                "from_bytes/as_bytes roundtrip failed for {bytes:?}"
+            );
         }
     }
 
@@ -207,8 +215,14 @@ mod tests {
         let error = HashParseError::InvalidLength;
         let msg = error.to_string();
         assert!(!msg.is_empty());
-        assert!(msg.contains("64"), "expected mention of 64 in display, got: {msg}");
-        assert!(msg.contains("lowercase"), "expected mention of lowercase in display, got: {msg}");
+        assert!(
+            msg.contains("64"),
+            "expected mention of 64 in display, got: {msg}"
+        );
+        assert!(
+            msg.contains("lowercase"),
+            "expected mention of lowercase in display, got: {msg}"
+        );
     }
 
     #[test]
@@ -216,8 +230,14 @@ mod tests {
         let error = HashParseError::InvalidCharacter;
         let msg = error.to_string();
         assert!(!msg.is_empty());
-        assert!(msg.contains("lowercase"), "expected mention of lowercase in display, got: {msg}");
-        assert!(msg.contains("hexadecimal"), "expected mention of hexadecimal in display, got: {msg}");
+        assert!(
+            msg.contains("lowercase"),
+            "expected mention of lowercase in display, got: {msg}"
+        );
+        assert!(
+            msg.contains("hexadecimal"),
+            "expected mention of hexadecimal in display, got: {msg}"
+        );
     }
 
     #[test]

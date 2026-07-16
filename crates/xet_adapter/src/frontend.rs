@@ -123,7 +123,10 @@ mod tests {
     fn build_xorb_transfer_url_without_trailing_slash_on_base() {
         let url = build_xorb_transfer_url("http://example.com", &"a".repeat(64));
         assert!(url.starts_with("http://example.com/transfer/xorb/default/"));
-        assert_eq!(url.len(), "http://example.com/transfer/xorb/default/".len() + 64);
+        assert_eq!(
+            url.len(),
+            "http://example.com/transfer/xorb/default/".len() + 64
+        );
     }
 
     #[test]

@@ -764,9 +764,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -777,7 +775,10 @@ mod tests {
         );
 
         let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-        assert!(hashes.is_ok(), "retained_shard_chunk_hashes failed: {hashes:?}");
+        assert!(
+            hashes.is_ok(),
+            "retained_shard_chunk_hashes failed: {hashes:?}"
+        );
         assert_eq!(hashes.unwrap(), vec![chunk_hash.hex()]);
     }
 
@@ -890,8 +891,7 @@ mod tests {
 
     #[test]
     fn shard_hash_from_key_rejects_extra_segments() {
-        let key =
-            shardline_storage::ObjectKey::parse("shards/ab/abhash.shard/extra").unwrap();
+        let key = shardline_storage::ObjectKey::parse("shards/ab/abhash.shard/extra").unwrap();
         let extracted = super::shard_hash_from_object_key_if_present(&key);
         assert!(extracted.is_ok());
         assert_eq!(extracted.unwrap(), None);
@@ -899,8 +899,7 @@ mod tests {
 
     #[test]
     fn shard_hash_from_key_rejects_wrong_namespace() {
-        let key =
-            shardline_storage::ObjectKey::parse("xorbs/ab/abhash.shard").unwrap();
+        let key = shardline_storage::ObjectKey::parse("xorbs/ab/abhash.shard").unwrap();
         let extracted = super::shard_hash_from_object_key_if_present(&key);
         assert!(extracted.is_ok());
         assert_eq!(extracted.unwrap(), None);
@@ -908,8 +907,7 @@ mod tests {
 
     #[test]
     fn shard_hash_from_key_rejects_invalid_prefix_length() {
-        let key =
-            shardline_storage::ObjectKey::parse("shards/abc/abchash.shard").unwrap();
+        let key = shardline_storage::ObjectKey::parse("shards/abc/abchash.shard").unwrap();
         let extracted = super::shard_hash_from_object_key_if_present(&key);
         assert!(extracted.is_ok());
         assert_eq!(extracted.unwrap(), None);
@@ -917,8 +915,7 @@ mod tests {
 
     #[test]
     fn shard_hash_from_key_rejects_non_hex_prefix() {
-        let key =
-            shardline_storage::ObjectKey::parse("shards/xx/xxhash.shard").unwrap();
+        let key = shardline_storage::ObjectKey::parse("shards/xx/xxhash.shard").unwrap();
         let extracted = super::shard_hash_from_object_key_if_present(&key);
         assert!(extracted.is_ok());
         assert_eq!(extracted.unwrap(), None);
@@ -926,8 +923,7 @@ mod tests {
 
     #[test]
     fn shard_hash_from_key_rejects_missing_shard_extension() {
-        let key =
-            shardline_storage::ObjectKey::parse("shards/ab/abhash").unwrap();
+        let key = shardline_storage::ObjectKey::parse("shards/ab/abhash").unwrap();
         let extracted = super::shard_hash_from_object_key_if_present(&key);
         assert!(extracted.is_ok());
         assert_eq!(extracted.unwrap(), None);
@@ -935,8 +931,7 @@ mod tests {
 
     #[test]
     fn shard_hash_from_key_rejects_prefix_mismatch() {
-        let key =
-            shardline_storage::ObjectKey::parse("shards/bb/abhash.shard").unwrap();
+        let key = shardline_storage::ObjectKey::parse("shards/bb/abhash.shard").unwrap();
         let extracted = super::shard_hash_from_object_key_if_present(&key);
         assert!(extracted.is_ok());
         assert_eq!(extracted.unwrap(), None);
@@ -1149,7 +1144,10 @@ mod tests {
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash_bytes, 1_usize, false, false),
                 segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash_bytes, 1_u32, 0_u32, 1_u32,
+                    xorb_hash_bytes,
+                    1_u32,
+                    0_u32,
+                    1_u32,
                 )],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -1190,11 +1188,11 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_with_metrics_delegates_success() {
+        use crate::xorb_store::store_uploaded_xorb;
         use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
-        use crate::xorb_store::store_uploaded_xorb;
 
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -1213,9 +1211,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -1226,9 +1222,15 @@ mod tests {
         );
 
         let result = super::parse_uploaded_shard_with_metrics(
-            &object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS,
+            &object_store,
+            &shard,
+            None,
+            DEFAULT_SHARD_METADATA_LIMITS,
         );
-        assert!(result.is_ok(), "parse_uploaded_shard_with_metrics failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "parse_uploaded_shard_with_metrics failed: {result:?}"
+        );
     }
 
     #[test]
@@ -1237,7 +1239,10 @@ mod tests {
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
         let result = super::parse_uploaded_shard_with_metrics(
-            &object_store, b"", None, DEFAULT_SHARD_METADATA_LIMITS,
+            &object_store,
+            b"",
+            None,
+            DEFAULT_SHARD_METADATA_LIMITS,
         );
         assert!(result.is_err(), "expected error for empty shard bytes");
     }
@@ -1246,11 +1251,11 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_success_with_xorb_lookup() {
+        use crate::xorb_store::store_uploaded_xorb;
         use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
-        use crate::xorb_store::store_uploaded_xorb;
 
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -1269,9 +1274,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -1283,12 +1286,14 @@ mod tests {
 
         // 3. Verify the shard can be parsed for retained hashes (tests read_bounded_shard_sections)
         let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-        assert!(hashes.is_ok(), "retained hashes should parse OK: {hashes:?}");
+        assert!(
+            hashes.is_ok(),
+            "retained hashes should parse OK: {hashes:?}"
+        );
 
         // 4. Parse the shard (tests full flow including build_file_records_from_infos)
-        let result = parse_uploaded_shard(
-            &object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS,
-        );
+        let result =
+            parse_uploaded_shard(&object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS);
         assert!(result.is_ok(), "parse_uploaded_shard failed: {result:?}");
         let parsed = result.unwrap();
         assert_eq!(parsed.result, 1, "expected newly inserted shard");
@@ -1299,11 +1304,11 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_already_exists_returns_result_zero() {
+        use crate::xorb_store::store_uploaded_xorb;
         use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
-        use crate::xorb_store::store_uploaded_xorb;
 
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -1320,9 +1325,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -1333,18 +1336,20 @@ mod tests {
         );
 
         // Store the shard once
-        let first = parse_uploaded_shard(
-            &object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS,
-        );
+        let first =
+            parse_uploaded_shard(&object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS);
         assert!(first.is_ok());
         assert_eq!(first.unwrap().result, 1);
 
         // Store again - should be AlreadyExists
-        let second = parse_uploaded_shard(
-            &object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS,
-        );
+        let second =
+            parse_uploaded_shard(&object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS);
         assert!(second.is_ok(), "second parse failed: {second:?}");
-        assert_eq!(second.unwrap().result, 0, "expected result=0 for existing shard");
+        assert_eq!(
+            second.unwrap().result,
+            0,
+            "expected result=0 for existing shard"
+        );
     }
 
     // ── parse_uploaded_shard error: missing referenced xorb ─────────────
@@ -1361,9 +1366,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
@@ -1373,9 +1376,8 @@ mod tests {
             }],
         );
 
-        let result = parse_uploaded_shard(
-            &object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS,
-        );
+        let result =
+            parse_uploaded_shard(&object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS);
 
         assert!(
             matches!(result, Err(XetAdapterError::MissingReferencedXorb)),
@@ -1433,11 +1435,11 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_with_verification_and_no_metadata_ext() {
+        use crate::xorb_store::store_uploaded_xorb;
         use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
-        use crate::xorb_store::store_uploaded_xorb;
 
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
@@ -1455,9 +1457,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, true, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 0_u32, 1_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: vec![FileVerificationEntry::new(MerkleHash::default())],
                 metadata_ext: None,
             }],
@@ -1467,10 +1467,12 @@ mod tests {
             }],
         );
 
-        let result = parse_uploaded_shard(
-            &object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS,
+        let result =
+            parse_uploaded_shard(&object_store, &shard, None, DEFAULT_SHARD_METADATA_LIMITS);
+        assert!(
+            result.is_ok(),
+            "shard with verification should parse OK: {result:?}"
         );
-        assert!(result.is_ok(), "shard with verification should parse OK: {result:?}");
     }
 
     // ── collect_dedupe_chunk_hashes flag-based dedup eligibility ─────────
@@ -1486,8 +1488,7 @@ mod tests {
 
         let chunks = vec![
             XorbChunkSequenceEntry::new(chunk_a, 8_u32, 0_u32),
-            XorbChunkSequenceEntry::new(chunk_b, 8_u32, 8_u32)
-                .with_global_dedup_flag(true),
+            XorbChunkSequenceEntry::new(chunk_b, 8_u32, 8_u32).with_global_dedup_flag(true),
         ];
 
         let shard = serialize_test_shard(
@@ -1504,7 +1505,10 @@ mod tests {
         );
 
         let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS);
-        assert!(hashes.is_ok(), "retained_shard_chunk_hashes failed: {hashes:?}");
+        assert!(
+            hashes.is_ok(),
+            "retained_shard_chunk_hashes failed: {hashes:?}"
+        );
         let result_hashes = hashes.unwrap();
         // chunk[0] is a file start (chunk_index_start=0), should be retained
         // chunk[1] has MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, should be retained
@@ -1556,7 +1560,10 @@ mod tests {
         };
         // packed_start(2) -> range_start=2 -> previous_index = 1 -> out of bounds
         let result = info.packed_start(2);
-        assert!(result.is_err(), "expected error for out-of-bounds start index");
+        assert!(
+            result.is_err(),
+            "expected error for out-of-bounds start index"
+        );
     }
 
     #[test]
@@ -1575,7 +1582,10 @@ mod tests {
         };
         // packed_end(1) -> range_end = 1 -> saturating_sub(1) = 0 -> get(0) = None
         let result = info.packed_end(1);
-        assert!(result.is_err(), "expected error for empty packed_chunk_ends");
+        assert!(
+            result.is_err(),
+            "expected error for empty packed_chunk_ends"
+        );
     }
 
     // ── checked helper functions ─────────────────────────────────────────
@@ -1643,7 +1653,9 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(super::resolve_dedupe_shard_object(
-            &index_store, &object_store, &chunk_hash_hex,
+            &index_store,
+            &object_store,
+            &chunk_hash_hex,
         ));
 
         assert!(
@@ -1690,7 +1702,10 @@ mod tests {
             &chunk_hash_hex,
         ));
 
-        assert!(result.is_ok(), "resolve_dedupe_shard_object failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "resolve_dedupe_shard_object failed: {result:?}"
+        );
         let (resolved_key, length) = result.unwrap();
         assert_eq!(resolved_key.as_str(), shard_key.as_str());
         assert_eq!(length, shard_data.len() as u64);
@@ -1737,7 +1752,9 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(super::resolve_dedupe_shard_object(
-            &index_store, &object_store, "not-a-valid-hash",
+            &index_store,
+            &object_store,
+            "not-a-valid-hash",
         ));
 
         assert!(result.is_err(), "expected error for invalid hash");
@@ -1755,9 +1772,7 @@ mod tests {
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
                 metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb_hash, 1_u32, 1_u32, 2_u32,
-                )],
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 1_u32, 2_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],

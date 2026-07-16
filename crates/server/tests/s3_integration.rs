@@ -10,9 +10,9 @@
     clippy::needless_return
 )]
 
-use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
+use sha2::{Digest, Sha256};
 use shardline_server::{
     BenchmarkBackend, ObjectStorageAdapter, ObjectStoreError, ServerBackend, ServerConfig,
     ServerError, shared_sha256_object_key,
@@ -23,7 +23,6 @@ use shardline_storage::{
     ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore, S3ObjectStoreConfig,
 };
 use shardline_test_support::DockerLocalStack;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 
@@ -131,9 +130,7 @@ async fn test_s3_put_and_get() {
     let key = ObjectKey::parse("crud/put-get").unwrap();
     let data = b"hello s3 world";
     let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(data).as_bytes(),
-        ),
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
         data.len() as u64,
     );
 
@@ -157,14 +154,100 @@ async fn test_s3_put_and_get() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_s3_object_store_recovers_after_minio_restart() {
+    let Some(mut stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping — Docker not available");
+        return;
+    };
+    let prefix = stack.unique_s3_key_prefix("s3-recovery");
+    let raw = stack
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO should be configured");
+    let config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
+        .with_endpoint(raw.endpoint)
+        .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+        .with_key_prefix(raw.key_prefix.as_deref())
+        .with_allow_http(raw.allow_http);
+    // Construct outside Tokio so the adapter retains a runtime when used from
+    // the blocking outage probe below.
+    let store = tokio::task::spawn_blocking(move || S3ObjectStore::new(config))
+        .await
+        .unwrap()
+        .unwrap();
+    let key = ObjectKey::parse("recovery/persisted-object").unwrap();
+    let data = b"object survives temporary MinIO outage";
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+        data.len() as u64,
+    );
+    assert_eq!(
+        store
+            .put_if_absent(&key, ObjectBody::from_slice(data), &integrity)
+            .unwrap(),
+        PutOutcome::Inserted
+    );
+
+    stack.stop_minio().unwrap();
+    let unavailable_store = store.clone();
+    let unavailable_key = key.clone();
+    let unavailable = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || unavailable_store.metadata(&unavailable_key)),
+    )
+    .await
+    .expect("object metadata probe should fail promptly while MinIO is stopped")
+    .unwrap();
+    assert!(
+        unavailable.is_err(),
+        "object metadata probe must surface a stopped MinIO service"
+    );
+
+    stack.start_minio().unwrap();
+    let recovered_raw = stack
+        .s3_raw_config(Some(&prefix))
+        .expect("MinIO should be configured after restart");
+    let recovered_config = S3ObjectStoreConfig::new(recovered_raw.bucket, recovered_raw.region)
+        .with_endpoint(recovered_raw.endpoint)
+        .with_credentials(
+            recovered_raw.access_key,
+            recovered_raw.secret_key,
+            recovered_raw.session_token,
+        )
+        .with_key_prefix(recovered_raw.key_prefix.as_deref())
+        .with_allow_http(recovered_raw.allow_http);
+    let recovered_store = tokio::task::spawn_blocking(move || S3ObjectStore::new(recovered_config))
+        .await
+        .unwrap()
+        .unwrap();
+    let recovered = retry_s3_metadata(&recovered_store, &key).await;
+    assert_eq!(recovered.length(), data.len() as u64);
+    let range = shardline_protocol::ByteRange::new(0, data.len() as u64 - 1).unwrap();
+    assert_eq!(recovered_store.read_range(&key, range).unwrap(), data);
+}
+
+async fn retry_s3_metadata(
+    store: &S3ObjectStore,
+    key: &ObjectKey,
+) -> shardline_storage::ObjectMetadata {
+    let mut last_error = None;
+    for _ in 0..20 {
+        match store.metadata(key) {
+            Ok(Some(metadata)) => return metadata,
+            Ok(None) => panic!("persisted object disappeared after MinIO restart"),
+            Err(error) => last_error = Some(error),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("MinIO did not recover in time: {last_error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_s3_put_if_absent_idempotent() {
     let store = s3_store().await;
     let key = ObjectKey::parse("crud/idempotent").unwrap();
     let data = b"same content";
     let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(data).as_bytes(),
-        ),
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
         data.len() as u64,
     );
 
@@ -184,9 +267,7 @@ async fn test_s3_delete_object() {
     let key = ObjectKey::parse("crud/delete-me").unwrap();
     let data = b"to-delete";
     let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(data).as_bytes(),
-        ),
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
         data.len() as u64,
     );
 
@@ -216,9 +297,7 @@ async fn test_s3_list_prefix() {
         let key = ObjectKey::parse(&format!("{prefix_str}/obj{i}")).unwrap();
         let data = vec![b'a' + i; 16];
         let integrity = ObjectIntegrity::new(
-            shardline_protocol::ShardlineHash::from_bytes(
-                *blake3::hash(&data).as_bytes(),
-            ),
+            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&data).as_bytes()),
             data.len() as u64,
         );
         store
@@ -249,7 +328,10 @@ async fn test_s3_create_upload_and_abort() {
     assert!(!upload_id.is_empty());
 
     // Abort the upload — no parts uploaded, so this should succeed.
-    store.abort_resumable_upload(&key, &upload_id).await.unwrap();
+    store
+        .abort_resumable_upload(&key, &upload_id)
+        .await
+        .unwrap();
 
     // Object should not exist after abort.
     assert!(!store.contains(&key).unwrap());
@@ -405,9 +487,7 @@ async fn test_s3_copy_if_absent() {
     let dst = ObjectKey::parse("copy/dest").unwrap();
     let data = b"copy-test-data";
     let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(data).as_bytes(),
-        ),
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
         data.len() as u64,
     );
 
@@ -452,15 +532,11 @@ async fn test_s3_overwrite() {
     let _hash1 = blake3_hash(original);
     let _hash2 = blake3_hash(replacement);
     let integrity1 = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(original).as_bytes(),
-        ),
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(original).as_bytes()),
         original.len() as u64,
     );
     let integrity2 = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(
-            *blake3::hash(replacement).as_bytes(),
-        ),
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(replacement).as_bytes()),
         replacement.len() as u64,
     );
 
@@ -560,8 +636,13 @@ async fn test_s3_backend_ready() {
     let _prefix = ensure_minio().await;
     let (bench, _tmp) = s3_benchmark("ready-check").await;
 
-    let result = bench.reconstruction("nonexistent-s3-file", None, None, None).await;
-    assert!(result.is_err(), "reconstruction of missing file should fail");
+    let result = bench
+        .reconstruction("nonexistent-s3-file", None, None, None)
+        .await;
+    assert!(
+        result.is_err(),
+        "reconstruction of missing file should fail"
+    );
 }
 
 // ===========================================================================
@@ -600,7 +681,10 @@ async fn test_s3_oci_create_resumable_upload() {
     let result = OciBackend::create_resumable_object_upload(&backend, &key).await;
     assert!(result.is_ok());
     let upload_id = result.unwrap();
-    assert!(upload_id.is_some(), "S3 create_resumable_upload should return an upload ID");
+    assert!(
+        upload_id.is_some(),
+        "S3 create_resumable_upload should return an upload ID"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -659,14 +743,9 @@ async fn test_s3_oci_complete_resumable_upload() {
     .await
     .unwrap();
 
-    OciBackend::complete_resumable_object_upload(
-        &backend,
-        &key,
-        &upload_id,
-        vec![(0, etag)],
-    )
-    .await
-    .unwrap();
+    OciBackend::complete_resumable_object_upload(&backend, &key, &upload_id, vec![(0, etag)])
+        .await
+        .unwrap();
 
     // Object should now exist and have correct length
     assert!(store_contains(&key).await);
@@ -705,7 +784,11 @@ async fn store_contains(key: &ObjectKey) -> bool {
 /// Helper: get object length from the S3 store.
 async fn object_length(key: &ObjectKey) -> u64 {
     let store = s3_store().await;
-    store.metadata(key).unwrap().map(|m| m.length()).unwrap_or(0)
+    store
+        .metadata(key)
+        .unwrap()
+        .map(|m| m.length())
+        .unwrap_or(0)
 }
 
 // ===========================================================================
@@ -887,8 +970,7 @@ async fn test_s3_benchmark_missing_credentials_fails_on_operation() {
     )
     .with_object_storage(ObjectStorageAdapter::S3, Some(bad_config));
 
-    let bench =
-        BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "bad-cred").await;
+    let bench = BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "bad-cred").await;
     // Construction may succeed (lazy S3 client) but an upload should fail
     if let Ok(bench) = bench {
         let result = bench
@@ -917,8 +999,8 @@ async fn test_s3_benchmark_without_s3_config_fails() {
     )
     .with_object_storage(ObjectStorageAdapter::S3, None);
 
-    let result = BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "no-s3-cfg")
-        .await;
+    let result =
+        BenchmarkBackend::from_config(&config, tmp.path().to_path_buf(), "no-s3-cfg").await;
     assert!(result.is_err(), "benchmark without S3 config should fail");
 }
 
@@ -931,7 +1013,10 @@ async fn test_s3_list_non_existent_prefix() {
     let store = s3_store().await;
     let prefix = ObjectPrefix::parse("zzz/nonexistent").unwrap();
     let results = store.list_prefix(&prefix).unwrap();
-    assert!(results.is_empty(), "non-existent prefix should return empty list");
+    assert!(
+        results.is_empty(),
+        "non-existent prefix should return empty list"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -954,10 +1039,11 @@ async fn test_s3_visit_prefix() {
     }
 
     let mut visited: Vec<String> = Vec::new();
-    let result: Result<(), shardline_storage::S3ObjectStoreError> = store.visit_prefix(&prefix, |meta| {
-        visited.push(meta.key().as_str().to_owned());
-        Ok(())
-    });
+    let result: Result<(), shardline_storage::S3ObjectStoreError> =
+        store.visit_prefix(&prefix, |meta| {
+            visited.push(meta.key().as_str().to_owned());
+            Ok(())
+        });
     assert!(result.is_ok());
     assert_eq!(visited.len(), 2);
 }
@@ -1176,7 +1262,10 @@ async fn test_s3_backend_visit_prefix_via_benchmark_stats() {
 
     // Stats implicitly visits object prefixes through the metadata backend
     let stats = bench.stats().await.unwrap();
-    assert!(stats.files >= 1, "stats should report at least one file: {stats:?}");
+    assert!(
+        stats.files >= 1,
+        "stats should report at least one file: {stats:?}"
+    );
 }
 
 // ===========================================================================
@@ -1237,9 +1326,7 @@ async fn test_s3_concurrent_put_if_absent_same_key() {
         let k = key.clone();
         let int = integrity.clone();
         let body = ObjectBody::from_slice(data);
-        handles.push(tokio::spawn(async move {
-            s.put_if_absent(&k, body, &int)
-        }));
+        handles.push(tokio::spawn(async move { s.put_if_absent(&k, body, &int) }));
     }
 
     let mut inserted_count = 0;
@@ -1266,7 +1353,9 @@ async fn test_s3_concurrent_put_different_keys() {
         let key = ObjectKey::parse(&format!("concurrent/diff-key-{i:02}")).unwrap();
         let data = format!("concurrent-data-{i}");
         let integrity = ObjectIntegrity::new(
-            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data.as_bytes()).as_bytes()),
+            shardline_protocol::ShardlineHash::from_bytes(
+                *blake3::hash(data.as_bytes()).as_bytes(),
+            ),
             data.len() as u64,
         );
         handles.push(tokio::spawn(async move {
@@ -1318,7 +1407,11 @@ async fn test_s3_upload_delete_100_objects() {
     for i in 0..100 {
         let key = ObjectKey::parse(&format!("{prefix}/obj{i:04}")).unwrap();
         let outcome = store.delete_if_present(&key).unwrap();
-        assert_eq!(outcome, DeleteOutcome::Deleted, "delete obj{i:04} should succeed");
+        assert_eq!(
+            outcome,
+            DeleteOutcome::Deleted,
+            "delete obj{i:04} should succeed"
+        );
     }
 
     // Verify empty
@@ -1438,11 +1531,18 @@ async fn test_s3_benchmark_upload_then_stats() {
     let _prefix = ensure_minio().await;
     let (bench, _tmp) = s3_benchmark("s3-up-stats").await;
     bench
-        .upload_file("s3-up-stats-file.bin", axum::body::Bytes::from_static(b"s3 stats data"), None)
+        .upload_file(
+            "s3-up-stats-file.bin",
+            axum::body::Bytes::from_static(b"s3 stats data"),
+            None,
+        )
         .await
         .unwrap();
     let stats = bench.stats().await.unwrap();
-    assert!(stats.files >= 1, "stats should show at least 1 file: {stats:?}");
+    assert!(
+        stats.files >= 1,
+        "stats should show at least 1 file: {stats:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1450,7 +1550,10 @@ async fn test_s3_benchmark_download_missing_file() {
     let _prefix = ensure_minio().await;
     let (bench, _tmp) = s3_benchmark("s3-dl-missing").await;
     let result = bench.download_file("s3-missing-file.bin", None, None).await;
-    assert!(result.is_err(), "download of missing file via S3 backend should fail");
+    assert!(
+        result.is_err(),
+        "download of missing file via S3 backend should fail"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1459,7 +1562,11 @@ async fn test_s3_benchmark_reconstruction_with_content_hash() {
     let (bench, _tmp) = s3_benchmark("s3-recon-hash").await;
     let content = b"S3 reconstruction with content hash via BenchmarkBackend";
     let resp = bench
-        .upload_file("s3-recon-hash.bin", axum::body::Bytes::from_static(content), None)
+        .upload_file(
+            "s3-recon-hash.bin",
+            axum::body::Bytes::from_static(content),
+            None,
+        )
         .await
         .unwrap();
     let recon = bench
@@ -1544,7 +1651,9 @@ async fn test_s3_server_backend_oci_delete_object_if_present() {
         .put_if_absent(&key, ObjectBody::from_slice(data), &integrity)
         .unwrap();
 
-    let outcome = OciBackend::delete_object_if_present(&backend, &key).await.unwrap();
+    let outcome = OciBackend::delete_object_if_present(&backend, &key)
+        .await
+        .unwrap();
     assert_eq!(outcome, DeleteOutcome::Deleted);
     assert!(!store.contains(&key).unwrap());
 }
@@ -1626,7 +1735,9 @@ async fn test_s3_100_concurrent_puts() {
             let key = ObjectKey::parse(&format!("concurrent100/key-{i:04}")).unwrap();
             let data = format!("concurrent-data-{i}");
             let integrity = ObjectIntegrity::new(
-                shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data.as_bytes()).as_bytes()),
+                shardline_protocol::ShardlineHash::from_bytes(
+                    *blake3::hash(data.as_bytes()).as_bytes(),
+                ),
                 data.len() as u64,
             );
             s.put_if_absent(&key, ObjectBody::from_vec(data.into_bytes()), &integrity)
@@ -1659,12 +1770,16 @@ async fn test_s3_10_concurrent_content_addressed() {
             let result = s.begin_content_addressed_upload(&key).await;
             match result {
                 Ok(BeginMultipartUploadResult::AlreadyExists) => {
-                    return Ok::<_, shardline_storage::S3ObjectStoreError>(PutOutcome::AlreadyExists);
+                    return Ok::<_, shardline_storage::S3ObjectStoreError>(
+                        PutOutcome::AlreadyExists,
+                    );
                 }
                 Ok(BeginMultipartUploadResult::Upload(mut writer, temp_key)) => {
                     writer.write(data.as_bytes());
                     writer.wait_for_capacity(4).await?;
-                    let outcome = s.finish_content_addressed_upload(writer, &temp_key, &key).await?;
+                    let outcome = s
+                        .finish_content_addressed_upload(writer, &temp_key, &key)
+                        .await?;
                     Ok(outcome)
                 }
                 Err(e) => Err(e),
@@ -1675,18 +1790,27 @@ async fn test_s3_10_concurrent_content_addressed() {
     let mut inserted = 0;
     for handle in handles {
         let result = handle.await.unwrap();
-        assert!(result.is_ok(), "concurrent content-addressed upload should succeed");
+        assert!(
+            result.is_ok(),
+            "concurrent content-addressed upload should succeed"
+        );
         if result.unwrap() == PutOutcome::Inserted {
             inserted += 1;
         }
     }
-    assert!(inserted >= 1, "at least one upload should succeed as Inserted");
+    assert!(
+        inserted >= 1,
+        "at least one upload should succeed as Inserted"
+    );
 
     // Verify keys exist
     let store = s3_store().await;
     for i in 0..10 {
         let key = ObjectKey::parse(&format!("ca/concurrent-{i:02}")).unwrap();
-        assert!(store.contains(&key).unwrap(), "key ca/concurrent-{i:02} should exist");
+        assert!(
+            store.contains(&key).unwrap(),
+            "key ca/concurrent-{i:02} should exist"
+        );
     }
 }
 
@@ -1709,9 +1833,7 @@ async fn test_s3_concurrent_put_and_get_same_key() {
 
     let store_get = Arc::clone(&store);
     let key_get = key.clone();
-    let get_handle = tokio::spawn(async move {
-        store_get.contains(&key_get)
-    });
+    let get_handle = tokio::spawn(async move { store_get.contains(&key_get) });
 
     let (put_result, get_result) = tokio::join!(put_handle, get_handle);
     // Put may succeed or return AlreadyExists — both valid
@@ -1740,9 +1862,7 @@ async fn test_s3_concurrent_put_and_delete_same_key() {
 
     let store_del = Arc::clone(&store);
     let key_del = key.clone();
-    let del_handle = tokio::spawn(async move {
-        store_del.delete_if_present(&key_del)
-    });
+    let del_handle = tokio::spawn(async move { store_del.delete_if_present(&key_del) });
 
     let (put_result, del_result) = tokio::join!(put_handle, del_handle);
     let put = put_result.unwrap();

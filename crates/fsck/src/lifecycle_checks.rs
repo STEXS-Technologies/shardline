@@ -388,9 +388,7 @@ mod tests {
             shardline_index::QuarantineCandidate::new(obj_key.clone(), 100, 100, 200).unwrap();
         LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
         let mut reach = empty_reachability();
-        reach
-            .referenced_object_keys
-            .insert("ab/1234".to_owned());
+        reach.referenced_object_keys.insert("ab/1234".to_owned());
         let report = run_lifecycle_check(&store, Some(reach)).await;
         // 1 missing object (blackhole) + 1 reachable
         assert_eq!(report.issue_count(), 2);
@@ -427,13 +425,9 @@ mod tests {
         let candidate =
             shardline_index::QuarantineCandidate::new(obj_key.clone(), 100, 100, 200).unwrap();
         LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
-        let hold = shardline_index::RetentionHold::new(
-            obj_key.clone(),
-            "reason".to_owned(),
-            100,
-            None,
-        )
-        .unwrap();
+        let hold =
+            shardline_index::RetentionHold::new(obj_key.clone(), "reason".to_owned(), 100, None)
+                .unwrap();
         LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
         let report = run_lifecycle_check(&store, None).await;
         // 1 missing object (quarantine) + 1 held+quarantined
@@ -506,7 +500,10 @@ mod tests {
         LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
         // Even though the object doesn't exist, the hold is inactive so no issue.
         let report = run_lifecycle_check(&store, None).await;
-        assert!(report.is_clean(), "expected no issues for expired hold, got: {report:?}");
+        assert!(
+            report.is_clean(),
+            "expected no issues for expired hold, got: {report:?}"
+        );
     }
 
     #[tokio::test]
@@ -534,9 +531,9 @@ mod tests {
         // Create a quarantine candidate with a DIFFERENT observed_length (10 instead of 27)
         let candidate = shardline_index::QuarantineCandidate::new(
             obj_key.clone(),
-            10,   // observed_length (different from actual 27)
-            100,  // first_seen
-            200,  // delete_after
+            10,  // observed_length (different from actual 27)
+            100, // first_seen
+            200, // delete_after
         )
         .unwrap();
         LifecycleStore::upsert_quarantine_candidate(&index_store, &candidate).unwrap();
@@ -651,8 +648,7 @@ mod tests {
             .filter(|i| i.kind == FsckIssueKind::InvalidProviderRepositoryStateTimestamp)
             .count();
         assert_eq!(
-            timestamp_count,
-            5,
+            timestamp_count, 5,
             "expected 5 timestamp issues (for all 5 fields), got: {report:?}"
         );
     }
@@ -689,9 +685,15 @@ mod tests {
 
         let mut report = clean_report();
         let reach = empty_reachability();
-        inspect_lifecycle_metadata(&index_store, &object_root, &object_store, &reach, &mut report)
-            .await
-            .unwrap();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
         // Active hold with existing object and not quarantined → clean
         assert!(report.is_clean(), "expected clean report, got: {report:?}");
     }
@@ -728,9 +730,15 @@ mod tests {
 
         let mut report = clean_report();
         let reach = empty_reachability();
-        inspect_lifecycle_metadata(&index_store, &object_root, &object_store, &reach, &mut report)
-            .await
-            .unwrap();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
         // Permanent hold with existing object → clean
         assert!(report.is_clean(), "expected clean report, got: {report:?}");
     }

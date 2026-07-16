@@ -396,14 +396,20 @@ mod tests {
     fn range_error_display_inverted() {
         let msg = RangeError::Inverted.to_string();
         assert!(!msg.is_empty());
-        assert!(msg.contains("smaller"), "expected 'smaller' in display, got: {msg}");
+        assert!(
+            msg.contains("smaller"),
+            "expected 'smaller' in display, got: {msg}"
+        );
     }
 
     #[test]
     fn range_error_display_empty() {
         let msg = RangeError::Empty.to_string();
         assert!(!msg.is_empty());
-        assert!(msg.contains("at least one chunk"), "expected 'at least one chunk' in display, got: {msg}");
+        assert!(
+            msg.contains("at least one chunk"),
+            "expected 'at least one chunk' in display, got: {msg}"
+        );
     }
 
     #[test]
@@ -417,7 +423,10 @@ mod tests {
         for (error, substring) in cases {
             let msg = error.to_string();
             assert!(!msg.is_empty(), "empty display for {error:?}");
-            assert!(msg.contains(substring), "expected '{substring}' in '{msg}' from {error:?}");
+            assert!(
+                msg.contains(substring),
+                "expected '{substring}' in '{msg}' from {error:?}"
+            );
         }
     }
 
@@ -513,10 +522,7 @@ mod tests {
 
     #[test]
     fn http_byte_range_huge_numbers() {
-        let result = parse_http_byte_range(
-            "bytes=99999999999999999999-100000000000000000000",
-            100,
-        );
+        let result = parse_http_byte_range("bytes=99999999999999999999-100000000000000000000", 100);
         assert_eq!(result, Err(HttpRangeParseError::InvalidNumber));
     }
 

@@ -398,12 +398,15 @@ mod tests {
             RepositoryVisibility::Private,
             "main",
             "https://github.example/team/assets.git",
-        ).unwrap();
-        catalog.register(ProviderRepositoryPolicy::new(
-            metadata,
-            HashSet::from([subject]),
-            HashSet::new(),
-        )).unwrap();
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
         let adapter = GitHubAdapter::new(catalog, None);
 
         let body = br#"{"ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#;
@@ -439,7 +442,10 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-noref", signature.as_deref(), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRevisionPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRevisionPayload)
+        ));
     }
 
     #[test]
@@ -450,9 +456,12 @@ mod tests {
             "repository":{"full_name":"team/assets"}
         }"#;
         let signature = signature(body);
-        let request = WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
+        let request =
+            WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -464,9 +473,12 @@ mod tests {
             "repository":{"full_name":"team/assets"}
         }"#;
         let signature = signature(body);
-        let request = WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
+        let request =
+            WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -480,7 +492,9 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-pub", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -508,7 +522,9 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-alt", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.repository().name(), "assets");
     }
 
@@ -519,6 +535,9 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-no-name", signature.as_deref(), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
     }
 }

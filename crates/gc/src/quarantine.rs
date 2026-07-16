@@ -191,8 +191,8 @@ where
 mod tests {
     use super::*;
     use shardline_index::MemoryIndexStore;
-    use shardline_storage::ObjectKey;
     use shardline_server_core::ServerObjectStore;
+    use shardline_storage::ObjectKey;
 
     fn make_orphan(hash: &str, bytes: u64) -> OrphanObject {
         let prefix = &hash[..2];
@@ -570,11 +570,14 @@ mod tests {
             let candidate = QuarantineCandidate::new(
                 orphan.object_key.clone(),
                 orphan.bytes,
-                now - 200_000,   // first seen long ago
-                now - 1,          // expired before now
+                now - 200_000, // first seen long ago
+                now - 1,       // expired before now
             )
             .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             let mut quarantine_entries = HashMap::new();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
@@ -637,13 +640,13 @@ mod tests {
             orphan_objects.insert(orphan.hash.clone(), orphan.clone());
 
             // Non-expired candidate
-            let candidate = QuarantineCandidate::new(
-                orphan.object_key.clone(),
-                orphan.bytes,
-                now,
-                now + 3600,
-            ).unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            let candidate =
+                QuarantineCandidate::new(orphan.object_key.clone(), orphan.bytes, now, now + 3600)
+                    .unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             let mut quarantine_entries = HashMap::new();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
@@ -697,8 +700,12 @@ mod tests {
                 orphan.bytes,
                 now - 100,
                 now - 1,
-            ).unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            )
+            .unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             let mut quarantine_entries = HashMap::new();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
@@ -748,7 +755,8 @@ mod tests {
                 "expired".to_owned(),
                 900_000,
                 Some(950_000),
-            ).unwrap();
+            )
+            .unwrap();
             index_store.upsert_retention_hold(&hold).await.unwrap();
 
             // prune_expired = true → expired hold should be pruned
@@ -787,7 +795,8 @@ mod tests {
                 "active".to_owned(),
                 1_000_000,
                 Some(2_000_000),
-            ).unwrap();
+            )
+            .unwrap();
             index_store.upsert_retention_hold(&hold).await.unwrap();
 
             let holds = read_active_retention_hold_object_keys(&index_store, 1_500_000, true)
@@ -811,27 +820,23 @@ mod tests {
                 "1111111111111111111111111111111111111111111111111111111111111111",
                 64,
             );
-            let candidate1 = QuarantineCandidate::new(
-                orphan1.object_key.clone(),
-                64,
-                now,
-                now + 3600,
-            )
-            .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate1).await.unwrap();
+            let candidate1 =
+                QuarantineCandidate::new(orphan1.object_key.clone(), 64, now, now + 3600).unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate1)
+                .await
+                .unwrap();
 
             let orphan2 = make_orphan(
                 "2222222222222222222222222222222222222222222222222222222222222222",
                 128,
             );
-            let candidate2 = QuarantineCandidate::new(
-                orphan2.object_key.clone(),
-                128,
-                now,
-                now + 7200,
-            )
-            .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate2).await.unwrap();
+            let candidate2 =
+                QuarantineCandidate::new(orphan2.object_key.clone(), 128, now, now + 7200).unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate2)
+                .await
+                .unwrap();
 
             let entries = read_quarantine_entries(&index_store).await.unwrap();
             assert_eq!(entries.len(), 2);
@@ -923,7 +928,10 @@ mod tests {
             )
             .unwrap();
             // Insert into index store so delete_quarantine_candidate will work.
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             let mut quarantine_entries = HashMap::new();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
@@ -973,14 +981,12 @@ mod tests {
                 64,
             );
 
-            let candidate = QuarantineCandidate::new(
-                orphan.object_key.clone(),
-                64,
-                now,
-                now + 3600,
-            )
-            .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            let candidate =
+                QuarantineCandidate::new(orphan.object_key.clone(), 64, now, now + 3600).unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             let mut quarantine_entries = HashMap::new();
             quarantine_entries.insert(orphan.hash.clone(), candidate);
@@ -1098,7 +1104,10 @@ mod tests {
             let now = 1_000_000_u64;
 
             // Active hold
-            let active_key = ObjectKey::parse("ab/8888888888888888888888888888888888888888888888888888888888888888").unwrap();
+            let active_key = ObjectKey::parse(
+                "ab/8888888888888888888888888888888888888888888888888888888888888888",
+            )
+            .unwrap();
             let active_hold = shardline_index::RetentionHold::new(
                 active_key.clone(),
                 "active".to_owned(),
@@ -1106,10 +1115,16 @@ mod tests {
                 Some(now + 3600),
             )
             .unwrap();
-            index_store.upsert_retention_hold(&active_hold).await.unwrap();
+            index_store
+                .upsert_retention_hold(&active_hold)
+                .await
+                .unwrap();
 
             // Expired hold (no release_after — permanent hold, always active)
-            let permanent_key = ObjectKey::parse("ab/9999999999999999999999999999999999999999999999999999999999999999").unwrap();
+            let permanent_key = ObjectKey::parse(
+                "ab/9999999999999999999999999999999999999999999999999999999999999999",
+            )
+            .unwrap();
             let permanent_hold = shardline_index::RetentionHold::new(
                 permanent_key.clone(),
                 "permanent".to_owned(),
@@ -1117,7 +1132,10 @@ mod tests {
                 None,
             )
             .unwrap();
-            index_store.upsert_retention_hold(&permanent_hold).await.unwrap();
+            index_store
+                .upsert_retention_hold(&permanent_hold)
+                .await
+                .unwrap();
 
             let holds = read_active_retention_hold_object_keys(&index_store, now, false)
                 .await

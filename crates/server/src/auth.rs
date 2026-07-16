@@ -376,28 +376,40 @@ mod tests {
     fn parse_bearer_token_rejects_missing_bearer_prefix() {
         use super::parse_bearer_token;
         let result = parse_bearer_token("Basic token");
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
     fn parse_bearer_token_rejects_empty_token_after_prefix() {
         use super::parse_bearer_token;
         let result = parse_bearer_token("Bearer ");
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
     fn parse_bearer_token_rejects_whitespace_only_token() {
         use super::parse_bearer_token;
         let result = parse_bearer_token("Bearer   ");
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
     fn parse_bearer_token_rejects_token_with_whitespace() {
         use super::parse_bearer_token;
         let result = parse_bearer_token("Bearer abc def");
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
@@ -406,7 +418,10 @@ mod tests {
         let large = "a".repeat(MAX_BEARER_TOKEN_BYTES + 1);
         let header = format!("Bearer {large}");
         let result = parse_bearer_token(&header);
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
@@ -479,10 +494,7 @@ mod tests {
         let auth = ServerAuth::from_provider(provider);
         // Verify it can authorize a request with a Bearer token
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer any-token"),
-        );
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer any-token"));
         let result = auth.authorize(&headers, TokenScope::Write);
         assert!(result.is_ok());
         let ctx = result.unwrap();
@@ -526,14 +538,24 @@ mod tests {
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
                 .unwrap();
         let claims = TokenClaims::new(
-            "local", "provider-user-1", TokenScope::Write, repository, u64::MAX,
+            "local",
+            "provider-user-1",
+            TokenScope::Write,
+            repository,
+            u64::MAX,
         )
         .unwrap();
         let valid_token = signer.sign(&claims).unwrap();
 
-        headers.append(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {valid_token}")).unwrap());
+        headers.append(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {valid_token}")).unwrap(),
+        );
         // Append a second (invalid) header — should be ignored.
-        headers.append(AUTHORIZATION, HeaderValue::from_static("Bearer invalid-token-here"));
+        headers.append(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer invalid-token-here"),
+        );
 
         // Headers.get() returns the first entry — the valid token.
         let result = auth.authorize(&headers, TokenScope::Read);
@@ -569,6 +591,9 @@ mod tests {
         // whitespace rejection in parse_bearer_token.
         use super::parse_bearer_token;
         let result = parse_bearer_token("Bearer token1, token2");
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 }

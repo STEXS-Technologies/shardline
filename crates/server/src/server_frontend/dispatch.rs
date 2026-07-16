@@ -123,7 +123,11 @@ mod tests {
     #[test]
     fn optional_keys_with_mixed_frontends_xet_alone_produces_keys() {
         let hash = "cd".repeat(32);
-        let frontends = vec![ServerFrontend::Lfs, ServerFrontend::Xet, ServerFrontend::Oci];
+        let frontends = vec![
+            ServerFrontend::Lfs,
+            ServerFrontend::Xet,
+            ServerFrontend::Oci,
+        ];
         let result = optional_chunk_container_keys(&frontends, &hash);
         assert!(result.is_ok());
         let keys = result.unwrap();
@@ -186,17 +190,17 @@ mod tests {
         let key = ObjectKey::parse(&format!("xorbs/default/{h}/{h}", h = &hash[..2])).unwrap();
         // Use a blackhole store (never returns metadata)
         let store = crate::object_store::ServerObjectStore::blackhole();
-        let frontends = vec![ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp, ServerFrontend::Hub];
+        let frontends = vec![
+            ServerFrontend::Lfs,
+            ServerFrontend::Oci,
+            ServerFrontend::BazelHttp,
+            ServerFrontend::Hub,
+        ];
         let mut visited = false;
-        let result = visit_protocol_object_member_chunks(
-            &frontends,
-            &store,
-            &key,
-            |_hash| {
-                visited = true;
-                Ok(())
-            },
-        );
+        let result = visit_protocol_object_member_chunks(&frontends, &store, &key, |_hash| {
+            visited = true;
+            Ok(())
+        });
         // Non-Xet frontends should return Ok without calling the visitor
         assert!(result.is_ok());
         assert!(!visited);
@@ -208,15 +212,10 @@ mod tests {
         let store = crate::object_store::ServerObjectStore::blackhole();
         let frontends: Vec<ServerFrontend> = Vec::new();
         let mut visited = false;
-        let result = visit_protocol_object_member_chunks(
-            &frontends,
-            &store,
-            &key,
-            |_hash| {
-                visited = true;
-                Ok(())
-            },
-        );
+        let result = visit_protocol_object_member_chunks(&frontends, &store, &key, |_hash| {
+            visited = true;
+            Ok(())
+        });
         assert!(result.is_ok());
         assert!(!visited);
     }
@@ -229,20 +228,13 @@ mod tests {
         let store = crate::object_store::ServerObjectStore::blackhole();
         let frontends = vec![ServerFrontend::Xet];
         let mut visited = false;
-        let result = visit_protocol_object_member_chunks(
-            &frontends,
-            &store,
-            &key,
-            |_hash| {
-                visited = true;
-                Ok(())
-            },
-        );
+        let result = visit_protocol_object_member_chunks(&frontends, &store, &key, |_hash| {
+            visited = true;
+            Ok(())
+        });
         assert!(result.is_ok());
         assert!(!visited);
     }
-
-
 
     // -----------------------------------------------------------------------
     // append_referenced_term_bytes

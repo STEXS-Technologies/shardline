@@ -2050,9 +2050,15 @@ mod tests {
         assert!(!resp.private);
         assert_eq!(resp.url, "/models/org/my-model");
         assert_eq!(resp.default_branch.as_deref(), Some("main"));
-        let lm = resp.last_modified.as_deref().expect("last_modified should be Some");
+        let lm = resp
+            .last_modified
+            .as_deref()
+            .expect("last_modified should be Some");
         // Should be a valid RFC 3339 timestamp around 2023-11-14
-        assert!(lm.contains("2023-11-14T22"), "expected 2023-11-14T22... got {lm}");
+        assert!(
+            lm.contains("2023-11-14T22"),
+            "expected 2023-11-14T22... got {lm}"
+        );
     }
 
     #[test]
@@ -2148,10 +2154,7 @@ mod tests {
         let result = parse_yaml_frontmatter(content);
         assert!(result.is_some());
         let obj = result.unwrap();
-        assert_eq!(
-            obj.get("title").and_then(|v| v.as_str()),
-            Some("My Model")
-        );
+        assert_eq!(obj.get("title").and_then(|v| v.as_str()), Some("My Model"));
     }
 
     #[test]
@@ -2240,7 +2243,11 @@ mod tests {
             },
         ];
         let entries = tree_entries_at_path(&files, "");
-        assert_eq!(entries.len(), 3, "expected 3 entries: README.md, src/, data/");
+        assert_eq!(
+            entries.len(),
+            3,
+            "expected 3 entries: README.md, src/, data/"
+        );
         // Directories come before files (sorted by type then path)
         assert_eq!(entries[0].entry_type, "directory");
         assert_eq!(entries[0].path, "data");
@@ -2446,14 +2453,8 @@ mod tests {
         let text = "{\"a\":1,\"b\":2}\n{\"a\":3,\"b\":4}";
         let rows = parse_jsonl_rows(text, 0, 10).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(
-            rows[0].columns.get("a"),
-            Some(&serde_json::json!(1))
-        );
-        assert_eq!(
-            rows[1].columns.get("b"),
-            Some(&serde_json::json!(4))
-        );
+        assert_eq!(rows[0].columns.get("a"), Some(&serde_json::json!(1)));
+        assert_eq!(rows[1].columns.get("b"), Some(&serde_json::json!(4)));
     }
 
     #[test]
@@ -2505,10 +2506,7 @@ mod tests {
             rows[0].columns.get("name"),
             Some(&serde_json::json!("Alice"))
         );
-        assert_eq!(
-            rows[1].columns.get("age"),
-            Some(&serde_json::json!(25))
-        );
+        assert_eq!(rows[1].columns.get("age"), Some(&serde_json::json!(25)));
     }
 
     #[test]
@@ -2784,7 +2782,10 @@ Bob,"say ""hi"""#;
         let content = b"---\nkey: value\n---";
         let result = parse_yaml_frontmatter(content);
         assert!(result.is_some(), "closing --- on its own line is valid");
-        assert_eq!(result.unwrap().get("key").and_then(|v| v.as_str()), Some("value"));
+        assert_eq!(
+            result.unwrap().get("key").and_then(|v| v.as_str()),
+            Some("value")
+        );
     }
 
     #[test]
@@ -2874,9 +2875,7 @@ Bob,"say ""hi"""#;
             .create_revision(repo_id, Some(parent), rev_sha, "main", "first")
             .expect("create_revision");
         if !files.is_empty() {
-            store
-                .store_files(rev_sha, files)
-                .expect("store_files");
+            store.store_files(rev_sha, files).expect("store_files");
         }
         (td, store)
     }
@@ -3028,7 +3027,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "missing".into(), "nope".into())),
-
         )
         .await;
         assert!(result.is_err());
@@ -3047,7 +3045,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "existing".into())),
-
         )
         .await
         .unwrap();
@@ -3057,7 +3054,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_repo_info_with_card_data() {
-        let readme_content = b"---\nlanguage: en\npipeline_tag: text-classification\n---\n# Model\nSome text";
+        let readme_content =
+            b"---\nlanguage: en\npipeline_tag: text-classification\n---\n# Model\nSome text";
         let (_td, store) = make_store_with_revision(
             HubRepoType::Model,
             "org/card-model",
@@ -3079,15 +3077,11 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "card-model".into())),
-
         )
         .await
         .unwrap();
         let card = result.card_data.as_ref().expect("expected card_data");
-        assert_eq!(
-            card.get("language").and_then(|v| v.as_str()),
-            Some("en")
-        );
+        assert_eq!(card.get("language").and_then(|v| v.as_str()), Some("en"));
         assert_eq!(
             card.get("pipeline_tag").and_then(|v| v.as_str()),
             Some("text-classification")
@@ -3105,7 +3099,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "no".into(), "such".into())),
-
         )
         .await;
         assert!(result.is_err());
@@ -3114,12 +3107,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_repo_modelcard_no_readme() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/no-readme",
-            "sha_nr",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/no-readme", "sha_nr", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3129,7 +3118,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "no-readme".into())),
-
         )
         .await;
         assert!(result.is_err());
@@ -3160,7 +3148,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "my-model".into())),
-
         )
         .await
         .unwrap();
@@ -3181,12 +3168,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_repo_revisions_with_revisions() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/has-revs",
-            "sha_rev1",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/has-revs", "sha_rev1", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3196,7 +3179,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "has-revs".into())),
-
         )
         .await
         .unwrap();
@@ -3218,13 +3200,9 @@ Bob,"say ""hi"""#;
             name: "ns/new-repo".to_owned(),
             private: false,
         };
-        let (status, json) = repo_create(
-            State(state),
-            default_headers(),
-            Json(req),
-        )
-        .await
-        .unwrap();
+        let (status, json) = repo_create(State(state), default_headers(), Json(req))
+            .await
+            .unwrap();
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(json.id, "ns/new-repo");
     }
@@ -3240,7 +3218,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("invalid".into(), "ns".into(), "repo".into())),
-
             Json(serde_json::json!({})),
         )
         .await;
@@ -3259,7 +3236,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "ns".into(), "my-repo".into())),
-
             Json(serde_json::json!({})),
         )
         .await
@@ -3276,7 +3252,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("datasets".into(), "ns".into(), "secret-data".into())),
-
             Json(serde_json::json!({"private": true})),
         )
         .await
@@ -3296,7 +3271,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "no".into(), "exist".into())),
-
         )
         .await;
         assert!(matches!(result, Err(HubApiError::RepoNotFound)));
@@ -3314,7 +3288,6 @@ Bob,"say ""hi"""#;
             State(state.clone()),
             default_headers(),
             Path(("models".into(), "org".into(), "to-delete".into())),
-
         )
         .await;
         assert!(result.is_ok());
@@ -3340,7 +3313,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "ns".into(), "r".into(), "main".into())),
-
             Json(PreuploadRequest {
                 files,
                 git_attributes: None,
@@ -3379,8 +3351,12 @@ Bob,"say ""hi"""#;
         let result = preupload(
             State(state),
             default_headers(),
-            Path(("models".into(), "org".into(), "preupload-test".into(), "main".into())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "preupload-test".into(),
+                "main".into(),
+            )),
             Json(PreuploadRequest {
                 files: vec![
                     PreuploadFile {
@@ -3415,7 +3391,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "ns".into(), "r".into(), "main".into())),
-
             "{}".to_string(),
         )
         .await;
@@ -3438,12 +3413,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_commit_inline_file_success() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/commit-test",
-            "parent_sha_001",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/commit-test", "parent_sha_001", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3455,8 +3426,12 @@ Bob,"say ""hi"""#;
         let result = commit(
             State(state),
             ndjson_headers(),
-            Path(("models".into(), "org".into(), "commit-test".into(), "main".into())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "commit-test".into(),
+                "main".into(),
+            )),
             body.to_string(),
         )
         .await;
@@ -3468,12 +3443,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_commit_lfs_pointer_success() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/lfs-commit",
-            "parent_lfs",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/lfs-commit", "parent_lfs", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3489,8 +3460,12 @@ Bob,"say ""hi"""#;
         let result = commit(
             State(state),
             ndjson_headers(),
-            Path(("models".into(), "org".into(), "lfs-commit".into(), "main".into())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "lfs-commit".into(),
+                "main".into(),
+            )),
             body,
         )
         .await;
@@ -3524,8 +3499,12 @@ Bob,"say ""hi"""#;
         let result = commit(
             State(state),
             ndjson_headers(),
-            Path(("models".into(), "org".into(), "del-test".into(), "main".into())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "del-test".into(),
+                "main".into(),
+            )),
             body.to_string(),
         )
         .await;
@@ -3552,8 +3531,12 @@ Bob,"say ""hi"""#;
         let result = commit(
             State(state),
             ndjson_headers(),
-            Path(("models".into(), "org".into(), "parent-mismatch".into(), "main".into())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "parent-mismatch".into(),
+                "main".into(),
+            )),
             body.to_string(),
         )
         .await;
@@ -3571,12 +3554,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_apply_commit_inline_file() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/apply-test",
-            "parent_apply",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/apply-test", "parent_apply", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3607,12 +3586,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_apply_commit_lfs_pointer() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/apply-lfs",
-            "parent_lfs2",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/apply-lfs", "parent_lfs2", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3673,12 +3648,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_apply_commit_parent_mismatch() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/apply-mismatch",
-            "actual_sha",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/apply-mismatch", "actual_sha", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3733,8 +3704,13 @@ Bob,"say ""hi"""#;
         let entries = file_tree(
             State(state),
             default_headers(),
-            Path(("models".into(), "org".into(), "tree-test".into(), "main".into(), String::new())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "tree-test".into(),
+                "main".into(),
+                String::new(),
+            )),
             Query(TreeQuery {
                 limit: None,
                 cursor: None,
@@ -3778,8 +3754,13 @@ Bob,"say ""hi"""#;
         let entries = file_tree(
             State(state),
             default_headers(),
-            Path(("models".into(), "org".into(), "tree-rec".into(), "main".into(), String::new())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "tree-rec".into(),
+                "main".into(),
+                String::new(),
+            )),
             Query(TreeQuery {
                 limit: None,
                 cursor: None,
@@ -3830,8 +3811,13 @@ Bob,"say ""hi"""#;
         let entries = file_tree(
             State(state),
             default_headers(),
-            Path(("models".into(), "org".into(), "tree-lim".into(), "main".into(), String::new())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "tree-lim".into(),
+                "main".into(),
+                String::new(),
+            )),
             Query(TreeQuery {
                 limit: Some(2),
                 cursor: Some("a.txt".into()),
@@ -3873,8 +3859,13 @@ Bob,"say ""hi"""#;
         let result = resolve_file(
             State(state),
             default_headers(),
-            Path(("models".into(), "org".into(), "resolve-test".into(), "main".into(), "data.txt".into())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "resolve-test".into(),
+                "main".into(),
+                "data.txt".into(),
+            )),
         )
         .await;
         assert!(result.is_ok(), "resolve_file failed: {:?}", result.err());
@@ -3890,12 +3881,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_resolve_file_not_found() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/resolve-miss",
-            "sha_miss",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/resolve-miss", "sha_miss", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -3904,8 +3891,13 @@ Bob,"say ""hi"""#;
         let result = resolve_file(
             State(state),
             default_headers(),
-            Path(("models".into(), "org".into(), "resolve-miss".into(), "main".into(), "nope.txt".into())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "resolve-miss".into(),
+                "main".into(),
+                "nope.txt".into(),
+            )),
         )
         .await;
         assert!(result.is_err());
@@ -4010,17 +4002,17 @@ Bob,"say ""hi"""#;
         let obj = &result.objects[0];
         // Missing download: actions is None, error is Some(404)
         assert!(obj.actions.is_none());
-        let err = obj.error.as_ref().expect("expected error for missing object");
+        let err = obj
+            .error
+            .as_ref()
+            .expect("expected error for missing object");
         assert_eq!(err.code, 404);
     }
 
     #[tokio::test]
     async fn handler_lfs_batch_verify_existing() {
         let (_td, state) = make_lfs_state();
-        state
-            .store
-            .put_lfs_object("verify_oid", b"data")
-            .unwrap();
+        state.store.put_lfs_object("verify_oid", b"data").unwrap();
         let result = lfs_batch(
             State(state),
             default_headers(),
@@ -4127,17 +4119,11 @@ Bob,"say ""hi"""#;
     async fn handler_lfs_download_success() {
         let (_td, state) = make_test_state();
         let oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        state
-            .store
-            .put_lfs_object(oid, b"download data")
-            .unwrap();
-        let (status, headers, data) = lfs_download(
-            State(state),
-            default_headers(),
-            Path(oid.to_string()),
-        )
-        .await
-        .unwrap();
+        state.store.put_lfs_object(oid, b"download data").unwrap();
+        let (status, headers, data) =
+            lfs_download(State(state), default_headers(), Path(oid.to_string()))
+                .await
+                .unwrap();
         assert_eq!(status, StatusCode::OK);
         assert_eq!(data, b"download data");
         // Verify content-type header name
@@ -4170,12 +4156,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_git_head_with_revision() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/has-head",
-            "sha_head123",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/has-head", "sha_head123", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -4185,7 +4167,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "has-head".into())),
-
         )
         .await
         .unwrap();
@@ -4209,7 +4190,12 @@ Bob,"say ""hi"""#;
         let result = commit(
             State(state),
             ndjson_headers(),
-            Path(("models".into(), "org".into(), "no-rev".into(), "nonexistent_rev".into())),
+            Path((
+                "models".into(),
+                "org".into(),
+                "no-rev".into(),
+                "nonexistent_rev".into(),
+            )),
             r#"{"header":{"message":"x"}}"#.to_string(),
         )
         .await;
@@ -4249,7 +4235,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("org".into(), "data".into())),
-
         )
         .await
         .unwrap();
@@ -4296,7 +4281,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("org".into(), "multi".into())),
-
         )
         .await
         .unwrap();
@@ -4309,12 +4293,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_dataset_first_rows_empty_dataset() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Dataset,
-            "org/empty-ds",
-            "sha_empty_ds",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Dataset, "org/empty-ds", "sha_empty_ds", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -4324,7 +4304,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("org".into(), "empty-ds".into())),
-
             Query(DatasetFirstRowsQuery {
                 config: "default".into(),
                 split: "train".into(),
@@ -4361,7 +4340,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("org".into(), "jsonl-ds".into())),
-
             Query(DatasetFirstRowsQuery {
                 config: "default".into(),
                 split: "train".into(),
@@ -4404,7 +4382,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("org".into(), "viewer-ds".into(), "train".into())),
-
             Query(DatasetViewerQuery {
                 config: "default".into(),
                 offset: 0,
@@ -4443,7 +4420,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("org".into(), "viewer-pag".into(), "test".into())),
-
             Query(DatasetViewerQuery {
                 config: "data".into(),
                 offset: 2,
@@ -4454,14 +4430,8 @@ Bob,"say ""hi"""#;
         .unwrap();
         assert_eq!(result.rows.len(), 2);
         // rows[0] is the 3rd data row (offset 2): n=3 (CSV values are parsed as primitives)
-        assert_eq!(
-            result.rows[0].columns.get("n"),
-            Some(&serde_json::json!(3))
-        );
-        assert_eq!(
-            result.rows[1].columns.get("n"),
-            Some(&serde_json::json!(4))
-        );
+        assert_eq!(result.rows[0].columns.get("n"), Some(&serde_json::json!(3)));
+        assert_eq!(result.rows[1].columns.get("n"), Some(&serde_json::json!(4)));
     }
 
     // ------------------------------------------------------------------
@@ -4480,7 +4450,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "wh-test".into())),
-
             Json(WebhookCreateRequest {
                 url: "https://example.com/hook".into(),
                 events: vec!["push".into()],
@@ -4506,7 +4475,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "wh-badurl".into())),
-
             Json(WebhookCreateRequest {
                 url: "ftp://bad.com/hook".into(),
                 events: vec!["push".into()],
@@ -4535,7 +4503,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "wh-toomany".into())),
-
             Json(WebhookCreateRequest {
                 url: "https://example.com/hook".into(),
                 events,
@@ -4567,7 +4534,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "wh-list-empty".into())),
-
         )
         .await
         .unwrap();
@@ -4602,7 +4568,6 @@ Bob,"say ""hi"""#;
             State(state),
             default_headers(),
             Path(("models".into(), "org".into(), "wh-list-full".into())),
-
         )
         .await
         .unwrap();
@@ -4632,8 +4597,12 @@ Bob,"say ""hi"""#;
         let result = webhook_delete(
             State(state.clone()),
             default_headers(),
-            Path(("models".into(), "org".into(), "wh-del".into(), wh.id.clone())),
-
+            Path((
+                "models".into(),
+                "org".into(),
+                "wh-del".into(),
+                wh.id.clone(),
+            )),
         )
         .await;
         assert!(result.is_ok());
@@ -4649,8 +4618,8 @@ Bob,"say ""hi"""#;
 
     #[test]
     fn route_authorize_with_auth_and_no_header_is_err() {
-        use shardline_server_core::AuthProvider;
         use shardline_protocol::TokenClaims;
+        use shardline_server_core::AuthProvider;
         struct MockProvider;
         impl AuthProvider for MockProvider {
             fn verify_token(
@@ -4687,12 +4656,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_apply_commit_empty_instructions() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/empty-inst",
-            "parent_empty",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/empty-inst", "parent_empty", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -4715,12 +4680,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_dataset_parquet_non_dataset_repo_errors() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/model-repo",
-            "sha_model",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/model-repo", "sha_model", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -4746,12 +4707,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_dataset_first_rows_non_dataset_errors() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/model-ds",
-            "sha_model_ds",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/model-ds", "sha_model_ds", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -4782,12 +4739,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_dataset_viewer_non_dataset_errors() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Model,
-            "org/model-view",
-            "sha_model_view",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/model-view", "sha_model_view", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -4819,7 +4772,9 @@ Bob,"say ""hi"""#;
     #[tokio::test]
     async fn handler_repo_search_sort_by_last_modified_asc() {
         let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/model-a");
-        store.create_repo(HubRepoType::Model, "org/model-b", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "org/model-b", false)
+            .unwrap();
         let state = HubState {
             store,
             auth: None,
@@ -4845,7 +4800,9 @@ Bob,"say ""hi"""#;
     #[tokio::test]
     async fn handler_repo_search_sort_likes_noop() {
         let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/likes-a");
-        store.create_repo(HubRepoType::Model, "org/likes-b", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "org/likes-b", false)
+            .unwrap();
         let state = HubState {
             store,
             auth: None,
@@ -4872,7 +4829,9 @@ Bob,"say ""hi"""#;
     #[tokio::test]
     async fn handler_repo_search_sort_downloads_noop() {
         let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/dl-a");
-        store.create_repo(HubRepoType::Model, "org/dl-b", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "org/dl-b", false)
+            .unwrap();
         let state = HubState {
             store,
             auth: None,
@@ -4903,7 +4862,9 @@ Bob,"say ""hi"""#;
     #[tokio::test]
     async fn handler_repo_search_unknown_sort_keeps_default_order() {
         let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/order-a");
-        store.create_repo(HubRepoType::Model, "org/order-b", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "org/order-b", false)
+            .unwrap();
         let state = HubState {
             store,
             auth: None,
@@ -4990,12 +4951,8 @@ Bob,"say ""hi"""#;
 
     #[tokio::test]
     async fn handler_dataset_viewer_split_not_found() {
-        let (_td, store) = make_store_with_revision(
-            HubRepoType::Dataset,
-            "org/no-split",
-            "sha_no_split",
-            &[],
-        );
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Dataset, "org/no-split", "sha_no_split", &[]);
         let state = HubState {
             store,
             auth: None,
@@ -5088,7 +5045,7 @@ Bob,"say ""hi"""#;
     }
 
     // ------------------------------------------------------------------
-    // validate_webhook_url — scheme edge cases  
+    // validate_webhook_url — scheme edge cases
     // ------------------------------------------------------------------
 
     #[test]

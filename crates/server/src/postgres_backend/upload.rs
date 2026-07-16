@@ -222,8 +222,8 @@ impl super::PostgresBackend {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use shardline_storage::ObjectKey;
     use sha2::Digest;
+    use shardline_storage::ObjectKey;
 
     use super::super::PostgresBackend;
     use super::*;
@@ -257,11 +257,15 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let key = make_object_key("test-blob");
         let data = b"hello object".to_vec();
-        let outcome = backend.put_object_bytes_if_absent(&key, data.clone()).expect("put");
+        let outcome = backend
+            .put_object_bytes_if_absent(&key, data.clone())
+            .expect("put");
         assert_eq!(outcome, PutOutcome::Inserted);
 
         // Second put returns AlreadyPresent
-        let outcome2 = backend.put_object_bytes_if_absent(&key, data).expect("put again");
+        let outcome2 = backend
+            .put_object_bytes_if_absent(&key, data)
+            .expect("put again");
         assert_eq!(outcome2, PutOutcome::AlreadyExists);
     }
 
@@ -270,7 +274,9 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let key = make_object_key("empty-blob");
         let data = Vec::new();
-        let outcome = backend.put_object_bytes_if_absent(&key, data).expect("put empty");
+        let outcome = backend
+            .put_object_bytes_if_absent(&key, data)
+            .expect("put empty");
         assert_eq!(outcome, PutOutcome::Inserted);
     }
 
@@ -281,8 +287,12 @@ mod tests {
         let data1 = b"first version".to_vec();
         let data2 = b"second version".to_vec();
 
-        backend.put_object_bytes_overwrite(&key, data1).expect("first write");
-        backend.put_object_bytes_overwrite(&key, data2).expect("overwrite");
+        backend
+            .put_object_bytes_overwrite(&key, data1)
+            .expect("first write");
+        backend
+            .put_object_bytes_overwrite(&key, data2)
+            .expect("overwrite");
         // Success indicates the overwrite completed without error.
     }
 
@@ -293,12 +303,16 @@ mod tests {
         let dst = make_object_key("dest-blob");
         let data = b"copy me".to_vec();
 
-        backend.put_object_bytes_if_absent(&src, data).expect("put source");
+        backend
+            .put_object_bytes_if_absent(&src, data)
+            .expect("put source");
         let outcome = backend.copy_object_if_absent(&src, &dst).expect("copy");
         assert_eq!(outcome, PutOutcome::Inserted);
 
         // Second copy returns AlreadyPresent
-        let outcome2 = backend.copy_object_if_absent(&src, &dst).expect("copy again");
+        let outcome2 = backend
+            .copy_object_if_absent(&src, &dst)
+            .expect("copy again");
         assert_eq!(outcome2, PutOutcome::AlreadyExists);
     }
 
@@ -325,8 +339,10 @@ mod tests {
             .expect("put with user key");
         // The canonical content exists, and the copy to user_key should work
         // (user_key is new, so this is a fresh Put).
-        assert!(outcome2 == PutOutcome::Inserted || outcome2 == PutOutcome::AlreadyExists,
-            "expected Inserted or AlreadyExists, got {outcome2:?}");
+        assert!(
+            outcome2 == PutOutcome::Inserted || outcome2 == PutOutcome::AlreadyExists,
+            "expected Inserted or AlreadyExists, got {outcome2:?}"
+        );
     }
 
     #[tokio::test]
@@ -345,7 +361,12 @@ mod tests {
         std::fs::write(tmpfile.path(), data).expect("write temp file");
 
         let outcome = backend
-            .put_sha256_addressed_object_file(&canonical_key, &digest_hex, tmpfile.path(), &integrity)
+            .put_sha256_addressed_object_file(
+                &canonical_key,
+                &digest_hex,
+                tmpfile.path(),
+                &integrity,
+            )
             .expect("put from file");
         assert_eq!(outcome, PutOutcome::Inserted);
     }
@@ -365,7 +386,12 @@ mod tests {
         std::fs::write(tmpfile.path(), data).expect("write temp file");
 
         let outcome = backend
-            .put_sha256_addressed_object_file(&canonical_key, &digest_hex, tmpfile.path(), &integrity)
+            .put_sha256_addressed_object_file(
+                &canonical_key,
+                &digest_hex,
+                tmpfile.path(),
+                &integrity,
+            )
             .expect("put from file with matching digest");
         assert_eq!(outcome, PutOutcome::Inserted);
     }
@@ -377,7 +403,10 @@ mod tests {
         let data = b"not a valid xorb body";
         let hash = hex::encode(blake3::hash(data).as_bytes());
         let result = backend.upload_xorb(&hash, Bytes::from(data.to_vec())).await;
-        assert!(result.is_err(), "upload_xorb should reject invalid xorb data");
+        assert!(
+            result.is_err(),
+            "upload_xorb should reject invalid xorb data"
+        );
     }
 
     #[tokio::test]
@@ -386,7 +415,9 @@ mod tests {
         let data = b"some content";
         // Use a hash that does NOT match the data.
         let wrong_hash = "ab".repeat(32);
-        let result = backend.upload_xorb(&wrong_hash, Bytes::from(data.to_vec())).await;
+        let result = backend
+            .upload_xorb(&wrong_hash, Bytes::from(data.to_vec()))
+            .await;
         assert!(result.is_err(), "upload_xorb should reject hash mismatch");
     }
 
@@ -416,7 +447,10 @@ mod tests {
         let (xorb_bytes, _actual_hash) = crate::test_fixtures::single_chunk_xorb(content);
         let wrong_hash = "ff".repeat(32);
         let result = backend.upload_xorb(&wrong_hash, xorb_bytes).await;
-        assert!(result.is_err(), "upload_xorb should reject hash mismatch even for valid xorb");
+        assert!(
+            result.is_err(),
+            "upload_xorb should reject hash mismatch even for valid xorb"
+        );
     }
 
     #[tokio::test]
@@ -425,14 +459,21 @@ mod tests {
         let key = make_object_key("overwrite-new");
         // Overwrite on a key that doesn't exist yet should succeed (create or overwrite).
         let data = b"first data".to_vec();
-        backend.put_object_bytes_overwrite(&key, data).expect("overwrite non-existent");
+        backend
+            .put_object_bytes_overwrite(&key, data)
+            .expect("overwrite non-existent");
 
         // Overwrite existing.
         let data2 = b"replacement data".to_vec();
-        backend.put_object_bytes_overwrite(&key, data2).expect("overwrite existing");
+        backend
+            .put_object_bytes_overwrite(&key, data2)
+            .expect("overwrite existing");
 
         // Verify the final content by reading back via the object store.
-        let meta = backend.object_store().metadata(&key).expect("metadata after overwrite");
+        let meta = backend
+            .object_store()
+            .metadata(&key)
+            .expect("metadata after overwrite");
         assert!(meta.is_some());
     }
 
@@ -461,8 +502,14 @@ mod tests {
 
         // Canonical key should already exist (inserted during the user-key call).
         // Verify by reading directly.
-        let meta = backend.object_store().metadata(&canonical_key).expect("meta");
-        assert!(meta.is_some(), "canonical key should exist after user-key put");
+        let meta = backend
+            .object_store()
+            .metadata(&canonical_key)
+            .expect("meta");
+        assert!(
+            meta.is_some(),
+            "canonical key should exist after user-key put"
+        );
     }
 
     #[tokio::test]
@@ -470,7 +517,9 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let key = make_object_key("large-blob");
         let data = vec![0xABu8; 1_000_000]; // 1 MB
-        let outcome = backend.put_object_bytes_if_absent(&key, data).expect("put large");
+        let outcome = backend
+            .put_object_bytes_if_absent(&key, data)
+            .expect("put large");
         assert_eq!(outcome, PutOutcome::Inserted);
     }
 
@@ -489,7 +538,9 @@ mod tests {
         // Keys with hyphens, dots, underscores should work.
         let key = ObjectKey::parse("test/special-v1.0_data.bin").unwrap();
         let data = b"special key test".to_vec();
-        let outcome = backend.put_object_bytes_if_absent(&key, data).expect("put special key");
+        let outcome = backend
+            .put_object_bytes_if_absent(&key, data)
+            .expect("put special key");
         assert_eq!(outcome, PutOutcome::Inserted);
     }
 
@@ -498,7 +549,9 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let key = make_object_key("roundtrip-verify");
         let original = b"verify roundtrip content".to_vec();
-        backend.put_object_bytes_if_absent(&key, original.clone()).expect("put");
+        backend
+            .put_object_bytes_if_absent(&key, original.clone())
+            .expect("put");
 
         // Read back via the object store and verify.
         let meta = backend.object_store().metadata(&key).expect("meta");
@@ -507,11 +560,9 @@ mod tests {
 
         // Read the object bytes to verify.
         use shardline_storage::ObjectStore;
-        let read_bytes = crate::object_store::read_full_object(
-            &backend.object_store(),
-            &key,
-            meta.length(),
-        ).expect("read full");
+        let read_bytes =
+            crate::object_store::read_full_object(&backend.object_store(), &key, meta.length())
+                .expect("read full");
         assert_eq!(read_bytes, original);
     }
 
@@ -520,7 +571,9 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let key = make_object_key("overwrite-large");
         let data = vec![0xCDu8; 500_000];
-        backend.put_object_bytes_overwrite(&key, data).expect("overwrite large");
+        backend
+            .put_object_bytes_overwrite(&key, data)
+            .expect("overwrite large");
     }
 
     #[tokio::test]
@@ -529,11 +582,15 @@ mod tests {
         let key = make_object_key("double-put-same");
         let data = b"same data".to_vec();
 
-        let first = backend.put_object_bytes_if_absent(&key, data.clone()).expect("first put");
+        let first = backend
+            .put_object_bytes_if_absent(&key, data.clone())
+            .expect("first put");
         assert_eq!(first, PutOutcome::Inserted);
 
         // Second put with identical data returns AlreadyExists.
-        let second = backend.put_object_bytes_if_absent(&key, data).expect("second put");
+        let second = backend
+            .put_object_bytes_if_absent(&key, data)
+            .expect("second put");
         assert_eq!(second, PutOutcome::AlreadyExists);
     }
 
@@ -550,9 +607,9 @@ mod tests {
     #[tokio::test]
     async fn upload_file_stream_rejects_invalid_file_id() {
         let (backend, _root) = make_backend().await;
-        let body = crate::upload_ingest::RequestBodyReader::from_bytes(
-            axum::body::Bytes::from(b"content".to_vec()),
-        );
+        let body = crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from(
+            b"content".to_vec(),
+        ));
         let result = backend
             .upload_file_stream("../traverse", body, None, None)
             .await;
@@ -562,12 +619,10 @@ mod tests {
     #[tokio::test]
     async fn upload_file_stream_rejects_empty_file_id() {
         let (backend, _root) = make_backend().await;
-        let body = crate::upload_ingest::RequestBodyReader::from_bytes(
-            axum::body::Bytes::from(b"content".to_vec()),
-        );
-        let result = backend
-            .upload_file_stream("", body, None, None)
-            .await;
+        let body = crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from(
+            b"content".to_vec(),
+        ));
+        let result = backend.upload_file_stream("", body, None, None).await;
         assert!(matches!(result, Err(ServerError::InvalidFileId)));
     }
 
@@ -576,18 +631,14 @@ mod tests {
     #[tokio::test]
     async fn upload_shard_stream_rejects_empty_body() {
         let (backend, _root) = make_backend().await;
-        let body = crate::upload_ingest::RequestBodyReader::from_bytes(
-            axum::body::Bytes::new(),
-        );
+        let body = crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::new());
         let limits = crate::ShardMetadataLimits::new(
             std::num::NonZeroUsize::new(100).unwrap(),
             std::num::NonZeroUsize::new(100).unwrap(),
             std::num::NonZeroUsize::new(100).unwrap(),
             std::num::NonZeroUsize::new(100).unwrap(),
         );
-        let result = backend
-            .upload_shard_stream(body, None, limits)
-            .await;
+        let result = backend.upload_shard_stream(body, None, limits).await;
         // Empty shard body should produce an error.
         assert!(result.is_err());
     }
@@ -599,8 +650,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"canonical equals user key".to_vec();
         let digest_hex = hex::encode(sha2::Sha256::digest(&data));
-        let canonical_key =
-            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
 
         // Passing the same key as both canonical and user → the early return
         // on line 106 ('if canonical_key == *object_key') is exercised.
@@ -617,8 +667,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"file canonical equals user key";
         let digest_hex = hex::encode(sha2::Sha256::digest(data));
-        let canonical_key =
-            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
         let integrity = ObjectIntegrity::new(
             shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
             data.len() as u64,

@@ -571,13 +571,14 @@ async fn lfs_frontend_batch_reports_stored_object_size() -> Result<(), Box<dyn S
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
+async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_working()
 -> Result<(), Box<dyn StdError>> {
     let runtime = start_protocol_runtime(&[
         ServerFrontend::Xet,
         ServerFrontend::Lfs,
         ServerFrontend::BazelHttp,
         ServerFrontend::Oci,
+        ServerFrontend::Hub,
     ])
     .await?;
     let client = Client::new();
@@ -731,6 +732,147 @@ async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
         assert_eq!(lfs_metadata.ino(), oci_metadata.ino());
         assert_eq!(lfs_metadata.ino(), shared_metadata.ino());
         assert!(shared_metadata.nlink() >= 4);
+    }
+
+    let hub_repo = client
+        .post(format!("{}/api/repos/create", runtime.base_url()))
+        .bearer_auth(&write_token)
+        .json(&json!({
+            "name": "team/assets",
+            "type": "model",
+            "private": false,
+        }))
+        .send()
+        .await?;
+    assert_eq!(hub_repo.status(), StatusCode::CREATED);
+
+    let hub_content = BASE64_STANDARD.encode(b"hub and native frontends coexist");
+    let hub_commit = client
+        .post(format!(
+            "{}/api/models/team/assets/commit/main",
+            runtime.base_url()
+        ))
+        .bearer_auth(&write_token)
+        .header(CONTENT_TYPE, "application/x-ndjson")
+        .body(format!(
+            "{{\"header\":{{\"summary\":\"all frontend matrix\"}}}}\n{{\"file\":{{\"path\":\"README.md\",\"content\":\"{hub_content}\"}}}}"
+        ))
+        .send()
+        .await?;
+    assert_eq!(hub_commit.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_nonempty_frontend_combination_starts_and_serves_its_routes()
+-> Result<(), Box<dyn StdError>> {
+    let all_frontends = [
+        ServerFrontend::Xet,
+        ServerFrontend::Lfs,
+        ServerFrontend::BazelHttp,
+        ServerFrontend::Oci,
+        ServerFrontend::Hub,
+    ];
+    let client = Client::new();
+    let write_token = scoped_token(TokenScope::Write, "team", "assets")?;
+
+    for mask in 1_usize..(1_usize << all_frontends.len()) {
+        let frontends = all_frontends
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frontend)| ((mask & (1_usize << index)) != 0).then_some(*frontend))
+            .collect::<Vec<_>>();
+        let runtime = start_protocol_runtime(&frontends).await?;
+
+        let ready = client
+            .get(format!("{}/readyz", runtime.base_url()))
+            .send()
+            .await?;
+        assert_eq!(
+            ready.status(),
+            StatusCode::OK,
+            "frontend combination {frontends:?} should become ready"
+        );
+
+        if frontends.contains(&ServerFrontend::Xet) {
+            let (xorb, hash) = single_chunk_xorb(b"frontend-matrix-xet");
+            let response = client
+                .post(format!("{}/v1/xorbs/default/{hash}", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .body(xorb)
+                .send()
+                .await?;
+            assert!(
+                response.status().is_success(),
+                "Xet route failed for {frontends:?}: {}",
+                response.status()
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::Lfs) {
+            let response = client
+                .post(format!("{}/v1/lfs/objects/batch", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .header(CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .json(&json!({
+                    "operation": "download",
+                    "objects": [],
+                    "transfers": ["basic"],
+                }))
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "LFS route failed for {frontends:?}"
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::BazelHttp) {
+            let body = format!("frontend-matrix-bazel-{mask}").into_bytes();
+            let hash = hex::encode(Sha256::digest(&body));
+            let response = client
+                .put(format!(
+                    "{}/v1/bazel/cache/cas/{hash}",
+                    runtime.base_url()
+                ))
+                .bearer_auth(&write_token)
+                .body(body)
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "Bazel route failed for {frontends:?}"
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::Oci) {
+            let response = client
+                .get(format!("{}/v2/", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "OCI route failed for {frontends:?}"
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::Hub) {
+            let response = client
+                .get(format!("{}/api/whoami-v2", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "Hub route failed for {frontends:?}"
+            );
+        }
     }
 
     Ok(())

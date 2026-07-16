@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: shardline-kind-smoke
+
+resources:
+  - ../../../docs/k8s/production-scaled
+
+images:
+  - name: registry.example.com/shardline
+    newName: shardline-kind-smoke
+    newTag: latest
+
+patches:
+  - path: namespace.patch.yaml
+    target:
+      version: v1
+      kind: Namespace
+      name: shardline
+  - path: configmap.patch.yaml
+  - path: api-deployment.patch.yaml
+  - path: transfer-deployment.patch.yaml
+  - path: delete-api-hpa.patch.yaml
+  - path: delete-transfer-hpa.patch.yaml
+  - path: delete-ingress.patch.yaml
