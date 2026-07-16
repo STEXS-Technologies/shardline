@@ -81,6 +81,7 @@ pub struct ServerConfig {
     pub(crate) oci: OciConfig,
     pub(crate) cache: CacheConfig,
     pub(crate) provider: ProviderConfig,
+    pub(crate) shutdown_timeout: Option<std::time::Duration>,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -117,6 +118,7 @@ impl fmt::Debug for ServerConfig {
             .field("oci", &self.oci)
             .field("cache", &self.cache)
             .field("provider", &self.provider)
+            .field("shutdown_timeout", &self.shutdown_timeout)
             .finish()
     }
 }
@@ -330,6 +332,7 @@ impl ServerConfig {
                 token_issuer: None,
                 token_ttl_seconds: None,
             },
+            shutdown_timeout: None,
         }
     }
 
@@ -710,6 +713,27 @@ impl ServerConfig {
     #[must_use]
     pub const fn provider_token_ttl_seconds(&self) -> Option<NonZeroU64> {
         self.provider.token_ttl_seconds
+    }
+
+    /// Returns the graceful shutdown drain timeout.
+    ///
+    /// When `Some(duration)`, the server waits up to this long for active
+    /// connections to finish after a shutdown signal before force-closing.
+    /// `None` means wait indefinitely.
+    #[must_use]
+    pub const fn shutdown_timeout(&self) -> Option<std::time::Duration> {
+        self.shutdown_timeout
+    }
+
+    /// Sets a maximum drain duration after the shutdown signal is received.
+    ///
+    /// Once the shutdown signal fires, the server stops accepting new
+    /// connections and waits up to `timeout` for in-flight requests to
+    /// complete.  Connections that outlive the timeout are force-closed.
+    #[must_use]
+    pub const fn with_shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.shutdown_timeout = Some(timeout);
+        self
     }
 
     /// Sets the PostgreSQL connection URL for the index store.

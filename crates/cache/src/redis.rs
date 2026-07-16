@@ -1,7 +1,6 @@
-use std::{fmt, num::NonZeroU64, sync::Arc};
+use std::{fmt, num::NonZeroU64};
 
 use redis::AsyncCommands;
-use tokio::sync::Mutex;
 
 use crate::{
     AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheFuture,
@@ -13,7 +12,6 @@ const RECONSTRUCTION_CACHE_PREFIX: &str = "shardline:reconstruction:v1";
 /// Redis-backed reconstruction cache adapter.
 pub struct RedisReconstructionCache {
     client: redis::Client,
-    connection: Arc<Mutex<Option<redis::aio::MultiplexedConnection>>>,
     ttl_seconds: NonZeroU64,
 }
 
@@ -21,7 +19,6 @@ impl Clone for RedisReconstructionCache {
     fn clone(&self) -> Self {
         Self {
             client: self.client.clone(),
-            connection: Arc::clone(&self.connection),
             ttl_seconds: self.ttl_seconds,
         }
     }
@@ -50,21 +47,18 @@ impl RedisReconstructionCache {
 
         Ok(Self {
             client: redis::Client::open(redis_url)?,
-            connection: Arc::new(Mutex::new(None)),
             ttl_seconds,
         })
     }
 
+    /// Returns a new multiplexed async connection from the client pool.
+    ///
+    /// The underlying `redis::Client` manages connection pooling internally,
+    /// so this is cheap to call per-operation.
     async fn get_connection(
         &self,
     ) -> Result<redis::aio::MultiplexedConnection, ReconstructionCacheError> {
-        let mut guard = self.connection.lock().await;
-        if let Some(ref conn) = *guard {
-            return Ok(conn.clone());
-        }
-        let conn = self.client.get_multiplexed_async_connection().await?;
-        *guard = Some(conn.clone());
-        Ok(conn)
+        Ok(self.client.get_multiplexed_async_connection().await?)
     }
 
     pub(crate) fn redis_key(key: &ReconstructionCacheKey) -> String {

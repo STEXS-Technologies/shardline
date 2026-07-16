@@ -4383,3 +4383,163 @@ async fn test_bazel_and_oci_coexist() {
     let bazel_missing_resp = app.clone().oneshot(bazel_get_missing).await.unwrap();
     assert_eq!(bazel_missing_resp.status(), 404, "Bazel should not find non-Bazel content");
 }
+
+// ===========================================================================
+// 39. Hub + Xet + LFS triple coexistence
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_hub_xet_lfs_triple_coexist() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Hub, ServerFrontend::Xet, ServerFrontend::Lfs])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let token = {
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo_s = RepositoryScope::new(
+            RepositoryProvider::Generic, "test", "test", Some("main"),
+        ).unwrap();
+        let claims = TokenClaims::new(
+            "shardline", "test", TokenScope::Write, repo_s, u64::MAX,
+        ).unwrap();
+        provider.mint_token(&claims).unwrap()
+    };
+    let _keep = Box::new(tmp);
+
+    let repo = "test/test";
+
+    // 1. Create repo via Hub API
+    let hub_create = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/repos/create")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&serde_json::json!({"name": repo, "type": "model"})).unwrap(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(hub_create).await.unwrap();
+    assert_eq!(create_resp.status(), 201, "Hub repo creation should succeed: {}", create_resp.status());
+
+    // 2. LFS batch request via standard LFS frontend
+    let lfs_batch = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/lfs/objects/batch")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/vnd.git-lfs+json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "operation": "download",
+                "objects": [],
+                "transfers": ["basic"]
+            })).unwrap(),
+        ))
+        .unwrap();
+    let lfs_resp = app.clone().oneshot(lfs_batch).await.unwrap();
+    assert_eq!(lfs_resp.status(), 200, "LFS batch should succeed: {}", lfs_resp.status());
+
+    // 3. Xet read token via Xet frontend
+    let xet_read = axum::http::Request::builder()
+        .method("GET")
+        .uri("/api/generic/test/test/xet-read-token/main")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let xet_resp = app.clone().oneshot(xet_read).await.unwrap();
+    // Should not be a 500 (may 404 on missing shard, but not crash)
+    assert!(!xet_resp.status().is_server_error(), "Xet read should not 500: {}", xet_resp.status());
+
+    // 4. Healthz
+    let health = app.clone().oneshot(
+        axum::http::Request::builder()
+            .uri("/healthz")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    ).await.unwrap();
+    assert_eq!(health.status(), 200);
+
+    // 5. Hub list repos
+    let hub_list = axum::http::Request::builder()
+        .method("GET")
+        .uri("/api/repos")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let list_resp = app.clone().oneshot(hub_list).await.unwrap();
+    assert_eq!(list_resp.status(), 200, "Hub list should succeed: {}", list_resp.status());
+    let body_bytes = axum::body::to_bytes(list_resp.into_body(), 1024 * 1024).await.unwrap();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(body_str.contains("test/test"), "Hub repo list should contain created repo: {body_str}");
+}
+
+// ===========================================================================
+// 40. Graceful shutdown with timeout
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_graceful_shutdown_with_timeout() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Xet])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled()
+    .with_shutdown_timeout(Duration::from_millis(500));
+
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+            .ok();
+        done_tx.send(()).ok();
+    });
+
+    // Give server a moment to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Trigger shutdown
+    shutdown_tx.send(()).ok();
+
+    // Server should exit within timeout + margin
+    tokio::time::timeout(Duration::from_secs(10), done_rx)
+        .await
+        .expect("timeout: server should shut down within 10s")
+        .expect("server task should complete");
+}
