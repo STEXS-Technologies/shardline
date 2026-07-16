@@ -1127,6 +1127,16 @@ mod tests {
     }
 
     #[test]
+    fn chunk_object_key_single_char_hash() {
+        // A single hex character is too short — validation should reject it.
+        let err = chunk_object_key("a").unwrap_err();
+        assert!(
+            matches!(err, ServerObjectStoreError::InvalidContentHash),
+            "single-char hash should return InvalidContentHash, got: {err}"
+        );
+    }
+
+    #[test]
     fn chunk_object_key_invalid_hex() {
         // Non-hex characters (uppercase, 'g', symbols)
         let invalid_hashes = [

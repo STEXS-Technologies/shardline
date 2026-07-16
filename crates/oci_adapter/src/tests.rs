@@ -2669,6 +2669,30 @@ async fn create_upload_session_metadata_write_failure_cleans_up() {
     }
 }
 
+#[tokio::test]
+async fn append_upload_bytes_invalid_session_id_returns_invalid_upload_session() {
+    let root = temp_root();
+    let result = append_upload_bytes(root.path(), "bad/session/id", b"data").await;
+    assert!(matches!(
+        result,
+        Err(OciAdapterError::InvalidUploadSession)
+    ));
+}
+
+#[tokio::test]
+async fn upload_body_integrity_empty_session() {
+    let root = temp_root();
+    let session_id = create_test_session(root.path(), false).await.unwrap();
+    let (sha256_hex, integrity) = upload_body_integrity(root.path(), &session_id)
+        .await
+        .unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"");
+    let expected = hex::encode(hasher.finalize());
+    assert_eq!(sha256_hex, expected);
+    assert_eq!(integrity.length(), 0);
+}
+
 // ── Additional edge case tests ─────────────────────────────────────────────
 
 #[test]

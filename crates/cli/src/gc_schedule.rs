@@ -1003,6 +1003,22 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_binary_path_returns_valid_path() {
+        // When a non-default path is supplied, it should be returned as-is.
+        let custom = Path::new("/opt/shardline/bin/shardline");
+        let result = super::resolve_binary_path(custom);
+        assert_eq!(result, custom);
+
+        // When the default path is supplied, resolve_binary_path attempts
+        // current_exe() first, falling back to the default. Either way
+        // the returned path should be non-empty.
+        let default = Path::new("/usr/local/bin/shardline");
+        let result = super::resolve_binary_path(default);
+        assert!(!result.as_os_str().is_empty());
+    }
+
     #[test]
     fn read_text_file_with_limit_rejects_growth_after_validation() {
         let sandbox = tempfile::tempdir();

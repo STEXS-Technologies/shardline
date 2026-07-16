@@ -985,6 +985,35 @@ mod tests {
         assert!(result.unwrap().is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ensure_s3_credential_path_is_regular_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("real-credential");
+        std::fs::write(&target, b"supersecret").unwrap();
+        let link = sandbox.path().join("cred-link");
+        symlink(&target, &link).unwrap();
+
+        let result = super::ensure_s3_credential_path_is_regular(&link);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_s3_credential_path_is_regular_accepts_regular_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("regular-credential");
+        std::fs::write(&path, b"valid-secret").unwrap();
+
+        let result = super::ensure_s3_credential_path_is_regular(&path);
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn runtime_error_optional_s3_secret_from_sources_direct() {
         let result = super::optional_s3_secret_from_sources(

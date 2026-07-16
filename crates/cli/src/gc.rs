@@ -251,6 +251,28 @@ mod tests {
     }
 
     #[test]
+    fn write_optional_artifact_retention_report_round_trip() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("retention.json");
+        let report = serde_json::json!({
+            "quarantined_objects": [
+                {"object_key": "aa/hash1", "added_at": 1000},
+                {"object_key": "bb/hash2", "added_at": 2000}
+            ],
+            "total_orphan_bytes": 5000
+        });
+        let result = super::write_optional_artifact(Some(&path), &report);
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed["total_orphan_bytes"],
+            serde_json::json!(5000)
+        );
+        assert_eq!(parsed["quarantined_objects"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
     fn gc_runtime_error_debug_and_display() {
         let json_err = serde_json::from_str::<()>("invalid").unwrap_err();
         let err = super::GcRuntimeError::Json(json_err);

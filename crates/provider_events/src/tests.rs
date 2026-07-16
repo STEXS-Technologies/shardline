@@ -1785,6 +1785,76 @@ impl AsyncIndexStore for FailAlwaysStore {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_webhook_with_generic_provider_revision_pushed() {
+    let storage = tempfile::tempdir().unwrap();
+    let record_store = LocalRecordStore::open(storage.path().to_path_buf());
+    let index_store = LocalIndexStore::new(storage.path().to_path_buf()).unwrap();
+    let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
+
+    let scope =
+        RepositoryScope::new(RepositoryProvider::Generic, "myorg", "myrepo", Some("main")).unwrap();
+    let record = FileRecord {
+        file_id: "data.bin".to_owned(),
+        content_hash: "a".repeat(64),
+        total_bytes: 4,
+        chunk_size: 4,
+        repository_scope: Some(scope),
+        chunks: vec![FileChunkRecord {
+            hash: "b".repeat(64),
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }],
+    };
+    RecordMutation::write_version_record(&record_store, &record).await.unwrap();
+    RecordMutation::write_latest_record(&record_store, &record).await.unwrap();
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::Generic, "myorg", "myrepo").unwrap(),
+        WebhookDeliveryId::new("delivery-generic-rev-1").unwrap(),
+        RepositoryWebhookEventKind::RevisionPushed {
+            revision: RevisionRef::new("refs/heads/main").unwrap(),
+        },
+    );
+
+    let outcome = apply_provider_webhook_with_stores(
+        &record_store,
+        &index_store,
+        &object_store,
+        &event,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RevisionPushed {
+            revision: "refs/heads/main".to_owned()
+        }
+    );
+    assert_eq!(outcome.affected_file_versions, 0);
+    assert_eq!(outcome.affected_chunks, 0);
+    assert_eq!(outcome.applied_holds, 0);
+    assert!(local_version_record_exists(&record_store, &record).await.unwrap());
+    assert!(local_latest_record_exists(&record_store, &record).await.unwrap());
+
+    let repository_state = LifecycleStore::provider_repository_state(
+        &index_store,
+        RepositoryProvider::Generic,
+        "myorg",
+        "myrepo",
+    )
+    .unwrap();
+    assert!(repository_state.is_some());
+    let state = repository_state.unwrap();
+    assert!(state.last_revision_pushed_at_unix_seconds().is_some());
+    assert_eq!(state.last_pushed_revision(), Some("refs/heads/main"));
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 struct TestInvariantError {

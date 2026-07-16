@@ -1797,6 +1797,32 @@ async fn lfs_delete_object() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_lfs_delete_nonexistent() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    // Delete an OID that was never uploaded
+    let nonexistent_oid = "a".repeat(64);
+    let delete_resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/lfs/objects/{nonexistent_oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // lfs_delete_object returns 404 for non-existent objects
+    assert_eq!(
+        delete_resp.status(),
+        StatusCode::NOT_FOUND,
+        "expected 404 for deleting non-existent LFS object, got {}",
+        delete_resp.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_invalid_oid_returns_error() {
     let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
 

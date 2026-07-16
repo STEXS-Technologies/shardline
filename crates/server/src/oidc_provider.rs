@@ -1531,6 +1531,72 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         assert_eq!(cached.keys[0].kid, "oidc-bg-key");
     }
 
+    // ── E2E token verification with mock OIDC provider ────────────────────
+
+    #[tokio::test]
+    async fn test_auth_with_oidc_provider_e2e() {
+        let mock_server = wiremock::MockServer::start().await;
+        let base_url = mock_server.uri();
+
+        // Serve discovery endpoint
+        let jwks_url = format!("{base_url}/oauth/jwks");
+        let discovery_json = serde_json::json!({
+            "jwks_uri": jwks_url,
+            "issuer": base_url,
+        });
+
+        // Serve JWKS endpoint with a real RSA public key (from TEST_RSA_PEM)
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kid": "e2e-test-key",
+                "kty": "RSA",
+                "n": TEST_RSA_N,
+                "e": TEST_RSA_E,
+            }]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/.well-known/openid-configuration"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(discovery_json))
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/oauth/jwks"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&mock_server)
+            .await;
+
+        let provider = OidcProvider::new(&base_url, None)
+            .await
+            .expect("OIDC provider creation should succeed");
+
+        // Sign a valid JWT with the matching RSA key
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        claims.insert("iss", serde_json::json!(&base_url));
+        claims.insert("sub", serde_json::json!("oidc-e2e-user"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("e2e-test-key".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        // Verify the token through the provider
+        let result = provider.verify_token(&token);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.issuer(), base_url.as_str());
+        assert_eq!(token_claims.subject(), "oidc-e2e-user");
+    }
+
     #[test]
     fn verify_token_with_future_nbf_fails() {
         use jsonwebtoken::{encode, EncodingKey, Header};

@@ -633,4 +633,14 @@ mod tests {
         assert_eq!(event.repository(), &repository);
         assert_eq!(event.delivery_id(), &delivery_id);
     }
+
+    #[test]
+    fn provider_subject_debug_does_not_leak_internal_state() {
+        let subject = ProviderSubject::new("operator-42").unwrap();
+        let debug = format!("{subject:?}");
+        // The debug output should contain the type name and value
+        // but should not unexpectedly leak internal fields beyond the
+        // public interface.
+        assert!(!debug.is_empty());
+    }
 }

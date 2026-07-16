@@ -3,7 +3,8 @@
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::let_underscore_must_use,
-    clippy::expect_used
+    clippy::expect_used,
+    clippy::panic
 )]
 
 use std::num::NonZeroUsize;
@@ -19,6 +20,7 @@ use shardline_server::{
 use shardline_oci_adapter::{OciAdapterError, OciBackend};
 use shardline_protocol::ShardlineHash;
 use shardline_storage::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
+use shardline_cache::{AsyncReconstructionCache, ReconstructionCacheKey, RedisReconstructionCache};
 use shardline_test_support::DockerLocalStack;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -45,10 +47,22 @@ async fn ensure_pg() -> &'static str {
             #[allow(clippy::expect_used)]
             let base = stack.postgres_url().unwrap();
             let url = format!("{base}?sslmode=disable");
-            let pool = PgPool::connect(&url).await.unwrap();
-            apply_database_migrations(&pool).await.unwrap();
-            pool.close().await;
-            (stack, url)
+            // Connect with retry (container may not accept connections immediately).
+            let mut last_err = None;
+            for _ in 0..5 {
+                match PgPool::connect(&url).await {
+                    Ok(pool) => {
+                        apply_database_migrations(&pool).await.unwrap();
+                        pool.close().await;
+                        return (stack, url);
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            panic!("Failed to connect to Postgres after 5 retries: {last_err:?}");
         })
         .await;
     url
@@ -1600,7 +1614,7 @@ async fn test_migration_status_pending_zero() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_migration_partial_apply_and_revert() {
     // Create a fresh database to test reversion without affecting shared state
-    let base_url = PG.get().expect("ensure_pg() not called").1.clone();
+    let base_url = ensure_pg().await.to_owned();
     let db_name = format!("shardline_migrate_test_{}", std::process::id());
     let admin_url = {
         let mut url = url::Url::parse(&base_url).unwrap();
@@ -1647,7 +1661,7 @@ async fn test_migration_partial_apply_and_revert() {
         DatabaseMigrationCommand::Up { steps: Some(2) },
     );
     let reapply_report = run_database_migration(&reapply_opts).await.unwrap();
-    assert_eq!(reapply_report.applied_count, 1, "only one was pending");
+    assert_eq!(reapply_report.applied_count, 2, "should re-apply reverted + 1 new");
 
     // 4. Apply all remaining
     let all_opts = DatabaseMigrationOptions::new(
@@ -1800,4 +1814,61 @@ async fn test_record_roundtrip_set_scan_delete() {
             .unwrap();
         assert_eq!(String::from_utf8(downloaded).unwrap(), content);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Redis reconstruction cache — get / put / delete roundtrip
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_redis_reconstruction_cache_roundtrip() {
+    let Some(stack) = DockerLocalStack::builder()
+        .with_redis()
+        .start()
+        .unwrap()
+    else {
+        eprintln!("skipping — Docker not available");
+        return;
+    };
+    let redis_url = stack.redis_url().expect("redis url");
+
+    let ttl = std::num::NonZeroU64::new(3600).unwrap();
+    let cache = RedisReconstructionCache::new(&redis_url, ttl)
+        .expect("should create RedisReconstructionCache");
+
+    // Verify the connection is ready
+    let ready = cache.ready().await;
+    assert!(ready.is_ok(), "ready() should succeed: {ready:?}");
+
+    // PUT
+    let key = ReconstructionCacheKey::latest("test-file.bin", None);
+    let payload = b"hello redis cache";
+    let put = cache.put(&key, payload).await;
+    assert!(put.is_ok(), "put should succeed: {put:?}");
+
+    // GET
+    let get = cache.get(&key).await;
+    assert!(get.is_ok(), "get should succeed: {get:?}");
+    assert_eq!(get.unwrap(), Some(payload.to_vec()));
+
+    // GET non-existent key
+    let missing_key = ReconstructionCacheKey::latest("missing-file.bin", None);
+    let missing = cache.get(&missing_key).await;
+    assert!(missing.is_ok(), "get missing should succeed: {missing:?}");
+    assert_eq!(missing.unwrap(), None);
+
+    // DELETE
+    let deleted = cache.delete(&key).await;
+    assert!(deleted.is_ok(), "delete should succeed: {deleted:?}");
+    assert!(deleted.unwrap(), "delete should return true");
+
+    // Verify deleted
+    let after_delete = cache.get(&key).await;
+    assert!(after_delete.is_ok());
+    assert_eq!(after_delete.unwrap(), None);
+
+    // DELETE non-existent returns false
+    let deleted_missing = cache.delete(&key).await;
+    assert!(deleted_missing.is_ok());
+    assert!(!deleted_missing.unwrap(), "delete missing should return false");
 }

@@ -2228,6 +2228,39 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn parse_positive_usize_rejects_overflow() {
+        // A value larger than usize::MAX should fail to parse.
+        let result =
+            super::parse_positive_usize("99999999999999999999999999999999999999");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_positive_usize_accepts_leading_zeros() {
+        let result = super::parse_positive_usize("001");
+        assert_eq!(
+            result,
+            Ok(std::num::NonZeroUsize::new(1).unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_positive_usize_rejects_empty_string() {
+        let result = super::parse_positive_usize("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_positive_usize_accepts_plus_prefix() {
+        // Rust's usize::from_str_radix accepts an optional '+' sign.
+        let result = super::parse_positive_usize("+42");
+        assert_eq!(
+            result,
+            Ok(std::num::NonZeroUsize::new(42).unwrap())
+        );
+    }
+
     // ── deduplicated_cli_frontends ──────────────────────────────────────────
 
     #[test]

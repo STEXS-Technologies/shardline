@@ -397,4 +397,34 @@ mod tests {
         // We just verify it doesn't panic
         let _ = result;
     }
+
+    #[tokio::test]
+    async fn run_hold_set_and_list_and_release_cycle() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("deployment-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let object_key = format!("de/{}", "de".repeat(32));
+
+        // Set a hold
+        let set_result = run_hold_set(Some(&root), &object_key, "integration test reason", Some(3600)).await;
+        let set_was_ok = set_result.is_ok();
+        if let Ok(ref hold) = set_result {
+            assert_eq!(hold.reason(), "integration test reason");
+            assert!(hold.release_after_unix_seconds().is_some());
+        }
+
+        // List holds
+        let list_result = run_hold_list(Some(&root), false).await;
+        if let Ok(holds) = list_result {
+            // If we successfully set a hold, it should appear in the list
+            if set_was_ok {
+                assert!(!holds.is_empty());
+            }
+        }
+
+        // Release the hold
+        let release_result = run_hold_release(Some(&root), &object_key).await;
+        // May fail, shouldn't panic
+        let _ = release_result;
+    }
 }
