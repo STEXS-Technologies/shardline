@@ -241,4 +241,17 @@ mod tests {
         assert_eq!(debug, "***");
         assert!(!debug.contains("api-token"));
     }
+
+    #[test]
+    fn secret_bytes_zeroize_clears_memory() {
+        use zeroize::Zeroize;
+        let mut secret = SecretBytes::from_slice(b"hello-world");
+        assert!(!secret.is_empty());
+        assert_eq!(secret.len(), 11);
+        // Explicitly zeroize the buffer and verify the underlying Vec is cleared.
+        secret.zeroize();
+        assert!(secret.is_empty());
+        assert_eq!(secret.len(), 0);
+        assert!(secret.expose_secret().is_empty());
+    }
 }

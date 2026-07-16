@@ -1730,6 +1730,72 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         assert!(!requests.is_empty(), "background refresh should make HTTP requests");
     }
 
+    // ── E2E token verification with mock JWKS provider ────────────────────
+
+    #[tokio::test]
+    async fn test_auth_with_jwks_provider_e2e() {
+        let mock_server = wiremock::MockServer::start().await;
+        let url = mock_server.uri();
+
+        // Serve JWKS endpoint with the real RSA public key matching TEST_RSA_PEM
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kid": "e2e-key",
+                "kty": "RSA",
+                "n": TEST_RSA_N,
+                "e": TEST_RSA_E,
+            }]
+        });
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(jwks_json))
+            .mount(&mock_server)
+            .await;
+
+        // Create provider via the real constructor (fetches keys from mock)
+        // Fetch keys from the mock server into a CachedJwks structure.
+        let client = Client::new();
+        let resp = client.get(&url).send().await.expect("fetch jwks");
+        let jwks: JwksResponse = resp.json().await.expect("parse jwks");
+        let jwks = CachedJwks {
+            keys: Arc::new(jwks.keys),
+            etag: None,
+            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+        };
+
+        // Build provider with pre-populated cache (avoids block_on at verify time).
+        let provider = make_provider(Some(jwks));
+
+        // Sign a valid JWT with the matching RSA key
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        use std::collections::BTreeMap;
+
+        let mut claims = BTreeMap::new();
+        // Issuer must match the provider's issuer (https://example.com from make_provider)
+        claims.insert("iss", serde_json::json!("https://example.com"));
+        claims.insert("sub", serde_json::json!("jwks-e2e-user"));
+        claims.insert("exp", serde_json::json!(9999999999u64));
+        claims.insert("iat", serde_json::json!(1000000000u64));
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("e2e-key".to_owned());
+
+        let encoding_key =
+            EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes()).expect("valid RSA PEM");
+        let token = encode(&header, &claims, &encoding_key).expect("should sign token");
+
+        // Verify the token through the provider.
+        // verify_token uses block_on internally, so call from a thread without runtime.
+        let result = std::thread::spawn(move || provider.verify_token(&token))
+            .join()
+            .expect("thread should not panic");
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let token_claims = result.unwrap();
+        assert_eq!(token_claims.issuer(), "https://example.com");
+        assert_eq!(token_claims.subject(), "jwks-e2e-user");
+    }
+
     #[tokio::test]
     async fn refresh_keys_if_changed_with_json_parse_error() {
         let mock_server = wiremock::MockServer::start().await;

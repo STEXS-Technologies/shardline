@@ -1486,4 +1486,17 @@ mod write_file_atomically_tests {
             .collect();
         assert_eq!(entries.len(), 1, "temp file should have been cleaned up");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_rename_parent_anchor_check_passes() {
+        // Verifies that ensure_parent_path_matches_anchor passes after a
+        // successful atomic write — the post-rename integrity check should
+        // not reject a valid path.
+        let (_dir, root) = temp_root();
+        let path = root.join("metadata.json");
+        write_file_atomically(&root, &path, b"payload").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"payload");
+    }
 }

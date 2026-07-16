@@ -43,12 +43,23 @@ async fn ensure_stack() -> (&'static str, &'static str) {
                 .expect("Docker stack: is docker available?");
             let base = stack.postgres_url().unwrap();
             let pg_url = format!("{base}?sslmode=disable");
-            // Run migrations.
-            let pool = sqlx::PgPool::connect(&pg_url).await.unwrap();
-            shardline_server::apply_database_migrations(&pool).await.unwrap();
-            pool.close().await;
-            let s3_prefix = stack.unique_s3_key_prefix("postgres-s3-e2e-http");
-            (stack, pg_url, s3_prefix)
+            // Run migrations with retry (container may not accept connections immediately).
+            let mut last_err = None;
+            for _ in 0..5 {
+                match sqlx::PgPool::connect(&pg_url).await {
+                    Ok(pool) => {
+                        shardline_server::apply_database_migrations(&pool).await.unwrap();
+                        pool.close().await;
+                        let s3_prefix = stack.unique_s3_key_prefix("postgres-s3-e2e-http");
+                        return (stack, pg_url, s3_prefix);
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            panic!("Failed to connect to Postgres after 5 retries: {last_err:?}");
         })
         .await;
     (pg_url, s3_prefix)
