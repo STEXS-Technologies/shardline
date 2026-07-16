@@ -186,6 +186,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "shardline_hub_refs"
+path = "fuzz_targets/shardline/hub_refs.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "shardline_rebuild_candidates"
 path = "fuzz_targets/shardline/rebuild_candidates.rs"
 test = false
