@@ -1943,6 +1943,26 @@ mod config_types_tests {
     }
 
     #[test]
+    fn server_config_non_existent_root_dir_does_not_fail_construction() {
+        // ServerConfig::new() stores root_dir as a PathBuf without validating
+        // existence.  Construction itself must not fail for a non-existent path.
+        let config = ServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            PathBuf::from("/nonexistent/path/that/does/not/exist"),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+        assert_eq!(
+            config.root_dir(),
+            Path::new("/nonexistent/path/that/does/not/exist")
+        );
+        // The root_dir is *not* validated at construction time — the error
+        // surfaces later when the backend or a handler tries to create
+        // directories under root_dir.  At that point the IO error message
+        // is clear (e.g. "No such file or directory").
+    }
+
+    #[test]
     fn server_config_debug_redacts_secrets() {
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),

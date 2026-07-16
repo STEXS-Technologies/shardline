@@ -1054,6 +1054,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_identifier_rejects_null_byte() {
+        // Null bytes are control characters and MUST be rejected.
+        assert!(validate_identifier("foo\0bar").is_err());
+        assert!(validate_identifier("\0").is_err());
+        assert!(validate_identifier("null\0end").is_err());
+    }
+
+    #[test]
     fn validate_content_hash_accepts_valid_hash() {
         let hash = "a".repeat(64);
         assert!(validate_content_hash(&hash).is_ok());

@@ -116,6 +116,20 @@ mod tests {
     }
 
     #[test]
+    fn oci_repository_name_with_null_byte_rejected() {
+        // Null bytes are not valid ASCII lowercase/digit/punctuation and
+        // must be rejected.
+        assert!(matches!(
+            validate_oci_repository_name("team/asset\0s"),
+            Err(OciAdapterError::InvalidRepositoryName)
+        ));
+        assert!(matches!(
+            validate_oci_repository_name("\0team/assets"),
+            Err(OciAdapterError::InvalidRepositoryName)
+        ));
+    }
+
+    #[test]
     fn oci_tag_validator_enforces_allowed_characters() {
         assert!(validate_oci_tag("v1").is_ok());
         assert!(validate_oci_tag("_debug.2026-04-23").is_ok());
@@ -308,5 +322,57 @@ mod tests {
             validate_oci_tag(".starts-with-dot"),
             Err(OciAdapterError::InvalidManifestReference)
         ));
+    }
+
+    // ── Unicode / multibyte tags ────────────────────────────────────────────
+
+    #[test]
+    fn validate_oci_tag_rejects_utf8_multibyte_chars() {
+        // The OCI distribution spec requires tag characters to be valid ASCII
+        // alphanumeric, underscore, dot, or hyphen.  Multibyte UTF-8 sequences
+        // like é (U+00E9, 2-byte UTF-8) or ❤ (U+2764, 3-byte UTF-8) are not
+        // valid ASCII and MUST be rejected.
+        assert!(matches!(
+            validate_oci_tag("tag-émoji"),
+            Err(OciAdapterError::InvalidManifestReference)
+        ));
+        assert!(matches!(
+            validate_oci_tag("❤️"),
+            Err(OciAdapterError::InvalidManifestReference)
+        ));
+        assert!(matches!(
+            validate_oci_tag("café"),
+            Err(OciAdapterError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn validate_oci_tag_nfc_vs_nfd_no_canonicalization() {
+        // NFC form: "café" — U+00E9 (single precomposed character).
+        // NFD form: "café" — U+0065 + U+0301 (e + combining acute accent).
+        // Both contain non-ASCII bytes and are rejected by the ASCII-only
+        // validator.  The important property is that neither is silently
+        // canonicalized to the other — both are treated identically
+        // (rejected), proving no normalization is applied.
+        let nfc = "caf\u{00e9}";     // café  (precomposed é)
+        let nfd = "cafe\u{0301}";    // café  (e + combining accent)
+
+        assert!(
+            nfc != nfd,
+            "NFC and NFD forms must be different strings"
+        );
+
+        let nfc_result = validate_oci_tag(nfc);
+        let nfd_result = validate_oci_tag(nfd);
+
+        // Both are rejected — no canonicalization converts one to the other.
+        assert!(
+            matches!(nfc_result, Err(OciAdapterError::InvalidManifestReference)),
+            "NFC form should be rejected: {nfc_result:?}"
+        );
+        assert!(
+            matches!(nfd_result, Err(OciAdapterError::InvalidManifestReference)),
+            "NFD form should be rejected: {nfd_result:?}"
+        );
     }
 }

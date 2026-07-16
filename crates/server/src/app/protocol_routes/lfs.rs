@@ -1575,6 +1575,77 @@ mod tests {
     }
 
     // =========================================================================
+    // Large / overflow size field tests
+    // =========================================================================
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_accepts_u64_max_size() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+        let oid = test_oid(b"test");
+
+        let request = json!({
+            "operation": "download",
+            "objects": [{ "oid": oid, "size": 18446744073709551615u64 }]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // u64::MAX is a valid u64 value → should deserialize and return 200.
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let objects = parsed["objects"].as_array().unwrap();
+        assert!(
+            objects[0].get("error").is_some(),
+            "u64::MAX size on missing object should give an error"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_rejects_overflow_size() {
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+
+        // A JSON number larger than u64::MAX — serde_json will reject it at
+        // deserialization time, so axum returns 400 before the handler runs.
+        // We build the JSON as a raw string because serde_json::Value cannot
+        // represent numbers beyond f64 precision.
+        let overflow_body = format!(
+            r#"{{"operation":"download","objects":[{{"oid":"{}","size":999999999999999999999999999999999999}}]}}"#,
+            "a".repeat(64)
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .body(Body::from(overflow_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // serde_json deserialization failure results in a 422 Unprocessable Entity
+        // (axum's default Json rejection status).
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // =========================================================================
     // lfs_verify_object tests
     // =========================================================================
 

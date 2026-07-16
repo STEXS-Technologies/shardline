@@ -316,4 +316,34 @@ mod tests {
         let result = parse_oci_path("team/./assets/tags/list");
         assert!(matches!(result, Err(ServerError::InvalidRepositoryName)));
     }
+
+    // ── Null byte rejection ──────────────────────────────────────────────
+
+    #[test]
+    fn oci_repository_name_with_null_byte_rejected() {
+        let path = "team/asset\0s/tags/list";
+        let result = parse_oci_path(path);
+        assert!(matches!(result, Err(ServerError::InvalidRepositoryName)));
+    }
+
+    #[test]
+    fn oci_blob_path_with_null_byte_rejected() {
+        let path = "team/assets/blobs/sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc\0ef";
+        let result = parse_oci_path(path);
+        assert!(matches!(result, Err(ServerError::InvalidDigest)));
+    }
+
+    #[test]
+    fn oci_manifest_path_with_null_byte_in_reference() {
+        let path = "team/assets/manifests/v1\0tag";
+        let result = parse_oci_path(path);
+        // parse_oci_path validates the repository portion but passes the
+        // reference through without validation.  The null byte is part of
+        // the reference string.  Downstream manifest handlers should reject
+        // the null-containing reference.
+        assert!(matches!(
+            result,
+            Ok(OciPath::Manifest { reference, .. }) if reference == "v1\0tag"
+        ));
+    }
 }
