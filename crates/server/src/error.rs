@@ -288,6 +288,9 @@ pub enum ServerError {
     /// The transfer concurrency limiter was unexpectedly unavailable.
     #[error("transfer concurrency limiter is unavailable")]
     TransferLimiterClosed,
+    /// The transfer concurrency limiter timed out waiting for capacity.
+    #[error("transfer concurrency limiter timed out")]
+    TransferLimiterTimedOut,
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
@@ -355,6 +358,7 @@ impl ServerError {
             | Self::UnauthorizedChallenge(_)
             | Self::MissingReconstructionCacheRedisUrl
             | Self::TransferLimiterClosed
+            | Self::TransferLimiterTimedOut
             | Self::BlockingTask(_) => "INTERNAL",
         }
     }
@@ -402,7 +406,7 @@ impl ServerError {
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
                 StatusCode::TOO_MANY_REQUESTS
             }
-            Self::TransferLimiterClosed => StatusCode::SERVICE_UNAVAILABLE,
+            Self::TransferLimiterClosed | Self::TransferLimiterTimedOut => StatusCode::SERVICE_UNAVAILABLE,
             Self::Io(_)
             | Self::Json(_)
             | Self::NumericConversion(_)
@@ -849,6 +853,14 @@ mod tests {
     }
 
     #[test]
+    fn transfer_limiter_timed_out_maps_to_503() {
+        assert_eq!(
+            status_for(&ServerError::TransferLimiterTimedOut),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
     fn provider_denied_maps_to_403() {
         assert_eq!(
             status_for(&ServerError::ProviderDenied),
@@ -1200,6 +1212,15 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "transfer concurrency limiter is unavailable"
+        );
+    }
+
+    #[test]
+    fn server_error_display_transfer_limiter_timed_out() {
+        let err = ServerError::TransferLimiterTimedOut;
+        assert_eq!(
+            err.to_string(),
+            "transfer concurrency limiter timed out"
         );
     }
 
