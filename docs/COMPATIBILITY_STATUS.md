@@ -59,8 +59,8 @@ workflows covered by this repository.
 - The compatibility claim applies to the documented route surfaces and native client
   workflows above. It does not imply implementation of unrelated upstream products or
   optional APIs such as Bazel Remote Execution, OCI referrers, Hugging Face
-  collections/profile/jobs/inference APIs, Git ref deletion, or every third-party
-  client-version extension.
+  collections/profile/jobs/inference APIs, or every third-party client-version
+  extension.
 - Xet and OCI currently have the deepest native-client coverage in this repository.
 - Git LFS, Bazel HTTP remote cache, and OCI Distribution claims are scoped to the route
   behavior and client flows covered by the repository tests.

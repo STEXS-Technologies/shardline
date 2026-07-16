@@ -29,6 +29,13 @@ pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_re
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
                 ON shardline_hub_revisions (repo_id, ref_name);
+            CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+                repo_id TEXT NOT NULL,
+                ref_name TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                PRIMARY KEY (repo_id, ref_name),
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
                 commit_sha TEXT NOT NULL,
                 path TEXT NOT NULL,

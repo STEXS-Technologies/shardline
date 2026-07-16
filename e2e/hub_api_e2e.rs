@@ -1151,6 +1151,23 @@ fn build_receive_pack_request(
     file_content: &[u8],
     commit_message: &str,
 ) -> (Vec<u8>, String) {
+    build_receive_pack_request_for_ref(
+        old_sha_hex,
+        "refs/heads/main",
+        file_path,
+        file_content,
+        commit_message,
+    )
+}
+
+/// Builds a Git receive-pack request that creates or updates `ref_name`.
+fn build_receive_pack_request_for_ref(
+    old_sha_hex: &str,
+    ref_name: &str,
+    file_path: &str,
+    file_content: &[u8],
+    commit_message: &str,
+) -> (Vec<u8>, String) {
     use shardline_hub_api::git::pack::{
         create_blob_object, create_commit_object, create_tree_object, generate_pack,
     };
@@ -1180,7 +1197,7 @@ fn build_receive_pack_request(
     //   0000            (flush)
     //   <raw pack data>
     //
-    let ref_line = format!("{old_sha_hex} {commit_sha_hex} refs/heads/main\n");
+    let ref_line = format!("{old_sha_hex} {commit_sha_hex} {ref_name}\n");
     let mut body = Vec::new();
     body.extend_from_slice(pktline::encode_line(&ref_line).expect("pkt-line too large").as_bytes());
     body.extend_from_slice(pktline::FLUSH.as_bytes());
@@ -1301,6 +1318,104 @@ async fn git_push_clone_roundtrip_via_smart_http() {
         upload_response.len() > 100,
         "upload-pack response should contain pack data (got {} bytes)",
         upload_response.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_smart_http_ref_deletion_removes_branch_and_keeps_commit_available() {
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
+    let client = Client::new();
+    create_model_repo(&base_url, &token).await;
+
+    let null_sha = "0000000000000000000000000000000000000000";
+    let (push_body, commit_sha) = build_receive_pack_request_for_ref(
+        null_sha,
+        "refs/heads/feature/remove-me",
+        "feature.txt",
+        b"temporary feature branch\n",
+        "Create removable feature branch",
+    );
+    let push = client
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(push_body)
+        .send()
+        .await
+        .unwrap();
+    let push_body = push.text().await.unwrap();
+    assert!(
+        push_body.contains("ok refs/heads/feature/remove-me"),
+        "feature push should succeed: {push_body}"
+    );
+
+    let refs_before = client
+        .get(format!(
+            "{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(refs_before.contains("refs/heads/feature/remove-me"));
+
+    let delete_line = format!("{commit_sha} {null_sha} refs/heads/feature/remove-me\n");
+    let mut delete_body = shardline_hub_api::git::pktline::encode_line(&delete_line)
+        .expect("delete pkt-line")
+        .into_bytes();
+    delete_body.extend_from_slice(shardline_hub_api::git::pktline::FLUSH.as_bytes());
+    let deletion = client
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(delete_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deletion.status(), 200);
+    let deletion_body = deletion.text().await.unwrap();
+    assert!(
+        deletion_body.contains("ok refs/heads/feature/remove-me"),
+        "branch deletion should succeed: {deletion_body}"
+    );
+
+    let refs_after = client
+        .get(format!(
+            "{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !refs_after.contains("refs/heads/feature/remove-me"),
+        "deleted branch must not be advertised: {refs_after}"
+    );
+
+    let preserved_commit = client
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/revision/{commit_sha}"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        preserved_commit.status(),
+        200,
+        "ref deletion must preserve immutable commit history"
     );
 }
 

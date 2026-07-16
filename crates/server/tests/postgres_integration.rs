@@ -2046,13 +2046,17 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
     .unwrap();
     assert_eq!(upgraded.pending_count, 0);
 
+    let post_v1_migration_count =
+        bundled_database_migrations().len() - V1_0_0_MIGRATION_VERSIONS.len();
     let rollback = run_database_migration(&DatabaseMigrationOptions::new(
         database_url.clone(),
-        DatabaseMigrationCommand::Down { steps: 2 },
+        DatabaseMigrationCommand::Down {
+            steps: post_v1_migration_count,
+        },
     ))
     .await
     .unwrap();
-    assert_eq!(rollback.reverted_count, 2);
+    assert_eq!(rollback.reverted_count, post_v1_migration_count as u64);
     assert_eq!(
         rollback.applied_total_count,
         V1_0_0_MIGRATION_VERSIONS.len() as u64

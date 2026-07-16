@@ -83,6 +83,31 @@ pub struct HubRevision {
     pub created_at_unix_seconds: u64,
 }
 
+/// An active Git-compatible reference pointing at a revision.
+///
+/// Revisions are immutable history records. References are kept separately so a
+/// branch or tag can be removed without deleting the commit data it previously
+/// pointed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubRef {
+    pub repo_id: String,
+    pub ref_name: String,
+    pub sha: String,
+}
+
+/// Converts the Git spelling of a branch reference to the Hub storage spelling.
+///
+/// Tags deliberately keep their full `refs/tags/...` name, while branches use
+/// their short name so Hub API revisions such as `main` and Git Smart HTTP
+/// `refs/heads/main` address the same ref.
+#[must_use]
+pub fn canonical_ref_name(ref_name: &str) -> &str {
+    ref_name
+        .strip_prefix("refs/heads/")
+        .filter(|name| !name.is_empty())
+        .unwrap_or(ref_name)
+}
+
 /// A Hub file entry within a commit tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubFileEntry {
@@ -174,6 +199,29 @@ pub trait HubStore: Send + Sync {
         ref_name: &str,
         message: &str,
     ) -> Result<HubRevision, Self::Error>;
+
+    /// Lists the active branch and tag references for a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error>;
+
+    /// Deletes an active branch or tag only if it still points to `expected_sha`.
+    ///
+    /// The compare-and-delete semantics prevent a stale Git receive-pack request
+    /// from deleting a ref that has advanced concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ref is protected, missing, has moved, or the
+    /// storage backend operation fails.
+    fn delete_ref(
+        &self,
+        repo_id: &str,
+        ref_name: &str,
+        expected_sha: &str,
+    ) -> Result<(), Self::Error>;
 
     /// Lists all revisions for a repository.
     ///
@@ -318,6 +366,18 @@ trait ErasedHubStore: Send + Sync {
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>>;
 
+    fn list_refs(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn delete_ref(
+        &self,
+        repo_id: &str,
+        ref_name: &str,
+        expected_sha: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
     fn list_revisions(
         &self,
         repo_id: &str,
@@ -422,6 +482,23 @@ impl<T: HubStore> ErasedHubStore for T {
         message: &str,
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(self, repo_id, parent_sha, new_sha, ref_name, message)
+            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn list_refs(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_refs(self, repo_id).map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
+    }
+
+    fn delete_ref(
+        &self,
+        repo_id: &str,
+        ref_name: &str,
+        expected_sha: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::delete_ref(self, repo_id, ref_name, expected_sha)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
@@ -607,6 +684,33 @@ impl BoxedHubStore {
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         self.inner
             .create_revision(repo_id, parent_sha, new_sha, ref_name, message)
+    }
+
+    /// Lists active branches and tags.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage backend operation fails.
+    pub fn list_refs(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.list_refs(repo_id)
+    }
+
+    /// Atomically removes a branch or tag when it still points to `expected_sha`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ref is protected, missing, has moved, or the
+    /// storage backend operation fails.
+    pub fn delete_ref(
+        &self,
+        repo_id: &str,
+        ref_name: &str,
+        expected_sha: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.delete_ref(repo_id, ref_name, expected_sha)
     }
 
     /// Lists all revisions.
@@ -808,6 +912,22 @@ where
     ) -> Result<HubRevision, Box<dyn std::error::Error + Send + Sync>> {
         T::create_revision(&self.0, repo_id, parent_sha, new_sha, ref_name, message)
             .map_err(Into::into)
+    }
+
+    fn list_refs(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<HubRef>, Box<dyn std::error::Error + Send + Sync>> {
+        T::list_refs(&self.0, repo_id).map_err(Into::into)
+    }
+
+    fn delete_ref(
+        &self,
+        repo_id: &str,
+        ref_name: &str,
+        expected_sha: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        T::delete_ref(&self.0, repo_id, ref_name, expected_sha).map_err(Into::into)
     }
 
     fn list_revisions(
@@ -1046,6 +1166,7 @@ mod tests {
     struct MemoryHubStore {
         repos: std::sync::Mutex<HashMap<String, HubRepo>>,
         revisions: std::sync::Mutex<HashMap<String, Vec<HubRevision>>>,
+        refs: std::sync::Mutex<HashMap<String, HashMap<String, String>>>,
         files: std::sync::Mutex<HashMap<String, Vec<HubFileEntry>>>,
         lfs: std::sync::Mutex<HashMap<String, Vec<u8>>>,
         webhooks: std::sync::Mutex<HashMap<String, Vec<HubWebhook>>>,
@@ -1056,6 +1177,7 @@ mod tests {
             Self {
                 repos: std::sync::Mutex::new(HashMap::new()),
                 revisions: std::sync::Mutex::new(HashMap::new()),
+                refs: std::sync::Mutex::new(HashMap::new()),
                 files: std::sync::Mutex::new(HashMap::new()),
                 lfs: std::sync::Mutex::new(HashMap::new()),
                 webhooks: std::sync::Mutex::new(HashMap::new()),
@@ -1085,6 +1207,13 @@ mod tests {
                 updated_at_unix_seconds: 100,
             };
             repos.insert(name.to_owned(), repo.clone());
+            self.refs.lock().unwrap().insert(
+                name.to_owned(),
+                HashMap::from([(
+                    "main".to_owned(),
+                    "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3".to_owned(),
+                )]),
+            );
             Ok(repo)
         }
 
@@ -1127,6 +1256,7 @@ mod tests {
             ref_name: &str,
             message: &str,
         ) -> Result<HubRevision, Self::Error> {
+            let ref_name = canonical_ref_name(ref_name);
             let mut repos = self.repos.lock().unwrap();
             if !repos.contains_key(repo_id) {
                 return Err("repo not found".into());
@@ -1134,20 +1264,33 @@ mod tests {
             // Drop the repos lock before acquiring revisions lock to avoid deadlock
             drop(repos);
 
-            let mut revisions = self.revisions.lock().unwrap();
-            let repo_revisions = revisions.entry(repo_id.to_owned()).or_default();
+            let current_ref = self
+                .refs
+                .lock()
+                .unwrap()
+                .get(repo_id)
+                .and_then(|refs| refs.get(ref_name))
+                .cloned();
 
-            // Optimistic concurrency: if parent_sha is Some, check it matches current HEAD
+            // Optimistic concurrency: compare against the current target ref.
             if let Some(parent_sha) = parent_sha {
-                let head_sha = repo_revisions
-                    .iter()
-                    .rev()
-                    .find(|r| r.ref_name == ref_name)
-                    .map(|r| r.sha.as_str());
-                if head_sha != Some(parent_sha) {
+                if let Some(current_sha) = current_ref {
+                    if current_sha != parent_sha {
+                        return Err("parent sha conflict".into());
+                    }
+                } else if !self
+                    .revisions
+                    .lock()
+                    .unwrap()
+                    .get(repo_id)
+                    .is_some_and(|revisions| revisions.iter().any(|r| r.sha == parent_sha))
+                {
                     return Err("parent sha conflict".into());
                 }
             }
+
+            let mut revisions = self.revisions.lock().unwrap();
+            let repo_revisions = revisions.entry(repo_id.to_owned()).or_default();
 
             let revision = HubRevision {
                 repo_id: repo_id.to_owned(),
@@ -1158,7 +1301,53 @@ mod tests {
                 created_at_unix_seconds: 200,
             };
             repo_revisions.push(revision.clone());
+            drop(revisions);
+            self.refs
+                .lock()
+                .unwrap()
+                .entry(repo_id.to_owned())
+                .or_default()
+                .insert(ref_name.to_owned(), new_sha.to_owned());
             Ok(revision)
+        }
+
+        fn list_refs(&self, repo_id: &str) -> Result<Vec<HubRef>, Self::Error> {
+            let mut refs = self
+                .refs
+                .lock()
+                .unwrap()
+                .get(repo_id)
+                .into_iter()
+                .flat_map(|refs| refs.iter())
+                .map(|(ref_name, sha)| HubRef {
+                    repo_id: repo_id.to_owned(),
+                    ref_name: ref_name.clone(),
+                    sha: sha.clone(),
+                })
+                .collect::<Vec<_>>();
+            refs.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+            Ok(refs)
+        }
+
+        fn delete_ref(
+            &self,
+            repo_id: &str,
+            ref_name: &str,
+            expected_sha: &str,
+        ) -> Result<(), Self::Error> {
+            let ref_name = canonical_ref_name(ref_name);
+            if ref_name == "main" || ref_name == "HEAD" {
+                return Err("default branch cannot be deleted".into());
+            }
+            let mut refs = self.refs.lock().unwrap();
+            let repo_refs = refs.get_mut(repo_id).ok_or("repo not found")?;
+            match repo_refs.get(ref_name) {
+                Some(current) if current == expected_sha => {}
+                Some(_) => return Err("ref sha conflict".into()),
+                None => return Err("ref not found".into()),
+            }
+            repo_refs.remove(ref_name);
+            Ok(())
         }
 
         fn list_revisions(&self, repo_id: &str) -> Result<Vec<HubRevision>, Self::Error> {
@@ -1176,7 +1365,7 @@ mod tests {
             repo_id: &str,
             revision: &str,
         ) -> Result<Option<String>, Self::Error> {
-            // Try exact SHA first, then ref_name match
+            // Try exact SHA first, then the active ref mapping.
             let revisions = self.revisions.lock().unwrap();
             let repo_revisions = match revisions.get(repo_id) {
                 Some(r) => r,
@@ -1187,11 +1376,13 @@ mod tests {
             if let Some(r) = repo_revisions.iter().find(|r| r.sha == revision) {
                 return Ok(Some(r.sha.clone()));
             }
-            // Check ref_name (return the latest with that ref)
-            if let Some(r) = repo_revisions.iter().rev().find(|r| r.ref_name == revision) {
-                return Ok(Some(r.sha.clone()));
-            }
-            Ok(None)
+            Ok(self
+                .refs
+                .lock()
+                .unwrap()
+                .get(repo_id)
+                .and_then(|refs| refs.get(canonical_ref_name(revision)))
+                .cloned())
         }
 
         fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
@@ -1266,6 +1457,7 @@ mod tests {
             repos.remove(repo_id);
             drop(repos);
             self.revisions.lock().unwrap().remove(repo_id);
+            self.refs.lock().unwrap().remove(repo_id);
             self.files.lock().unwrap().remove(repo_id);
             self.webhooks.lock().unwrap().remove(repo_id);
             Ok(())

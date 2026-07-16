@@ -20,7 +20,7 @@ use super::pack::{
 use super::pktline::{self, FLUSH};
 use crate::error::HubApiError;
 use crate::routes::HubState;
-use shardline_index::hub::HubFileEntry;
+use shardline_index::hub::{HubFileEntry, canonical_ref_name};
 use shardline_protocol::TokenScope;
 use std::collections::HashMap;
 
@@ -253,24 +253,36 @@ pub async fn receive_pack(
         return build_report_response(&[], true);
     }
 
-    let objects = match parse_pack_data(&pack_data) {
-        Ok(objects) => objects,
-        Err(e) => {
-            tracing::warn!("failed to parse receive-pack data: {e}");
-            return build_report_response(
-                &updates
-                    .into_iter()
-                    .map(|(_, _, refname)| (refname, false, Some("unpack failed".to_owned())))
-                    .collect::<Vec<_>>(),
-                false,
-            );
+    let has_object_updates = updates
+        .iter()
+        .any(|(_, new_sha, _)| new_sha != "0000000000000000000000000000000000000000");
+    let objects = if has_object_updates {
+        match parse_pack_data(&pack_data) {
+            Ok(objects) => objects,
+            Err(e) => {
+                tracing::warn!("failed to parse receive-pack data: {e}");
+                return build_report_response(
+                    &updates
+                        .into_iter()
+                        .map(|(_, _, refname)| (refname, false, Some("unpack failed".to_owned())))
+                        .collect::<Vec<_>>(),
+                    false,
+                );
+            }
         }
+    } else {
+        Vec::new()
     };
 
     let mut results = Vec::new();
 
     for (old_sha, new_sha, refname) in &updates {
-        match store_push_objects(&state, &repo_id, old_sha, new_sha, refname, &objects).await {
+        let result = if new_sha == "0000000000000000000000000000000000000000" {
+            delete_push_ref(&state, &repo_id, old_sha, refname)
+        } else {
+            store_push_objects(&state, &repo_id, old_sha, new_sha, refname, &objects).await
+        };
+        match result {
             Ok(()) => results.push((refname.clone(), true, None)),
             Err(e) => results.push((refname.clone(), false, Some(e))),
         }
@@ -301,7 +313,7 @@ fn is_valid_refname(refname: &str) -> bool {
 
 /// Collects all refs from the HubStore for a given repo.
 async fn collect_refs(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
-    let revisions = state.store.list_revisions(repo_id).map_err(|e| {
+    let store_refs = state.store.list_refs(repo_id).map_err(|e| {
         tracing::debug!("failed to list revisions for {repo_id}: {e}");
         HubApiError::RepoNotFound
     })?;
@@ -309,53 +321,43 @@ async fn collect_refs(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, Hu
     let mut refs = Vec::new();
     let mut seen_refs = std::collections::HashSet::new();
 
-    for rev in &revisions {
-        if rev.ref_name == "HEAD" || rev.ref_name.is_empty() {
+    for store_ref in &store_refs {
+        if store_ref.ref_name == "HEAD" || store_ref.ref_name.is_empty() {
             if seen_refs.insert("HEAD".to_owned()) {
                 refs.push(GitRef {
                     name: "HEAD".to_owned(),
-                    sha1: rev.sha.clone(),
+                    sha1: store_ref.sha.clone(),
                 });
             }
-        } else if rev.ref_name.starts_with("refs/") {
-            if seen_refs.insert(rev.ref_name.clone()) {
+        } else if store_ref.ref_name.starts_with("refs/") {
+            if seen_refs.insert(store_ref.ref_name.clone()) {
                 refs.push(GitRef {
-                    name: rev.ref_name.clone(),
-                    sha1: rev.sha.clone(),
+                    name: store_ref.ref_name.clone(),
+                    sha1: store_ref.sha.clone(),
                 });
             }
         } else {
-            let full_ref = format!("refs/heads/{}", rev.ref_name);
+            let full_ref = format!("refs/heads/{}", store_ref.ref_name);
             if seen_refs.insert(full_ref.clone()) {
                 refs.push(GitRef {
                     name: full_ref,
-                    sha1: rev.sha.clone(),
+                    sha1: store_ref.sha.clone(),
                 });
             }
         }
     }
 
-    // If no HEAD was explicitly set, use the latest revision as HEAD.
-    // Use max_by_key on created_at_unix_seconds to find the actual most recent revision,
-    // since revisions.last() may not be the newest due to ordering.
+    // If no HEAD was explicitly set, point HEAD at the active default branch.
     if !seen_refs.contains("HEAD")
-        && let Some(latest) = revisions.iter().max_by_key(|r| r.created_at_unix_seconds)
+        && let Some(main_ref) = store_refs.iter().find(|r| r.ref_name == "main")
     {
         refs.insert(
             0,
             GitRef {
                 name: "HEAD".to_owned(),
-                sha1: latest.sha.clone(),
+                sha1: main_ref.sha.clone(),
             },
         );
-        // Also ensure refs/heads/main exists pointing to HEAD.
-        let main_ref = format!("refs/heads/{}", latest.ref_name);
-        if !seen_refs.contains(&main_ref) {
-            refs.push(GitRef {
-                name: main_ref,
-                sha1: latest.sha.clone(),
-            });
-        }
     }
 
     refs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -934,11 +936,6 @@ async fn store_push_objects(
     ref_name: &str,
     objects: &[GitObject],
 ) -> Result<(), String> {
-    // Zero SHA means delete ref — not supported yet.
-    if new_sha == "0000000000000000000000000000000000000000" {
-        return Err("delete ref is not supported".to_owned());
-    }
-
     // Build SHA → object index.
     let mut sha_to_obj: HashMap<[u8; 20], &GitObject> = HashMap::new();
     for obj in objects {
@@ -1025,6 +1022,21 @@ async fn store_push_objects(
         .map_err(|e| format!("failed to create revision: {e}"))?;
 
     Ok(())
+}
+
+fn delete_push_ref(
+    state: &HubState,
+    repo_id: &str,
+    old_sha: &str,
+    ref_name: &str,
+) -> Result<(), String> {
+    if old_sha == "0000000000000000000000000000000000000000" {
+        return Err("cannot delete a ref that does not exist".to_owned());
+    }
+    state
+        .store
+        .delete_ref(repo_id, canonical_ref_name(ref_name), old_sha)
+        .map_err(|e| format!("failed to delete ref: {e}"))
 }
 
 /// Parses a raw Git commit object and extracts tree SHA, parent SHA, and message.
@@ -1739,6 +1751,10 @@ mod tests {
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
                 ON shardline_hub_revisions (repo_id, ref_name);
+            CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+                repo_id TEXT NOT NULL, ref_name TEXT NOT NULL, sha TEXT NOT NULL,
+                PRIMARY KEY (repo_id, ref_name)
+            );
             CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
                 commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
                 sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
@@ -1860,11 +1876,10 @@ mod tests {
             1,
             "collect_refs should inject exactly one HEAD entry when none is explicit: {refs:?}"
         );
-        // The HEAD fallback uses `revisions.last()` which, in DESC order,
-        // is the oldest revision (the initial empty-tree SHA).
+        // The fallback follows the active default branch, not historical order.
         assert_eq!(
-            heads[0].sha1, initial_sha,
-            "HEAD fallback should point to the oldest revision (list last): {refs:?}"
+            heads[0].sha1, "abc123",
+            "HEAD fallback should point to the active main ref: {refs:?}"
         );
     }
 
@@ -1894,7 +1909,7 @@ mod tests {
             .store
             .create_revision(
                 "org/explicit-head",
-                Some("sha_head"),
+                Some(initial_sha),
                 "sha_main",
                 "main",
                 "main commit",
