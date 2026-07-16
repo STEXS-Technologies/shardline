@@ -646,6 +646,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::TooManyRegistryTokenRequests
         | ServerError::MissingReconstructionCacheRedisUrl
         | ServerError::TransferLimiterClosed
+        | ServerError::TransferLimiterTimedOut
         | ServerError::SigningKeyError(_)) => {
             OciAdapterError::Io(std::io::Error::other(other.to_string()))
         }

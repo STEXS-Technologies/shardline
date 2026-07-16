@@ -1,8 +1,11 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::ServerError;
+
+/// Default timeout for acquiring chunk transfer permits.
+pub const DEFAULT_TRANSFER_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Weighted transfer concurrency limiter based on chunk-equivalent cost.
 #[derive(Debug, Clone)]
@@ -10,6 +13,7 @@ pub struct TransferLimiter {
     chunk_size_bytes: NonZeroUsize,
     max_in_flight_chunks: NonZeroUsize,
     semaphore: Arc<Semaphore>,
+    acquire_timeout: Duration,
 }
 
 impl TransferLimiter {
@@ -21,15 +25,23 @@ impl TransferLimiter {
             chunk_size_bytes,
             max_in_flight_chunks,
             semaphore: Arc::new(Semaphore::new(max_in_flight_chunks.get())),
+            acquire_timeout: DEFAULT_TRANSFER_ACQUIRE_TIMEOUT,
         }
+    }
+
+    /// Sets a custom acquire timeout.
+    #[must_use]
+    pub const fn with_acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.acquire_timeout = timeout;
+        self
     }
 
     /// Acquires permits for a transfer with the supplied byte length.
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when the limiter capacity cannot be represented or the
-    /// semaphore has been closed.
+    /// Returns [`ServerError`] when the limiter capacity cannot be represented,
+    /// the semaphore has been closed, or the acquire timeout elapses.
     pub async fn acquire_bytes(
         &self,
         total_bytes: u64,
@@ -39,10 +51,10 @@ impl TransferLimiter {
             self.chunk_size_bytes,
             self.max_in_flight_chunks,
         )?;
-        self.semaphore
-            .clone()
-            .acquire_many_owned(permits)
+        let semaphore = self.semaphore.clone();
+        tokio::time::timeout(self.acquire_timeout, semaphore.acquire_many_owned(permits))
             .await
+            .map_err(|_elapsed| ServerError::TransferLimiterTimedOut)?
             .map_err(|_error| ServerError::TransferLimiterClosed)
     }
 }
@@ -111,6 +123,14 @@ mod tests {
         assert_eq!(limiter.chunk_size_bytes, CHUNK_SIZE);
         assert_eq!(limiter.max_in_flight_chunks, MAX_IN_FLIGHT);
         assert_eq!(limiter.semaphore.available_permits(), MAX_IN_FLIGHT.get());
+        assert_eq!(limiter.acquire_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn with_acquire_timeout_overrides_default() {
+        let limiter = TransferLimiter::new(CHUNK_SIZE, MAX_IN_FLIGHT)
+            .with_acquire_timeout(Duration::from_secs(10));
+        assert_eq!(limiter.acquire_timeout, Duration::from_secs(10));
     }
 
     #[test]
@@ -157,19 +177,33 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limiter_times_out_when_all_permits_consumed() {
+        let limiter = TransferLimiter::new(CHUNK_SIZE, NonZeroUsize::MIN)
+            .with_acquire_timeout(Duration::from_millis(10));
+        // Acquire the only permit
+        let _permit = limiter.acquire_bytes(4).await.unwrap();
+        // Second acquire should time out immediately
+        let result = limiter.acquire_bytes(4).await;
+        assert!(
+            matches!(result, Err(ServerError::TransferLimiterTimedOut)),
+            "expected TransferLimiterTimedOut, got {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn limiter_returns_closed_error_when_semaphore_destroyed() {
         let limiter = TransferLimiter::new(
             NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
             NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
-        );
+        )
+        .with_acquire_timeout(Duration::from_secs(60));
         // Acquire the only permit
         let _permit = limiter.acquire_bytes(1).await.unwrap();
         // Close the underlying semaphore by replacing it
         // We can't directly close the semaphore from TransferLimiter's API,
-        // but we can drop all permits then test that acquire_many_owned
-        // returns closed when semaphore has 0 permits.
-        let result = timeout(Duration::from_millis(10), limiter.acquire_bytes(1)).await;
-        // Should time out because no permits available, but semaphore is not closed
+        // but we can test that timeout works correctly
+        let result = timeout(Duration::from_millis(100), limiter.acquire_bytes(1)).await;
+        // Should time out because no permits available
         assert!(result.is_err());
     }
 

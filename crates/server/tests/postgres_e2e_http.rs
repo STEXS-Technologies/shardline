@@ -24,6 +24,7 @@ use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
+use futures_util::stream;
 
 // ---------------------------------------------------------------------------
 // Shared Docker Postgres — one container for all tests.
@@ -4542,4 +4543,103 @@ async fn test_graceful_shutdown_with_timeout() {
         .await
         .expect("timeout: server should shut down within 10s")
         .expect("server task should complete");
+}
+
+// ===========================================================================
+// 41. Graceful shutdown interrupts active upload
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_graceful_shutdown_during_upload() {
+    let pg_url = ensure_pg().await;
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(ServerRole::All)
+    .with_server_frontends([ServerFrontend::Xet])
+    .unwrap()
+    .with_token_signing_key(TEST_SIGNING_KEY.to_vec())
+    .unwrap()
+    .with_index_postgres_url(pg_url.to_owned())
+    .unwrap()
+    .with_reconstruction_cache_disabled()
+    .with_shutdown_timeout(Duration::from_millis(500));
+
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (server_done_tx, server_done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Spawn server with the select! timeout pattern (same as serve_with_listener).
+    // After shutdown signal + timeout, the serve future is dropped, which
+    // force-closes all in-flight connections.
+    let shutdown_timeout = Duration::from_millis(1000);
+    tokio::spawn(async move {
+        let serve = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                shutdown_rx.await.ok();
+            });
+        tokio::select! {
+            result = serve => { result.ok(); }
+            () = tokio::time::sleep(shutdown_timeout) => {
+                // Dropped — connections force-closed
+            }
+        }
+        server_done_tx.send(()).ok();
+    });
+
+    // Give server a moment to start.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Start a slow streaming request using reqwest with a streaming body that
+    // yields a single byte after a long delay. The connection stays open while
+    // the body stream is pending, simulating an in-flight upload.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+
+    let slow_stream = stream::once(async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        Ok::<_, reqwest::Error>(bytes::Bytes::from_static(b"x"))
+    });
+
+    let upload_handle = tokio::spawn(async move {
+        client
+            .post(&format!("{base_url}/readyz"))
+            .header("Content-Type", "application/octet-stream")
+            .body(reqwest::Body::wrap_stream(slow_stream))
+            .send()
+            .await
+    });
+
+    // Give the body stream a moment to start sending (the connection is now open).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Trigger shutdown while upload is in-flight.
+    shutdown_tx.send(()).ok();
+
+    // Server should exit within the select! timeout + margin.
+    tokio::time::timeout(Duration::from_secs(10), server_done_rx)
+        .await
+        .expect("timeout: server should shut down within 10s")
+        .expect("server task should complete");
+
+    // The upload request should fail or get a server error since the connection
+    // was force-closed when the serve future was dropped.
+    let upload_result = upload_handle.await.unwrap();
+    assert!(
+        upload_result.is_err() || upload_result.as_ref().unwrap().status().is_server_error(),
+        "upload should be interrupted by shutdown, got: {upload_result:?}"
+    );
 }
