@@ -26,8 +26,11 @@ use tokio::{net::TcpListener, sync::Barrier, task::JoinHandle, time::timeout};
 
 use support::{bearer_token, wait_for_health};
 
-const ROUNDS_PER_FRONTEND: usize = 4;
-const SOAK_TIMEOUT: Duration = Duration::from_secs(30);
+// Each round performs a write and a read through every frontend. Twelve rounds
+// keep the CI exercise bounded while creating enough interleaving (60
+// cross-protocol write/read cycles) to expose state leakage and routing races.
+const ROUNDS_PER_FRONTEND: usize = 12;
+const SOAK_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct MixedProtocolRuntime {
     _storage: tempfile::TempDir,

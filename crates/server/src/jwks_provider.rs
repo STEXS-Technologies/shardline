@@ -1487,6 +1487,101 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         }
     }
 
+    #[tokio::test]
+    async fn jwks_rotation_rejects_tokens_for_removed_kids_and_accepts_new_kids() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        use std::collections::BTreeMap;
+
+        let mock_server = wiremock::MockServer::start().await;
+        let rotated_jwks = json!({
+            "keys": [{
+                "kid": "rotated-key",
+                "kty": "RSA",
+                "n": TEST_RSA_N,
+                "e": TEST_RSA_E,
+            }]
+        });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::header(
+                "if-none-match",
+                "old-jwks-version",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(rotated_jwks)
+                    .insert_header("etag", "rotated-jwks-version"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let sign = |kid: &str| {
+            let mut claims = BTreeMap::new();
+            claims.insert("iss", json!("https://example.com"));
+            claims.insert("sub", json!("rotating-user"));
+            claims.insert("exp", json!(9_999_999_999_u64));
+            claims.insert("iat", json!(1_000_000_000_u64));
+            let mut header = Header::new(Algorithm::RS256);
+            header.kid = Some(kid.to_owned());
+            let key = EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes())
+                .expect("test RSA key should be valid");
+            encode(&header, &claims, &key).expect("test JWT should be signed")
+        };
+
+        let old_token = sign("old-key");
+        let rotated_token = sign("rotated-key");
+        let provider = JwksProvider {
+            client: Client::new(),
+            jwks_url: mock_server.uri(),
+            issuer: "https://example.com".to_owned(),
+            cached_keys: Arc::new(RwLock::new(Some(CachedJwks {
+                keys: Arc::new(vec![test_rsa_jwk("old-key")]),
+                etag: Some("old-jwks-version".to_owned()),
+                refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
+            }))),
+            background_handle: Arc::new(std::sync::OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+
+        let before_rotation = {
+            let provider = provider.clone();
+            let old_token = old_token.clone();
+            std::thread::spawn(move || provider.verify_token(&old_token))
+                .join()
+                .expect("verification thread should not panic")
+        };
+        assert!(
+            before_rotation.is_ok(),
+            "old JWKS key should authenticate before rotation"
+        );
+
+        provider
+            .refresh_keys_if_changed()
+            .await
+            .expect("ETag refresh should apply the rotated JWKS");
+
+        let stale_after_rotation = {
+            let provider = provider.clone();
+            std::thread::spawn(move || provider.verify_token(&old_token))
+                .join()
+                .expect("verification thread should not panic")
+        };
+        assert!(
+            stale_after_rotation.is_err(),
+            "a token whose kid was removed during JWKS rotation must be rejected"
+        );
+
+        let current_after_rotation = {
+            let provider = provider.clone();
+            std::thread::spawn(move || provider.verify_token(&rotated_token))
+                .join()
+                .expect("verification thread should not panic")
+        };
+        assert!(
+            current_after_rotation.is_ok(),
+            "a token signed for the rotated JWKS kid must authenticate"
+        );
+    }
+
     #[test]
     fn verify_token_with_valid_rs256_jwt_succeeds() {
         use jsonwebtoken::{EncodingKey, Header, encode};

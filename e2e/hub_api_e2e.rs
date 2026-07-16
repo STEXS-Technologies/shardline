@@ -2,7 +2,10 @@
 
 mod support;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
+};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use reqwest::Client;
@@ -121,6 +124,27 @@ fn mint_wrong_key_token(
     Ok(signer.sign(&claims)?)
 }
 
+fn mint_token_with_key(
+    signing_key: &[u8],
+    scope: shardline_protocol::TokenScope,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let signer = shardline_protocol::TokenSigner::new(signing_key)?;
+    let repository = shardline_protocol::RepositoryScope::new(
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )?;
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        scope,
+        repository,
+        u64::MAX,
+    )?;
+    Ok(signer.sign(&claims)?)
+}
+
 /// Starts a Hub-only server and returns a `ServerGuard` that aborts on drop.
 async fn start_hub_server() -> ServerGuard {
     for attempt in 0..5 {
@@ -164,6 +188,31 @@ async fn try_start_hub_server() -> Result<ServerGuard, Box<dyn std::error::Error
     wait_for_health(&base_url).await?;
     let token = mint_token(shardline_protocol::TokenScope::Write)?;
     Ok(ServerGuard { base_url, token, _storage: storage, server })
+}
+
+async fn start_hub_server_with_signing_key(
+    storage: &Path,
+    signing_key: &[u8],
+) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>>
+{
+    create_hub_db(storage);
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://{addr}");
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(signing_key.to_vec())?
+    .with_server_frontends([ServerFrontend::Hub])?;
+    let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
+    if let Err(error) = wait_for_health(&base_url).await {
+        server.abort();
+        return Err(error);
+    }
+    Ok((base_url, server))
 }
 
 /// Creates a model repo and returns the write token so downstream tests can
@@ -973,6 +1022,66 @@ async fn hub_api_rejects_token_signed_with_wrong_key() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401, "wrong signing key should be 401");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_signing_key_rotation_revokes_old_tokens_without_losing_metadata() {
+    const OLD_KEY: &[u8] = b"old-test-signing-key-32-bytes-long!!";
+    const NEW_KEY: &[u8] = b"new-test-signing-key-32-bytes-long!!";
+
+    let storage = tempfile::tempdir().unwrap();
+    let old_write_token = mint_token_with_key(OLD_KEY, shardline_protocol::TokenScope::Write)
+        .unwrap();
+    let (old_base_url, old_server) = start_hub_server_with_signing_key(storage.path(), OLD_KEY)
+        .await
+        .unwrap();
+
+    let client = Client::new();
+    let created = client
+        .post(format!("{old_base_url}/api/repos/create"))
+        .bearer_auth(&old_write_token)
+        .json(&serde_json::json!({
+            "name": "test-owner/rotated-key-model",
+            "type": "model",
+            "private": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+
+    old_server.abort();
+    let _ = old_server.await;
+
+    let new_read_token = mint_token_with_key(NEW_KEY, shardline_protocol::TokenScope::Read)
+        .unwrap();
+    let (new_base_url, new_server) = start_hub_server_with_signing_key(storage.path(), NEW_KEY)
+        .await
+        .unwrap();
+
+    let stale = client
+        .get(format!("{new_base_url}/api/repos"))
+        .bearer_auth(&old_write_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 401, "rotated signing key must revoke old tokens");
+
+    let retained = client
+        .get(format!("{new_base_url}/api/repos"))
+        .bearer_auth(&new_read_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retained.status(), 200);
+    let repositories = retained.text().await.unwrap();
+    assert!(
+        repositories.contains("rotated-key-model"),
+        "repository metadata must survive a token-signing-key rotation"
+    );
+
+    new_server.abort();
+    let _ = new_server.await;
 }
 
 // ---------------------------------------------------------------------------
