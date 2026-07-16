@@ -19,6 +19,9 @@ workflows covered by this repository.
   routes
 - native external-client coverage for `git-lfs`, `bazel`/`bazelisk`, and `skopeo` across
   multiple command-path variants in the repository test matrix
+- native `hf` CLI coverage for model and dataset repository creation, single-file and
+  filtered-directory upload, single-file and filtered snapshot download, file deletion,
+  and repository cleanup
 - provider-issued repository-scoped tokens and provider webhook handling for GitHub,
   GitLab, Gitea, Codeberg, and the generic provider adapter
 - stock `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, and historical checkout
@@ -38,6 +41,7 @@ workflows covered by this repository.
 | Git LFS | `git-lfs` push/pull plus separate `pull` and `fetch --all` flows |
 | Bazel HTTP remote cache | `bazel` and `bazelisk` remote-cache flows with `remote_download_outputs=all` and `remote_download_outputs=toplevel` |
 | OCI Distribution | `skopeo` push/pull/tag-list, digest-reference, multi-tag, registry-to-registry copy, multi-arch index, Docker schema2, and token-service credential flow; `helm` OCI chart push/pull; `podman` pull/push; `docker` login/pull/push |
+| Hugging Face Hub API | `hf` CLI model and dataset create, upload, download, filtered snapshot, delete-files, and delete-repository flows |
 
 ## Validated Route Surface
 
@@ -46,12 +50,17 @@ workflows covered by this repository.
 - OCI Distribution: blob `GET`, `HEAD`, upload, mount, and ranged read paths; manifest
   `PUT`, `GET`, `HEAD`, and digest delete; tag listing with pagination; token-service
   flow at `/v2/token`; upload cancellation and scoped upload-session handling
+- Hugging Face Hub API: repository create/info/delete, revision and tree lookup,
+  preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search,
+  webhooks, and Git Smart HTTP clone/fetch/push
 
 ## Current Limits
 
-- Shardline does not claim blanket compatibility across every possible Git workflow,
-  container client, Bazel deployment, deployment topology, provider setup, or
-  client-version combination.
+- The compatibility claim applies to the documented route surfaces and native client
+  workflows above. It does not imply implementation of unrelated upstream products or
+  optional APIs such as Bazel Remote Execution, OCI referrers, Hugging Face
+  collections/profile/jobs/inference APIs, Git ref deletion, or every third-party
+  client-version extension.
 - Xet and OCI currently have the deepest native-client coverage in this repository.
 - Git LFS, Bazel HTTP remote cache, and OCI Distribution claims are scoped to the route
   behavior and client flows covered by the repository tests.

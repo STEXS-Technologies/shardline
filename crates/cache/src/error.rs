@@ -8,6 +8,9 @@ pub enum ReconstructionCacheError {
     /// The configured Redis URL was empty.
     #[error("reconstruction cache redis url must not be empty")]
     EmptyRedisUrl,
+    /// Only one half of a Redis mTLS identity was configured.
+    #[error("redis TLS client certificate and key must be configured together")]
+    IncompleteRedisTlsClientIdentity,
     /// Redis client initialization or operations failed.
     #[error("reconstruction cache redis operation failed")]
     Redis(#[from] redis::RedisError),
@@ -33,6 +36,11 @@ mod tests {
 
         // Operation has no source
         assert!(ReconstructionCacheError::Operation.source().is_none());
+        assert!(
+            ReconstructionCacheError::IncompleteRedisTlsClientIdentity
+                .source()
+                .is_none()
+        );
 
         // Redis wraps a redis::RedisError
         let redis_err = redis::RedisError::from((redis::ErrorKind::Io, "inner source"));
@@ -69,6 +77,15 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "reconstruction cache adapter operation failed"
+        );
+    }
+
+    #[test]
+    fn display_incomplete_redis_tls_client_identity() {
+        let err = ReconstructionCacheError::IncompleteRedisTlsClientIdentity;
+        assert_eq!(
+            err.to_string(),
+            "redis TLS client certificate and key must be configured together"
         );
     }
 

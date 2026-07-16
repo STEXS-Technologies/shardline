@@ -1,9 +1,43 @@
 #![allow(clippy::unwrap_used)]
 
-use std::num::NonZeroU64;
+use std::{fs::read, num::NonZeroU64};
 
-use shardline_cache::{AsyncReconstructionCache, ReconstructionCacheKey, RedisReconstructionCache};
+use shardline_cache::{
+    AsyncReconstructionCache, ReconstructionCacheKey, RedisReconstructionCache, RedisTlsConfig,
+};
 use shardline_test_support::DockerLocalStack;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redis_cache_roundtrips_over_tls_with_mutual_authentication() {
+    let Some(stack) = DockerLocalStack::builder()
+        .with_redis_tls()
+        .start()
+        .unwrap()
+    else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let redis_url = stack.redis_tls_url().unwrap();
+    let root_cert = read(stack.redis_tls_ca_cert_path().unwrap()).unwrap();
+    let client_cert = read(stack.redis_tls_client_cert_path().unwrap()).unwrap();
+    let client_key = read(stack.redis_tls_client_key_path().unwrap()).unwrap();
+    let tls = RedisTlsConfig::new(Some(root_cert)).with_client_identity(client_cert, client_key);
+    let cache =
+        RedisReconstructionCache::new_with_tls(&redis_url, NonZeroU64::new(3600).unwrap(), tls)
+            .unwrap();
+    let key = ReconstructionCacheKey::latest("mutual-tls-file", None);
+
+    cache.ready().await.unwrap();
+    cache
+        .put(&key, b"TLS-protected Redis payload")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cache.get(&key).await.unwrap(),
+        Some(b"TLS-protected Redis payload".to_vec())
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redis_cache_put_get_roundtrip() {

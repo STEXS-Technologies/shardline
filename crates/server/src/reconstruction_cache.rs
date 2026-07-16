@@ -80,9 +80,13 @@ impl ReconstructionCacheService {
                 let redis_url = config
                     .reconstruction_cache_redis_url()
                     .ok_or(ServerError::MissingReconstructionCacheRedisUrl)?;
-                let adapter = RedisReconstructionCache::new(
+                let adapter = RedisReconstructionCache::new_with_tls(
                     redis_url,
                     config.reconstruction_cache_ttl_seconds(),
+                    config
+                        .reconstruction_cache_redis_tls()
+                        .cloned()
+                        .unwrap_or_default(),
                 )?;
                 Ok(Self {
                     adapter_name: ReconstructionCacheAdapter::Redis.as_str(),

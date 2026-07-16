@@ -354,7 +354,7 @@ async fn repo_create_dataset_returns_201() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repo_create_duplicate_returns_error() {
+async fn repo_create_duplicate_returns_conflict_with_native_huggingface_url() {
     let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
     let client = Client::new();
     let payload = serde_json::json!({
@@ -377,11 +377,14 @@ async fn repo_create_duplicate_returns_error() {
         .send()
         .await
         .unwrap();
-    assert!(
-        second.status().is_client_error() || second.status().is_server_error(),
-        "duplicate repo creation should fail, got: {}",
+    assert_eq!(
+        second.status(),
+        409,
+        "duplicate creation should retain the HTTP conflict contract: {}",
         second.status()
     );
+    let body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(body["url"], format!("{base_url}/test-owner/dupe-repo"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
