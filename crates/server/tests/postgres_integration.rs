@@ -1956,6 +1956,138 @@ async fn test_migration_partial_apply_and_revert() {
     admin_pool.close().await;
 }
 
+/// The released v1.0.0 binary bundled these seven migrations. Keep this exact
+/// prefix stable so a database created by that release can be upgraded by the
+/// current binary and intentionally rolled back before a v1.0.0 deployment.
+const V1_0_0_MIGRATION_VERSIONS: [&str; 7] = [
+    "20260417000000",
+    "20260417010000",
+    "20260418000000",
+    "20260418010000",
+    "20260418020000",
+    "20260418110000",
+    "20260629000000",
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
+    assert_eq!(
+        bundled_database_migrations()
+            .iter()
+            .take(V1_0_0_MIGRATION_VERSIONS.len())
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>(),
+        V1_0_0_MIGRATION_VERSIONS,
+        "the v1.0.0 migration prefix must remain byte-for-byte compatible"
+    );
+
+    let base_url = ensure_pg().await.to_owned();
+    let db_name = format!("shardline_v1_upgrade_{}", std::process::id());
+    let mut admin_url = url::Url::parse(&base_url).unwrap();
+    admin_url.set_path("postgres");
+    let admin_pool = sqlx::PgPool::connect(admin_url.as_str()).await.unwrap();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .ok();
+    sqlx::query(&format!("CREATE DATABASE {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+
+    let mut database_url = url::Url::parse(&base_url).unwrap();
+    database_url.set_path(&db_name);
+    let database_url = database_url.to_string();
+
+    let v1_apply = run_database_migration(&DatabaseMigrationOptions::new(
+        database_url.clone(),
+        DatabaseMigrationCommand::Up {
+            steps: Some(V1_0_0_MIGRATION_VERSIONS.len()),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        v1_apply.applied_count,
+        V1_0_0_MIGRATION_VERSIONS.len() as u64
+    );
+    assert_eq!(
+        v1_apply.applied_total_count,
+        V1_0_0_MIGRATION_VERSIONS.len() as u64
+    );
+
+    let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+    sqlx::query(
+        "INSERT INTO shardline_hub_repos \
+         (repo_id, repo_type, private, default_branch, created_at_unix_seconds, updated_at_unix_seconds) \
+         VALUES ('compatibility/model', 'model', FALSE, 'main', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    apply_database_migrations(&pool).await.unwrap();
+    let upgraded_repo: (String, String) = sqlx::query_as(
+        "SELECT repo_id, default_branch FROM shardline_hub_repos WHERE repo_id = 'compatibility/model'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        upgraded_repo,
+        ("compatibility/model".to_owned(), "main".to_owned())
+    );
+
+    let upgraded = run_database_migration(&DatabaseMigrationOptions::new(
+        database_url.clone(),
+        DatabaseMigrationCommand::Status,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(upgraded.pending_count, 0);
+
+    let rollback = run_database_migration(&DatabaseMigrationOptions::new(
+        database_url.clone(),
+        DatabaseMigrationCommand::Down { steps: 2 },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(rollback.reverted_count, 2);
+    assert_eq!(
+        rollback.applied_total_count,
+        V1_0_0_MIGRATION_VERSIONS.len() as u64
+    );
+
+    let rollback_read: (String, String) = sqlx::query_as(
+        "SELECT repo_id, default_branch FROM shardline_hub_repos WHERE repo_id = 'compatibility/model'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rollback_read, upgraded_repo,
+        "rollback must preserve v1.0.0 Hub metadata"
+    );
+    let added_column_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM information_schema.columns \
+         WHERE table_name = 'shardline_hub_file_entries' AND column_name = 'inline_content')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !added_column_exists,
+        "rollback must remove the column unknown to the v1.0.0 schema"
+    );
+
+    pool.close().await;
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {db_name}"))
+        .execute(&admin_pool)
+        .await
+        .ok();
+    admin_pool.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_migration_options_up_down_commands() {
     // Verify that DatabaseMigrationCommand::Up and Down accessors work

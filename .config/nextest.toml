@@ -1,0 +1,34 @@
+# Docker-backed integration binaries start disposable Postgres, Redis, and
+# MinIO containers. Limit their concurrent startup to prevent resource
+# exhaustion and transient connection EOFs on CI runners.
+
+[[profile.default.overrides]]
+filter = 'binary(postgres_e2e_http)'
+test-group = "docker-integration"
+
+[[profile.default.overrides]]
+filter = 'binary(postgres_integration)'
+test-group = "docker-integration"
+
+[[profile.default.overrides]]
+filter = 'binary(postgres_redis_e2e_http)'
+test-group = "docker-integration"
+
+[[profile.default.overrides]]
+filter = 'binary(postgres_s3_e2e_http)'
+test-group = "docker-integration"
+
+[[profile.default.overrides]]
+filter = 'binary(redis_integration)'
+test-group = "docker-integration"
+
+[[profile.default.overrides]]
+filter = 'binary(s3_e2e_http)'
+test-group = "docker-integration"
+
+[[profile.default.overrides]]
+filter = 'binary(s3_integration)'
+test-group = "docker-integration"
+
+[test-groups.docker-integration]
+max-threads = 4
