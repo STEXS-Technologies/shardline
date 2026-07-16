@@ -403,11 +403,7 @@ mod tests {
         let before = metrics().system.active_connections.get();
         // Use oneshot to drive poll_ready + call
         let _response = svc
-            .oneshot(
-                axum::http::Request::builder()
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(axum::http::Request::builder().body(Body::empty()).unwrap())
             .await;
         let after = metrics().system.active_connections.get();
         // Connections opened and then closed, so active should be same
@@ -610,7 +606,9 @@ mod tests {
     fn metrics_layer_creates_metrics_service() {
         use axum::routing::get;
         use tower::ServiceExt;
-        async fn handler() -> &'static str { "ok" }
+        async fn handler() -> &'static str {
+            "ok"
+        }
         let layer = MetricsLayer;
         let svc = layer.layer(get(handler));
         // Verify the service wraps the inner by calling it
@@ -618,7 +616,7 @@ mod tests {
             axum::http::Request::builder()
                 .uri("/")
                 .body(axum::body::Body::empty())
-                .unwrap()
+                .unwrap(),
         );
         drop(response);
     }

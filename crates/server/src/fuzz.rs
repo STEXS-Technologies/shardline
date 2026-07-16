@@ -851,34 +851,19 @@ mod tests {
 
     #[test]
     fn fuzz_classify_retention_keep() {
-        let result = fuzz_classify_retention(
-            Some(200),
-            100,
-            true,
-            150,
-        );
+        let result = fuzz_classify_retention(Some(200), 100, true, 150);
         assert_eq!(result, FuzzRetentionAction::Keep);
     }
 
     #[test]
     fn fuzz_classify_retention_delete_expired() {
-        let result = fuzz_classify_retention(
-            Some(100),
-            50,
-            true,
-            150,
-        );
+        let result = fuzz_classify_retention(Some(100), 50, true, 150);
         assert_eq!(result, FuzzRetentionAction::DeleteExpired);
     }
 
     #[test]
     fn fuzz_classify_retention_delete_missing() {
-        let result = fuzz_classify_retention(
-            Some(200),
-            100,
-            false,
-            150,
-        );
+        let result = fuzz_classify_retention(Some(200), 100, false, 150);
         assert_eq!(result, FuzzRetentionAction::DeleteMissing);
     }
 
@@ -1000,31 +985,23 @@ mod tests {
     #[test]
     fn fuzz_lifecycle_repair_summary_webhook_delete_future() {
         // processed_at > max_processed_at (now + 300) => DeleteFuture
-        let result = fuzz_lifecycle_repair_summary(
-            200, 100, &[], &[], &[600],
-        ).unwrap();
+        let result = fuzz_lifecycle_repair_summary(200, 100, &[], &[], &[600]).unwrap();
         assert_eq!(result.webhook_delete_future, 1);
         assert_eq!(result.webhook_keep, 0);
     }
 
     #[test]
     fn fuzz_lifecycle_repair_summary_retention_delete_missing() {
-        let result = fuzz_lifecycle_repair_summary(
-            200, 100, &[],
-            &[(Some(300), 100, false)],
-            &[],
-        ).unwrap();
+        let result =
+            fuzz_lifecycle_repair_summary(200, 100, &[], &[(Some(300), 100, false)], &[]).unwrap();
         assert_eq!(result.retention_delete_missing, 1);
     }
 
     #[test]
     fn fuzz_lifecycle_repair_summary_retention_none_release() {
         // release_after = None and object exists => Keep
-        let result = fuzz_lifecycle_repair_summary(
-            200, 100, &[],
-            &[(None, 100, true)],
-            &[],
-        ).unwrap();
+        let result =
+            fuzz_lifecycle_repair_summary(200, 100, &[], &[(None, 100, true)], &[]).unwrap();
         assert_eq!(result.retention_keep, 1);
     }
 
@@ -1041,7 +1018,8 @@ mod tests {
     fn fuzz_protocol_frontend_summary_accepts_bazel_frontend() {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
-        let result = fuzz_protocol_frontend_summary("bazel-http", hex, digest, "repo", "v1").unwrap();
+        let result =
+            fuzz_protocol_frontend_summary("bazel-http", hex, digest, "repo", "v1").unwrap();
         assert!(result.frontend_accepts);
         assert!(result.bazel_accepts);
     }
@@ -1069,7 +1047,8 @@ mod tests {
     #[test]
     fn fuzz_protocol_frontend_summary_rejects_bad_digest() {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let result = fuzz_protocol_frontend_summary("xet", hex, "not-a-digest", "repo", "v1").unwrap();
+        let result =
+            fuzz_protocol_frontend_summary("xet", hex, "not-a-digest", "repo", "v1").unwrap();
         assert!(!result.digest_accepts);
         assert!(!result.oci_blob_accepts);
         assert!(!result.oci_manifest_accepts);
@@ -1095,9 +1074,14 @@ mod tests {
     #[test]
     fn fuzz_oci_frontend_summary_rejects_invalid_digest() {
         let result = fuzz_oci_frontend_summary(
-            "my-repo", "v1", "bad-digest", "abc123",
-            "0-100", "/v2/my-repo/blobs/sha256:abc",
-        ).unwrap();
+            "my-repo",
+            "v1",
+            "bad-digest",
+            "abc123",
+            "0-100",
+            "/v2/my-repo/blobs/sha256:abc",
+        )
+        .unwrap();
         assert!(!result.digest_accepts);
         assert!(!result.blob_accepts);
         assert!(!result.manifest_accepts);
@@ -1107,10 +1091,8 @@ mod tests {
     fn fuzz_oci_frontend_summary_rejects_invalid_path() {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
-        let result = fuzz_oci_frontend_summary(
-            "my-repo", "v1", digest, "abc123",
-            "0-100", "",
-        ).unwrap();
+        let result =
+            fuzz_oci_frontend_summary("my-repo", "v1", digest, "abc123", "0-100", "").unwrap();
         assert!(!result.path_accepts);
     }
 
@@ -1125,10 +1107,8 @@ mod tests {
 
     #[test]
     fn fuzz_retained_shard_chunk_hashes_rejects_empty_shard() {
-        let result = fuzz_retained_shard_chunk_hashes(
-            b"",
-            crate::config::ShardMetadataLimits::default(),
-        );
+        let result =
+            fuzz_retained_shard_chunk_hashes(b"", crate::config::ShardMetadataLimits::default());
         assert!(result.is_err());
     }
 
@@ -1210,7 +1190,8 @@ mod tests {
             }],
         };
         let range = shardline_protocol::ByteRange::new(2, 7);
-        let result = fuzz_reconstruction_response_summary("http://localhost:8080", &record, range.ok());
+        let result =
+            fuzz_reconstruction_response_summary("http://localhost:8080", &record, range.ok());
         assert!(result.is_ok() || result.is_err());
     }
 
@@ -1235,7 +1216,8 @@ mod tests {
             }],
         };
         let range = shardline_protocol::ByteRange::new(0, 9);
-        let result = fuzz_reconstruction_response_summary("http://localhost:8080", &record, range.ok());
+        let result =
+            fuzz_reconstruction_response_summary("http://localhost:8080", &record, range.ok());
         assert!(result.is_ok() || result.is_err());
     }
 
@@ -1268,7 +1250,8 @@ mod tests {
         // OCI reference as a tag (not digest)
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
-        let result = fuzz_protocol_frontend_summary("oci", hex, digest, "my-repo", "latest").unwrap();
+        let result =
+            fuzz_protocol_frontend_summary("oci", hex, digest, "my-repo", "latest").unwrap();
         assert!(result.frontend_accepts);
         assert!(result.oci_reference_accepts);
     }
@@ -1276,7 +1259,9 @@ mod tests {
     #[test]
     fn fuzz_protocol_frontend_summary_rejects_bazel_with_bad_hash() {
         // Bazel with a hash that fails key derivation
-        let result = fuzz_protocol_frontend_summary("bazel-http", "bad", "sha256:bad", "repo", "v1").unwrap();
+        let result =
+            fuzz_protocol_frontend_summary("bazel-http", "bad", "sha256:bad", "repo", "v1")
+                .unwrap();
         assert!(result.frontend_accepts);
         assert!(!result.bazel_accepts);
     }
@@ -1286,9 +1271,14 @@ mod tests {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
         let result = fuzz_oci_frontend_summary(
-            "my-repo", "v1", digest, "abc123",
-            "not-a-range", "/v2/my-repo/blobs/sha256:abc",
-        ).unwrap();
+            "my-repo",
+            "v1",
+            digest,
+            "abc123",
+            "not-a-range",
+            "/v2/my-repo/blobs/sha256:abc",
+        )
+        .unwrap();
         assert!(!result.content_range_accepts);
     }
 
@@ -1297,9 +1287,14 @@ mod tests {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
         let result = fuzz_oci_frontend_summary(
-            "my-repo", "v1", digest, "!!!invalid-session!!!",
-            "0-100", "/v2/my-repo/blobs/sha256:abc",
-        ).unwrap();
+            "my-repo",
+            "v1",
+            digest,
+            "!!!invalid-session!!!",
+            "0-100",
+            "/v2/my-repo/blobs/sha256:abc",
+        )
+        .unwrap();
         assert!(!result.session_accepts);
     }
 
@@ -1308,40 +1303,36 @@ mod tests {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
         let result = fuzz_oci_frontend_summary(
-            "my-repo", "v1", digest, "",
-            "0-100", "/v2/my-repo/blobs/sha256:abc",
-        ).unwrap();
+            "my-repo",
+            "v1",
+            digest,
+            "",
+            "0-100",
+            "/v2/my-repo/blobs/sha256:abc",
+        )
+        .unwrap();
         assert!(!result.session_accepts);
     }
 
     #[test]
     fn fuzz_lifecycle_repair_summary_retention_none_missing() {
         // release_after = None, object does not exist => DeleteMissing
-        let result = fuzz_lifecycle_repair_summary(
-            200, 100, &[],
-            &[(None, 100, false)],
-            &[],
-        ).unwrap();
+        let result =
+            fuzz_lifecycle_repair_summary(200, 100, &[], &[(None, 100, false)], &[]).unwrap();
         assert_eq!(result.retention_delete_missing, 1);
     }
 
     #[test]
     fn fuzz_lifecycle_repair_summary_all_delete_future() {
         // All webhook entries are in the future (> max_processed_at = now + 300)
-        let result = fuzz_lifecycle_repair_summary(
-            100, 50, &[], &[],
-            &[500, 600, 700],
-        ).unwrap();
+        let result = fuzz_lifecycle_repair_summary(100, 50, &[], &[], &[500, 600, 700]).unwrap();
         assert_eq!(result.webhook_delete_future, 3);
     }
 
     #[test]
     fn fuzz_lifecycle_repair_summary_all_delete_stale() {
         // All webhook entries are stale (below stale_cutoff)
-        let result = fuzz_lifecycle_repair_summary(
-            100, 50, &[], &[],
-            &[10, 20, 30],
-        ).unwrap();
+        let result = fuzz_lifecycle_repair_summary(100, 50, &[], &[], &[10, 20, 30]).unwrap();
         assert_eq!(result.webhook_delete_stale, 3);
     }
 
@@ -1349,7 +1340,8 @@ mod tests {
     fn fuzz_lifecycle_repair_summary_max_inputs() {
         // All 8 combinations of quarantine (2^3)
         let result = fuzz_lifecycle_repair_summary(
-            200, 100,
+            200,
+            100,
             &[
                 (false, false, false), // DeleteMissing
                 (false, false, true),  // DeleteMissing
@@ -1368,7 +1360,8 @@ mod tests {
                 (Some(100), 50, false), // DeleteMissing
             ],
             &[50, 150, 600],
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.quarantine_keep, 1);
         assert_eq!(result.quarantine_delete_missing, 4);
         assert_eq!(result.quarantine_delete_reachable, 2);
@@ -1415,10 +1408,8 @@ mod tests {
         //
         // This test verifies that empty/invalid shards produce errors without
         // reaching the ordering check.
-        let result = fuzz_retained_shard_chunk_hashes(
-            b"",
-            crate::config::ShardMetadataLimits::default(),
-        );
+        let result =
+            fuzz_retained_shard_chunk_hashes(b"", crate::config::ShardMetadataLimits::default());
         assert!(result.is_err());
     }
 
@@ -1427,10 +1418,8 @@ mod tests {
         // windows(2) on a single-element slice yields no windows,
         // so the let-else and ordering checks are skipped entirely.
         // This just verifies no panic.
-        let result = fuzz_retained_shard_chunk_hashes(
-            b"",
-            crate::config::ShardMetadataLimits::default(),
-        );
+        let result =
+            fuzz_retained_shard_chunk_hashes(b"", crate::config::ShardMetadataLimits::default());
         // Should fail at shard parsing before any hash enumeration.
         assert!(result.is_err());
     }
@@ -1452,7 +1441,8 @@ mod tests {
     fn fuzz_protocol_frontend_summary_oci_invalid_reference() {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
-        let result = fuzz_protocol_frontend_summary("oci", hex, digest, "my-repo", "!!!invalid").unwrap();
+        let result =
+            fuzz_protocol_frontend_summary("oci", hex, digest, "my-repo", "!!!invalid").unwrap();
         // validate_oci_tag("!!!invalid") should fail, and parse_reference should also fail
         assert!(!result.oci_reference_accepts);
     }
@@ -1462,9 +1452,8 @@ mod tests {
     #[test]
     fn fuzz_lifecycle_repair_summary_retention_none_and_missing() {
         // retention_none + object_missing => DeleteMissing
-        let result = fuzz_lifecycle_repair_summary(
-            200, 100, &[], &[(None, 0, false)], &[],
-        ).unwrap();
+        let result =
+            fuzz_lifecycle_repair_summary(200, 100, &[], &[(None, 0, false)], &[]).unwrap();
         assert_eq!(result.retention_delete_missing, 1);
         assert_eq!(result.retention_keep, 0);
     }
@@ -1473,7 +1462,8 @@ mod tests {
     fn fuzz_lifecycle_repair_summary_all_quarantine_combinations() {
         // Exercise all 8 quarantine combinations through the classification.
         let result = fuzz_lifecycle_repair_summary(
-            200, 100,
+            200,
+            100,
             &[
                 (false, false, false), // DeleteMissing
                 (false, true, false),  // DeleteMissing
@@ -1486,7 +1476,8 @@ mod tests {
             ],
             &[],
             &[],
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.quarantine_keep, 1);
         assert_eq!(result.quarantine_delete_missing, 4);
         assert_eq!(result.quarantine_delete_reachable, 2);
@@ -1500,10 +1491,7 @@ mod tests {
         // stale_cutoff = 200 - 100 = 100, max = 200 + 300 = 500
         // processed_at = 100 => 100 <= 100 => DeleteStale
         // processed_at = 500 => 500 > 500 is false, 500 <= 100 is false => Keep
-        let result = fuzz_lifecycle_repair_summary(
-            200, 100, &[], &[],
-            &[100, 500],
-        ).unwrap();
+        let result = fuzz_lifecycle_repair_summary(200, 100, &[], &[], &[100, 500]).unwrap();
         assert_eq!(result.webhook_keep, 1);
         assert_eq!(result.webhook_delete_stale, 1);
         assert_eq!(result.webhook_delete_future, 0);
@@ -1516,9 +1504,14 @@ mod tests {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
         let result = fuzz_oci_frontend_summary(
-            "my-repo", "v1", digest, "abc123",
-            "", "/v2/my-repo/blobs/sha256:abc",
-        ).unwrap();
+            "my-repo",
+            "v1",
+            digest,
+            "abc123",
+            "",
+            "/v2/my-repo/blobs/sha256:abc",
+        )
+        .unwrap();
         assert!(!result.content_range_accepts);
     }
 
@@ -1527,9 +1520,14 @@ mod tests {
         let hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let digest = &format!("sha256:{hex}");
         let result = fuzz_oci_frontend_summary(
-            "my-repo", "", digest, "abc123",
-            "0-100", "/v2/my-repo/blobs/sha256:abc",
-        ).unwrap();
+            "my-repo",
+            "",
+            digest,
+            "abc123",
+            "0-100",
+            "/v2/my-repo/blobs/sha256:abc",
+        )
+        .unwrap();
         assert!(!result.reference_accepts);
     }
 }

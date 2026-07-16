@@ -1,0 +1,240 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shardline-kind-smoke
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shardline-runtime
+  namespace: shardline-kind-smoke
+type: Opaque
+stringData:
+  index-postgres-url: postgres://shardline:kind-smoke-postgres@postgres:5432/shardline
+  reconstruction-cache-url: redis://redis:6379
+  s3-access-key-id: kind-smoke
+  s3-secret-access-key: kind-smoke-minio-secret
+  token-signing-key: kind-smoke-token-signing-key-at-least-32-bytes
+  metrics-token: kind-smoke-metrics-token
+  provider-api-key: kind-smoke-provider-key
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shardline-provider-catalog
+  namespace: shardline-kind-smoke
+type: Opaque
+stringData:
+  providers.json: |
+    {
+      "providers": [
+        {
+          "kind": "generic",
+          "integration_subject": "kind-smoke",
+          "webhook_secret": "kind-smoke-webhook-secret",
+          "repositories": [
+            {
+              "owner": "kind-smoke",
+              "name": "assets",
+              "visibility": "private",
+              "default_revision": "main",
+              "clone_url": "https://example.invalid/kind-smoke/assets.git",
+              "read_subjects": ["kind-smoke-user"],
+              "write_subjects": ["kind-smoke-user"]
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-fixture-runtime-ingress
+  namespace: shardline-kind-smoke
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [postgres, redis, minio]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: shardline-kind-smoke
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: shardline-kind-smoke
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: shardline
+            - name: POSTGRES_PASSWORD
+              value: kind-smoke-postgres
+            - name: POSTGRES_DB
+              value: shardline
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "shardline", "-d", "shardline"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: shardline-kind-smoke
+spec:
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: shardline-kind-smoke
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: shardline-kind-smoke
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: shardline-kind-smoke
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+    spec:
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - name: api
+              containerPort: 9000
+          env:
+            - name: MINIO_ROOT_USER
+              value: kind-smoke
+            - name: MINIO_ROOT_PASSWORD
+              value: kind-smoke-minio-secret
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-create-bucket
+  namespace: shardline-kind-smoke
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until mc alias set local http://minio:9000 kind-smoke kind-smoke-minio-secret; do
+                sleep 1
+              done
+              mc mb --ignore-existing local/shardline

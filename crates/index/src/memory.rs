@@ -1192,11 +1192,18 @@ mod tests {
         };
         let reconstruction1 =
             FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash1), range, 64)]);
-        let reconstruction2 =
-            FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash2), range, 128)]);
+        let reconstruction2 = FileReconstruction::new(vec![ReconstructionTerm::new(
+            XorbId::new(hash2),
+            range,
+            128,
+        )]);
 
-        store.insert_reconstruction(&file_id1, &reconstruction1).unwrap();
-        store.insert_reconstruction(&file_id2, &reconstruction2).unwrap();
+        store
+            .insert_reconstruction(&file_id1, &reconstruction1)
+            .unwrap();
+        store
+            .insert_reconstruction(&file_id2, &reconstruction2)
+            .unwrap();
 
         let ids = store.list_reconstruction_file_ids().unwrap();
         assert_eq!(ids.len(), 2);
@@ -1219,7 +1226,9 @@ mod tests {
 
         assert!(!store.delete_reconstruction(&file_id).unwrap());
 
-        store.insert_reconstruction(&file_id, &reconstruction).unwrap();
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .unwrap();
         assert!(store.delete_reconstruction(&file_id).unwrap());
 
         assert!(!store.delete_reconstruction(&file_id).unwrap());
@@ -1303,23 +1312,17 @@ mod tests {
         let states = LifecycleStore::list_provider_repository_states(&store).unwrap();
         assert_eq!(states, vec![state]);
 
-        assert!(LifecycleStore::delete_provider_repository_state(
-            &store,
-            provider,
-            "team",
-            "assets"
-        )
-        .unwrap());
+        assert!(
+            LifecycleStore::delete_provider_repository_state(&store, provider, "team", "assets")
+                .unwrap()
+        );
         let loaded =
             LifecycleStore::provider_repository_state(&store, provider, "team", "assets").unwrap();
         assert!(loaded.is_none());
-        assert!(!LifecycleStore::delete_provider_repository_state(
-            &store,
-            provider,
-            "team",
-            "assets"
-        )
-        .unwrap());
+        assert!(
+            !LifecycleStore::delete_provider_repository_state(&store, provider, "team", "assets")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1375,13 +1378,7 @@ mod tests {
         let store = MemoryIndexStore::new();
 
         // Exercise every MemoryRepositoryProvider match arm via different providers.
-        let providers = [
-            Rp::GitHub,
-            Rp::Gitea,
-            Rp::GitLab,
-            Rp::Codeberg,
-            Rp::Generic,
-        ];
+        let providers = [Rp::GitHub, Rp::Gitea, Rp::GitLab, Rp::Codeberg, Rp::Generic];
         for (i, &p) in providers.iter().enumerate() {
             let state = ProviderRepositoryState::new(
                 p,
@@ -1459,11 +1456,8 @@ mod tests {
         let hash = ShardlineHash::from_bytes([15; 32]);
         let file_id = FileId::new(hash);
         let range = ChunkRange::new(0, 1).unwrap();
-        let reconstruction = FileReconstruction::new(vec![ReconstructionTerm::new(
-            XorbId::new(hash),
-            range,
-            64,
-        )]);
+        let reconstruction =
+            FileReconstruction::new(vec![ReconstructionTerm::new(XorbId::new(hash), range, 64)]);
 
         AsyncIndexStore::insert_reconstruction(&store, &file_id, &reconstruction)
             .await
@@ -1481,13 +1475,17 @@ mod tests {
         AsyncIndexStore::insert_object(&store, &StoredObjectId::new(hash))
             .await
             .unwrap();
-        assert!(AsyncIndexStore::contains_object(&store, &StoredObjectId::new(hash))
-            .await
-            .unwrap());
+        assert!(
+            AsyncIndexStore::contains_object(&store, &StoredObjectId::new(hash))
+                .await
+                .unwrap()
+        );
 
-        assert!(AsyncIndexStore::delete_reconstruction(&store, &file_id)
-            .await
-            .unwrap());
+        assert!(
+            AsyncIndexStore::delete_reconstruction(&store, &file_id)
+                .await
+                .unwrap()
+        );
         let ids = AsyncIndexStore::list_reconstruction_file_ids(&store)
             .await
             .unwrap();
@@ -1500,10 +1498,9 @@ mod tests {
         AsyncIndexStore::upsert_dedupe_shard_mapping(&store, &mapping)
             .await
             .unwrap();
-        let loaded_mapping =
-            AsyncIndexStore::dedupe_shard_mapping(&store, &dedupe_hash)
-                .await
-                .unwrap();
+        let loaded_mapping = AsyncIndexStore::dedupe_shard_mapping(&store, &dedupe_hash)
+            .await
+            .unwrap();
         assert_eq!(loaded_mapping, Some(mapping.clone()));
         let all_mappings = AsyncIndexStore::list_dedupe_shard_mappings(&store)
             .await
@@ -1555,13 +1552,8 @@ mod tests {
                 .unwrap()
         );
 
-        let hold = RetentionHold::new(
-            object_key.clone(),
-            "test hold".to_owned(),
-            10,
-            Some(20),
-        )
-        .unwrap();
+        let hold =
+            RetentionHold::new(object_key.clone(), "test hold".to_owned(), 10, Some(20)).unwrap();
         AsyncIndexStore::upsert_retention_hold(&store, &hold)
             .await
             .unwrap();
@@ -1622,10 +1614,14 @@ mod tests {
         AsyncIndexStore::upsert_provider_repository_state(&store, &state)
             .await
             .unwrap();
-        let loaded_state =
-            AsyncIndexStore::provider_repository_state(&store, RepositoryProvider::GitHub, "team", "assets")
-                .await
-                .unwrap();
+        let loaded_state = AsyncIndexStore::provider_repository_state(
+            &store,
+            RepositoryProvider::GitHub,
+            "team",
+            "assets",
+        )
+        .await
+        .unwrap();
         assert_eq!(loaded_state, Some(state));
 
         let all_states = AsyncIndexStore::list_provider_repository_states(&store)
@@ -2035,14 +2031,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_record_store_list_repository_latest_locators_no_match() {
         let store = MemoryRecordStore::new();
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main")).unwrap();
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "other", Some("main"))
+            .unwrap();
         let record = file_record_with_scope(scope, "x");
         store.write_latest_record(&record).await.unwrap();
 
         // Different repository scope => no match.
-        let repository =
-            RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
+        let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
         let locators = store
             .list_repository_latest_record_locators(&repository)
             .await
@@ -2058,8 +2053,7 @@ mod tests {
         let record = file_record_with_scope(scope, "y");
         store.insert_version_record(&record).unwrap();
 
-        let repository =
-            RepositoryRecordScope::new(RepositoryProvider::GitLab, "other", "project");
+        let repository = RepositoryRecordScope::new(RepositoryProvider::GitLab, "other", "project");
         let locators = store
             .list_repository_version_record_locators(&repository)
             .await
@@ -2116,9 +2110,11 @@ mod tests {
     #[test]
     fn memory_index_store_delete_provider_repository_state_not_found() {
         let store = MemoryIndexStore::new();
-        assert!(!store
-            .delete_provider_repository_state(RepositoryProvider::GitHub, "nonexistent", "repo")
-            .unwrap());
+        assert!(
+            !store
+                .delete_provider_repository_state(RepositoryProvider::GitHub, "nonexistent", "repo")
+                .unwrap()
+        );
     }
 
     // ── visit methods with no records ──────────────────────────────────────
@@ -2215,19 +2211,26 @@ mod tests {
     async fn memory_record_store_list_repository_latest_records_populated() {
         let store = MemoryRecordStore::new();
         let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
         let record = file_record_with_scope(scope, "a");
         store.write_latest_record(&record).await.unwrap();
 
         let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
-        let locators = store.list_repository_latest_record_locators(&repository).await.unwrap();
+        let locators = store
+            .list_repository_latest_record_locators(&repository)
+            .await
+            .unwrap();
         assert!(!locators.is_empty());
 
         let mut visited = Vec::new();
-        store.visit_repository_latest_records(&repository, |stored| {
-            visited.push(stored);
-            Ok::<(), MemoryRecordStoreError>(())
-        }).await.unwrap();
+        store
+            .visit_repository_latest_records(&repository, |stored| {
+                visited.push(stored);
+                Ok::<(), MemoryRecordStoreError>(())
+            })
+            .await
+            .unwrap();
         assert!(!visited.is_empty());
     }
 
@@ -2235,19 +2238,26 @@ mod tests {
     async fn memory_record_store_list_repository_version_records_populated() {
         let store = MemoryRecordStore::new();
         let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
         let record = file_record_with_scope(scope, "a");
         store.insert_version_record(&record).unwrap();
 
         let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "team", "assets");
-        let locators = store.list_repository_version_record_locators(&repository).await.unwrap();
+        let locators = store
+            .list_repository_version_record_locators(&repository)
+            .await
+            .unwrap();
         assert!(!locators.is_empty());
 
         let mut visited = Vec::new();
-        store.visit_repository_version_records(&repository, |stored| {
-            visited.push(stored);
-            Ok::<(), MemoryRecordStoreError>(())
-        }).await.unwrap();
+        store
+            .visit_repository_version_records(&repository, |stored| {
+                visited.push(stored);
+                Ok::<(), MemoryRecordStoreError>(())
+            })
+            .await
+            .unwrap();
         assert!(!visited.is_empty());
     }
 
@@ -2255,14 +2265,17 @@ mod tests {
     async fn memory_record_store_list_repository_latest_locators_no_match_different_provider() {
         let store = MemoryRecordStore::new();
         let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap();
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
         let record = file_record_with_scope(scope, "a");
         store.write_latest_record(&record).await.unwrap();
 
         // Different provider => no match.
-        let repository =
-            RepositoryRecordScope::new(RepositoryProvider::GitLab, "team", "assets");
-        let locators = store.list_repository_latest_record_locators(&repository).await.unwrap();
+        let repository = RepositoryRecordScope::new(RepositoryProvider::GitLab, "team", "assets");
+        let locators = store
+            .list_repository_latest_record_locators(&repository)
+            .await
+            .unwrap();
         assert!(locators.is_empty());
     }
 
@@ -2275,9 +2288,11 @@ mod tests {
         store.insert_version_record(&record).unwrap();
 
         // Different owner => no match.
-        let repository =
-            RepositoryRecordScope::new(RepositoryProvider::GitHub, "other", "assets");
-        let locators = store.list_repository_version_record_locators(&repository).await.unwrap();
+        let repository = RepositoryRecordScope::new(RepositoryProvider::GitHub, "other", "assets");
+        let locators = store
+            .list_repository_version_record_locators(&repository)
+            .await
+            .unwrap();
         assert!(locators.is_empty());
     }
 
@@ -2362,10 +2377,7 @@ mod tests {
     #[test]
     fn memory_record_store_error_display_record_not_found() {
         let err = MemoryRecordStoreError::RecordNotFound;
-        assert_eq!(
-            format!("{err}"),
-            "memory record locator was not found"
-        );
+        assert_eq!(format!("{err}"), "memory record locator was not found");
     }
 
     #[test]
@@ -2394,15 +2406,33 @@ mod tests {
         let xorb_id = XorbId::new(hash);
 
         // Before insert: neither contains_object nor contains_xorb should find it.
-        assert!(!AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
-        assert!(!AsyncIndexStore::contains_xorb(&store, &xorb_id).await.unwrap());
+        assert!(
+            !AsyncIndexStore::contains_object(&store, &object_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !AsyncIndexStore::contains_xorb(&store, &xorb_id)
+                .await
+                .unwrap()
+        );
 
         // Insert via insert_object.
-        AsyncIndexStore::insert_object(&store, &object_id).await.unwrap();
+        AsyncIndexStore::insert_object(&store, &object_id)
+            .await
+            .unwrap();
 
         // After insert: both should find it.
-        assert!(AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
-        assert!(AsyncIndexStore::contains_xorb(&store, &xorb_id).await.unwrap());
+        assert!(
+            AsyncIndexStore::contains_object(&store, &object_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            AsyncIndexStore::contains_xorb(&store, &xorb_id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2414,10 +2444,20 @@ mod tests {
         let xorb_id = XorbId::new(hash);
 
         // Insert via insert_xorb (which defaults to insert_object).
-        AsyncIndexStore::insert_xorb(&store, &xorb_id).await.unwrap();
+        AsyncIndexStore::insert_xorb(&store, &xorb_id)
+            .await
+            .unwrap();
 
         // Both contains_object and contains_xorb should find it.
-        assert!(AsyncIndexStore::contains_object(&store, &object_id).await.unwrap());
-        assert!(AsyncIndexStore::contains_xorb(&store, &xorb_id).await.unwrap());
+        assert!(
+            AsyncIndexStore::contains_object(&store, &object_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            AsyncIndexStore::contains_xorb(&store, &xorb_id)
+                .await
+                .unwrap()
+        );
     }
 }

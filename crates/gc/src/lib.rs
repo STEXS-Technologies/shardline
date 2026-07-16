@@ -691,7 +691,9 @@ pub use shardline_index::LocalRecordStore;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shardline_index::{AsyncIndexStore, MemoryIndexStore, MemoryIndexStoreError, MemoryRecordStore, RetentionHold};
+    use shardline_index::{
+        AsyncIndexStore, MemoryIndexStore, MemoryIndexStoreError, MemoryRecordStore, RetentionHold,
+    };
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey};
 
     #[test]
@@ -1046,7 +1048,10 @@ mod tests {
             shardline_protocol::HashParseError::InvalidCharacter,
         );
         let err = GcError::PostgresMetadata(inner);
-        assert_eq!(err.to_string(), "postgres metadata adapter operation failed");
+        assert_eq!(
+            err.to_string(),
+            "postgres metadata adapter operation failed"
+        );
     }
 
     #[test]
@@ -1278,8 +1283,7 @@ mod tests {
     fn retention_report_entry_expired() {
         let now = 1_000_000_u64;
         let object_key = ObjectKey::parse("ab/abcdef").unwrap();
-        let candidate = QuarantineCandidate::new(object_key, 512, now - 100, now - 1)
-            .unwrap();
+        let candidate = QuarantineCandidate::new(object_key, 512, now - 100, now - 1).unwrap();
         let entry = retention_report_entry(&candidate, &[], now);
         assert!(entry.expired);
         assert_eq!(entry.hash, "ab/abcdef");
@@ -1294,8 +1298,7 @@ mod tests {
     fn retention_report_entry_not_expired() {
         let now = 1_000_000_u64;
         let object_key = ObjectKey::parse("ab/abcdef").unwrap();
-        let candidate =
-            QuarantineCandidate::new(object_key, 1024, now - 3600, now + 3600).unwrap();
+        let candidate = QuarantineCandidate::new(object_key, 1024, now - 3600, now + 3600).unwrap();
         let entry = retention_report_entry(&candidate, &[], now);
         assert!(!entry.expired);
         assert_eq!(entry.seconds_until_delete, 3600);
@@ -1347,14 +1350,8 @@ mod tests {
         assert_eq!(entry.hash, hash);
         assert_eq!(entry.object_key, "ab/cafebabe");
         assert_eq!(entry.bytes, 512);
-        assert_eq!(
-            entry.quarantine_state,
-            GcOrphanQuarantineState::Quarantined
-        );
-        assert_eq!(
-            entry.first_seen_unreachable_at_unix_seconds,
-            Some(now)
-        );
+        assert_eq!(entry.quarantine_state, GcOrphanQuarantineState::Quarantined);
+        assert_eq!(entry.first_seen_unreachable_at_unix_seconds, Some(now));
         assert_eq!(entry.delete_after_unix_seconds, Some(now + 3600));
     }
 
@@ -1379,7 +1376,11 @@ mod tests {
     fn quarantine_record_path_with_empty_hash() {
         let hash = "";
         let result = quarantine_record_path(Path::new("/root"), hash);
-        assert!(result.to_string_lossy().ends_with("/.json"), "got: {:?}", result);
+        assert!(
+            result.to_string_lossy().ends_with("/.json"),
+            "got: {:?}",
+            result
+        );
         // Empty prefix means first two chars are empty → root path
     }
 
@@ -1392,7 +1393,11 @@ mod tests {
         // Create minimal chunks subdirectory so ServerObjectStore can initialize.
         std::fs::create_dir_all(root.join("chunks")).unwrap();
         let result = run_local_gc(root, LocalGcOptions::dry_run()).await;
-        assert!(result.is_ok(), "dry-run with empty root should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "dry-run with empty root should succeed: {:?}",
+            result
+        );
         let report = result.unwrap();
         assert_eq!(report.scanned_records, 0);
         assert_eq!(report.orphan_chunks, 0);
@@ -1402,11 +1407,7 @@ mod tests {
     // ── run_gc_with_stores / validate_gc_index_integrity tests ──────────
 
     /// Helper to build a local object store with a single object at the given key.
-    fn put_object(
-        object_store: &ServerObjectStore,
-        key: &ObjectKey,
-        data: &[u8],
-    ) {
+    fn put_object(object_store: &ServerObjectStore, key: &ObjectKey, data: &[u8]) {
         let hash = shardline_server_core::chunk_hash(data);
         let integrity = ObjectIntegrity::new(hash, u64::try_from(data.len()).unwrap_or(0));
         object_store
@@ -1444,19 +1445,24 @@ mod tests {
             let object_store = ServerObjectStore::local(&dir).unwrap();
             let index_store = MemoryIndexStore::new();
 
-            let key = ObjectKey::parse("ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
-            let candidate = QuarantineCandidate::new(
-                key,
-                100,
-                1_000_000,
-                2_000_000,
+            let key = ObjectKey::parse(
+                "ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            let candidate = QuarantineCandidate::new(key, 100, 1_000_000, 2_000_000).unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             // No object exists in the store → auto-release.
-            let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
-            assert!(result.is_ok(), "auto-release should not error: {:?}", result);
+            let result =
+                run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+            assert!(
+                result.is_ok(),
+                "auto-release should not error: {:?}",
+                result
+            );
 
             // Verify candidate was removed from index.
             let mut found = false;
@@ -1467,7 +1473,10 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert!(!found, "quarantine candidate should have been auto-released");
+            assert!(
+                !found,
+                "quarantine candidate should have been auto-released"
+            );
             let _ = std::fs::remove_dir_all(&dir);
         });
     }
@@ -1497,18 +1506,22 @@ mod tests {
                 2_000_000,
             )
             .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
-            let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
-            assert!(
-                result.is_err(),
-                "length mismatch should produce an error"
-            );
+            let result =
+                run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+            assert!(result.is_err(), "length mismatch should produce an error");
             let err = result.unwrap_err();
             assert!(
-                matches!(err, GcError::InvalidLifecycleMetadata(
-                    InvalidLifecycleMetadataError::QuarantineCandidateLengthMismatch { .. }
-                )),
+                matches!(
+                    err,
+                    GcError::InvalidLifecycleMetadata(
+                        InvalidLifecycleMetadataError::QuarantineCandidateLengthMismatch { .. }
+                    )
+                ),
                 "expected QuarantineCandidateLengthMismatch, got: {err:?}"
             );
             let _ = std::fs::remove_dir_all(&dir);
@@ -1527,7 +1540,10 @@ mod tests {
             let index_store = MemoryIndexStore::new();
 
             let now = shardline_protocol::unix_now_seconds_lossy();
-            let key = ObjectKey::parse("ab/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+            let key = ObjectKey::parse(
+                "ab/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .unwrap();
             let hold = RetentionHold::new(
                 key,
                 "test hold".to_owned(),
@@ -1538,16 +1554,20 @@ mod tests {
             index_store.upsert_retention_hold(&hold).await.unwrap();
 
             // No object exists → error.
-            let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+            let result =
+                run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
             assert!(
                 result.is_err(),
                 "active hold with missing object should error"
             );
             let err = result.unwrap_err();
             assert!(
-                matches!(err, GcError::InvalidLifecycleMetadata(
-                    InvalidLifecycleMetadataError::ActiveRetentionHoldMissingObject { .. }
-                )),
+                matches!(
+                    err,
+                    GcError::InvalidLifecycleMetadata(
+                        InvalidLifecycleMetadataError::ActiveRetentionHoldMissingObject { .. }
+                    )
+                ),
                 "expected ActiveRetentionHoldMissingObject, got: {err:?}"
             );
             let _ = std::fs::remove_dir_all(&dir);
@@ -1574,34 +1594,28 @@ mod tests {
             put_object(&object_store, &key, b"test data");
 
             // Add both a retention hold and a quarantine candidate for the same key.
-            let hold = RetentionHold::new(
-                key.clone(),
-                "test hold".to_owned(),
-                now,
-                Some(now + 3600),
-            )
-            .unwrap();
+            let hold =
+                RetentionHold::new(key.clone(), "test hold".to_owned(), now, Some(now + 3600))
+                    .unwrap();
             index_store.upsert_retention_hold(&hold).await.unwrap();
 
-            let candidate = QuarantineCandidate::new(
-                key,
-                9,
-                now,
-                now + 3600,
-            )
-            .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            let candidate = QuarantineCandidate::new(key, 9, now, now + 3600).unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
-            let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
-            assert!(
-                result.is_err(),
-                "active hold + quarantine should error"
-            );
+            let result =
+                run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+            assert!(result.is_err(), "active hold + quarantine should error");
             let err = result.unwrap_err();
             assert!(
-                matches!(err, GcError::InvalidLifecycleMetadata(
-                    InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined { .. }
-                )),
+                matches!(
+                    err,
+                    GcError::InvalidLifecycleMetadata(
+                        InvalidLifecycleMetadataError::ActiveRetentionHoldQuarantined { .. }
+                    )
+                ),
                 "expected ActiveRetentionHoldQuarantined, got: {err:?}"
             );
             let _ = std::fs::remove_dir_all(&dir);
@@ -1619,20 +1633,20 @@ mod tests {
             let index_store = MemoryIndexStore::new();
 
             let now = shardline_protocol::unix_now_seconds_lossy();
-            let key = ObjectKey::parse("ab/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd").unwrap();
+            let key = ObjectKey::parse(
+                "ab/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            )
+            .unwrap();
             put_object(&object_store, &key, b"data");
 
             // Valid hold (release after > held_at) should pass.
-            let hold = RetentionHold::new(
-                key.clone(),
-                "valid hold".to_owned(),
-                now,
-                Some(now + 3600),
-            )
-            .unwrap();
+            let hold =
+                RetentionHold::new(key.clone(), "valid hold".to_owned(), now, Some(now + 3600))
+                    .unwrap();
             index_store.upsert_retention_hold(&hold).await.unwrap();
 
-            let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+            let result =
+                run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
             assert!(result.is_ok(), "valid hold should pass: {:?}", result);
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -1651,18 +1665,18 @@ mod tests {
             let index_store = MemoryIndexStore::new();
 
             let now = shardline_protocol::unix_now_seconds_lossy();
-            let key = ObjectKey::parse("ab/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").unwrap();
-            // Expired hold: release_after < now.
-            let hold = RetentionHold::new(
-                key,
-                "expired hold".to_owned(),
-                now - 2000,
-                Some(now - 1000),
+            let key = ObjectKey::parse(
+                "ab/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
             )
             .unwrap();
+            // Expired hold: release_after < now.
+            let hold =
+                RetentionHold::new(key, "expired hold".to_owned(), now - 2000, Some(now - 1000))
+                    .unwrap();
             index_store.upsert_retention_hold(&hold).await.unwrap();
 
-            let result = run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
+            let result =
+                run_gc_helper(&object_store, &index_store, LocalGcOptions::dry_run()).await;
             assert!(
                 result.is_ok(),
                 "inactive hold with missing object should not error: {:?}",
@@ -1678,34 +1692,30 @@ mod tests {
     fn diagnostics_retention_report_sorted_by_delete_time_then_key() {
         let now = 1_000_000_u64;
         let make_candidate = |key_str: &str, delete_at: u64| -> QuarantineCandidate {
-            QuarantineCandidate::new(
-                ObjectKey::parse(key_str).unwrap(),
-                100,
-                now,
-                delete_at,
-            )
-            .unwrap()
+            QuarantineCandidate::new(ObjectKey::parse(key_str).unwrap(), 100, now, delete_at)
+                .unwrap()
         };
 
         let mut quarantine_entries = HashMap::new();
         quarantine_entries.insert(
             "b-key".to_owned(),
-            make_candidate("ab/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", now + 200),
+            make_candidate(
+                "ab/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                now + 200,
+            ),
         );
         quarantine_entries.insert(
             "a-key".to_owned(),
-            make_candidate("ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", now + 100),
+            make_candidate(
+                "ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                now + 100,
+            ),
         );
 
         let orphan_objects = HashMap::new();
         let report = LocalGcReport::default();
-        let diagnostics = build_gc_diagnostics(
-            report,
-            &[],
-            &orphan_objects,
-            &quarantine_entries,
-            now,
-        );
+        let diagnostics =
+            build_gc_diagnostics(report, &[], &orphan_objects, &quarantine_entries, now);
 
         assert_eq!(diagnostics.retention_report.len(), 2);
         assert!(
@@ -1722,7 +1732,10 @@ mod tests {
             "ab/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned(),
             OrphanObject {
                 hash: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".to_owned(),
-                object_key: ObjectKey::parse("ab/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").unwrap(),
+                object_key: ObjectKey::parse(
+                    "ab/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                )
+                .unwrap(),
                 bytes: 100,
             },
         );
@@ -1730,20 +1743,18 @@ mod tests {
             "ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             OrphanObject {
                 hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                object_key: ObjectKey::parse("ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+                object_key: ObjectKey::parse(
+                    "ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
                 bytes: 200,
             },
         );
 
         let quarantine_entries = HashMap::new();
         let report = LocalGcReport::default();
-        let diagnostics = build_gc_diagnostics(
-            report,
-            &[],
-            &orphan_objects,
-            &quarantine_entries,
-            now,
-        );
+        let diagnostics =
+            build_gc_diagnostics(report, &[], &orphan_objects, &quarantine_entries, now);
 
         assert_eq!(diagnostics.orphan_inventory.len(), 2);
         // 'aa...' should come before 'zz...'
@@ -1839,7 +1850,11 @@ mod tests {
                 LocalGcOptions::sweep_only(),
             )
             .await;
-            assert!(sweep_result.is_ok(), "sweep should succeed: {:?}", sweep_result);
+            assert!(
+                sweep_result.is_ok(),
+                "sweep should succeed: {:?}",
+                sweep_result
+            );
             let diagnostics = sweep_result.unwrap();
             assert_eq!(diagnostics.report.deleted_chunks, 1);
             assert_eq!(diagnostics.report.deleted_bytes, 14); // "expired orphan" is 14 bytes
@@ -1917,7 +1932,11 @@ mod tests {
                 LocalGcOptions::dry_run(),
             )
             .await;
-            assert!(result.is_ok(), "empty frontend should not error: {:?}", result);
+            assert!(
+                result.is_ok(),
+                "empty frontend should not error: {:?}",
+                result
+            );
         });
     }
 
@@ -2141,7 +2160,10 @@ mod tests {
                 now + 86400, // far in the future
             )
             .unwrap();
-            index_store.upsert_quarantine_candidate(&candidate).await.unwrap();
+            index_store
+                .upsert_quarantine_candidate(&candidate)
+                .await
+                .unwrap();
 
             // Run sweep only — candidate should be retained (not expired)
             let result = run_gc_with_stores(
@@ -2154,7 +2176,10 @@ mod tests {
             .await;
             assert!(result.is_ok());
             let diag = result.unwrap();
-            assert_eq!(diag.report.deleted_chunks, 0, "unexpired should not be deleted");
+            assert_eq!(
+                diag.report.deleted_chunks, 0,
+                "unexpired should not be deleted"
+            );
             assert_eq!(diag.report.active_quarantine_candidates, 1);
         });
     }

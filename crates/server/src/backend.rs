@@ -942,16 +942,12 @@ fn count_repository_reference_probe_for_tests(hash_hex: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        num::NonZeroUsize,
-        path::PathBuf,
-        sync::atomic::Ordering,
-    };
+    use std::{num::NonZeroUsize, path::PathBuf, sync::atomic::Ordering};
 
     use super::{
         BenchmarkBackend, REPOSITORY_REFERENCE_PROBE_COUNT, REPOSITORY_REFERENCE_PROBE_FILTER,
-        ServerBackend, compose_benchmark_object_key_prefix,
-        clear_repository_reference_probe_filter, count_repository_reference_probe_for_tests,
+        ServerBackend, clear_repository_reference_probe_filter,
+        compose_benchmark_object_key_prefix, count_repository_reference_probe_for_tests,
         lock_repository_reference_probe_test, repository_reference_probe_count,
         reset_repository_reference_probe_count_for_hash, server_error_to_oci,
     };
@@ -1167,9 +1163,7 @@ mod tests {
     #[test]
     fn server_error_to_oci_maps_object_store_prefix_error() {
         use shardline_storage::ObjectPrefixError;
-        let err = ServerError::ObjectStore(ObjectStoreError::Prefix(
-            ObjectPrefixError::UnsafePath,
-        ));
+        let err = ServerError::ObjectStore(ObjectStoreError::Prefix(ObjectPrefixError::UnsafePath));
         let oci = server_error_to_oci(err);
         assert!(matches!(oci, OciAdapterError::ObjectPrefix(_)));
     }
@@ -1300,8 +1294,7 @@ mod tests {
         let (backend, _tmp) = make_backend().await;
         let body = b"sha256-payload-backend";
         let digest_hex = "ab".repeat(32);
-        let canonical_key =
-            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
         let result = backend.put_sha256_addressed_object_bytes_if_absent(
             &canonical_key,
             &digest_hex,
@@ -1490,7 +1483,10 @@ mod tests {
             axum::body::Bytes::from_static(b"part-data"),
         )
         .await;
-        assert!(matches!(result, Err(shardline_oci_adapter::OciAdapterError::NotFound)));
+        assert!(matches!(
+            result,
+            Err(shardline_oci_adapter::OciAdapterError::NotFound)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1505,7 +1501,10 @@ mod tests {
             vec![(0, "part-etag".to_owned())],
         )
         .await;
-        assert!(matches!(result, Err(shardline_oci_adapter::OciAdapterError::NotFound)));
+        assert!(matches!(
+            result,
+            Err(shardline_oci_adapter::OciAdapterError::NotFound)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1551,8 +1550,7 @@ mod tests {
         let (backend, _tmp) = make_backend().await;
         let body = b"oci-sha256-payload";
         let digest_hex = "cd".repeat(32);
-        let canonical_key =
-            crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
         let result = OciBackend::put_sha256_addressed_object_bytes_if_absent(
             &backend,
             &canonical_key,

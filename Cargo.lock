@@ -3505,6 +3505,7 @@ dependencies = [
 name = "shardline-test-support"
 version = "1.0.0"
 dependencies = [
+ "libc",
  "tempfile",
  "thiserror 2.0.18",
 ]

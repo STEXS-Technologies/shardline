@@ -360,7 +360,9 @@ mod tests {
         let contents = super::render_providerless_env_file(&data_dir, &key_file);
         assert!(contents.contains("SHARDLINE_BIND_ADDR=0.0.0.0:8080"));
         assert!(contents.contains("SHARDLINE_ROOT_DIR=/tmp/.shardline/data"));
-        assert!(contents.contains("SHARDLINE_TOKEN_SIGNING_KEY_FILE=/tmp/.shardline/token-signing-key"));
+        assert!(
+            contents.contains("SHARDLINE_TOKEN_SIGNING_KEY_FILE=/tmp/.shardline/token-signing-key")
+        );
         assert!(contents.contains("SHARDLINE_OBJECT_STORAGE_ADAPTER=local"));
     }
 }

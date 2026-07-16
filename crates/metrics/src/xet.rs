@@ -31,7 +31,8 @@ impl XetMetrics {
             "shardline_xet_xorb_upload_bytes_total",
             "Xet xorb bytes uploaded",
         );
-        let xorb_downloads = must_counter("shardline_xet_xorb_downloads_total", "Xet xorb downloads");
+        let xorb_downloads =
+            must_counter("shardline_xet_xorb_downloads_total", "Xet xorb downloads");
         let reconstruction_requests = must_counter(
             "shardline_xet_reconstruction_requests_total",
             "Xet file reconstruction requests",

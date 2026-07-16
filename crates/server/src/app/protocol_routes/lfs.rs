@@ -48,9 +48,7 @@ static LFS_PATCH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
 fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
     // Recover from poisoning: if a previous lock-holder panicked, the map
     // contents are still valid (simple OID→lock mapping), so continue.
-    let mut map = LFS_PATCH_LOCKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut map = LFS_PATCH_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
     map.entry(oid.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
@@ -390,12 +388,12 @@ pub(crate) async fn lfs_patch_object(
         std::fs::create_dir_all(&tmp_dir).ok();
         let tmp_path = tmp_dir.join(&oid_for_closure);
         {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&tmp_path)?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&tmp_path)?;
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&chunk_bytes)?;
         }
@@ -680,10 +678,7 @@ mod tests {
     #[test]
     fn lfs_validation_response_sets_lfs_content_type() {
         let response = lfs_validation_response("too many objects");
-        assert_eq!(
-            response.headers()["content-type"],
-            crate::LFS_CONTENT_TYPE
-        );
+        assert_eq!(response.headers()["content-type"], crate::LFS_CONTENT_TYPE);
     }
 
     // =========================================================================
@@ -1777,8 +1772,8 @@ mod tests {
                 Request::builder()
                     .method("PATCH")
                     .uri(format!("/v1/lfs/objects/{oid}"))
-                    .header("Content-Range", "bytes 0-4/20")  // claim 5 bytes
-                    .header("Content-Length", "10")            // but say 10
+                    .header("Content-Range", "bytes 0-4/20") // claim 5 bytes
+                    .header("Content-Length", "10") // but say 10
                     .header("Content-Type", "application/octet-stream")
                     .body(Body::from(b"short-body".to_vec()))
                     .unwrap(),

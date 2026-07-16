@@ -3,11 +3,11 @@ use std::{
     path::Path,
 };
 
-#[cfg(not(unix))]
-use tokio::fs;
 #[cfg(unix)]
 #[allow(unused_imports)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(not(unix))]
+use tokio::fs;
 
 use crate::ServerError;
 
@@ -52,10 +52,7 @@ pub(crate) async fn ensure_directory(path: &Path) -> Result<(), ServerError> {
         .map_err(|e| {
             ServerError::Io(Error::new(
                 ErrorKind::InvalidData,
-                format!(
-                    "failed to open directory at {}: {e}",
-                    path.display()
-                ),
+                format!("failed to open directory at {}: {e}", path.display()),
             ))
         })?;
     let metadata = file.metadata().await?;

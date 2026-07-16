@@ -456,9 +456,8 @@ mod tests {
         );
         // Create a stream whose first chunk is larger than remaining_bytes
         use futures_util::stream;
-        let oversized: Vec<Result<Bytes, ServerError>> = vec![
-            Ok(Bytes::from_static(b"too-big-chunk-here")),
-        ];
+        let oversized: Vec<Result<Bytes, ServerError>> =
+            vec![Ok(Bytes::from_static(b"too-big-chunk-here"))];
         let body = metered_transfer_body(Box::pin(stream::iter(oversized)), limiter, 3);
         let result = drain_body(body).await;
         assert!(result.is_err(), "expected error for oversized chunk");

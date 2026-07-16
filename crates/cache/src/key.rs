@@ -295,7 +295,11 @@ mod tests {
             };
             let key = ReconstructionCacheKey::version("v.bin", "abc", Some(&scope));
             let scope_key = key.repository_scope().unwrap();
-            assert_eq!(scope_key.revision(), None, "revision should be None for {provider:?}");
+            assert_eq!(
+                scope_key.revision(),
+                None,
+                "revision should be None for {provider:?}"
+            );
         }
     }
 

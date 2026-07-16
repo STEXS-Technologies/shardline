@@ -1,7 +1,4 @@
-#![allow(
-    clippy::let_underscore_must_use,
-    clippy::manual_inspect,
-)]
+#![allow(clippy::let_underscore_must_use, clippy::manual_inspect)]
 
 use std::{
     fmt,
@@ -704,11 +701,10 @@ impl S3ObjectStore {
         let temp_key = ObjectKey::parse(&format!("{}.{temp_suffix}", key.as_str()))
             .map_err(|_err| S3ObjectStoreError::InvalidListedKey)?;
         let temp_location = self.location_for_key(&temp_key)?;
-        self.block_on(self.inner.put_opts(
-            &temp_location,
-            bytes.into(),
-            PutMode::Create.into(),
-        ))?;
+        self.block_on(
+            self.inner
+                .put_opts(&temp_location, bytes.into(), PutMode::Create.into()),
+        )?;
 
         // Atomically replace the live key with the temp content via copy,
         // then remove the temp key.
@@ -1509,10 +1505,9 @@ mod tests {
     use shardline_protocol::{ByteRange, ShardlineHash};
 
     use super::{
-        S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, is_temp_upload_key,
-        stream_payload_for_range, temp_key_for, validated_external_range,
-        normalize_prefix, verify_integrity, verify_file_length, temporary_upload_location,
-        chunk_hash,
+        S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, chunk_hash, is_temp_upload_key,
+        normalize_prefix, stream_payload_for_range, temp_key_for, temporary_upload_location,
+        validated_external_range, verify_file_length, verify_integrity,
     };
     use crate::{ObjectIntegrity, ObjectKey, PutOutcome};
 
@@ -1730,12 +1725,11 @@ mod tests {
 
     #[test]
     fn s3_store_with_full_credentials_accepts_custom_session_token() {
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_credentials(
-                Some("key".to_owned()),
-                Some("secret".to_owned()),
-                Some("token".to_owned()),
-            );
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
+            Some("key".to_owned()),
+            Some("secret".to_owned()),
+            Some("token".to_owned()),
+        );
         // Full credentials (key + secret + session token) should build successfully
         // without needing any external endpoint.
         let store = S3ObjectStore::new(config);
@@ -1868,10 +1862,7 @@ mod tests {
 
     #[test]
     fn normalize_prefix_preserves_inner_slashes() {
-        assert_eq!(
-            normalize_prefix("/a/b/c/"),
-            Some("a/b/c".to_owned())
-        );
+        assert_eq!(normalize_prefix("/a/b/c/"), Some("a/b/c".to_owned()));
     }
 
     // ── validate_config ───────────────────────────────────────────────────
@@ -1900,8 +1891,8 @@ mod tests {
 
     #[test]
     fn s3_config_bucket_accessor_with_prefix() {
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_key_prefix(Some("pfx"));
+        let config =
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_key_prefix(Some("pfx"));
         assert_eq!(config.key_prefix(), Some("pfx"));
     }
 
@@ -1915,12 +1906,11 @@ mod tests {
 
     #[test]
     fn s3_config_debug_redacts_credentials() {
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_credentials(
-                Some("access-key-123".to_owned()),
-                Some("secret-key-456".to_owned()),
-                Some("session-token-789".to_owned()),
-            );
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
+            Some("access-key-123".to_owned()),
+            Some("secret-key-456".to_owned()),
+            Some("session-token-789".to_owned()),
+        );
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("access-key-123"));
         assert!(!rendered.contains("secret-key-456"));
@@ -2031,10 +2021,7 @@ mod tests {
     #[test]
     fn s3_error_display_runtime_unavailable() {
         let err = S3ObjectStoreError::RuntimeUnavailable;
-        assert_eq!(
-            err.to_string(),
-            "s3 object store runtime is unavailable"
-        );
+        assert_eq!(err.to_string(), "s3 object store runtime is unavailable");
     }
 
     #[test]
@@ -2288,8 +2275,7 @@ mod tests {
             .put_multipart(&location)
             .await
             .expect("should create multipart upload");
-        let writer =
-            WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
+        let writer = WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
         let mut multipart = super::S3MultipartUploadWriter { writer };
 
         // Write some bytes
@@ -2315,8 +2301,7 @@ mod tests {
             .put_multipart(&location)
             .await
             .expect("should create multipart upload");
-        let writer =
-            WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
+        let writer = WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
         let multipart = super::S3MultipartUploadWriter { writer };
 
         // Abort immediately without writing anything
@@ -2336,8 +2321,7 @@ mod tests {
             .put_multipart(&location)
             .await
             .expect("should create multipart upload");
-        let writer =
-            WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
+        let writer = WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
         let mut multipart = super::S3MultipartUploadWriter { writer };
 
         // wait_for_capacity with 0 permits is valid when no parts are queued
@@ -2380,8 +2364,7 @@ mod tests {
 
     #[test]
     fn s3_config_with_key_prefix_none_is_noop() {
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_key_prefix(None);
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_key_prefix(None);
         assert_eq!(config.key_prefix(), None);
     }
 
@@ -2412,18 +2395,30 @@ mod tests {
 
     #[test]
     fn s3_store_rejects_incomplete_credentials_key_without_secret() {
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_credentials(Some("key".to_owned()), None, None);
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
+            Some("key".to_owned()),
+            None,
+            None,
+        );
         let store = S3ObjectStore::new(config);
-        assert!(matches!(store, Err(S3ObjectStoreError::IncompleteCredentials)));
+        assert!(matches!(
+            store,
+            Err(S3ObjectStoreError::IncompleteCredentials)
+        ));
     }
 
     #[test]
     fn s3_store_rejects_incomplete_credentials_secret_without_key() {
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_credentials(None, Some("secret".to_owned()), None);
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
+            None,
+            Some("secret".to_owned()),
+            None,
+        );
         let store = S3ObjectStore::new(config);
-        assert!(matches!(store, Err(S3ObjectStoreError::IncompleteCredentials)));
+        assert!(matches!(
+            store,
+            Err(S3ObjectStoreError::IncompleteCredentials)
+        ));
     }
 
     // ── MinIO-backed integration tests ───────────────────────────────────
@@ -2435,8 +2430,7 @@ mod tests {
         use shardline_test_support::S3RawConfig;
 
         use super::super::{
-            BeginMultipartUploadResult, S3ObjectStore, S3ObjectStoreConfig,
-            S3ObjectStoreError,
+            BeginMultipartUploadResult, S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
         };
         use crate::{
             DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix,
@@ -2538,17 +2532,27 @@ mod tests {
                 let key = ObjectKey::parse(&format!("ns/key{i:020}")).unwrap();
                 let body = b"data";
                 let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 4);
-                store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+                store
+                    .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+                    .unwrap();
             }
 
             // Full listing
-            let all = store.list_flat_namespace_page(&ns_prefix, None, 10).unwrap();
+            let all = store
+                .list_flat_namespace_page(&ns_prefix, None, 10)
+                .unwrap();
             assert_eq!(all.len(), 3, "should list all 3 objects");
 
             // Pagination with start_after
             let after_first = ObjectKey::parse("ns/key00000000000000000000").unwrap();
-            let page = store.list_flat_namespace_page(&ns_prefix, Some(&after_first), 10).unwrap();
-            assert_eq!(page.len(), 2, "should list remaining 2 objects after first key");
+            let page = store
+                .list_flat_namespace_page(&ns_prefix, Some(&after_first), 10)
+                .unwrap();
+            assert_eq!(
+                page.len(),
+                2,
+                "should list remaining 2 objects after first key"
+            );
 
             // Limit
             let limited = store.list_flat_namespace_page(&ns_prefix, None, 2).unwrap();
@@ -2569,7 +2573,9 @@ mod tests {
                 let key = ObjectKey::parse(&format!("vp/obj{i:010}")).unwrap();
                 let body = b"x";
                 let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 1);
-                store.put_if_absent(&key, ObjectBody::from_slice(body), &integrity).unwrap();
+                store
+                    .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+                    .unwrap();
             }
 
             let mut visited = Vec::new();
@@ -2635,7 +2641,9 @@ mod tests {
             assert!(result.is_ok());
 
             // Verify it's readable
-            let read = store.read_range(&key, ByteRange::new(0, body.len() as u64 - 1).unwrap()).unwrap();
+            let read = store
+                .read_range(&key, ByteRange::new(0, body.len() as u64 - 1).unwrap())
+                .unwrap();
             assert_eq!(read, body);
 
             // Second put is idempotent
@@ -2660,7 +2668,9 @@ mod tests {
             let result = store.put_file_if_absent(&key, tmp.path(), &integrity);
             assert!(result.is_ok());
 
-            let read = store.read_range(&key, ByteRange::new(0, body.len() as u64 - 1).unwrap()).unwrap();
+            let read = store
+                .read_range(&key, ByteRange::new(0, body.len() as u64 - 1).unwrap())
+                .unwrap();
             assert_eq!(read, body);
         }
 
@@ -2676,7 +2686,9 @@ mod tests {
 
             let body = b"copy test data";
             let integrity = ObjectIntegrity::new(super::super::chunk_hash(body), 14);
-            store.put_if_absent(&src, ObjectBody::from_slice(body), &integrity).unwrap();
+            store
+                .put_if_absent(&src, ObjectBody::from_slice(body), &integrity)
+                .unwrap();
 
             let copy = store.copy_object_if_absent(&src, &dst);
             assert!(matches!(copy, Ok(PutOutcome::Inserted)));
@@ -2763,7 +2775,10 @@ mod tests {
         if let Ok(loc) = location {
             // ObjectStorePath::parse may strip trailing slashes
             let path_str = loc.as_ref();
-            assert!(path_str == "tenant-x/sub" || path_str == "tenant-x/sub/", "unexpected path: {path_str}");
+            assert!(
+                path_str == "tenant-x/sub" || path_str == "tenant-x/sub/",
+                "unexpected path: {path_str}"
+            );
         }
     }
 
@@ -2792,7 +2807,8 @@ mod tests {
     #[test]
     fn validated_external_range_start_at_u64_max_rejected() {
         // Range starting at u64::MAX with length 1 would overflow
-        let range = ByteRange::new(u64::MAX, u64::MAX).expect("valid range with single byte at MAX");
+        let range =
+            ByteRange::new(u64::MAX, u64::MAX).expect("valid range with single byte at MAX");
         let result = validated_external_range(range);
         assert!(matches!(result, Err(S3ObjectStoreError::RangeOutOfBounds)));
     }
@@ -2805,7 +2821,10 @@ mod tests {
         let source = std::error::Error::source(&err);
         assert!(source.is_some());
         let source = source.unwrap();
-        assert_eq!(source.to_string(), ObjectPrefixError::UnsafePath.to_string());
+        assert_eq!(
+            source.to_string(),
+            ObjectPrefixError::UnsafePath.to_string()
+        );
     }
 
     #[test]
@@ -2898,18 +2917,30 @@ mod tests {
     #[test]
     fn s3_config_with_credentials_only_key() {
         // Only access_key_id without secret_access_key should fail
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_credentials(Some("key".to_owned()), None, None);
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
+            Some("key".to_owned()),
+            None,
+            None,
+        );
         let store = S3ObjectStore::new(config);
-        assert!(matches!(store, Err(S3ObjectStoreError::IncompleteCredentials)));
+        assert!(matches!(
+            store,
+            Err(S3ObjectStoreError::IncompleteCredentials)
+        ));
     }
 
     #[test]
     fn s3_config_with_credentials_only_secret() {
-        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
-            .with_credentials(None, Some("secret".to_owned()), None);
+        let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
+            None,
+            Some("secret".to_owned()),
+            None,
+        );
         let store = S3ObjectStore::new(config);
-        assert!(matches!(store, Err(S3ObjectStoreError::IncompleteCredentials)));
+        assert!(matches!(
+            store,
+            Err(S3ObjectStoreError::IncompleteCredentials)
+        ));
     }
 
     // ── S3ObjectStoreConfig Debug without endpoint ────────────────────────
@@ -2957,7 +2988,10 @@ mod tests {
         assert!(location.is_ok());
         if let Ok(loc) = location {
             let path = loc.as_ref();
-            assert!(path == "my-stuff" || path == "my-stuff/", "unexpected: {path}");
+            assert!(
+                path == "my-stuff" || path == "my-stuff/",
+                "unexpected: {path}"
+            );
         }
     }
 
@@ -3059,7 +3093,10 @@ mod tests {
         let key = ObjectKey::parse("test/key").unwrap();
         let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello"), 5);
         let result = super::existing_object_outcome(&store, &key, 10, b"hello", &integrity);
-        assert!(matches!(result, Err(S3ObjectStoreError::ExistingObjectConflict)));
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
     }
 
     #[test]
@@ -3096,6 +3133,9 @@ mod tests {
         // Length check passes (0 == 0) but hash check fails
         // (hash of "" != hash of "x") → IntegrityHashMismatch.
         let result = super::existing_object_outcome(&store, &key, 0, b"", &integrity);
-        assert!(matches!(result, Err(S3ObjectStoreError::IntegrityHashMismatch)));
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::IntegrityHashMismatch)
+        ));
     }
 }

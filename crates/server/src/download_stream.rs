@@ -463,7 +463,10 @@ mod tests {
         // range.end_inclusive = 10, total_length = 4 → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
-        assert!(matches!(result, Err(crate::ServerError::RangeNotSatisfiable)));
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::RangeNotSatisfiable)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -551,8 +554,14 @@ mod tests {
         tokio::fs::write(&path, content).await.unwrap();
 
         let store = crate::object_store::ServerObjectStore::Local(object_store);
-        let result = super::object_byte_stream(store.clone(), object_key.clone(), content.len() as u64).await;
-        assert!(result.is_ok(), "object_byte_stream failed: {:?}", result.err());
+        let result =
+            super::object_byte_stream(store.clone(), object_key.clone(), content.len() as u64)
+                .await;
+        assert!(
+            result.is_ok(),
+            "object_byte_stream failed: {:?}",
+            result.err()
+        );
         let mut stream = result.unwrap();
         let mut observed = Vec::new();
         while let Some(item) = stream.next().await {
@@ -673,7 +682,9 @@ mod tests {
             tokio::fs::create_dir_all(parent).await.unwrap();
         }
         // Write initial content
-        tokio::fs::write(&path, b"content-to-be-truncated").await.unwrap();
+        tokio::fs::write(&path, b"content-to-be-truncated")
+            .await
+            .unwrap();
 
         // We need to access the file after the stream is created and truncate it.
         // Use the before_read_hook to truncate after length validation passes.
@@ -827,7 +838,10 @@ mod tests {
         // Range end_inclusive (10) >= total_length (4) → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
-        assert!(matches!(result, Err(crate::ServerError::RangeNotSatisfiable)));
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::RangeNotSatisfiable)
+        ));
     }
 
     // ── object_byte_range_stream — range end equals total_length ─────────
@@ -846,7 +860,10 @@ mod tests {
         // range.end_inclusive() == total_length → >= check triggers RangeNotSatisfiable
         let range = ByteRange::new(0, 4).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
-        assert!(matches!(result, Err(crate::ServerError::RangeNotSatisfiable)));
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::RangeNotSatisfiable)
+        ));
     }
 
     // ── object_byte_stream — 404 via blackhole metadata check ────────────
@@ -995,7 +1012,8 @@ mod tests {
         let result = local_object_byte_range_stream(object_store, object_key, 1, range).await;
         assert!(result.is_ok());
         let mut stream = result.unwrap();
-        let observed: Vec<u8> = futures_util::StreamExt::collect::<Vec<_>>(&mut stream).await
+        let observed: Vec<u8> = futures_util::StreamExt::collect::<Vec<_>>(&mut stream)
+            .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()

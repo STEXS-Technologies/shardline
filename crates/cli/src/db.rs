@@ -47,7 +47,7 @@ mod tests {
         DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,
     };
 
-    use super::{run_db_migration, DbRuntimeError};
+    use super::{DbRuntimeError, run_db_migration};
 
     #[test]
     fn db_runtime_error_missing_url_message() {
@@ -196,7 +196,8 @@ mod tests {
         let result = run_db_migration(
             Some("postgres://localhost:1/shardline_test_invalid"),
             DatabaseMigrationCommand::Status,
-        ).await;
+        )
+        .await;
         // Should fail with a Migration error (trying to connect)
         assert!(result.is_err());
     }

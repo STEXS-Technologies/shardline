@@ -504,12 +504,7 @@ mod tests {
 
     #[test]
     fn repository_scope_accepts_missing_revision() {
-        let scope = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "owner",
-            "repo",
-            None,
-        );
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None);
         assert!(scope.is_ok());
         if let Ok(scope) = scope {
             assert_eq!(scope.revision(), None);
@@ -518,45 +513,25 @@ mod tests {
 
     #[test]
     fn repository_scope_rejects_empty_revision() {
-        let scope = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "owner",
-            "repo",
-            Some(""),
-        );
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some(""));
         assert_eq!(scope, Err(TokenClaimsError::EmptyRevision));
     }
 
     #[test]
     fn repository_scope_rejects_empty_name() {
-        let scope = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "owner",
-            "",
-            None,
-        );
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "", None);
         assert_eq!(scope, Err(TokenClaimsError::EmptyRepositoryName));
     }
 
     #[test]
     fn repository_scope_rejects_control_characters_in_owner() {
-        let scope = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "own\ner",
-            "repo",
-            None,
-        );
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "own\ner", "repo", None);
         assert_eq!(scope, Err(TokenClaimsError::ControlCharacter));
     }
 
     #[test]
     fn repository_scope_rejects_control_characters_in_name() {
-        let scope = RepositoryScope::new(
-            RepositoryProvider::GitHub,
-            "owner",
-            "rep\0o",
-            None,
-        );
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "rep\0o", None);
         assert_eq!(scope, Err(TokenClaimsError::ControlCharacter));
     }
 
@@ -820,8 +795,7 @@ mod tests {
         assert!(!msg.is_empty());
         assert!(msg.contains("json"));
 
-        let msg = TokenCodecError::InvalidHex(hex::FromHexError::InvalidStringLength)
-            .to_string();
+        let msg = TokenCodecError::InvalidHex(hex::FromHexError::InvalidStringLength).to_string();
         assert!(!msg.is_empty());
         assert!(msg.contains("hex") || !msg.is_empty());
     }
@@ -878,8 +852,8 @@ mod tests {
         let repository =
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
                 .unwrap();
-        let claims = TokenClaims::new("issuer", "subject", TokenScope::Write, repository, 100)
-            .unwrap();
+        let claims =
+            TokenClaims::new("issuer", "subject", TokenScope::Write, repository, 100).unwrap();
         assert_eq!(claims.issuer(), "issuer");
         assert_eq!(claims.subject(), "subject");
         assert_eq!(claims.scope(), TokenScope::Write);
@@ -962,7 +936,10 @@ mod tests {
     #[test]
     fn token_signer_verify_rejects_invalid_hex_payload() {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
-        let result = signer.verify_at("zzzz.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 100);
+        let result = signer.verify_at(
+            "zzzz.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            100,
+        );
         assert!(matches!(result, Err(TokenCodecError::InvalidHex(_))));
     }
 
@@ -974,9 +951,14 @@ mod tests {
             RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
                 .unwrap();
         let far_future = 2_000_000_000; // well past 2025
-        let claims =
-            TokenClaims::new("issuer", "subject", TokenScope::Read, repository, far_future)
-                .unwrap();
+        let claims = TokenClaims::new(
+            "issuer",
+            "subject",
+            TokenScope::Read,
+            repository,
+            far_future,
+        )
+        .unwrap();
         // verify_now should succeed since expiration is far in the future
         // (the current unix timestamp is around 1.7-1.8 billion as of 2025)
         let token = signer.sign(&claims).unwrap();
@@ -1010,8 +992,7 @@ mod tests {
 
     #[test]
     fn repository_scope_allows_missing_revision() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::Gitea, "owner", "repo", None).unwrap();
+        let scope = RepositoryScope::new(RepositoryProvider::Gitea, "owner", "repo", None).unwrap();
         assert_eq!(scope.revision(), None);
     }
 
@@ -1059,6 +1040,9 @@ mod tests {
         let claims_err = TokenClaimsError::ControlCharacter;
         let err = TokenCodecError::Claims(claims_err);
         let msg = err.to_string();
-        assert!(msg.contains("invalid"), "expected 'invalid' in Claims display, got: {msg}");
+        assert!(
+            msg.contains("invalid"),
+            "expected 'invalid' in Claims display, got: {msg}"
+        );
     }
 }

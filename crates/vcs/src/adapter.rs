@@ -582,7 +582,10 @@ mod tests {
     #[test]
     fn repository_visibility_variants_are_distinct() {
         assert_ne!(RepositoryVisibility::Public, RepositoryVisibility::Private);
-        assert_ne!(RepositoryVisibility::Private, RepositoryVisibility::Internal);
+        assert_ne!(
+            RepositoryVisibility::Private,
+            RepositoryVisibility::Internal
+        );
         assert_ne!(RepositoryVisibility::Internal, RepositoryVisibility::Public);
     }
 

@@ -146,9 +146,9 @@ pub(super) async fn handle_provider_webhook(
 mod tests {
     use std::sync::Arc;
 
+    use axum::body::Bytes;
     use axum::extract::{Path, State};
     use axum::http::HeaderMap;
-    use axum::body::Bytes;
 
     use super::XetTokenQuery;
 
@@ -225,7 +225,8 @@ mod tests {
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            ),
             transfer_limiter: crate::TransferLimiter::new(
                 std::num::NonZeroUsize::new(4096).unwrap(),
                 std::num::NonZeroUsize::new(16).unwrap(),
@@ -287,7 +288,8 @@ mod tests {
             backend,
             auth: None,
             provider_tokens: Some(service),
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            ),
             transfer_limiter: crate::TransferLimiter::new(
                 std::num::NonZeroUsize::new(4096).unwrap(),
                 std::num::NonZeroUsize::new(16).unwrap(),

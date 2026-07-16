@@ -1,8 +1,5 @@
 #![deny(unsafe_code)]
-#![allow(
-    clippy::missing_panics_doc,
-    clippy::let_underscore_must_use
-)]
+#![allow(clippy::missing_panics_doc, clippy::let_underscore_must_use)]
 #![cfg_attr(
     test,
     allow(
@@ -115,8 +112,8 @@ pub use database_migration::{
     DatabaseMigrationReport, DatabaseMigrationStatusEntry, apply_database_migrations,
     bundled_database_migrations, run_database_migration,
 };
-pub use error::{ObjectStoreError, ServerError};
 pub(crate) use error::{InvalidReconstructionResponseError, InvalidSerializedShardError};
+pub use error::{ObjectStoreError, ServerError};
 pub use fsck::{
     FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,
     LocalFsckIssueKind, LocalFsckReport, ProviderRepositoryStateTimestampField, run_fsck,

@@ -1237,9 +1237,7 @@ mod tests {
     use rusqlite::Connection;
     use std::os::unix::ffi::OsStrExt;
 
-    use super::super::{
-        collect_rows, normalize_local_root, record_not_found_error,
-    };
+    use super::super::{collect_rows, normalize_local_root, record_not_found_error};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
     // ── ensure_metadata_size_within_limit ─────────────────────────────────
@@ -1310,19 +1308,25 @@ mod tests {
     #[test]
     fn record_not_found_error_kind() {
         let err = record_not_found_error();
-        assert!(matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound));
+        assert!(
+            matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound)
+        );
     }
 
     #[test]
     fn invalid_metadata_path_error_kind() {
         let err = invalid_metadata_path_error();
-        assert!(matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData));
+        assert!(
+            matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData)
+        );
     }
 
     #[test]
     fn invalid_record_metadata_path_error_kind() {
         let err = invalid_record_metadata_path_error();
-        assert!(matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData));
+        assert!(
+            matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData)
+        );
     }
 
     // ── is_valid_local_table_name ─────────────────────────────────────────
@@ -1336,7 +1340,9 @@ mod tests {
         assert!(is_valid_local_table_name("shardline_quarantine_candidates"));
         assert!(is_valid_local_table_name("shardline_retention_holds"));
         assert!(is_valid_local_table_name("shardline_webhook_deliveries"));
-        assert!(is_valid_local_table_name("shardline_provider_repository_states"));
+        assert!(is_valid_local_table_name(
+            "shardline_provider_repository_states"
+        ));
     }
 
     #[test]
@@ -1415,7 +1421,9 @@ mod tests {
              INSERT INTO t VALUES ('a'), ('b');",
         )
         .unwrap();
-        let mut stmt = conn.prepare("SELECT v FROM t WHERE v = 'nonexistent'").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT v FROM t WHERE v = 'nonexistent'")
+            .unwrap();
         let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
         let collected: Vec<String> = collect_rows(rows).unwrap();
         assert!(collected.is_empty());
@@ -1533,7 +1541,11 @@ mod tests {
     fn legacy_quarantine_object_key_produces_two_char_prefix() {
         let hash = "aabbccdd";
         let ok = legacy_quarantine_object_key(hash).unwrap();
-        assert!(ok.as_str().starts_with("aa/"), "prefix should be first two chars, got: {}", ok.as_str());
+        assert!(
+            ok.as_str().starts_with("aa/"),
+            "prefix should be first two chars, got: {}",
+            ok.as_str()
+        );
         assert!(ok.as_str().contains(hash), "hash should be in key");
     }
 
@@ -1596,8 +1608,7 @@ mod tests {
     fn local_record_locator_version_has_content_hash() {
         let record = sample_record(None);
         let ch = record.content_hash.clone();
-        let locator =
-            local_record_locator(LocalRecordKind::Version, &record, Some(ch.clone()));
+        let locator = local_record_locator(LocalRecordKind::Version, &record, Some(ch.clone()));
         assert_eq!(locator.kind, LocalRecordKind::Version);
         assert_eq!(locator.content_hash, Some(ch));
     }

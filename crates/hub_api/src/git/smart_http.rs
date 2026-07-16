@@ -639,11 +639,7 @@ fn parse_receive_pack_request(body: &[u8]) -> (Vec<(String, String, String)>, Ve
 
         let parts: Vec<&str> = s.split_whitespace().collect();
         if let [first, second, third, ..] = parts.as_slice() {
-            updates.push((
-                first.to_string(),
-                second.to_string(),
-                third.to_string(),
-            ));
+            updates.push((first.to_string(), second.to_string(), third.to_string()));
         }
     }
 
@@ -810,19 +806,20 @@ pub fn parse_pack_data(data: &[u8]) -> Result<Vec<GitObject>, PackError> {
                     Err(_) => break,
                 }
             }
-                7 => {
-                    // REF_DELTA — resolve against a base object by SHA.
-                    if pos.wrapping_add(20) > data.len() {
-                        return Err(PackError::InvalidDelta);
-                    }
-                    let mut base_sha = [0u8; 20];
-                    // SAFETY: pos.wrapping_add(20) > data.len() check above guarantees range is valid
-                    base_sha.copy_from_slice(
-                        data.get(pos..pos.wrapping_add(20)).ok_or(PackError::InvalidDelta)?,
-                    );
-                    pos = pos.wrapping_add(20);
-                    // SAFETY: pos may equal data.len() (empty slice is valid for decompress_zlib)
-                    let remaining = data.get(pos..).unwrap_or(&[]);
+            7 => {
+                // REF_DELTA — resolve against a base object by SHA.
+                if pos.wrapping_add(20) > data.len() {
+                    return Err(PackError::InvalidDelta);
+                }
+                let mut base_sha = [0u8; 20];
+                // SAFETY: pos.wrapping_add(20) > data.len() check above guarantees range is valid
+                base_sha.copy_from_slice(
+                    data.get(pos..pos.wrapping_add(20))
+                        .ok_or(PackError::InvalidDelta)?,
+                );
+                pos = pos.wrapping_add(20);
+                // SAFETY: pos may equal data.len() (empty slice is valid for decompress_zlib)
+                let remaining = data.get(pos..).unwrap_or(&[]);
                 match decompress_zlib(remaining) {
                     Ok((delta_data, bytes_used)) => {
                         pos = pos.wrapping_add(bytes_used);
@@ -1115,8 +1112,8 @@ fn walk_git_tree_inner(
             .get(pos..)
             .and_then(|s| s.get(..space_pos))
             .ok_or("invalid tree entry: mode range out of bounds")?;
-        let mode_str = std::str::from_utf8(mode_slice)
-            .map_err(|e| format!("invalid mode encoding: {e}"))?;
+        let mode_str =
+            std::str::from_utf8(mode_slice).map_err(|e| format!("invalid mode encoding: {e}"))?;
 
         // Parse name (until null byte).
         // SAFETY: pos + space_pos < data.len() (proven above), so name_start <= data.len()
@@ -1125,7 +1122,9 @@ fn walk_git_tree_inner(
             .and_then(|p| p.checked_add(1))
             .ok_or("tree arithmetic overflow")?;
         // SAFETY: name_start <= data.len() so the slice is valid (empty if equal)
-        let name_tail = data.get(name_start..).ok_or("name position out of bounds")?;
+        let name_tail = data
+            .get(name_start..)
+            .ok_or("name position out of bounds")?;
         let null_pos = name_tail
             .iter()
             .position(|&b| b == 0)
@@ -1135,8 +1134,8 @@ fn walk_git_tree_inner(
             .get(name_start..)
             .and_then(|s| s.get(..null_pos))
             .ok_or("invalid tree entry: name range out of bounds")?;
-        let name = std::str::from_utf8(name_slice)
-            .map_err(|e| format!("invalid name encoding: {e}"))?;
+        let name =
+            std::str::from_utf8(name_slice).map_err(|e| format!("invalid name encoding: {e}"))?;
 
         // Parse SHA (20 bytes after null).
         // SAFETY: name_start + null_pos < data.len() (proven above), so sha_start <= data.len()
@@ -1145,7 +1144,9 @@ fn walk_git_tree_inner(
             .and_then(|p| p.checked_add(1))
             .ok_or("tree arithmetic overflow")?;
         // SAFETY: sha_start + 20 <= data.len() checked below with checked_add
-        let sha_end = sha_start.checked_add(20).ok_or("tree arithmetic overflow")?;
+        let sha_end = sha_start
+            .checked_add(20)
+            .ok_or("tree arithmetic overflow")?;
         if sha_end > data.len() {
             return Err("invalid tree entry: truncated SHA".to_owned());
         }
@@ -2013,13 +2014,11 @@ mod tests {
 
     #[test]
     fn build_report_response_unpack_failed_and_ng_refs() {
-        let results = vec![
-            (
-                "refs/heads/main".to_owned(),
-                false,
-                Some("unpack failed".to_owned()),
-            ),
-        ];
+        let results = vec![(
+            "refs/heads/main".to_owned(),
+            false,
+            Some("unpack failed".to_owned()),
+        )];
         let response = build_report_response(&results, false).unwrap();
         let body = body_string(response);
         assert!(body.contains("unpack failed"));
@@ -2029,11 +2028,7 @@ mod tests {
 
     #[test]
     fn build_report_response_ng_with_default_message() {
-        let results = vec![(
-            "refs/heads/bad".to_owned(),
-            false,
-            None,
-        )];
+        let results = vec![("refs/heads/bad".to_owned(), false, None)];
         let response = build_report_response(&results, false).unwrap();
         let body = body_string(response);
         assert!(body.contains("ng refs/heads/bad failed"));
@@ -2044,7 +2039,10 @@ mod tests {
         let results: Vec<(String, bool, Option<String>)> = vec![];
         let response = build_report_response(&results, true).unwrap();
         let body = body_string(response);
-        assert!(body.ends_with("0000"), "response should end with flush packet");
+        assert!(
+            body.ends_with("0000"),
+            "response should end with flush packet"
+        );
     }
 
     // --- parse_receive_pack_request tests ---
@@ -2079,7 +2077,10 @@ mod tests {
         assert!(updates.is_empty());
         // No flush packet found, so pack_start remains 0.
         // pack_start (0) < body.len() (10) → true, so pack_data = body[0..] (the full body)
-        assert!(!pack_data.is_empty(), "pack_data should be the full body when no flush is present");
+        assert!(
+            !pack_data.is_empty(),
+            "pack_data should be the full body when no flush is present"
+        );
     }
 
     #[test]
@@ -2224,14 +2225,26 @@ mod tests {
         let tree = super::super::pack::create_tree_object(&tree_entries);
         let tree_sha = tree.sha1();
         let commit = super::super::pack::create_commit_object(
-            &tree_sha, None, "Test <test@test.com>", "Initial",
+            &tree_sha,
+            None,
+            "Test <test@test.com>",
+            "Initial",
         );
         let pack = super::super::pack::generate_pack(&[blob, tree, commit]).unwrap();
         let objects = parse_pack_data(&pack).unwrap();
         assert_eq!(objects.len(), 3);
-        let blob_count = objects.iter().filter(|o| o.object_type == ObjectType::Blob).count();
-        let tree_count = objects.iter().filter(|o| o.object_type == ObjectType::Tree).count();
-        let commit_count = objects.iter().filter(|o| o.object_type == ObjectType::Commit).count();
+        let blob_count = objects
+            .iter()
+            .filter(|o| o.object_type == ObjectType::Blob)
+            .count();
+        let tree_count = objects
+            .iter()
+            .filter(|o| o.object_type == ObjectType::Tree)
+            .count();
+        let commit_count = objects
+            .iter()
+            .filter(|o| o.object_type == ObjectType::Commit)
+            .count();
         assert_eq!(blob_count, 1);
         assert_eq!(tree_count, 1);
         assert_eq!(commit_count, 1);
@@ -2274,7 +2287,10 @@ mod tests {
         // Valid zlib data
         data.extend_from_slice(&compressed);
         let result = parse_pack_data(&data);
-        assert!(result.is_err(), "expected error for REF_DELTA with missing base");
+        assert!(
+            result.is_err(),
+            "expected error for REF_DELTA with missing base"
+        );
     }
 
     #[test]
@@ -2295,7 +2311,10 @@ mod tests {
         // The parser may either return empty (if it breaks early) or return an error
         assert!(result.is_ok() || matches!(result, Err(PackError::ShiftOverflow)));
         if let Ok(objects) = result {
-            assert!(objects.is_empty(), "expected empty objects on shift overflow");
+            assert!(
+                objects.is_empty(),
+                "expected empty objects on shift overflow"
+            );
         }
     }
 
@@ -2503,8 +2522,10 @@ mod tests {
 
     #[test]
     fn authorize_read_with_auth_rejects_missing_token() {
-        use shardline_server_core::{AuthProvider, AuthError};
-        use shardline_protocol::{TokenClaims, RepositoryScope, RepositoryProvider, TokenScope as TS};
+        use shardline_protocol::{
+            RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS,
+        };
+        use shardline_server_core::{AuthError, AuthProvider};
 
         let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
         let _claims = TokenClaims::new("iss", "sub", TS::Read, repo, u64::MAX).unwrap();
@@ -2549,9 +2570,14 @@ mod tests {
             .await
             .expect("read body");
         let body = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body.contains("capabilities"), "response should contain capabilities: {body}");
-        assert!(body.contains("0000000000000000000000000000000000000000"),
-            "response should contain zero SHA: {body}");
+        assert!(
+            body.contains("capabilities"),
+            "response should contain capabilities: {body}"
+        );
+        assert!(
+            body.contains("0000000000000000000000000000000000000000"),
+            "response should contain zero SHA: {body}"
+        );
     }
 
     // --- parse_pack_data with OFS_DELTA ---
@@ -2630,7 +2656,8 @@ mod tests {
         assert_eq!(objects.len(), 2, "should parse both objects");
         assert_eq!(objects[0].object_type, ObjectType::Blob);
         assert_eq!(objects[0].data, base_content);
-        assert_eq!(objects[1].data, target_content,
+        assert_eq!(
+            objects[1].data, target_content,
             "OFS_DELTA should resolve to produce the target content"
         );
     }

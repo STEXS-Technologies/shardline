@@ -332,11 +332,9 @@ mod tests {
     use shardline_storage::{ObjectKey, ObjectPrefix};
 
     use super::{
-        read_full_object, read_open_local_object_append,
-        reconstruct_chunk_file_bytes, reconstruct_file_record_bytes,
-        reconstruct_local_file_bytes, set_before_local_object_read_hook,
-
-        visit_object_prefix,
+        read_full_object, read_open_local_object_append, reconstruct_chunk_file_bytes,
+        reconstruct_file_record_bytes, reconstruct_local_file_bytes,
+        set_before_local_object_read_hook, visit_object_prefix,
     };
     use crate::ServerError;
     use crate::chunk_store::chunk_object_key;
@@ -467,7 +465,9 @@ mod tests {
         let result = reconstruct_local_file_bytes(&store, &chunks, 99);
         assert!(matches!(
             result,
-            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -501,10 +501,15 @@ mod tests {
         let file = File::open(&path).unwrap();
         let mut output = Vec::new();
         let result = read_open_local_object_append(&path, file, 4, &mut output);
-        assert!(matches!(
-            result,
-            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
-        ), "expected StoredLengthMismatch for trailing bytes, got {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(ServerError::ObjectStore(
+                    ObjectStoreError::StoredLengthMismatch
+                ))
+            ),
+            "expected StoredLengthMismatch for trailing bytes, got {result:?}"
+        );
     }
 
     #[test]
@@ -517,7 +522,9 @@ mod tests {
         let result = read_open_local_object_append(&path, file, 5, &mut output);
         assert!(matches!(
             result,
-            Err(ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -742,10 +749,7 @@ mod tests {
     fn object_store_from_config_local_adapter_returns_local_store() {
         let tmp = tempfile::tempdir().unwrap();
         let config = crate::ServerConfig::new(
-            std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                8080,
-            ),
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
             std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
@@ -759,10 +763,7 @@ mod tests {
     fn object_store_from_config_s3_without_config_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         let config = crate::ServerConfig::new(
-            std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                8080,
-            ),
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
             std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
@@ -785,9 +786,7 @@ mod tests {
             shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch.into();
         assert!(matches!(
             err,
-            crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch
-            )
+            crate::ServerError::ObjectStore(crate::error::ObjectStoreError::StoredLengthMismatch)
         ));
     }
 
@@ -798,9 +797,7 @@ mod tests {
             shardline_server_core::ServerObjectStoreError::Local(io_err.into()).into();
         assert!(matches!(
             err,
-            crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::Local(_)
-            )
+            crate::ServerError::ObjectStore(crate::error::ObjectStoreError::Local(_))
         ));
     }
 
@@ -830,7 +827,9 @@ mod tests {
         let result = super::read_open_local_object(&path, file, 5);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -845,7 +844,9 @@ mod tests {
         let result = super::read_open_local_object(&path, file, 10);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -871,7 +872,9 @@ mod tests {
         let result = super::validate_local_object_length(&file, 10);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -939,7 +942,8 @@ mod tests {
         visit_object_prefix(&store, &prefix, |_meta| {
             count += 1;
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -953,10 +957,7 @@ mod tests {
             "us-east-1".to_owned(),
         );
         let config = crate::ServerConfig::new(
-            std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                8080,
-            ),
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
             std::num::NonZeroUsize::new(65536).unwrap_or(std::num::NonZeroUsize::MIN),
@@ -983,7 +984,9 @@ mod tests {
         let result = read_full_object(&store, &key, 100);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -1028,7 +1031,9 @@ mod tests {
         let result = read_open_local_object_append(&path, file, 100, &mut output);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -1074,7 +1079,9 @@ mod tests {
         let result = reconstruct_chunk_file_bytes(&store, &chunks, 99);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -1125,7 +1132,9 @@ mod tests {
         let result = read_open_local_object_append(&path, file, 4, &mut output);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -1165,7 +1174,9 @@ mod tests {
         let result = read_full_object(&store, &key, 10);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch))
+            Err(crate::ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
+            ))
         ));
     }
 
@@ -1215,9 +1226,8 @@ mod tests {
     #[test]
     fn server_object_store_error_s3_converts() {
         use shardline_storage::S3ObjectStoreError;
-        let s3_err = shardline_server_core::ServerObjectStoreError::S3(
-            S3ObjectStoreError::EmptyBucket,
-        );
+        let s3_err =
+            shardline_server_core::ServerObjectStoreError::S3(S3ObjectStoreError::EmptyBucket);
         let err: crate::ServerError = s3_err.into();
         assert!(matches!(
             err,
@@ -1340,12 +1350,8 @@ mod tests {
 
         // Sanity: normal read should succeed
         let mut output = Vec::new();
-        let result = crate::object_store::read_open_local_object_append(
-            &path,
-            file,
-            13,
-            &mut output,
-        );
+        let result =
+            crate::object_store::read_open_local_object_append(&path, file, 13, &mut output);
         assert!(result.is_ok());
         assert_eq!(output, b"exact-content");
     }

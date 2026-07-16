@@ -42,11 +42,26 @@ mod tests {
 
     #[test]
     fn provider_kind_repository_provider_maps_correctly() {
-        assert_eq!(ProviderKind::GitHub.repository_provider(), RepositoryProvider::GitHub);
-        assert_eq!(ProviderKind::Gitea.repository_provider(), RepositoryProvider::Gitea);
-        assert_eq!(ProviderKind::GitLab.repository_provider(), RepositoryProvider::GitLab);
-        assert_eq!(ProviderKind::Codeberg.repository_provider(), RepositoryProvider::Codeberg);
-        assert_eq!(ProviderKind::Generic.repository_provider(), RepositoryProvider::Generic);
+        assert_eq!(
+            ProviderKind::GitHub.repository_provider(),
+            RepositoryProvider::GitHub
+        );
+        assert_eq!(
+            ProviderKind::Gitea.repository_provider(),
+            RepositoryProvider::Gitea
+        );
+        assert_eq!(
+            ProviderKind::GitLab.repository_provider(),
+            RepositoryProvider::GitLab
+        );
+        assert_eq!(
+            ProviderKind::Codeberg.repository_provider(),
+            RepositoryProvider::Codeberg
+        );
+        assert_eq!(
+            ProviderKind::Generic.repository_provider(),
+            RepositoryProvider::Generic
+        );
     }
 
     #[test]

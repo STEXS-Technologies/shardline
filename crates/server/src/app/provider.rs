@@ -369,17 +369,17 @@ mod provider_tests {
     use shardline_vcs::{BuiltInProviderError, ProviderKind};
 
     use super::*;
+    use crate::app::{
+        MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
+    };
     use crate::{
-        ServerError, ServerConfig, ServerBackend,
+        ServerBackend, ServerConfig, ServerError,
         app::ProtocolMetrics,
         config::AuthProviderKind,
         provider::ProviderServiceError,
         provider_events::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind},
         reconstruction_cache::ReconstructionCacheService,
         transfer_limiter::TransferLimiter,
-    };
-    use crate::app::{
-        MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
     };
 
     #[test]
@@ -450,8 +450,8 @@ mod provider_tests {
             RepositoryProvider::GitHub,
             "org".to_owned(),
             "repo".to_owned(),
-            Some(10),  // access_changed_at
-            Some(20),  // revision_pushed_at
+            Some(10), // access_changed_at
+            Some(20), // revision_pushed_at
             None,
         );
         assert_eq!(latest_lifecycle_signal_at(&state), Some(20));
@@ -568,10 +568,7 @@ mod provider_tests {
     fn map_provider_issue_error_invalid_webhook_payload() {
         let built_in = BuiltInProviderError::InvalidWebhookPayload;
         let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
-        assert!(matches!(
-            result,
-            ServerError::InvalidProviderWebhookPayload
-        ));
+        assert!(matches!(result, ServerError::InvalidProviderWebhookPayload));
     }
 
     #[test]
@@ -730,10 +727,7 @@ mod provider_tests {
     #[test]
     fn extract_provider_subject_header_whitespace_only_is_skipped() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-shardline-provider-subject",
-            "   ".parse().unwrap(),
-        );
+        headers.insert("x-shardline-provider-subject", "   ".parse().unwrap());
         // No authorization header — should fail with MissingProviderSubject
         let result = extract_provider_subject(&headers, None);
         assert!(matches!(result, Err(ServerError::MissingProviderSubject)));
@@ -762,7 +756,10 @@ mod provider_tests {
             format!("Basic {encoded}").parse().unwrap(),
         );
         let result = extract_provider_subject(&headers, None);
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
@@ -793,7 +790,10 @@ mod provider_tests {
             axum::http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
         );
         let result = extract_provider_subject(&headers, None);
-        assert!(matches!(result, Err(ServerError::InvalidProviderTokenRequest)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidProviderTokenRequest)
+        ));
     }
 
     #[test]
@@ -816,7 +816,10 @@ mod provider_tests {
             "Basic not-valid-base64!!".parse().unwrap(),
         );
         let result = extract_provider_subject(&headers, None);
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
@@ -828,7 +831,10 @@ mod provider_tests {
             format!("Basic {large}").parse().unwrap(),
         );
         let result = extract_provider_subject(&headers, None);
-        assert!(matches!(result, Err(ServerError::InvalidAuthorizationHeader)));
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
     }
 
     #[test]
@@ -888,11 +894,10 @@ mod provider_tests {
 
     #[test]
     fn map_provider_issue_error_config_too_large() {
-        let result =
-            map_provider_issue_error(ProviderServiceError::ConfigTooLarge {
-                observed_bytes: 999,
-                maximum_bytes: 100,
-            });
+        let result = map_provider_issue_error(ProviderServiceError::ConfigTooLarge {
+            observed_bytes: 999,
+            maximum_bytes: 100,
+        });
         assert!(matches!(result, ServerError::Provider(_)));
     }
 
@@ -945,20 +950,14 @@ mod provider_tests {
     fn map_provider_issue_error_builtin_invalid_repository_payload() {
         let built_in = BuiltInProviderError::InvalidRepositoryPayload;
         let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
-        assert!(matches!(
-            result,
-            ServerError::InvalidProviderWebhookPayload
-        ));
+        assert!(matches!(result, ServerError::InvalidProviderWebhookPayload));
     }
 
     #[test]
     fn map_provider_issue_error_builtin_invalid_revision_payload() {
         let built_in = BuiltInProviderError::InvalidRevisionPayload;
         let result = map_provider_issue_error(ProviderServiceError::BuiltIn(built_in));
-        assert!(matches!(
-            result,
-            ServerError::InvalidProviderWebhookPayload
-        ));
+        assert!(matches!(result, ServerError::InvalidProviderWebhookPayload));
     }
 
     // -----------------------------------------------------------------------
@@ -978,10 +977,7 @@ mod provider_tests {
         let reconciled = reconciled_provider_repository_state(&state, 1000);
         // All three reconciliation timestamps should be None since there are
         // no signals and no prior reconciled values.
-        assert_eq!(
-            reconciled,
-            state.with_reconciliation(None, None, None)
-        );
+        assert_eq!(reconciled, state.with_reconciliation(None, None, None));
     }
 
     #[test]
@@ -990,8 +986,8 @@ mod provider_tests {
             RepositoryProvider::GitHub,
             "org".to_owned(),
             "repo".to_owned(),
-            Some(10),  // access_changed_at
-            Some(50),  // revision_pushed_at
+            Some(10), // access_changed_at
+            Some(50), // revision_pushed_at
             None,
         );
         // last_access_changed_at=10 > last_authorization_rechecked_at=None → now
@@ -1016,15 +1012,18 @@ mod provider_tests {
             RepositoryProvider::GitHub,
             "org".to_owned(),
             "repo".to_owned(),
-            Some(10),  // access_changed_at
-            Some(5),   // revision_pushed_at
+            Some(10), // access_changed_at
+            Some(5),  // revision_pushed_at
             None,
         );
         // Use with_reconciliation to set prior reconciled values that are
         // already after the signal.
         let state = state.with_reconciliation(Some(20), Some(15), Some(25));
         let reconciled = reconciled_provider_repository_state(&state, 1000);
-        assert_eq!(reconciled.last_cache_invalidated_at_unix_seconds(), Some(20));
+        assert_eq!(
+            reconciled.last_cache_invalidated_at_unix_seconds(),
+            Some(20)
+        );
         assert_eq!(
             reconciled.last_authorization_rechecked_at_unix_seconds(),
             Some(15)
@@ -1138,10 +1137,7 @@ mod provider_tests {
             None,
         )
         .with_reconciliation(Some(200), Some(200), Some(200));
-        store
-            .upsert_provider_repository_state(&seed)
-            .await
-            .unwrap();
+        store.upsert_provider_repository_state(&seed).await.unwrap();
 
         // Call reconcile — since the reconciled values already exceed the
         // signals, they should match existing and return early (no-op).
@@ -1165,10 +1161,7 @@ mod provider_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            after.last_cache_invalidated_at_unix_seconds(),
-            Some(200)
-        );
+        assert_eq!(after.last_cache_invalidated_at_unix_seconds(), Some(200));
         assert_eq!(
             after.last_authorization_rechecked_at_unix_seconds(),
             Some(200)
@@ -1196,10 +1189,7 @@ mod provider_tests {
         )
         .with_reconciliation(Some(200), Some(50), Some(200));
 
-        store
-            .upsert_provider_repository_state(&seed)
-            .await
-            .unwrap();
+        store.upsert_provider_repository_state(&seed).await.unwrap();
 
         let issued = ProviderTokenIssueResponse {
             token: "tok".to_owned(),

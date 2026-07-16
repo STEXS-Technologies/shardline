@@ -484,17 +484,15 @@ pub(crate) const fn classify_webhook_delivery_repair_action(
 mod tests {
     use shardline_index::{FileChunkRecord, FileRecord};
 
-    use crate::{
-        ServerFrontend, object_store::ServerObjectStore,
-    };
+    use crate::{ServerFrontend, object_store::ServerObjectStore};
 
     use super::{
-        LifecycleRepairOptions, LifecycleRepairReport, QuarantineRepairAction, RepairReachability,
-        RetentionHoldRepairAction, WebhookDeliveryRepairAction, classify_quarantine_repair_action,
-        classify_retention_hold_repair_action, classify_webhook_delivery_repair_action,
-        collect_record_object_references, collect_referenced_object_keys,
-        run_lifecycle_repair_with_stores_at_time, DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS,
-        WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS,
+        DEFAULT_WEBHOOK_DELIVERY_RETENTION_SECONDS, LifecycleRepairOptions, LifecycleRepairReport,
+        QuarantineRepairAction, RepairReachability, RetentionHoldRepairAction,
+        WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS, WebhookDeliveryRepairAction,
+        classify_quarantine_repair_action, classify_retention_hold_repair_action,
+        classify_webhook_delivery_repair_action, collect_record_object_references,
+        collect_referenced_object_keys, run_lifecycle_repair_with_stores_at_time,
     };
 
     // ── classify_quarantine_repair_action ──────────────────────────────────
@@ -730,10 +728,7 @@ mod tests {
 
     #[test]
     fn quarantine_repair_action_debug_format() {
-        assert_eq!(
-            format!("{:?}", QuarantineRepairAction::Keep),
-            "Keep"
-        );
+        assert_eq!(format!("{:?}", QuarantineRepairAction::Keep), "Keep");
         assert_eq!(
             format!("{:?}", QuarantineRepairAction::DeleteMissing),
             "DeleteMissing"
@@ -750,10 +745,7 @@ mod tests {
 
     #[test]
     fn retention_hold_repair_action_debug_format() {
-        assert_eq!(
-            format!("{:?}", RetentionHoldRepairAction::Keep),
-            "Keep"
-        );
+        assert_eq!(format!("{:?}", RetentionHoldRepairAction::Keep), "Keep");
         assert_eq!(
             format!("{:?}", RetentionHoldRepairAction::DeleteExpired),
             "DeleteExpired"
@@ -766,10 +758,7 @@ mod tests {
 
     #[test]
     fn webhook_delivery_repair_action_debug_format() {
-        assert_eq!(
-            format!("{:?}", WebhookDeliveryRepairAction::Keep),
-            "Keep"
-        );
+        assert_eq!(format!("{:?}", WebhookDeliveryRepairAction::Keep), "Keep");
         assert_eq!(
             format!("{:?}", WebhookDeliveryRepairAction::DeleteStale),
             "DeleteStale"
@@ -937,10 +926,14 @@ mod tests {
         assert!(result.is_ok());
 
         // For StoredChunks: referenced_object_keys should contain the chunk key
-        let expected_chunk_key =
-            crate::chunk_store::chunk_object_key(&hash).unwrap().as_str().to_owned();
+        let expected_chunk_key = crate::chunk_store::chunk_object_key(&hash)
+            .unwrap()
+            .as_str()
+            .to_owned();
         assert!(
-            reachability.referenced_object_keys.contains(&expected_chunk_key),
+            reachability
+                .referenced_object_keys
+                .contains(&expected_chunk_key),
             "expected chunk key {expected_chunk_key} in referenced keys"
         );
 
@@ -975,9 +968,15 @@ mod tests {
         assert!(result.is_ok());
 
         // Chunk key should still be referenced (doesn't depend on frontend)
-        let expected_chunk_key =
-            crate::chunk_store::chunk_object_key(&hash).unwrap().as_str().to_owned();
-        assert!(reachability.referenced_object_keys.contains(&expected_chunk_key));
+        let expected_chunk_key = crate::chunk_store::chunk_object_key(&hash)
+            .unwrap()
+            .as_str()
+            .to_owned();
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains(&expected_chunk_key)
+        );
 
         // live_dedupe_chunk_hashes populated
         assert!(reachability.live_dedupe_chunk_hashes.contains(&hash));
@@ -1158,7 +1157,9 @@ mod tests {
                 .as_str()
                 .to_owned();
         assert!(
-            reachability.referenced_object_keys.contains(&expected_term_key),
+            reachability
+                .referenced_object_keys
+                .contains(&expected_term_key),
             "expected term key {expected_term_key} in referenced keys"
         );
 
@@ -1198,7 +1199,10 @@ mod tests {
         // scanned_records at u64::MAX should overflow on increment
         let frontends = [ServerFrontend::Xet];
         let store = ServerObjectStore::blackhole();
-        let mut reachability = RepairReachability { scanned_records: u64::MAX, ..Default::default() };
+        let mut reachability = RepairReachability {
+            scanned_records: u64::MAX,
+            ..Default::default()
+        };
 
         let hash = valid_hash();
         let chunk = FileChunkRecord {
@@ -1221,19 +1225,22 @@ mod tests {
     // ── Integration-style tests with real stores ──────────────────────────
 
     use shardline_index::{
-        DedupeShardMapping, LifecycleStore, LocalIndexStore, LocalRecordStore, RecordMutation,
-        RetentionHold, QuarantineCandidate, WebhookDelivery,
+        DedupeShardMapping, LifecycleStore, LocalIndexStore, LocalRecordStore, QuarantineCandidate,
+        RecordMutation, RetentionHold, WebhookDelivery,
     };
     use shardline_protocol::{RepositoryProvider, ShardlineHash};
     use shardline_storage::ObjectKey;
 
     /// Helper: create temporary stores for testing.
-    fn make_test_stores(
-    ) -> (tempfile::TempDir, LocalRecordStore, LocalIndexStore, ServerObjectStore) {
+    fn make_test_stores() -> (
+        tempfile::TempDir,
+        LocalRecordStore,
+        LocalIndexStore,
+        ServerObjectStore,
+    ) {
         let root = tempfile::tempdir().expect("temp dir");
         let index_store = LocalIndexStore::new(root.path().to_path_buf()).expect("index store");
-        let record_store =
-            LocalRecordStore::new(root.path().to_path_buf()).expect("record store");
+        let record_store = LocalRecordStore::new(root.path().to_path_buf()).expect("record store");
         let object_store =
             ServerObjectStore::local(root.path().join("chunks")).expect("object store");
         (root, record_store, index_store, object_store)
@@ -1310,8 +1317,7 @@ mod tests {
 
         let key = ObjectKey::parse("test/retention-keep").unwrap();
         seed_object(&object_store, &key);
-        let hold =
-            RetentionHold::new(key.clone(), "test hold".to_owned(), 0, Some(2000)).unwrap();
+        let hold = RetentionHold::new(key.clone(), "test hold".to_owned(), 0, Some(2000)).unwrap();
         index_store.upsert_retention_hold(&hold).unwrap();
 
         let report = run_lifecycle_repair_with_stores_at_time(
@@ -1433,13 +1439,8 @@ mod tests {
         // Retention hold: active (not expired), object exists → Keep (active)
         let hold_key = ObjectKey::parse("test/held-object").unwrap();
         seed_object(&object_store, &hold_key);
-        let hold = RetentionHold::new(
-            hold_key.clone(),
-            "active hold".to_owned(),
-            0,
-            Some(2000),
-        )
-        .unwrap();
+        let hold =
+            RetentionHold::new(hold_key.clone(), "active hold".to_owned(), 0, Some(2000)).unwrap();
         index_store.upsert_retention_hold(&hold).unwrap();
 
         // Quarantine candidate for the same key: object exists, NOT reachable
@@ -1782,9 +1783,11 @@ mod tests {
         .expect("collect should succeed");
 
         assert_eq!(reachability.scanned_records, 1);
-        assert!(reachability
-            .referenced_object_keys
-            .contains(chunk_key.as_str()));
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains(chunk_key.as_str())
+        );
         assert!(reachability.live_dedupe_chunk_hashes.contains(&hash));
     }
 
@@ -1810,9 +1813,11 @@ mod tests {
         .expect("collect should succeed");
 
         assert_eq!(reachability.scanned_records, 1);
-        assert!(reachability
-            .referenced_object_keys
-            .contains(chunk_key.as_str()));
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains(chunk_key.as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1845,13 +1850,17 @@ mod tests {
         .expect("collect should succeed");
 
         // The chunk key from the record should be referenced
-        assert!(reachability
-            .referenced_object_keys
-            .contains(chunk_key.as_str()));
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains(chunk_key.as_str())
+        );
         // The shard key from the dedupe mapping should also be referenced
-        assert!(reachability
-            .referenced_object_keys
-            .contains(shard_key.as_str()));
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains(shard_key.as_str())
+        );
         assert_eq!(reachability.referenced_object_keys.len(), 2);
     }
 
@@ -1900,9 +1909,11 @@ mod tests {
         let term_key =
             crate::server_frontend::referenced_term_object_key(&[ServerFrontend::Xet], &hash)
                 .unwrap();
-        assert!(reachability
-            .referenced_object_keys
-            .contains(term_key.as_str()));
+        assert!(
+            reachability
+                .referenced_object_keys
+                .contains(term_key.as_str())
+        );
         // live_dedupe_chunk_hashes should be empty for ReferencedObjectTerms
         assert!(reachability.live_dedupe_chunk_hashes.is_empty());
     }
@@ -1930,13 +1941,9 @@ mod tests {
 
         // 3. Retention hold — missing object (will be deleted)
         let missing_key = ObjectKey::parse("test/retention-missing").unwrap();
-        let hold_missing = RetentionHold::new(
-            missing_key.clone(),
-            "missing-obj".to_owned(),
-            0,
-            Some(2000),
-        )
-        .unwrap();
+        let hold_missing =
+            RetentionHold::new(missing_key.clone(), "missing-obj".to_owned(), 0, Some(2000))
+                .unwrap();
         index_store.upsert_retention_hold(&hold_missing).unwrap();
 
         // 4. Quarantine — missing object (will be deleted)
@@ -1952,14 +1959,15 @@ mod tests {
 
         // 6. Quarantine — reachable via record (will be deleted)
         let reachable_hash = valid_hash();
-        let reachable_chunk_key =
-            crate::chunk_store::chunk_object_key(&reachable_hash).unwrap();
+        let reachable_chunk_key = crate::chunk_store::chunk_object_key(&reachable_hash).unwrap();
         seed_object(&object_store, &reachable_chunk_key);
         let record = single_chunk_record("reachable", &reachable_hash, 65536);
         record_store.write_version_record(&record).await.unwrap();
         record_store.write_latest_record(&record).await.unwrap();
         let q_reachable = QuarantineCandidate::new(reachable_chunk_key, 256, 0, 5000).unwrap();
-        index_store.upsert_quarantine_candidate(&q_reachable).unwrap();
+        index_store
+            .upsert_quarantine_candidate(&q_reachable)
+            .unwrap();
 
         // 7. Quarantine — held (will be deleted)
         let q_held_key = ObjectKey::parse("test/q-held").unwrap();
@@ -2145,7 +2153,9 @@ mod tests {
         // Quarantine candidate for any key → object missing → DeleteMissing
         let q_key = ObjectKey::parse("test/q-any-key").unwrap();
         let q_candidate = QuarantineCandidate::new(q_key, 1, 0, 5000).unwrap();
-        index_store.upsert_quarantine_candidate(&q_candidate).unwrap();
+        index_store
+            .upsert_quarantine_candidate(&q_candidate)
+            .unwrap();
 
         let report = run_lifecycle_repair_with_stores_at_time(
             &record_store,

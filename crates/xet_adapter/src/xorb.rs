@@ -444,9 +444,10 @@ mod tests {
     };
 
     use super::{
-        DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbInvalidFormatError, XorbParseError,
-        XorbVisitError, decode_serialized_xorb_chunks, merkle_hash_to_shardline_hash,
-        try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+        DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbInvalidFormatError,
+        XorbParseError, XorbVisitError, decode_serialized_xorb_chunks,
+        merkle_hash_to_shardline_hash, try_for_each_serialized_xorb_chunk,
+        validate_serialized_xorb,
     };
     use crate::XetAdapterError;
     use shardline_protocol::ShardlineHash;
@@ -469,9 +470,7 @@ mod tests {
 
     #[test]
     fn xorb_parse_error_display_numeric_conversion() {
-        let err = XorbParseError::NumericConversion(
-            u64::try_from(-1i32).unwrap_err(),
-        );
+        let err = XorbParseError::NumericConversion(u64::try_from(-1i32).unwrap_err());
         let msg = err.to_string();
         assert!(msg.contains("conversion"), "msg: {msg}");
     }
@@ -488,18 +487,39 @@ mod tests {
     #[test]
     fn xorb_invalid_format_error_display_all_variants() {
         let cases: &[(XorbInvalidFormatError, &str)] = &[
-            (XorbInvalidFormatError::StructuralValidationFailed, "structural"),
-            (XorbInvalidFormatError::MetadataSectionLengthMismatch, "length"),
-            (XorbInvalidFormatError::NonMonotonicChunkBoundaries, "boundar"),
-            (XorbInvalidFormatError::PackedContentLengthMismatch, "length"),
-            (XorbInvalidFormatError::PackedChunkLengthOverflow, "overflow"),
-            (XorbInvalidFormatError::ChunkPayloadMetadataMismatch, "metadata"),
+            (
+                XorbInvalidFormatError::StructuralValidationFailed,
+                "structural",
+            ),
+            (
+                XorbInvalidFormatError::MetadataSectionLengthMismatch,
+                "length",
+            ),
+            (
+                XorbInvalidFormatError::NonMonotonicChunkBoundaries,
+                "boundar",
+            ),
+            (
+                XorbInvalidFormatError::PackedContentLengthMismatch,
+                "length",
+            ),
+            (
+                XorbInvalidFormatError::PackedChunkLengthOverflow,
+                "overflow",
+            ),
+            (
+                XorbInvalidFormatError::ChunkPayloadMetadataMismatch,
+                "metadata",
+            ),
             (XorbInvalidFormatError::ChunkPayloadHashMismatch, "hash"),
             (XorbInvalidFormatError::DecodedChunkLengthMismatch, "length"),
             (XorbInvalidFormatError::CoreMalformedData, "malformed"),
             (XorbInvalidFormatError::CoreRejectedData, "rejected"),
             (XorbInvalidFormatError::XorbHashConversionFailed, "merkle"),
-            (XorbInvalidFormatError::ChunkHashConversionFailed, "protocol"),
+            (
+                XorbInvalidFormatError::ChunkHashConversionFailed,
+                "protocol",
+            ),
         ];
         for (variant, expected) in cases {
             let msg = variant.to_string();
@@ -514,8 +534,7 @@ mod tests {
 
     #[test]
     fn xorb_visit_error_parse_variant_displays_parse_error() {
-        let err: XorbVisitError<XetAdapterError> =
-            XorbParseError::HashMismatch.into();
+        let err: XorbVisitError<XetAdapterError> = XorbParseError::HashMismatch.into();
         let msg = err.to_string();
         assert!(msg.contains("hash"), "msg: {msg}");
     }
@@ -816,8 +835,7 @@ mod tests {
 
     #[test]
     fn xorb_invalid_format_error_from_for_parse_error_preserves_variant() {
-        let err: XorbParseError =
-            XorbInvalidFormatError::StructuralValidationFailed.into();
+        let err: XorbParseError = XorbInvalidFormatError::StructuralValidationFailed.into();
         assert!(matches!(err, XorbParseError::InvalidFormat(_)));
     }
 
@@ -945,10 +963,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             [first, second].concat(),
-            vec![
-                (first_hash, 4),
-                (second_hash, 8),
-            ],
+            vec![(first_hash, 4), (second_hash, 8)],
             CompressionScheme::None,
         );
         assert!(serialized.is_ok());
@@ -991,7 +1006,10 @@ mod tests {
             [first.clone(), second.clone()].concat(),
             vec![
                 (first_hash, u32::try_from(first.len()).unwrap_or(0)),
-                (second_hash, u32::try_from(first.len() + second.len()).unwrap_or(0)),
+                (
+                    second_hash,
+                    u32::try_from(first.len() + second.len()).unwrap_or(0),
+                ),
             ],
             CompressionScheme::LZ4,
         );
@@ -1096,7 +1114,10 @@ mod tests {
         let parse_err = XorbParseError::Io(std::io::Error::other("e"));
         let visit_err: XorbVisitError<XetAdapterError> = parse_err.into();
         let msg = visit_err.to_string();
-        assert!(!msg.is_empty(), "XorbVisitError display should not be empty");
+        assert!(
+            !msg.is_empty(),
+            "XorbVisitError display should not be empty"
+        );
     }
 
     // ── map_core_error direct tests for uncovered error paths ────────────

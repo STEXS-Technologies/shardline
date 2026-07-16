@@ -354,13 +354,10 @@ mod tests {
         // validator.  The important property is that neither is silently
         // canonicalized to the other — both are treated identically
         // (rejected), proving no normalization is applied.
-        let nfc = "caf\u{00e9}";     // café  (precomposed é)
-        let nfd = "cafe\u{0301}";    // café  (e + combining accent)
+        let nfc = "caf\u{00e9}"; // café  (precomposed é)
+        let nfd = "cafe\u{0301}"; // café  (e + combining accent)
 
-        assert!(
-            nfc != nfd,
-            "NFC and NFD forms must be different strings"
-        );
+        assert!(nfc != nfd, "NFC and NFD forms must be different strings");
 
         let nfc_result = validate_oci_tag(nfc);
         let nfd_result = validate_oci_tag(nfd);

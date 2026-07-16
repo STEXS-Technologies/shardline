@@ -90,7 +90,9 @@ mod tests {
     fn scoped_root_without_revision_omits_revision_component() {
         let scope = RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", None);
         assert!(scope.is_ok());
-        let Ok(scope) = scope else { return; };
+        let Ok(scope) = scope else {
+            return;
+        };
 
         let path = scoped_root(Path::new("/base"), &scope);
 
@@ -105,13 +107,25 @@ mod tests {
 
     #[test]
     fn repository_scoped_root_encodes_various_providers() {
-        for provider in [RepositoryProvider::GitHub, RepositoryProvider::GitLab, RepositoryProvider::Gitea] {
+        for provider in [
+            RepositoryProvider::GitHub,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Gitea,
+        ] {
             let scope = RepositoryRecordScope::new(provider, "owner", "name");
             let path = repository_scoped_root(Path::new("/data"), &scope);
             assert!(path.starts_with("/data"));
             // Components are hex-encoded, so check for hex of "owner" and "name"
-            assert!(path.to_string_lossy().contains(&hex::encode("owner")), "path {:?} should contain hex-encoded 'owner'", path);
-            assert!(path.to_string_lossy().contains(&hex::encode("name")), "path {:?} should contain hex-encoded 'name'", path);
+            assert!(
+                path.to_string_lossy().contains(&hex::encode("owner")),
+                "path {:?} should contain hex-encoded 'owner'",
+                path
+            );
+            assert!(
+                path.to_string_lossy().contains(&hex::encode("name")),
+                "path {:?} should contain hex-encoded 'name'",
+                path
+            );
         }
     }
 

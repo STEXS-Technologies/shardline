@@ -257,8 +257,7 @@ where
 #[cfg(test)]
 mod tests {
     use shardline_index::{
-        FileChunkRecord, MemoryIndexStore, MemoryRecordStore, RecordMutation,
-        RecordTraversal,
+        FileChunkRecord, MemoryIndexStore, MemoryRecordStore, RecordMutation, RecordTraversal,
     };
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use shardline_vcs::{
@@ -302,7 +301,8 @@ mod tests {
         let matching_scope =
             RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main")).unwrap();
         let non_matching_scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "other", "repo", Some("main")).unwrap();
+            RepositoryScope::new(RepositoryProvider::GitHub, "other", "repo", Some("main"))
+                .unwrap();
 
         let matching = shardline_index::FileRecord {
             file_id: "matching.bin".to_owned(),
@@ -357,13 +357,8 @@ mod tests {
             total_bytes: 4,
             chunk_size: 4,
             repository_scope: Some(
-                RepositoryScope::new(
-                    RepositoryProvider::GitHub,
-                    "org",
-                    "repo",
-                    Some("main"),
-                )
-                .unwrap(),
+                RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
+                    .unwrap(),
             ),
             chunks: vec![test_record()],
         };
@@ -421,12 +416,8 @@ mod tests {
             .unwrap();
 
         let latest_loc = RecordTraversal::latest_record_locator(&store, &record);
-        let result = delete_repository_records::<MemoryRecordStore>(
-            &store,
-            vec![latest_loc],
-            vec![],
-        )
-        .await;
+        let result =
+            delete_repository_records::<MemoryRecordStore>(&store, vec![latest_loc], vec![]).await;
         assert!(result.is_ok());
     }
 
@@ -450,12 +441,8 @@ mod tests {
             .unwrap();
 
         let version_loc = RecordTraversal::version_record_locator(&store, &record);
-        let result = delete_repository_records::<MemoryRecordStore>(
-            &store,
-            vec![],
-            vec![version_loc],
-        )
-        .await;
+        let result =
+            delete_repository_records::<MemoryRecordStore>(&store, vec![], vec![version_loc]).await;
         assert!(result.is_ok());
     }
 
@@ -475,10 +462,9 @@ mod tests {
             RepositoryWebhookEventKind::RepositoryDeleted,
         );
 
-        let outcome =
-            apply_repository_deleted(&record_store, &index_store, &object_store, &event)
-                .await
-                .unwrap();
+        let outcome = apply_repository_deleted(&record_store, &index_store, &object_store, &event)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.affected_file_versions, 0);
         assert_eq!(outcome.affected_chunks, 0);
@@ -494,7 +480,8 @@ mod tests {
     async fn apply_repository_renamed_empty_repo_returns_zero_counts() {
         let record_store = MemoryRecordStore::new();
         let index_store = MemoryIndexStore::new();
-        let new_repository = RepositoryRef::new(ProviderKind::GitHub, "team", "renamed-repo").unwrap();
+        let new_repository =
+            RepositoryRef::new(ProviderKind::GitHub, "team", "renamed-repo").unwrap();
         let event = RepositoryWebhookEvent::new(
             RepositoryRef::new(ProviderKind::GitHub, "team", "empty-repo").unwrap(),
             WebhookDeliveryId::new("delivery-rename-empty-1").unwrap(),

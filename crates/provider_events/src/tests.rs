@@ -1091,8 +1091,7 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<()
     Ok(())
 }
 
-async fn exercise_webhook_failure_with_failed_cleanup_logs_warning()
--> Result<(), Box<dyn Error>> {
+async fn exercise_webhook_failure_with_failed_cleanup_logs_warning() -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let record_store = LocalRecordStore::open(storage.path().to_path_buf());
     let index_store = FailAlwaysStore::new(LocalIndexStore::new(storage.path().to_path_buf())?);
@@ -1124,10 +1123,14 @@ async fn exercise_webhook_failure_with_failed_cleanup_logs_warning()
     );
 
     // Both upsert_retention_hold and delete_webhook_delivery fail, exercising the warn path.
-    let result = apply_provider_webhook_with_stores(&record_store, &index_store, &object_store, &event).await;
+    let result =
+        apply_provider_webhook_with_stores(&record_store, &index_store, &object_store, &event)
+            .await;
     assert!(matches!(
         result,
-        Err(ProviderEventsError::IndexStore(LocalIndexStoreError::InvalidLegacyImportState))
+        Err(ProviderEventsError::IndexStore(
+            LocalIndexStoreError::InvalidLegacyImportState
+        ))
     ));
 
     // Delivery record should still NOT be recorded (delete_webhook_delivery failed,
@@ -1810,8 +1813,12 @@ async fn apply_webhook_with_generic_provider_revision_pushed() {
             packed_end: 4,
         }],
     };
-    RecordMutation::write_version_record(&record_store, &record).await.unwrap();
-    RecordMutation::write_latest_record(&record_store, &record).await.unwrap();
+    RecordMutation::write_version_record(&record_store, &record)
+        .await
+        .unwrap();
+    RecordMutation::write_latest_record(&record_store, &record)
+        .await
+        .unwrap();
 
     let event = RepositoryWebhookEvent::new(
         RepositoryRef::new(ProviderKind::Generic, "myorg", "myrepo").unwrap(),
@@ -1821,14 +1828,10 @@ async fn apply_webhook_with_generic_provider_revision_pushed() {
         },
     );
 
-    let outcome = apply_provider_webhook_with_stores(
-        &record_store,
-        &index_store,
-        &object_store,
-        &event,
-    )
-    .await
-    .unwrap();
+    let outcome =
+        apply_provider_webhook_with_stores(&record_store, &index_store, &object_store, &event)
+            .await
+            .unwrap();
 
     assert_eq!(
         outcome.event_kind,
@@ -1839,8 +1842,16 @@ async fn apply_webhook_with_generic_provider_revision_pushed() {
     assert_eq!(outcome.affected_file_versions, 0);
     assert_eq!(outcome.affected_chunks, 0);
     assert_eq!(outcome.applied_holds, 0);
-    assert!(local_version_record_exists(&record_store, &record).await.unwrap());
-    assert!(local_latest_record_exists(&record_store, &record).await.unwrap());
+    assert!(
+        local_version_record_exists(&record_store, &record)
+            .await
+            .unwrap()
+    );
+    assert!(
+        local_latest_record_exists(&record_store, &record)
+            .await
+            .unwrap()
+    );
 
     let repository_state = LifecycleStore::provider_repository_state(
         &index_store,

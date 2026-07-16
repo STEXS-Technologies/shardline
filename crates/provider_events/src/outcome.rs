@@ -26,9 +26,7 @@ pub(super) fn duplicate_webhook_event_kind(
 
 #[cfg(test)]
 mod tests {
-    use shardline_vcs::{
-        ProviderKind, RepositoryRef, RepositoryWebhookEventKind, RevisionRef,
-    };
+    use shardline_vcs::{ProviderKind, RepositoryRef, RepositoryWebhookEventKind, RevisionRef};
 
     use super::duplicate_webhook_event_kind;
     use crate::ProviderWebhookOutcomeKind;
@@ -67,10 +65,14 @@ mod tests {
     #[allow(clippy::panic, clippy::wildcard_enum_match_arm)]
     #[test]
     fn duplicate_event_kind_repository_renamed() {
-        let new_repository = RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
+        let new_repository =
+            RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
         let kind = RepositoryWebhookEventKind::RepositoryRenamed { new_repository };
         match duplicate_webhook_event_kind(&kind) {
-            ProviderWebhookOutcomeKind::RepositoryRenamed { new_owner, new_repo } => {
+            ProviderWebhookOutcomeKind::RepositoryRenamed {
+                new_owner,
+                new_repo,
+            } => {
                 assert_eq!(new_owner, "new-owner");
                 assert_eq!(new_repo, "new-repo");
             }

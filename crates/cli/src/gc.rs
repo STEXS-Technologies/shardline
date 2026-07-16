@@ -265,10 +265,7 @@ mod tests {
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            parsed["total_orphan_bytes"],
-            serde_json::json!(5000)
-        );
+        assert_eq!(parsed["total_orphan_bytes"], serde_json::json!(5000));
         assert_eq!(parsed["quarantined_objects"].as_array().unwrap().len(), 2);
     }
 
@@ -287,9 +284,9 @@ mod tests {
     fn gc_runtime_error_config_display() {
         use std::net::AddrParseError;
         let addr_err: AddrParseError = "bad address".parse::<std::net::SocketAddr>().unwrap_err();
-        let err = super::GcRuntimeError::Config(
-            shardline_server::ServerConfigError::BindAddress(addr_err),
-        );
+        let err = super::GcRuntimeError::Config(shardline_server::ServerConfigError::BindAddress(
+            addr_err,
+        ));
         let display = err.to_string();
         assert!(!display.is_empty());
         let debug = format!("{err:?}");
@@ -319,8 +316,13 @@ mod tests {
     async fn run_gc_rejects_missing_root() {
         let result = super::run_gc(
             Some(Path::new("/nonexistent-shardline-test-root")),
-            true, true, 3600, None, None,
-        ).await;
+            true,
+            true,
+            3600,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -328,8 +330,13 @@ mod tests {
     async fn run_gc_diagnostics_rejects_missing_root() {
         let result = super::run_gc_diagnostics(
             Some(Path::new("/nonexistent-shardline-test-root")),
-            true, false, 3600, None, None,
-        ).await;
+            true,
+            false,
+            3600,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -346,10 +353,7 @@ mod tests {
         };
         #[cfg(not(unix))]
         let link = target.clone();
-        let result = super::run_gc_diagnostics(
-            Some(&link),
-            false, false, 3600, None, None,
-        ).await;
+        let result = super::run_gc_diagnostics(Some(&link), false, false, 3600, None, None).await;
         #[cfg(unix)]
         assert!(result.is_err());
     }

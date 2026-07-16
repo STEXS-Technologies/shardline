@@ -393,9 +393,21 @@ mod tests {
         };
         let json = serde_json::to_string(&original).unwrap();
         // Fields with skip_serializing_if should be absent
-        assert!(!json.contains("\"new_owner\""), "unexpected new_owner: {json}");
-        assert!(!json.contains("\"new_repo\""), "unexpected new_repo: {json}");
-        assert!(!json.contains("\"revision\""), "unexpected revision: {json}");
-        assert!(!json.contains("\"retention_seconds\""), "unexpected retention_seconds: {json}");
+        assert!(
+            !json.contains("\"new_owner\""),
+            "unexpected new_owner: {json}"
+        );
+        assert!(
+            !json.contains("\"new_repo\""),
+            "unexpected new_repo: {json}"
+        );
+        assert!(
+            !json.contains("\"revision\""),
+            "unexpected revision: {json}"
+        );
+        assert!(
+            !json.contains("\"retention_seconds\""),
+            "unexpected retention_seconds: {json}"
+        );
     }
 }

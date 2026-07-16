@@ -42,8 +42,10 @@ impl TransferMetrics {
                 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
             ]),
         );
-        let range_requests =
-            must_counter("shardline_range_requests_total", "Total range download requests");
+        let range_requests = must_counter(
+            "shardline_range_requests_total",
+            "Total range download requests",
+        );
 
         registry.register(Box::new(upload_requests.clone())).ok();
         registry.register(Box::new(upload_bytes.clone())).ok();

@@ -510,8 +510,8 @@ pub async fn read_upload_session(
         return Err(OciAdapterError::NotFound);
     }
     let body_path = upload_body_path(root, session_id);
-    let missing_local_body = !session.use_s3_multipart
-        && upload_file_exists_async(root, &body_path).await.is_err();
+    let missing_local_body =
+        !session.use_s3_multipart && upload_file_exists_async(root, &body_path).await.is_err();
     if missing_local_body {
         delete_upload_session(root, session_id).await?;
         return Err(OciAdapterError::NotFound);
@@ -577,15 +577,13 @@ async fn append_upload_bytes_impl(
 pub async fn upload_length(root: &Path, session_id: &str) -> Result<u64, OciAdapterError> {
     validate_upload_session_id(session_id)?;
     let path = upload_body_path(root, session_id);
-    upload_file_len_async(root, &path)
-        .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                OciAdapterError::NotFound
-            } else {
-                OciAdapterError::Io(error)
-            }
-        })
+    upload_file_len_async(root, &path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            OciAdapterError::NotFound
+        } else {
+            OciAdapterError::Io(error)
+        }
+    })
 }
 
 /// # Errors
@@ -1172,27 +1170,19 @@ async fn write_upload_tail(
 /// `/proc/self/fd/` — see [`AnchoredTarget::final_path`].
 #[cfg(unix)]
 fn open_anchored_file(root: &Path, path: &Path) -> std::io::Result<File> {
-    let anchored = open_anchored_target(
-        root,
-        path,
-        AnchoredPathOptions::new(None, None),
-        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
-    )?;
-    let file = OpenOptions::new()
-        .read(true)
-        .open(anchored.final_path())?;
+    let anchored = open_anchored_target(root, path, AnchoredPathOptions::new(None, None), || {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
+    })?;
+    let file = OpenOptions::new().read(true).open(anchored.final_path())?;
     Ok(file)
 }
 
 /// Reads a file under `root` using anchored (symlink-resistant) path resolution.
 #[cfg(unix)]
 fn read_file_anchored(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
-    let anchored = open_anchored_target(
-        root,
-        path,
-        AnchoredPathOptions::new(None, None),
-        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
-    )?;
+    let anchored = open_anchored_target(root, path, AnchoredPathOptions::new(None, None), || {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
+    })?;
     std::fs::read(anchored.final_path())
 }
 
@@ -1202,12 +1192,9 @@ fn read_file_anchored(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
 /// (catches TOCTOU rename+swap attacks).
 #[cfg(unix)]
 fn delete_file_anchored(root: &Path, path: &Path) -> std::io::Result<()> {
-    let anchored = open_anchored_target(
-        root,
-        path,
-        AnchoredPathOptions::new(None, None),
-        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
-    )?;
+    let anchored = open_anchored_target(root, path, AnchoredPathOptions::new(None, None), || {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
+    })?;
     let final_path = anchored.final_path();
     match std::fs::remove_file(&final_path) {
         Ok(()) => {
@@ -1226,13 +1213,12 @@ fn delete_file_anchored(root: &Path, path: &Path) -> std::io::Result<()> {
 /// Returns the new file length after the append.
 #[cfg(unix)]
 fn append_file_anchored(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<u64> {
-    let anchored = open_anchored_target(
-        root,
-        path,
-        AnchoredPathOptions::new(None, None),
-        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
-    )?;
-    let mut file = OpenOptions::new().append(true).open(anchored.final_path())?;
+    let anchored = open_anchored_target(root, path, AnchoredPathOptions::new(None, None), || {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
+    })?;
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(anchored.final_path())?;
     file.write_all(bytes)?;
     let metadata = file.metadata()?;
     Ok(metadata.len())
@@ -1245,7 +1231,8 @@ fn append_file_anchored(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Resu
 async fn read_upload_file_async(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
     let root = root.to_path_buf();
     let path = path.to_path_buf();
-    spawn_blocking(move || read_file_anchored(&root, &path)).await
+    spawn_blocking(move || read_file_anchored(&root, &path))
+        .await
         .map_err(std::io::Error::other)?
 }
 
@@ -1255,12 +1242,10 @@ async fn upload_file_len_async(root: &Path, path: &Path) -> std::io::Result<u64>
     let root = root.to_path_buf();
     let path = path.to_path_buf();
     spawn_blocking(move || {
-        let anchored = open_anchored_target(
-            &root,
-            &path,
-            AnchoredPathOptions::new(None, None),
-            || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
-        )?;
+        let anchored =
+            open_anchored_target(&root, &path, AnchoredPathOptions::new(None, None), || {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
+            })?;
         let file = File::open(anchored.final_path())?;
         let metadata = file.metadata()?;
         Ok(metadata.len())
@@ -1268,19 +1253,17 @@ async fn upload_file_len_async(root: &Path, path: &Path) -> std::io::Result<u64>
     .await
     .map_err(std::io::Error::other)?
 }
- 
+
 /// Checks if a file under the OCI upload root exists using anchored I/O.
 #[cfg(unix)]
 async fn upload_file_exists_async(root: &Path, path: &Path) -> std::io::Result<()> {
     let root = root.to_path_buf();
     let path = path.to_path_buf();
     spawn_blocking(move || {
-        let anchored = open_anchored_target(
-            &root,
-            &path,
-            AnchoredPathOptions::new(None, None),
-            || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root"),
-        )?;
+        let anchored =
+            open_anchored_target(&root, &path, AnchoredPathOptions::new(None, None), || {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path escapes root")
+            })?;
         match File::open(anchored.final_path()) {
             Ok(_file) => Ok(()),
             Err(error) => Err(error),
@@ -1288,8 +1271,8 @@ async fn upload_file_exists_async(root: &Path, path: &Path) -> std::io::Result<(
     })
     .await
     .map_err(std::io::Error::other)?
- }
- 
+}
+
 #[cfg(not(unix))]
 async fn read_upload_file_async(root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
     let _ = root;

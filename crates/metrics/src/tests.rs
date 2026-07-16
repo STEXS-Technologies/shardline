@@ -306,9 +306,10 @@ fn must_gauge_creates_valid_gauge() {
 
 #[test]
 fn must_histogram_creates_valid_histogram() {
-    let histogram = crate::must_histogram(
-        prometheus::HistogramOpts::new("shardline_test_must_histogram", "test histogram"),
-    );
+    let histogram = crate::must_histogram(prometheus::HistogramOpts::new(
+        "shardline_test_must_histogram",
+        "test histogram",
+    ));
     histogram.observe(0.5);
     assert_eq!(histogram.get_sample_count(), 1);
 }
@@ -318,7 +319,8 @@ fn must_histogram_creates_valid_histogram() {
 #[test]
 fn backend_record_s3_request_increments_counter() {
     let (registry, m) = new_registry_and_metrics();
-    m.backend.record_s3_request(std::time::Duration::from_millis(10));
+    m.backend
+        .record_s3_request(std::time::Duration::from_millis(10));
     let output = encode(&registry);
     assert!(output.contains("shardline_s3_requests_total 1"));
 }
@@ -334,7 +336,8 @@ fn backend_record_s3_error_increments_counter() {
 #[test]
 fn backend_record_local_io_increments_counter() {
     let (registry, m) = new_registry_and_metrics();
-    m.backend.record_local_io(std::time::Duration::from_micros(100));
+    m.backend
+        .record_local_io(std::time::Duration::from_micros(100));
     let output = encode(&registry);
     assert!(output.contains("shardline_local_io_operations_total 1"));
 }
@@ -483,7 +486,8 @@ fn protocol_oci_registry_token_operations() {
 #[test]
 fn provider_record_webhook_duration_observes() {
     let (registry, m) = new_registry_and_metrics();
-    m.provider.record_webhook_duration(std::time::Duration::from_millis(100));
+    m.provider
+        .record_webhook_duration(std::time::Duration::from_millis(100));
     let output = encode(&registry);
     assert!(output.contains("shardline_provider_webhook_processing_duration_seconds"));
 }
@@ -665,7 +669,8 @@ fn system_connection_negative_gauge() {
 #[test]
 fn backend_record_s3_request_duration() {
     let (registry, m) = new_registry_and_metrics();
-    m.backend.record_s3_request(std::time::Duration::from_secs(0));
+    m.backend
+        .record_s3_request(std::time::Duration::from_secs(0));
     let output = encode(&registry);
     assert!(output.contains("shardline_s3_requests_total 1"));
     assert!(output.contains("shardline_s3_request_duration_seconds_count 1"));
@@ -674,7 +679,8 @@ fn backend_record_s3_request_duration() {
 #[test]
 fn backend_record_local_io_duration() {
     let (registry, m) = new_registry_and_metrics();
-    m.backend.record_local_io(std::time::Duration::from_nanos(0));
+    m.backend
+        .record_local_io(std::time::Duration::from_nanos(0));
     let output = encode(&registry);
     assert!(output.contains("shardline_local_io_operations_total 1"));
     assert!(output.contains("shardline_local_io_duration_seconds_count 1"));
@@ -724,7 +730,8 @@ fn provider_record_webhook_and_token_exchange() {
 #[test]
 fn provider_record_webhook_duration_zero() {
     let (registry, m) = new_registry_and_metrics();
-    m.provider.record_webhook_duration(std::time::Duration::ZERO);
+    m.provider
+        .record_webhook_duration(std::time::Duration::ZERO);
     let output = encode(&registry);
     assert!(output.contains("shardline_provider_webhook_processing_duration_seconds_count 1"));
 }
@@ -760,7 +767,8 @@ fn reconstruction_record_with_zero_chunks() {
 #[test]
 fn reconstruction_record_failure_path() {
     let (registry, m) = new_registry_and_metrics();
-    m.reconstruction.record(false, std::time::Duration::from_millis(5), 3);
+    m.reconstruction
+        .record(false, std::time::Duration::from_millis(5), 3);
     let output = encode(&registry);
     assert!(output.contains("shardline_reconstruction_requests_total 1"));
     assert!(output.contains("shardline_reconstruction_chunks_fetched_total 3"));

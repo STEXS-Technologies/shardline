@@ -19,7 +19,6 @@ const MAX_OCI_TOKEN_QUERY_SERVICE_BYTES: usize = 128;
 const MAX_OCI_TOKEN_QUERY_SCOPE_BYTES: usize = 1024;
 const MAX_OCI_TOKEN_QUERY_ACCOUNT_BYTES: usize = 512;
 const MAX_OCI_TOKEN_QUERY_SCOPES: usize = 16;
-const MIN_OCI_TOKEN_EXPIRES_IN_SECONDS: u64 = 60;
 
 pub(crate) async fn oci_registry_token(
     State(state): State<Arc<AppState>>,
@@ -110,7 +109,6 @@ pub(crate) async fn oci_registry_token(
         expires_in: issued_claims
             .expires_at_unix_seconds()
             .saturating_sub(now)
-            .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
             .min(i32::MAX as u64),
     }))
 }
@@ -349,11 +347,13 @@ mod tests {
     use std::sync::Arc;
 
     use axum::http::{HeaderMap, HeaderValue, Uri};
-    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner};
+    use shardline_protocol::{
+        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
+    };
 
     use super::{
         MAX_OCI_TOKEN_BASIC_AUTH_BYTES, MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
-        MAX_OCI_TOKEN_QUERY_SCOPES, MAX_OCI_TOKEN_QUERY_SERVICE_BYTES, MIN_OCI_TOKEN_EXPIRES_IN_SECONDS, OCI_REGISTRY_SERVICE,
+        MAX_OCI_TOKEN_QUERY_SCOPES, MAX_OCI_TOKEN_QUERY_SERVICE_BYTES, OCI_REGISTRY_SERVICE,
         bounded_query_values, oci_bearer_challenge, oci_registry_token, parse_oci_registry_actions,
         parse_oci_registry_token_query, parse_oci_registry_token_scope,
         parse_oci_registry_token_scopes, scope_allows_oci_exchange, single_bounded_query_value,
@@ -374,13 +374,7 @@ mod tests {
             "issuer",
             "subject",
             TokenScope::Write,
-            RepositoryScope::new(
-                RepositoryProvider::GitHub,
-                "owner",
-                "repo",
-                None,
-            )
-            .unwrap(),
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap(),
             999_999_999_999,
         )
         .unwrap()
@@ -437,7 +431,10 @@ mod tests {
     fn single_value_too_large_errors() {
         assert!(matches!(
             single_bounded_query_value(
-                &uri(&format!("/v2/token?service={}", "x".repeat(MAX_OCI_TOKEN_QUERY_SERVICE_BYTES + 1))),
+                &uri(&format!(
+                    "/v2/token?service={}",
+                    "x".repeat(MAX_OCI_TOKEN_QUERY_SERVICE_BYTES + 1)
+                )),
                 "service",
                 MAX_OCI_TOKEN_QUERY_SERVICE_BYTES,
             ),
@@ -500,7 +497,10 @@ mod tests {
     fn bounded_values_value_too_large_errors() {
         assert!(matches!(
             bounded_query_values(
-                &uri(&format!("/v2/token?scope={}", "x".repeat(MAX_OCI_TOKEN_QUERY_SCOPE_BYTES + 1))),
+                &uri(&format!(
+                    "/v2/token?scope={}",
+                    "x".repeat(MAX_OCI_TOKEN_QUERY_SCOPE_BYTES + 1)
+                )),
                 "scope",
                 MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
                 MAX_OCI_TOKEN_QUERY_SCOPES,
@@ -557,13 +557,7 @@ mod tests {
             "issuer",
             "subject",
             TokenScope::Write,
-            RepositoryScope::new(
-                RepositoryProvider::GitHub,
-                "owner",
-                "repo",
-                None,
-            )
-            .unwrap(),
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap(),
             0, // expired
         )
         .unwrap();
@@ -647,10 +641,7 @@ mod tests {
 
     #[test]
     fn verify_bootstrap_basic_empty_password_errors() {
-        let encoded = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            "user:",
-        );
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "user:");
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -667,29 +658,20 @@ mod tests {
 
     #[test]
     fn parse_query_with_account() {
-        let query = parse_oci_registry_token_query(
-            &uri("/v2/token?account=myaccount"),
-        )
-        .unwrap();
+        let query = parse_oci_registry_token_query(&uri("/v2/token?account=myaccount")).unwrap();
         assert_eq!(query._account.as_deref(), Some("myaccount"));
     }
 
     #[test]
     fn parse_query_with_service_mismatch_returns_none_service() {
         // service is stored; the caller (oci_registry_token) checks it separately
-        let query = parse_oci_registry_token_query(
-            &uri("/v2/token?service=other"),
-        )
-        .unwrap();
+        let query = parse_oci_registry_token_query(&uri("/v2/token?service=other")).unwrap();
         assert_eq!(query.service.as_deref(), Some("other"));
     }
 
     #[test]
     fn parse_query_empty_scope_value_skipped() {
-        let query = parse_oci_registry_token_query(
-            &uri("/v2/token?scope="),
-        )
-        .unwrap();
+        let query = parse_oci_registry_token_query(&uri("/v2/token?scope=")).unwrap();
         assert!(query.scopes.is_empty());
     }
 
@@ -819,7 +801,8 @@ mod tests {
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            ),
             transfer_limiter: crate::TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
@@ -834,16 +817,8 @@ mod tests {
         let state = build_state_with_auth().await;
         let headers = HeaderMap::new();
         let uri: Uri = "/v2/token".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(ServerError::UnauthorizedChallenge(_))
-        ));
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
+        assert!(matches!(result, Err(ServerError::UnauthorizedChallenge(_))));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -857,17 +832,14 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
-        let uri: Uri = "/v2/token?scope=repository:owner/repo:pull".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
+        let uri: Uri = "/v2/token?scope=repository:owner/repo:pull"
+            .parse()
+            .unwrap();
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.0.access_token, response.0.token);
-        assert!(response.0.expires_in >= MIN_OCI_TOKEN_EXPIRES_IN_SECONDS);
+        assert!(response.0.expires_in > 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -882,12 +854,7 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
         let uri: Uri = "/v2/token?service=wrong-service".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
         assert!(matches!(result, Err(ServerError::InvalidManifestReference)));
     }
 
@@ -899,13 +866,7 @@ mod tests {
             "issuer",
             "subject",
             TokenScope::Write,
-            RepositoryScope::new(
-                RepositoryProvider::GitHub,
-                "owner",
-                "repo",
-                None,
-            )
-            .unwrap(),
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap(),
             0,
         )
         .unwrap();
@@ -916,16 +877,8 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
         let uri: Uri = "/v2/token".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(ServerError::UnauthorizedChallenge(_))
-        ));
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
+        assert!(matches!(result, Err(ServerError::UnauthorizedChallenge(_))));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -936,13 +889,7 @@ mod tests {
             "issuer",
             "subject",
             TokenScope::Read,
-            RepositoryScope::new(
-                RepositoryProvider::GitHub,
-                "owner",
-                "repo",
-                None,
-            )
-            .unwrap(),
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap(),
             999_999_999_999,
         )
         .unwrap();
@@ -956,12 +903,7 @@ mod tests {
         let uri: Uri = "/v2/token?scope=repository:owner/repo:push"
             .parse()
             .unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
         assert!(matches!(result, Err(ServerError::InsufficientScope)));
     }
 
@@ -981,12 +923,7 @@ mod tests {
             HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
         );
         let uri: Uri = "/v2/token".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
         assert!(result.is_ok());
     }
 
@@ -1015,7 +952,8 @@ mod tests {
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            ),
             transfer_limiter: crate::TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
@@ -1025,13 +963,11 @@ mod tests {
         });
         let headers = HeaderMap::new();
         let uri: Uri = "/v2/token".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
-        assert!(matches!(result, Err(ServerError::TooManyRegistryTokenRequests)));
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
+        assert!(matches!(
+            result,
+            Err(ServerError::TooManyRegistryTokenRequests)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1051,12 +987,7 @@ mod tests {
         let uri: Uri = "/v2/token?scope=repository:different/repo:pull"
             .parse()
             .unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
         assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
@@ -1083,7 +1014,8 @@ mod tests {
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(),
+            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            ),
             transfer_limiter: crate::TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
@@ -1093,12 +1025,7 @@ mod tests {
         });
         let headers = HeaderMap::new();
         let uri: Uri = "/v2/token".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
         assert!(matches!(result, Err(ServerError::MissingAuthorization)));
     }
 
@@ -1116,12 +1043,7 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
         let uri: Uri = "/v2/token?service=unknown-registry".parse().unwrap();
-        let result = oci_registry_token(
-            axum::extract::State(state),
-            headers,
-            uri,
-        )
-        .await;
+        let result = oci_registry_token(axum::extract::State(state), headers, uri).await;
         assert!(matches!(result, Err(ServerError::InvalidManifestReference)));
     }
 
@@ -1402,38 +1324,20 @@ mod tests {
         assert!(challenge.contains("realm=\"https://example.com/v2/token\""));
     }
 
-    // ── expires_in clamping ─────────────────────────────────────────────────
+    // ── expires_in reporting ────────────────────────────────────────────────
 
     #[test]
-    fn expires_in_clamps_to_minimum() {
+    fn expires_in_matches_the_issued_token_lifetime() {
         let now = 1000_u64;
-        // Bootstrap token is near-expiry (only 5 seconds remain). The clamp
-        // must raise this to at least MIN_OCI_TOKEN_EXPIRES_IN_SECONDS so the
-        // client has time to use the issued token.
-        assert_eq!(
-            (now + 5)
-                .saturating_sub(now)
-                .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
-                .min(i32::MAX as u64),
-            MIN_OCI_TOKEN_EXPIRES_IN_SECONDS,
-        );
+        assert_eq!((now + 5).saturating_sub(now).min(i32::MAX as u64), 5,);
 
-        // Bootstrap token is already expired (sub gives 0, max raises to 60).
         assert_eq!(
             now.saturating_sub(10)
                 .saturating_sub(now)
-                .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
                 .min(i32::MAX as u64),
-            MIN_OCI_TOKEN_EXPIRES_IN_SECONDS,
+            0,
         );
 
-        // Ample remaining lifetime is unclamped.
-        assert_eq!(
-            (now + 3600)
-                .saturating_sub(now)
-                .max(MIN_OCI_TOKEN_EXPIRES_IN_SECONDS)
-                .min(i32::MAX as u64),
-            3600,
-        );
+        assert_eq!((now + 3600).saturating_sub(now).min(i32::MAX as u64), 3600,);
     }
 }

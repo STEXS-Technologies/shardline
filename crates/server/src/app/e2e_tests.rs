@@ -206,36 +206,32 @@ async fn test_app_for_frontends_with_role(
                         );
                 }
             }
-            ServerFrontend::Oci => {
-                match role {
-                    ServerRole::All => {
-                        app = app
-                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                            .route(
-                                "/v2/{*path}",
-                                axum::routing::any(super::protocol_routes::oci_dispatch),
-                            );
-                    }
-                    ServerRole::Api => {
-                        app = app
-                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                            .route(
-                                "/v2/{*path}",
-                                axum::routing::any(super::protocol_routes::oci_api_dispatch),
-                            );
-                    }
-                    ServerRole::Transfer => {
-                        app = app.route(
+            ServerFrontend::Oci => match role {
+                ServerRole::All => {
+                    app = app
+                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                        .route(
                             "/v2/{*path}",
-                            axum::routing::any(
-                                super::protocol_routes::oci_transfer_dispatch,
-                            ),
+                            axum::routing::any(super::protocol_routes::oci_dispatch),
                         );
-                    }
                 }
-            }
+                ServerRole::Api => {
+                    app = app
+                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                        .route(
+                            "/v2/{*path}",
+                            axum::routing::any(super::protocol_routes::oci_api_dispatch),
+                        );
+                }
+                ServerRole::Transfer => {
+                    app = app.route(
+                        "/v2/{*path}",
+                        axum::routing::any(super::protocol_routes::oci_transfer_dispatch),
+                    );
+                }
+            },
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -262,8 +258,7 @@ async fn test_app_for_frontends_with_role(
 async fn build_test_hub_state(root: &std::path::Path) -> shardline_hub_api::routes::HubState {
     let hub_root = root.join("hub");
     std::fs::create_dir_all(&hub_root).ok();
-    let store = shardline_index::LocalIndexStore::new(hub_root.clone())
-        .expect("hub sqlite store");
+    let store = shardline_index::LocalIndexStore::new(hub_root.clone()).expect("hub sqlite store");
     shardline_index::hub::ensure_hub_tables(&hub_root).ok();
     let boxed = shardline_index::hub::BoxedHubStore::from_store(store);
     shardline_hub_api::routes::HubState {
@@ -427,36 +422,32 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                         );
                 }
             }
-            ServerFrontend::Oci => {
-                match state.role {
-                    ServerRole::All => {
-                        app = app
-                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                            .route(
-                                "/v2/{*path}",
-                                axum::routing::any(super::protocol_routes::oci_dispatch),
-                            );
-                    }
-                    ServerRole::Api => {
-                        app = app
-                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                            .route(
-                                "/v2/{*path}",
-                                axum::routing::any(super::protocol_routes::oci_api_dispatch),
-                            );
-                    }
-                    ServerRole::Transfer => {
-                        app = app.route(
+            ServerFrontend::Oci => match state.role {
+                ServerRole::All => {
+                    app = app
+                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                        .route(
                             "/v2/{*path}",
-                            axum::routing::any(
-                                super::protocol_routes::oci_transfer_dispatch,
-                            ),
+                            axum::routing::any(super::protocol_routes::oci_dispatch),
                         );
-                    }
                 }
-            }
+                ServerRole::Api => {
+                    app = app
+                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                        .route(
+                            "/v2/{*path}",
+                            axum::routing::any(super::protocol_routes::oci_api_dispatch),
+                        );
+                }
+                ServerRole::Transfer => {
+                    app = app.route(
+                        "/v2/{*path}",
+                        axum::routing::any(super::protocol_routes::oci_transfer_dispatch),
+                    );
+                }
+            },
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -473,7 +464,6 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
 
     (app, tmp)
 }
-
 
 // ---------------------------------------------------------------------------
 // Provider config helpers
@@ -686,36 +676,32 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                         );
                 }
             }
-            ServerFrontend::Oci => {
-                match state.role {
-                    ServerRole::All => {
-                        app = app
-                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                            .route(
-                                "/v2/{*path}",
-                                axum::routing::any(super::protocol_routes::oci_dispatch),
-                            );
-                    }
-                    ServerRole::Api => {
-                        app = app
-                            .route("/v2/token", get(super::protocol_routes::oci_registry_token))
-                            .route("/v2/", get(super::protocol_routes::oci_v2_root))
-                            .route(
-                                "/v2/{*path}",
-                                axum::routing::any(super::protocol_routes::oci_api_dispatch),
-                            );
-                    }
-                    ServerRole::Transfer => {
-                        app = app.route(
+            ServerFrontend::Oci => match state.role {
+                ServerRole::All => {
+                    app = app
+                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                        .route(
                             "/v2/{*path}",
-                            axum::routing::any(
-                                super::protocol_routes::oci_transfer_dispatch,
-                            ),
+                            axum::routing::any(super::protocol_routes::oci_dispatch),
                         );
-                    }
                 }
-            }
+                ServerRole::Api => {
+                    app = app
+                        .route("/v2/token", get(super::protocol_routes::oci_registry_token))
+                        .route("/v2/", get(super::protocol_routes::oci_v2_root))
+                        .route(
+                            "/v2/{*path}",
+                            axum::routing::any(super::protocol_routes::oci_api_dispatch),
+                        );
+                }
+                ServerRole::Transfer => {
+                    app = app.route(
+                        "/v2/{*path}",
+                        axum::routing::any(super::protocol_routes::oci_transfer_dispatch),
+                    );
+                }
+            },
             ServerFrontend::Hub => {
                 hub_state = Some(build_test_hub_state(tmp.path()).await);
             }
@@ -1097,16 +1083,12 @@ async fn batch_reconstruction_v1_route() {
     // batch reconstruction returns 200 with an empty files map.
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
-    assert!(
-        json["files"].is_object(),
-        "files should be an empty object"
-    );
+    assert!(json["files"].is_object(), "files should be an empty object");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_read_token_without_provider_key_returns_unauthorized() {
-    let (app, _tmp, _cfg_dir) =
-        test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
 
     // Request the xet-read-token route WITHOUT the x-shardline-provider-key header.
     // The route IS registered when provider tokens are configured, but fails auth.
@@ -1132,8 +1114,7 @@ async fn xet_read_token_without_provider_key_returns_unauthorized() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_write_token_without_provider_key_returns_unauthorized() {
-    let (app, _tmp, _cfg_dir) =
-        test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
+    let (app, _tmp, _cfg_dir) = test_app_with_provider_tokens(&[ServerFrontend::Xet]).await;
 
     let response = app
         .oneshot(
@@ -2270,7 +2251,7 @@ async fn lfs_batch_upload_existing_object() {
     assert_eq!(obj["oid"], oid);
     // Existing object should NOT have upload actions
     assert!(
-            obj.get("actions").is_none() || obj["actions"].as_object().is_none_or(|m| m.is_empty()),
+        obj.get("actions").is_none() || obj["actions"].as_object().is_none_or(|m| m.is_empty()),
         "existing object should not have upload actions: {:?}",
         obj["actions"]
     );
@@ -2846,10 +2827,10 @@ async fn bazel_ac_head_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bazel_ac_rejects_content_hash_mismatch() {
+async fn bazel_ac_accepts_an_action_digest_that_does_not_match_the_result_body() {
     let (app, _tmp) = test_app(&[ServerFrontend::BazelHttp]).await;
 
-    // AC now verifies SHA-256 hash of content matches URL hash.
+    // Action Cache keys identify actions, not the serialized action result.
     let wrong_hash = "a".repeat(64);
     let content = b"ac-content-hash-mismatch";
 
@@ -2864,7 +2845,7 @@ async fn bazel_ac_rejects_content_hash_mismatch() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5972,9 +5953,16 @@ async fn hub_revisions_lists_initial_revision() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let revisions = json["revisions"].as_array().unwrap();
-    assert!(!revisions.is_empty(), "should have at least the initial revision");
+    assert!(
+        !revisions.is_empty(),
+        "should have at least the initial revision"
+    );
     // The initial revision has ref_name "main"
-    assert!(revisions.iter().any(|r| r["refName"] == "main" || r["ref_name"] == "main"));
+    assert!(
+        revisions
+            .iter()
+            .any(|r| r["refName"] == "main" || r["ref_name"] == "main")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6527,7 +6515,10 @@ async fn oci_blob_upload_session_expires_cleaned_up() {
 
     // Step 2: Manipulate the session metadata file to simulate expiry.
     // The metadata is stored at: <tmp>/oci-uploads/<session_id>.json
-    let metadata_path = tmp.path().join("oci-uploads").join(format!("{session_id}.json"));
+    let metadata_path = tmp
+        .path()
+        .join("oci-uploads")
+        .join(format!("{session_id}.json"));
     assert!(metadata_path.exists(), "session metadata should exist");
     let mut session: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
@@ -7341,7 +7332,10 @@ async fn hub_dataset_parquet_returns_empty_for_fresh_dataset() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let files = json["files"].as_array().unwrap();
-    assert!(files.is_empty(), "fresh dataset should have no parquet files");
+    assert!(
+        files.is_empty(),
+        "fresh dataset should have no parquet files"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7485,7 +7479,10 @@ async fn hub_webhooks_create_list_delete() {
     assert_eq!(list2.status(), StatusCode::OK);
     let list2_json = body_json(list2).await;
     let webhooks2 = list2_json["webhooks"].as_array().unwrap();
-    assert!(webhooks2.is_empty(), "webhooks should be empty after delete");
+    assert!(
+        webhooks2.is_empty(),
+        "webhooks should be empty after delete"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8166,8 +8163,7 @@ async fn lfs_request_with_wrong_repo_scope() {
     // Upload data with a token scoped to "other/other" (not the default "test/test")
     let repo =
         RepositoryScope::new(RepositoryProvider::Generic, "other", "other", Some("main")).unwrap();
-    let claims =
-        TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let wrong_repo_token = provider.mint_token(&claims).unwrap();
 
@@ -8229,8 +8225,7 @@ async fn bazel_request_with_wrong_repo_scope() {
     // Upload data with a token scoped to "other/other"
     let repo =
         RepositoryScope::new(RepositoryProvider::Generic, "other", "other", Some("main")).unwrap();
-    let claims =
-        TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
     let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
     let wrong_repo_token = provider.mint_token(&claims).unwrap();
 

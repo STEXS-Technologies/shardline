@@ -2231,18 +2231,14 @@ mod tests {
     #[test]
     fn parse_positive_usize_rejects_overflow() {
         // A value larger than usize::MAX should fail to parse.
-        let result =
-            super::parse_positive_usize("99999999999999999999999999999999999999");
+        let result = super::parse_positive_usize("99999999999999999999999999999999999999");
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_positive_usize_accepts_leading_zeros() {
         let result = super::parse_positive_usize("001");
-        assert_eq!(
-            result,
-            Ok(std::num::NonZeroUsize::new(1).unwrap())
-        );
+        assert_eq!(result, Ok(std::num::NonZeroUsize::new(1).unwrap()));
     }
 
     #[test]
@@ -2255,10 +2251,7 @@ mod tests {
     fn parse_positive_usize_accepts_plus_prefix() {
         // Rust's usize::from_str_radix accepts an optional '+' sign.
         let result = super::parse_positive_usize("+42");
-        assert_eq!(
-            result,
-            Ok(std::num::NonZeroUsize::new(42).unwrap())
-        );
+        assert_eq!(result, Ok(std::num::NonZeroUsize::new(42).unwrap()));
     }
 
     // ── deduplicated_cli_frontends ──────────────────────────────────────────
@@ -2276,7 +2269,11 @@ mod tests {
         let deduped = super::deduplicated_cli_frontends(frontends);
         assert_eq!(
             deduped,
-            vec![ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci]
+            vec![
+                ServerFrontend::Xet,
+                ServerFrontend::Lfs,
+                ServerFrontend::Oci
+            ]
         );
     }
 
@@ -2343,48 +2340,38 @@ mod tests {
 
     #[test]
     fn cli_parse_error_kind() {
-        let error = super::CliParseError::validation(
-            clap::error::ErrorKind::InvalidSubcommand,
-            "bad",
-        );
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::InvalidSubcommand
-        );
+        let error =
+            super::CliParseError::validation(clap::error::ErrorKind::InvalidSubcommand, "bad");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 
     #[test]
     fn cli_parse_error_is_help_true_for_display_help() {
-        let error = super::CliParseError::validation(
-            clap::error::ErrorKind::DisplayHelp,
-            "help",
-        );
+        let error = super::CliParseError::validation(clap::error::ErrorKind::DisplayHelp, "help");
         assert!(error.is_help());
     }
 
     #[test]
     fn cli_parse_error_is_help_true_for_display_version() {
-        let error = super::CliParseError::validation(
-            clap::error::ErrorKind::DisplayVersion,
-            "version",
-        );
+        let error =
+            super::CliParseError::validation(clap::error::ErrorKind::DisplayVersion, "version");
         assert!(error.is_help());
     }
 
     #[test]
     fn cli_parse_error_is_help_false_for_other_kinds() {
-        let error = super::CliParseError::validation(
-            clap::error::ErrorKind::InvalidSubcommand,
-            "bad",
-        );
+        let error =
+            super::CliParseError::validation(clap::error::ErrorKind::InvalidSubcommand, "bad");
         assert!(!error.is_help());
     }
 
     #[test]
     fn cli_parse_error_from_clap_error() {
         use clap::CommandFactory;
-        let clap_err = super::CliDefinition::command()
-            .error(clap::error::ErrorKind::MissingRequiredArgument, "missing --flag");
+        let clap_err = super::CliDefinition::command().error(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "missing --flag",
+        );
         let error = super::CliParseError::from(clap_err);
         assert!(format!("{error}").contains("missing --flag"));
     }
@@ -2394,14 +2381,8 @@ mod tests {
     #[test]
     fn cli_server_role_to_server_role() {
         use shardline_server::ServerRole;
-        assert_eq!(
-            ServerRole::from(super::CliServerRole::All),
-            ServerRole::All
-        );
-        assert_eq!(
-            ServerRole::from(super::CliServerRole::Api),
-            ServerRole::Api
-        );
+        assert_eq!(ServerRole::from(super::CliServerRole::All), ServerRole::All);
+        assert_eq!(ServerRole::from(super::CliServerRole::Api), ServerRole::Api);
         assert_eq!(
             ServerRole::from(super::CliServerRole::Transfer),
             ServerRole::Transfer

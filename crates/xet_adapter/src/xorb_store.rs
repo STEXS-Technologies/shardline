@@ -245,8 +245,8 @@ mod tests {
 
     use super::{
         canonicalize_uploaded_xorb, normalize_serialized_xorb, store_uploaded_xorb,
-        store_uploaded_xorb_with_metrics, validate_serialized_xorb,
-        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
+        store_uploaded_xorb_with_metrics, validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
+        xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
     use shardline_server_core::ServerObjectStore;
@@ -422,7 +422,10 @@ mod tests {
 
         let result =
             store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "store_uploaded_xorb_with_metrics failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "store_uploaded_xorb_with_metrics failed: {result:?}"
+        );
         let stored = result.unwrap();
         assert!(stored.was_inserted);
     }
@@ -650,14 +653,18 @@ mod tests {
         use crate::xorb::XorbParseError;
         let err: XetAdapterError = XorbParseError::HashMismatch.into();
         let msg = err.to_string();
-        assert!(msg.contains("hash"), "expected hash-related message, got '{msg}'");
+        assert!(
+            msg.contains("hash"),
+            "expected hash-related message, got '{msg}'"
+        );
     }
 
     #[test]
     fn xorb_parse_error_invalid_format_maps_to_invalid_serialized_xorb() {
         use crate::xorb::{XorbInvalidFormatError, XorbParseError};
         let err: XetAdapterError =
-            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed).into();
+            XorbParseError::InvalidFormat(XorbInvalidFormatError::StructuralValidationFailed)
+                .into();
         let msg = err.to_string();
         assert!(
             msg.contains("xorb"),
@@ -699,11 +706,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
-        let result = store_uploaded_xorb_with_metrics(
-            &object_store,
-            "invalid-hash",
-            b"data",
-        );
+        let result = store_uploaded_xorb_with_metrics(&object_store, "invalid-hash", b"data");
         assert!(result.is_err(), "expected error for invalid hash");
     }
 
@@ -841,7 +844,10 @@ mod tests {
         for err in cases {
             let mapped = super::map_object_key_error(err);
             let msg = mapped.to_string();
-            assert!(msg.contains("hash"), "msg '{msg}' missing 'hash' for {err:?}");
+            assert!(
+                msg.contains("hash"),
+                "msg '{msg}' missing 'hash' for {err:?}"
+            );
         }
     }
 
@@ -903,7 +909,10 @@ mod tests {
 
         let result =
             store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
-        assert!(result.is_ok(), "store_uploaded_xorb_with_metrics(footerless) failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "store_uploaded_xorb_with_metrics(footerless) failed: {result:?}"
+        );
         let stored = result.unwrap();
         assert!(stored.was_inserted);
         assert!(stored.stored_bytes > 0, "stored_bytes should be > 0");

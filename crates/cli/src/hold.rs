@@ -186,7 +186,13 @@ mod tests {
         let object_key = ObjectKey::parse(&format!("de/{}", "de".repeat(32))).unwrap();
         let now = unix_now_seconds_lossy();
         let release_after = ttl_seconds.map(|ttl| now.saturating_add(ttl));
-        RetentionHold::new(object_key, "test hold reason".to_owned(), now, release_after).unwrap()
+        RetentionHold::new(
+            object_key,
+            "test hold reason".to_owned(),
+            now,
+            release_after,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -266,7 +272,10 @@ mod tests {
     #[test]
     fn hold_runtime_error_local_index_display() {
         use shardline_index::LocalIndexStoreError;
-        let inner = LocalIndexStoreError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "db missing"));
+        let inner = LocalIndexStoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "db missing",
+        ));
         let err = HoldRuntimeError::LocalIndex(inner);
         let msg = err.to_string();
         assert!(!msg.is_empty());
@@ -308,7 +317,8 @@ mod tests {
             "de/test/key",
             "test reason",
             None,
-        ).await;
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -318,12 +328,7 @@ mod tests {
         let sandbox = tempfile::tempdir().unwrap();
         let root = sandbox.path();
         // An empty object key should trigger ObjectKeyError
-        let result = run_hold_set(
-            Some(root),
-            "",
-            "test reason",
-            None,
-        ).await;
+        let result = run_hold_set(Some(root), "", "test reason", None).await;
         assert!(result.is_err());
         // The error should be ObjectKey
         #[allow(clippy::panic)]
@@ -343,7 +348,8 @@ mod tests {
             "de/test/overflow",
             "overflow test",
             Some(u64::MAX),
-        ).await;
+        )
+        .await;
         match result {
             Err(HoldRuntimeError::Overflow) => {} // expected
             _ => panic!("expected Overflow error, got {:?}", result),
@@ -352,10 +358,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_hold_list_rejects_missing_root() {
-        let result = run_hold_list(
-            Some(Path::new("/nonexistent-shardline-test-root")),
-            false,
-        ).await;
+        let result =
+            run_hold_list(Some(Path::new("/nonexistent-shardline-test-root")), false).await;
         assert!(result.is_err());
     }
 
@@ -364,7 +368,8 @@ mod tests {
         let result = run_hold_release(
             Some(Path::new("/nonexistent-shardline-test-root")),
             "de/test/key",
-        ).await;
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -372,10 +377,7 @@ mod tests {
     #[tokio::test]
     async fn run_hold_release_rejects_invalid_object_key() {
         let sandbox = tempfile::tempdir().unwrap();
-        let result = run_hold_release(
-            Some(sandbox.path()),
-            "",
-        ).await;
+        let result = run_hold_release(Some(sandbox.path()), "").await;
         match result {
             Err(HoldRuntimeError::ObjectKey(_)) => {} // expected
             _ => panic!("expected ObjectKey error, got {:?}", result),
@@ -389,10 +391,7 @@ mod tests {
         let root = sandbox.path().join("deployment-root");
         std::fs::create_dir_all(&root).unwrap();
 
-        let result = run_hold_list(
-            Some(&root),
-            false,
-        ).await;
+        let result = run_hold_list(Some(&root), false).await;
         // This may succeed (empty list) or fail (can't open index) depending on env
         // We just verify it doesn't panic
         let _ = result;
@@ -406,7 +405,13 @@ mod tests {
         let object_key = format!("de/{}", "de".repeat(32));
 
         // Set a hold
-        let set_result = run_hold_set(Some(&root), &object_key, "integration test reason", Some(3600)).await;
+        let set_result = run_hold_set(
+            Some(&root),
+            &object_key,
+            "integration test reason",
+            Some(3600),
+        )
+        .await;
         let set_was_ok = set_result.is_ok();
         if let Ok(ref hold) = set_result {
             assert_eq!(hold.reason(), "integration test reason");

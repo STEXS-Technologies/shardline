@@ -730,10 +730,7 @@ fn dedupe_shard_mapping_persists_and_retrieves_mapping() {
         .borrow_mut()
         .insert(chunk_hash, mapping.clone());
 
-    assert_eq!(
-        index.dedupe_shard_mapping(&chunk_hash),
-        Ok(Some(mapping))
-    );
+    assert_eq!(index.dedupe_shard_mapping(&chunk_hash), Ok(Some(mapping)));
 }
 
 #[test]
@@ -760,13 +757,18 @@ fn list_dedupe_shard_mappings_returns_inserted_mappings() {
     let map_a = DedupeShardMapping::new(hash_a, key_a);
     let map_b = DedupeShardMapping::new(hash_b, key_b);
 
-    index.dedupe_shards.borrow_mut().insert(hash_a, map_a.clone());
-    index.dedupe_shards.borrow_mut().insert(hash_b, map_b.clone());
+    index
+        .dedupe_shards
+        .borrow_mut()
+        .insert(hash_a, map_a.clone());
+    index
+        .dedupe_shards
+        .borrow_mut()
+        .insert(hash_b, map_b.clone());
 
     let mut all = index.list_dedupe_shard_mappings().unwrap();
     all.sort_by(|left, right| {
-        xet_hash_hex_string(left.chunk_hash())
-            .cmp(&xet_hash_hex_string(right.chunk_hash()))
+        xet_hash_hex_string(left.chunk_hash()).cmp(&xet_hash_hex_string(right.chunk_hash()))
     });
     assert_eq!(all, vec![map_a, map_b]);
 }
@@ -790,10 +792,7 @@ fn delete_dedupe_shard_mapping_returns_false_for_missing() {
     let index = MemoryIndexStore::default();
     let chunk_hash = ShardlineHash::from_bytes([7; 32]);
 
-    assert_eq!(
-        index.delete_dedupe_shard_mapping(&chunk_hash),
-        Ok(false)
-    );
+    assert_eq!(index.delete_dedupe_shard_mapping(&chunk_hash), Ok(false));
 }
 
 // ── LifecycleStore webhook methods ────────────────────────────────────
@@ -953,8 +952,12 @@ fn list_provider_repository_states_returns_all_states_sorted() {
         None,
     );
 
-    index.upsert_provider_repository_state(&gitlab_state).unwrap();
-    index.upsert_provider_repository_state(&github_state).unwrap();
+    index
+        .upsert_provider_repository_state(&gitlab_state)
+        .unwrap();
+    index
+        .upsert_provider_repository_state(&github_state)
+        .unwrap();
 
     let states = index.list_provider_repository_states().unwrap();
     assert_eq!(states.len(), 2);

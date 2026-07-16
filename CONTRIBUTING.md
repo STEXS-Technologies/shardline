@@ -21,6 +21,8 @@ Primary references:
 
 - Rust stable toolchain
 - `cargo-make` (used by contributor quality gates)
+- Docker (for Docker-backed integration tests)
+- `kind`, `kubectl`, and Python 3 (for the disposable Kubernetes smoke test)
 
 Quick smoke check:
 
@@ -172,6 +174,23 @@ This includes:
 - nextest across the workspace
 - release binary packaging smoke test
 - dependency audit
+
+Run infrastructure coverage when changing Docker-backed storage, service lifecycle, or
+Kubernetes deployment behavior:
+
+```bash
+cargo make test-docker
+cargo make test-kubernetes
+```
+
+To run both sequentially (Docker coverage first, then the disposable `kind` cluster):
+
+```bash
+cargo make test-infrastructure
+```
+
+`test-kubernetes` creates and deletes a local `kind` cluster and image; it preserves
+diagnostics only when the smoke test fails.
 
 For dependency-policy checks too:
 

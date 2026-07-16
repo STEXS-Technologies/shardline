@@ -462,8 +462,7 @@ mod tests {
 
         let mut referenced = HashSet::new();
         referenced.insert(key.as_str().to_owned());
-        let orphans =
-            scan_orphan_objects(&store, &[ServerFrontend::Xet], &referenced).unwrap();
+        let orphans = scan_orphan_objects(&store, &[ServerFrontend::Xet], &referenced).unwrap();
 
         assert!(
             orphans.is_empty(),
@@ -590,8 +589,7 @@ mod tests {
     #[test]
     fn managed_object_hash_returns_hash_for_xorb_key_with_xet_frontend() {
         let xorb_key = shardline_xet_adapter::xorb_object_key(TEST_HASH).unwrap();
-        let result =
-            managed_object_hash(&xorb_key, &[ServerFrontend::Xet]).unwrap();
+        let result = managed_object_hash(&xorb_key, &[ServerFrontend::Xet]).unwrap();
         assert_eq!(result, Some(TEST_HASH.to_owned()));
     }
 
@@ -691,7 +689,10 @@ mod tests {
 
             // Add a dedupe shard mapping that references the same chunk hash.
             let chunk_hash = ShardlineHash::from_bytes([0xee; 32]);
-            let shard_key = ObjectKey::parse("shards/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.shard").unwrap();
+            let shard_key = ObjectKey::parse(
+                "shards/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.shard",
+            )
+            .unwrap();
             let mapping = DedupeShardMapping::new(chunk_hash, shard_key.clone());
             index_store.upsert_dedupe_shard_mapping(&mapping).unwrap();
 
@@ -709,7 +710,9 @@ mod tests {
             // The shard key should be referenced because the chunk hash
             // is in live_dedupe_chunk_hashes.
             assert!(
-                reachability.referenced_object_keys.contains(shard_key.as_str()),
+                reachability
+                    .referenced_object_keys
+                    .contains(shard_key.as_str()),
                 "shard key from dedupe mapping should be referenced"
             );
             // The chunk key should also be referenced.
@@ -839,8 +842,16 @@ mod tests {
             .unwrap();
 
             assert_eq!(reachability.scanned_records, 2);
-            assert!(reachability.referenced_object_keys.contains("11/1111111111111111111111111111111111111111111111111111111111111111"));
-            assert!(reachability.referenced_object_keys.contains("22/2222222222222222222222222222222222222222222222222222222222222222"));
+            assert!(
+                reachability.referenced_object_keys.contains(
+                    "11/1111111111111111111111111111111111111111111111111111111111111111"
+                )
+            );
+            assert!(
+                reachability.referenced_object_keys.contains(
+                    "22/2222222222222222222222222222222222222222222222222222222222222222"
+                )
+            );
         });
     }
 }

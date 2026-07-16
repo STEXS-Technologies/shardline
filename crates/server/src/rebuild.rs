@@ -170,9 +170,8 @@ mod from_impl_tests {
 
     #[test]
     fn from_rebuild_error_local_object_store() {
-        let local_err = shardline_storage::LocalObjectStoreError::Io(
-            std::io::Error::other("local"),
-        );
+        let local_err =
+            shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local"));
         let err = RebuildError::LocalObjectStore(local_err);
         let server_err: ServerError = err.into();
         assert!(matches!(

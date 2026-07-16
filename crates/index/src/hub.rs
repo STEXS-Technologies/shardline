@@ -1194,11 +1194,7 @@ mod tests {
             Ok(None)
         }
 
-        fn store_files(
-            &self,
-            commit_sha: &str,
-            files: &[HubFileEntry],
-        ) -> Result<(), Self::Error> {
+        fn store_files(&self, commit_sha: &str, files: &[HubFileEntry]) -> Result<(), Self::Error> {
             self.files
                 .lock()
                 .unwrap()
@@ -1306,7 +1302,9 @@ mod tests {
     #[test]
     fn boxed_hub_store_create_and_get_repo() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        let repo = store.create_repo(HubRepoType::Model, "test/model", false).unwrap();
+        let repo = store
+            .create_repo(HubRepoType::Model, "test/model", false)
+            .unwrap();
         assert_eq!(repo.repo_id, "test/model");
         assert_eq!(repo.repo_type, HubRepoType::Model);
         assert!(!repo.private);
@@ -1321,7 +1319,9 @@ mod tests {
     #[test]
     fn boxed_hub_store_create_repo_duplicate_fails() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Dataset, "dup/repo", true).unwrap();
+        store
+            .create_repo(HubRepoType::Dataset, "dup/repo", true)
+            .unwrap();
         let err = store.create_repo(HubRepoType::Dataset, "dup/repo", false);
         assert!(err.is_err());
     }
@@ -1336,8 +1336,12 @@ mod tests {
     #[test]
     fn boxed_hub_store_list_repos_returns_all() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "a/model", false).unwrap();
-        store.create_repo(HubRepoType::Dataset, "b/dataset", true).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "a/model", false)
+            .unwrap();
+        store
+            .create_repo(HubRepoType::Dataset, "b/dataset", true)
+            .unwrap();
         let repos = store.list_repos().unwrap();
         assert_eq!(repos.len(), 2);
     }
@@ -1345,9 +1349,15 @@ mod tests {
     #[test]
     fn boxed_hub_store_search_repos_by_prefix() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "team/project-a", false).unwrap();
-        store.create_repo(HubRepoType::Model, "team/project-b", false).unwrap();
-        store.create_repo(HubRepoType::Dataset, "other/data", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "team/project-a", false)
+            .unwrap();
+        store
+            .create_repo(HubRepoType::Model, "team/project-b", false)
+            .unwrap();
+        store
+            .create_repo(HubRepoType::Dataset, "other/data", false)
+            .unwrap();
 
         let results = store.search_repos(None, "team/", 10).unwrap();
         assert_eq!(results.len(), 2);
@@ -1357,10 +1367,16 @@ mod tests {
     #[test]
     fn boxed_hub_store_search_repos_filters_by_type() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "a/model", false).unwrap();
-        store.create_repo(HubRepoType::Dataset, "a/data", true).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "a/model", false)
+            .unwrap();
+        store
+            .create_repo(HubRepoType::Dataset, "a/data", true)
+            .unwrap();
 
-        let models = store.search_repos(Some(HubRepoType::Model), "a/", 10).unwrap();
+        let models = store
+            .search_repos(Some(HubRepoType::Model), "a/", 10)
+            .unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].repo_type, HubRepoType::Model);
     }
@@ -1368,9 +1384,15 @@ mod tests {
     #[test]
     fn boxed_hub_store_search_repos_respects_limit() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "x/one", false).unwrap();
-        store.create_repo(HubRepoType::Model, "x/two", false).unwrap();
-        store.create_repo(HubRepoType::Model, "x/three", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "x/one", false)
+            .unwrap();
+        store
+            .create_repo(HubRepoType::Model, "x/two", false)
+            .unwrap();
+        store
+            .create_repo(HubRepoType::Model, "x/three", false)
+            .unwrap();
 
         let limited = store.search_repos(None, "x/", 2).unwrap();
         assert_eq!(limited.len(), 2);
@@ -1379,10 +1401,14 @@ mod tests {
     #[test]
     fn boxed_hub_store_revision_lifecycle() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "rev/repo", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "rev/repo", false)
+            .unwrap();
 
         // First revision with no parent
-        let rev1 = store.create_revision("rev/repo", None, "sha001", "main", "initial").unwrap();
+        let rev1 = store
+            .create_revision("rev/repo", None, "sha001", "main", "initial")
+            .unwrap();
         assert_eq!(rev1.sha, "sha001");
         assert!(rev1.parent_sha.is_none());
 
@@ -1405,13 +1431,19 @@ mod tests {
     #[test]
     fn boxed_hub_store_optimistic_concurrency() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "oc/repo", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "oc/repo", false)
+            .unwrap();
 
         // Create first commit
-        store.create_revision("oc/repo", None, "abc", "main", "first").unwrap();
+        store
+            .create_revision("oc/repo", None, "abc", "main", "first")
+            .unwrap();
 
         // Valid parent succeeds
-        store.create_revision("oc/repo", Some("abc"), "def", "main", "second").unwrap();
+        store
+            .create_revision("oc/repo", Some("abc"), "def", "main", "second")
+            .unwrap();
 
         // Stale parent rejected
         let err = store.create_revision("oc/repo", Some("abc"), "xxx", "main", "stale");
@@ -1428,15 +1460,13 @@ mod tests {
     #[test]
     fn boxed_hub_store_file_entries() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        let files = vec![
-            HubFileEntry {
-                path: "readme.md".to_owned(),
-                size: 100,
-                sha: "aaa".to_owned(),
-                is_lfs: false,
-                inline_content: None,
-            },
-        ];
+        let files = vec![HubFileEntry {
+            path: "readme.md".to_owned(),
+            size: 100,
+            sha: "aaa".to_owned(),
+            is_lfs: false,
+            inline_content: None,
+        }];
 
         store.store_files("commit-sha-1", &files).unwrap();
         let loaded = store.get_files("commit-sha-1").unwrap();
@@ -1475,7 +1505,9 @@ mod tests {
     #[test]
     fn boxed_hub_store_webhook_crud() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "wh/repo", false).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "wh/repo", false)
+            .unwrap();
 
         let wh = store
             .create_webhook(
@@ -1506,7 +1538,9 @@ mod tests {
     #[test]
     fn boxed_hub_store_delete_repo_cascades() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Space, "del/repo", false).unwrap();
+        store
+            .create_repo(HubRepoType::Space, "del/repo", false)
+            .unwrap();
         store
             .create_revision("del/repo", None, "s1", "main", "msg")
             .unwrap();
@@ -1524,7 +1558,9 @@ mod tests {
     #[test]
     fn boxed_hub_store_delete_webhook_nonexistent_is_idempotent() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Dataset, "idem/repo", false).unwrap();
+        store
+            .create_repo(HubRepoType::Dataset, "idem/repo", false)
+            .unwrap();
         // Deleting a non-existent webhook should not error
         store.delete_webhook("idem/repo", "no-such-id").unwrap();
     }
@@ -1565,7 +1601,9 @@ mod tests {
         let store = BoxedHubStore::new(MemoryHubStore::new());
 
         // create / get / list / search
-        let repo = store.create_repo(HubRepoType::Model, "blanket/repo", true).unwrap();
+        let repo = store
+            .create_repo(HubRepoType::Model, "blanket/repo", true)
+            .unwrap();
         assert!(repo.private);
         assert_eq!(store.get_repo("blanket/repo").unwrap(), Some(repo));
 
@@ -1575,11 +1613,15 @@ mod tests {
         let found = store.search_repos(None, "blanket", 10).unwrap();
         assert!(!found.is_empty());
 
-        let none_found = store.search_repos(Some(HubRepoType::Dataset), "blanket", 10).unwrap();
+        let none_found = store
+            .search_repos(Some(HubRepoType::Dataset), "blanket", 10)
+            .unwrap();
         assert!(none_found.is_empty());
 
         // revisions
-        let rev = store.create_revision("blanket/repo", None, "sha1", "main", "first").unwrap();
+        let rev = store
+            .create_revision("blanket/repo", None, "sha1", "main", "first")
+            .unwrap();
         assert_eq!(rev.sha, "sha1");
         let revs = store.list_revisions("blanket/repo").unwrap();
         assert_eq!(revs.len(), 1);
@@ -1589,7 +1631,11 @@ mod tests {
 
         // files
         let files = vec![HubFileEntry {
-            path: "f.txt".into(), size: 10, sha: "f1".into(), is_lfs: false, inline_content: None,
+            path: "f.txt".into(),
+            size: 10,
+            sha: "f1".into(),
+            is_lfs: false,
+            inline_content: None,
         }];
         store.store_files("c1", &files).unwrap();
         let loaded = store.get_files("c1").unwrap();
@@ -1601,7 +1647,9 @@ mod tests {
         assert_eq!(store.get_lfs_object("l1").unwrap(), Some(b"data".to_vec()));
 
         // webhooks
-        let wh = store.create_webhook("blanket/repo", "https://hook", &["push".into()], None).unwrap();
+        let wh = store
+            .create_webhook("blanket/repo", "https://hook", &["push".into()], None)
+            .unwrap();
         assert!(wh.active);
         let hooks = store.list_webhooks("blanket/repo").unwrap();
         assert_eq!(hooks.len(), 1);
@@ -1640,10 +1688,7 @@ mod tests {
         let sha = HubRepo::compute_commit_sha("", "", "").unwrap();
         assert_eq!(sha.len(), 16);
         // Same inputs = same output
-        assert_eq!(
-            HubRepo::compute_commit_sha("", "", "").unwrap(),
-            sha
-        );
+        assert_eq!(HubRepo::compute_commit_sha("", "", "").unwrap(), sha);
     }
 
     #[test]
@@ -1657,15 +1702,21 @@ mod tests {
     #[test]
     fn boxed_hub_store_search_repos_empty_prefix() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.create_repo(HubRepoType::Model, "aaa/model", false).unwrap();
-        store.create_repo(HubRepoType::Dataset, "bbb/data", true).unwrap();
+        store
+            .create_repo(HubRepoType::Model, "aaa/model", false)
+            .unwrap();
+        store
+            .create_repo(HubRepoType::Dataset, "bbb/data", true)
+            .unwrap();
 
         // Empty prefix should match everything (up to limit)
         let all = store.search_repos(None, "", 10).unwrap();
         assert_eq!(all.len(), 2);
 
         // With type filter
-        let models = store.search_repos(Some(HubRepoType::Model), "", 10).unwrap();
+        let models = store
+            .search_repos(Some(HubRepoType::Model), "", 10)
+            .unwrap();
         assert_eq!(models.len(), 1);
     }
 

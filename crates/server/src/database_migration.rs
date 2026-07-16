@@ -490,7 +490,11 @@ mod tests {
         for migration in migrations {
             let hash1 = migration_checksum(migration);
             let hash2 = migration_checksum(migration);
-            assert_eq!(hash1, hash2, "checksum must be deterministic for {}", migration.version);
+            assert_eq!(
+                hash1, hash2,
+                "checksum must be deterministic for {}",
+                migration.version
+            );
         }
     }
 
@@ -500,7 +504,10 @@ mod tests {
         if migrations.len() >= 2 {
             let hash1 = migration_checksum(&migrations[0]);
             let hash2 = migration_checksum(&migrations[1]);
-            assert_ne!(hash1, hash2, "different migrations must have different checksums");
+            assert_ne!(
+                hash1, hash2,
+                "different migrations must have different checksums"
+            );
         }
     }
 
@@ -509,7 +516,11 @@ mod tests {
         let migrations = bundled_database_migrations();
         for migration in migrations {
             let found = migration_by_version(migration.version);
-            assert!(found.is_some(), "version {} not found by migration_by_version", migration.version);
+            assert!(
+                found.is_some(),
+                "version {} not found by migration_by_version",
+                migration.version
+            );
             assert_eq!(found.unwrap().version, migration.version);
         }
     }
@@ -540,7 +551,10 @@ mod tests {
             "postgres://localhost:5432/test".to_owned(),
             DatabaseMigrationCommand::Up { steps: Some(3) },
         );
-        assert!(matches!(options.command(), DatabaseMigrationCommand::Up { steps: Some(3) }));
+        assert!(matches!(
+            options.command(),
+            DatabaseMigrationCommand::Up { steps: Some(3) }
+        ));
     }
 
     #[test]
@@ -549,7 +563,10 @@ mod tests {
             "postgres://localhost:5432/test".to_owned(),
             DatabaseMigrationCommand::Down { steps: 2 },
         );
-        assert!(matches!(options.command(), DatabaseMigrationCommand::Down { steps: 2 }));
+        assert!(matches!(
+            options.command(),
+            DatabaseMigrationCommand::Down { steps: 2 }
+        ));
     }
 
     #[test]
@@ -714,10 +731,8 @@ mod tests {
         // The empty URL validation in run_database_migration requires an async
         // runtime and a Postgres connection; instead verify the static
         // accessor returns the expected value.
-        let options = DatabaseMigrationOptions::new(
-            String::new(),
-            DatabaseMigrationCommand::Status,
-        );
+        let options =
+            DatabaseMigrationOptions::new(String::new(), DatabaseMigrationCommand::Status);
         assert_eq!(options.database_url(), "");
         assert_eq!(options.command(), &DatabaseMigrationCommand::Status);
     }

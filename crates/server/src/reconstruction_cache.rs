@@ -575,14 +575,14 @@ mod tests {
 
     #[test]
     fn payload_within_bound_rejects_oversized() {
-        use super::{payload_within_bound, MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES};
+        use super::{MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES, payload_within_bound};
         let oversized = vec![0u8; (MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES + 1) as usize];
         assert!(!payload_within_bound(&oversized));
     }
 
     #[test]
     fn payload_within_bound_accepts_exact_max() {
-        use super::{payload_within_bound, MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES};
+        use super::{MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES, payload_within_bound};
         let exact = vec![0u8; MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES as usize];
         assert!(payload_within_bound(&exact));
     }
@@ -710,7 +710,8 @@ mod tests {
     #[test]
     fn version_key_with_all_params() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap();
         let key = ReconstructionCacheService::version_key("file-id", "hash123", Some(&scope));
         // Key should be a non-empty string representation
         let key_str = format!("{key:?}");
@@ -719,8 +720,7 @@ mod tests {
 
     #[test]
     fn version_key_without_scope() {
-        let key =
-            ReconstructionCacheService::version_key("file-id", "hash123", None);
+        let key = ReconstructionCacheService::version_key("file-id", "hash123", None);
         let key_str = format!("{key:?}");
         assert!(!key_str.is_empty());
     }
@@ -811,9 +811,7 @@ mod tests {
         let key = ReconstructionCacheKey::latest("asset.bin", None);
 
         let result = cache
-            .get_or_load(&key, || async {
-                Err(crate::ServerError::NotFound)
-            })
+            .get_or_load(&key, || async { Err(crate::ServerError::NotFound) })
             .await;
 
         assert!(matches!(result, Err(crate::ServerError::NotFound)));
@@ -904,10 +902,7 @@ mod tests {
             report.hot_load_micros
         );
         assert!(report.cache_hit, "benchmark should report a cache hit");
-        assert!(
-            report.response_bytes > 0,
-            "response_bytes should be > 0"
-        );
+        assert!(report.response_bytes > 0, "response_bytes should be > 0");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

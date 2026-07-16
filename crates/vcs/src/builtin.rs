@@ -508,8 +508,14 @@ mod tests {
             (BuiltInProviderError::InvalidWebhookPayload, "payload"),
             (BuiltInProviderError::InvalidRepositoryPayload, "repository"),
             (BuiltInProviderError::InvalidRevisionPayload, "revision"),
-            (BuiltInProviderError::MissingWebhookAuthentication, "missing"),
-            (BuiltInProviderError::InvalidWebhookAuthentication, "invalid"),
+            (
+                BuiltInProviderError::MissingWebhookAuthentication,
+                "missing",
+            ),
+            (
+                BuiltInProviderError::InvalidWebhookAuthentication,
+                "invalid",
+            ),
             (BuiltInProviderError::InvalidIntegrationSubject, "subject"),
             (BuiltInProviderError::InvalidCloneUrl, "url"),
             (BuiltInProviderError::InvalidDefaultRevision, "revision"),
@@ -591,10 +597,22 @@ mod tests {
 
     #[test]
     fn parse_gitlab_visibility_maps_correctly() {
-        assert_eq!(super::parse_gitlab_visibility(10), RepositoryVisibility::Private);
-        assert_eq!(super::parse_gitlab_visibility(20), RepositoryVisibility::Internal);
-        assert_eq!(super::parse_gitlab_visibility(0), RepositoryVisibility::Public);
-        assert_eq!(super::parse_gitlab_visibility(99), RepositoryVisibility::Public);
+        assert_eq!(
+            super::parse_gitlab_visibility(10),
+            RepositoryVisibility::Private
+        );
+        assert_eq!(
+            super::parse_gitlab_visibility(20),
+            RepositoryVisibility::Internal
+        );
+        assert_eq!(
+            super::parse_gitlab_visibility(0),
+            RepositoryVisibility::Public
+        );
+        assert_eq!(
+            super::parse_gitlab_visibility(99),
+            RepositoryVisibility::Public
+        );
     }
 
     #[test]
@@ -647,9 +665,16 @@ mod tests {
 
     #[test]
     fn parsed_json_value_extraction() {
-        let json: serde_json::Value = serde_json::from_str(r#"{"a":{"b":"hello","c":42}}"#).unwrap();
-        assert_eq!(super::value_at(&json, &["a", "b"]).and_then(|v| v.as_str()), Some("hello"));
-        assert_eq!(super::value_at(&json, &["a", "c"]).and_then(|v| v.as_u64()), Some(42));
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"a":{"b":"hello","c":42}}"#).unwrap();
+        assert_eq!(
+            super::value_at(&json, &["a", "b"]).and_then(|v| v.as_str()),
+            Some("hello")
+        );
+        assert_eq!(
+            super::value_at(&json, &["a", "c"]).and_then(|v| v.as_u64()),
+            Some(42)
+        );
         assert_eq!(super::value_at(&json, &["a", "missing"]), None);
         assert_eq!(super::value_at(&json, &["missing"]), None);
 
@@ -669,19 +694,30 @@ mod tests {
     #[test]
     fn verify_prefixed_hmac_rejects_missing_header() {
         let result = super::verify_prefixed_hmac_sha256("secret", None, "sha256=", b"{}");
-        assert_eq!(result, Err(BuiltInProviderError::MissingWebhookAuthentication));
+        assert_eq!(
+            result,
+            Err(BuiltInProviderError::MissingWebhookAuthentication)
+        );
     }
 
     #[test]
     fn verify_prefixed_hmac_rejects_wrong_prefix() {
-        let result = super::verify_prefixed_hmac_sha256("secret", Some("sha1=abc"), "sha256=", b"{}");
-        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+        let result =
+            super::verify_prefixed_hmac_sha256("secret", Some("sha1=abc"), "sha256=", b"{}");
+        assert_eq!(
+            result,
+            Err(BuiltInProviderError::InvalidWebhookAuthentication)
+        );
     }
 
     #[test]
     fn verify_prefixed_hmac_rejects_short_signature() {
-        let result = super::verify_prefixed_hmac_sha256("secret", Some("sha256=abc"), "sha256=", b"{}");
-        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+        let result =
+            super::verify_prefixed_hmac_sha256("secret", Some("sha256=abc"), "sha256=", b"{}");
+        assert_eq!(
+            result,
+            Err(BuiltInProviderError::InvalidWebhookAuthentication)
+        );
     }
 
     #[test]
@@ -697,7 +733,10 @@ mod tests {
             "",
             "https://example.invalid/team/assets.git",
         );
-        assert!(result.is_ok(), "empty revision becomes 'refs/heads/' which is valid: {result:?}");
+        assert!(
+            result.is_ok(),
+            "empty revision becomes 'refs/heads/' which is valid: {result:?}"
+        );
     }
 
     #[test]
@@ -719,7 +758,10 @@ mod tests {
     #[test]
     fn verify_constant_time_secret_rejects_missing_header() {
         let result = verify_constant_time_secret("expected", None);
-        assert_eq!(result, Err(BuiltInProviderError::MissingWebhookAuthentication));
+        assert_eq!(
+            result,
+            Err(BuiltInProviderError::MissingWebhookAuthentication)
+        );
     }
 
     #[test]
@@ -734,7 +776,12 @@ mod tests {
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
         mac.update(body);
         let signature = hex::encode(mac.finalize().into_bytes());
-        let result = super::verify_prefixed_hmac_sha256("secret", Some(&format!("sha256={signature}")), "sha256=", body);
+        let result = super::verify_prefixed_hmac_sha256(
+            "secret",
+            Some(&format!("sha256={signature}")),
+            "sha256=",
+            body,
+        );
         assert_eq!(result, Ok(()));
     }
 
@@ -744,8 +791,16 @@ mod tests {
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"correct").unwrap();
         mac.update(body);
         let signature = hex::encode(mac.finalize().into_bytes());
-        let result = super::verify_prefixed_hmac_sha256("wrong", Some(&format!("sha256={signature}")), "sha256=", body);
-        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+        let result = super::verify_prefixed_hmac_sha256(
+            "wrong",
+            Some(&format!("sha256={signature}")),
+            "sha256=",
+            body,
+        );
+        assert_eq!(
+            result,
+            Err(BuiltInProviderError::InvalidWebhookAuthentication)
+        );
     }
 
     #[test]
@@ -755,7 +810,10 @@ mod tests {
         mac.update(body);
         let signature = hex::encode(mac.finalize().into_bytes());
         let result = super::verify_hex_hmac_sha256("wrong", &signature, body);
-        assert_eq!(result, Err(BuiltInProviderError::InvalidWebhookAuthentication));
+        assert_eq!(
+            result,
+            Err(BuiltInProviderError::InvalidWebhookAuthentication)
+        );
     }
 
     #[test]
@@ -775,18 +833,42 @@ mod tests {
 
     #[test]
     fn parse_gitlab_visibility_all_variants() {
-        assert_eq!(super::parse_gitlab_visibility(0), RepositoryVisibility::Public);
-        assert_eq!(super::parse_gitlab_visibility(10), RepositoryVisibility::Private);
-        assert_eq!(super::parse_gitlab_visibility(20), RepositoryVisibility::Internal);
-        assert_eq!(super::parse_gitlab_visibility(30), RepositoryVisibility::Public);
+        assert_eq!(
+            super::parse_gitlab_visibility(0),
+            RepositoryVisibility::Public
+        );
+        assert_eq!(
+            super::parse_gitlab_visibility(10),
+            RepositoryVisibility::Private
+        );
+        assert_eq!(
+            super::parse_gitlab_visibility(20),
+            RepositoryVisibility::Internal
+        );
+        assert_eq!(
+            super::parse_gitlab_visibility(30),
+            RepositoryVisibility::Public
+        );
     }
 
     #[test]
     fn parse_visibility_name_all_variants() {
-        assert_eq!(parse_visibility_name("public"), RepositoryVisibility::Public);
-        assert_eq!(parse_visibility_name("private"), RepositoryVisibility::Private);
-        assert_eq!(parse_visibility_name("internal"), RepositoryVisibility::Internal);
-        assert_eq!(parse_visibility_name("unknown"), RepositoryVisibility::Public);
+        assert_eq!(
+            parse_visibility_name("public"),
+            RepositoryVisibility::Public
+        );
+        assert_eq!(
+            parse_visibility_name("private"),
+            RepositoryVisibility::Private
+        );
+        assert_eq!(
+            parse_visibility_name("internal"),
+            RepositoryVisibility::Internal
+        );
+        assert_eq!(
+            parse_visibility_name("unknown"),
+            RepositoryVisibility::Public
+        );
     }
 
     #[test]

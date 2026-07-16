@@ -33,8 +33,7 @@ impl ProtocolMetrics {
             "shardline_oci_download_requests_total",
             "OCI download requests",
         );
-        let hub_api_requests =
-            must_counter("shardline_hub_api_requests_total", "Hub API requests");
+        let hub_api_requests = must_counter("shardline_hub_api_requests_total", "Hub API requests");
         let hub_api_commits = must_counter(
             "shardline_hub_api_commit_operations_total",
             "Hub API commit operations",

@@ -220,12 +220,11 @@ mod tests {
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
     use super::{
-        StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport,
-        endpoint_store, ensure_observed_hash_matches_key, run_storage_migration,
+        StorageMigrationEndpoint, StorageMigrationOptions, StorageMigrationReport, endpoint_store,
+        ensure_observed_hash_matches_key, run_storage_migration,
     };
     use crate::{
-        ServerError,
-        chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
+        ServerError, chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
         object_store::ServerObjectStore,
     };
 
@@ -239,8 +238,10 @@ mod tests {
 
     #[test]
     fn storage_migration_endpoint_backend_name_s3() {
-        let config =
-            shardline_storage::S3ObjectStoreConfig::new("bucket".to_owned(), "us-east-1".to_owned());
+        let config = shardline_storage::S3ObjectStoreConfig::new(
+            "bucket".to_owned(),
+            "us-east-1".to_owned(),
+        );
         let endpoint = StorageMigrationEndpoint::S3(config);
         assert_eq!(endpoint.backend_name(), "s3");
     }
@@ -410,7 +411,8 @@ mod tests {
         // A key that does not match any content-addressed pattern should pass
         let key = ObjectKey::parse("some/arbitrary/key.bin").unwrap();
         let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
-            &key, b"any bytes",
+            &key,
+            b"any bytes",
         );
         assert!(result.is_ok());
     }
@@ -428,11 +430,15 @@ mod tests {
         let key = chunk_object_key(&correct_hex).unwrap();
         // Verify key parses to extract hash
         let parsed = chunk_hash_from_chunk_object_key_if_present(&key).unwrap();
-        assert!(parsed.is_some(), "key should have a parseable chunk hash: {key:?}");
+        assert!(
+            parsed.is_some(),
+            "key should have a parseable chunk hash: {key:?}"
+        );
 
         // Call with wrong bytes (should trigger hash mismatch)
         let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
-            &key, b"wrong-bytes",
+            &key,
+            b"wrong-bytes",
         );
         assert!(result.is_err(), "expected err for hash mismatch, got ok");
         let err = result.unwrap_err();
@@ -451,9 +457,13 @@ mod tests {
         assert!(parsed.is_some(), "key should parse shard hash: {key_str}");
 
         let result = crate::storage_migration::validate_source_object_matches_content_addressed_key(
-            &key, b"wrong-bytes",
+            &key,
+            b"wrong-bytes",
         );
-        assert!(result.is_err(), "expected err for shard hash mismatch, got ok");
+        assert!(
+            result.is_err(),
+            "expected err for shard hash mismatch, got ok"
+        );
         let err = result.unwrap_err();
         assert!(matches!(err, crate::ServerError::ObjectStore(_)));
     }
@@ -472,8 +482,14 @@ mod tests {
     #[test]
     fn storage_migration_report_serialize_with_counts() {
         use shardline_storage::S3ObjectStoreConfig;
-        let source = StorageMigrationEndpoint::S3(S3ObjectStoreConfig::new("src".into(), "us-east-1".into()));
-        let dest = StorageMigrationEndpoint::S3(S3ObjectStoreConfig::new("dst".into(), "us-east-1".into()));
+        let source = StorageMigrationEndpoint::S3(S3ObjectStoreConfig::new(
+            "src".into(),
+            "us-east-1".into(),
+        ));
+        let dest = StorageMigrationEndpoint::S3(S3ObjectStoreConfig::new(
+            "dst".into(),
+            "us-east-1".into(),
+        ));
         let opts = StorageMigrationOptions::new(source, dest).with_prefix("test/".into());
         let mut report = StorageMigrationReport::new(&opts);
         report.scanned_objects = 10;
@@ -548,7 +564,8 @@ mod tests {
         .map(|(_hash, key)| key)
         .unwrap();
         let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
-        let integrity = ObjectIntegrity::new(crate::local_backend::chunk_hash(body), body.len() as u64);
+        let integrity =
+            ObjectIntegrity::new(crate::local_backend::chunk_hash(body), body.len() as u64);
         source_store
             .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
             .unwrap();
@@ -583,7 +600,8 @@ mod tests {
         .unwrap();
 
         let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
-        let integrity = ObjectIntegrity::new(crate::local_backend::chunk_hash(body), body.len() as u64);
+        let integrity =
+            ObjectIntegrity::new(crate::local_backend::chunk_hash(body), body.len() as u64);
         source_store
             .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
             .unwrap();
@@ -607,8 +625,7 @@ mod tests {
         let key = ObjectKey::parse(&key_str).unwrap();
 
         // Verify the key is recognized as a xorb key
-        let parsed =
-            crate::xet_adapter::xorb_hash_from_object_key_if_present(&key).unwrap();
+        let parsed = crate::xet_adapter::xorb_hash_from_object_key_if_present(&key).unwrap();
         assert!(parsed.is_some(), "key should parse xorb hash: {key_str}");
 
         // Call with bytes that are not a valid serialized xorb
@@ -616,7 +633,10 @@ mod tests {
             &key,
             b"not-a-valid-xorb",
         );
-        assert!(result.is_err(), "expected err for invalid xorb bytes, got ok");
+        assert!(
+            result.is_err(),
+            "expected err for invalid xorb bytes, got ok"
+        );
     }
 
     #[test]

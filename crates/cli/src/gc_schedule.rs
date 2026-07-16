@@ -1137,8 +1137,13 @@ mod tests {
 
     #[test]
     fn gc_schedule_error_empty_value_display() {
-        let err = GcScheduleError::EmptyValue { field: "unit-prefix" };
-        assert_eq!(err.to_string(), "invalid unit-prefix: value must not be empty");
+        let err = GcScheduleError::EmptyValue {
+            field: "unit-prefix",
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid unit-prefix: value must not be empty"
+        );
     }
 
     #[test]
@@ -1285,7 +1290,9 @@ mod tests {
         {
             assert!(result.is_err());
             let Err(err) = result else { return };
-            assert!(matches!(err, GcScheduleError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::Unsupported));
+            assert!(
+                matches!(err, GcScheduleError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::Unsupported)
+            );
         }
         #[cfg(target_os = "linux")]
         {
@@ -1307,7 +1314,9 @@ mod tests {
         let result = super::validate_text_field("unit-prefix", "");
         assert!(matches!(
             result,
-            Err(GcScheduleError::EmptyValue { field: "unit-prefix" })
+            Err(GcScheduleError::EmptyValue {
+                field: "unit-prefix"
+            })
         ));
     }
 

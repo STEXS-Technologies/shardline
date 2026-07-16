@@ -507,12 +507,15 @@ mod tests {
             RepositoryVisibility::Private,
             "main",
             "https://gitlab.example/group/assets.git",
-        ).unwrap();
-        catalog.register(ProviderRepositoryPolicy::new(
-            metadata,
-            HashSet::from([subject]),
-            HashSet::new(),
-        )).unwrap();
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
         let adapter = GitLabAdapter::new(catalog, None);
 
         let body = br#"{"ref":"refs/heads/main","project":{"path_with_namespace":"group/assets"}}"#;
@@ -531,12 +534,15 @@ mod tests {
             RepositoryVisibility::Private,
             "main",
             "https://gitlab.example/group/assets.git",
-        ).unwrap();
-        catalog.register(ProviderRepositoryPolicy::new(
-            metadata,
-            HashSet::from([subject]),
-            HashSet::new(),
-        )).unwrap();
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
         let adapter = GitLabAdapter::new(catalog, None);
 
         let body = br#"{
@@ -558,7 +564,9 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("Project Hook", "delivery-create", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -569,9 +577,12 @@ mod tests {
             "event_name":"project_create",
             "path_with_namespace":"group/assets"
         }"#;
-        let request = WebhookRequest::new("System Hook", "delivery-sys-create", Some("token"), body);
+        let request =
+            WebhookRequest::new("System Hook", "delivery-sys-create", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -599,7 +610,10 @@ mod tests {
         let body = br#"{"ref":"refs/heads/main"}"#;
         let request = WebhookRequest::new("Push Hook", "delivery-no-proj", Some("token"), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
     }
 
     #[test]
@@ -611,7 +625,9 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("System Hook", "delivery-destroy", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
     }
 
@@ -625,8 +641,13 @@ mod tests {
         }"#;
         let request = WebhookRequest::new("System Hook", "delivery-transfer", Some("token"), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
-        assert!(matches!(event.kind(), RepositoryWebhookEventKind::RepositoryRenamed { .. }));
+        let Some(event) = event else {
+            return;
+        };
+        assert!(matches!(
+            event.kind(),
+            RepositoryWebhookEventKind::RepositoryRenamed { .. }
+        ));
     }
 
     #[test]
@@ -648,7 +669,10 @@ mod tests {
         let body = br#"{"event_name":"repository_update","refs":["refs/heads/main"]}"#;
         let request = WebhookRequest::new("System Hook", "delivery-no-proj", Some("token"), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
     }
 
     #[test]
@@ -657,7 +681,10 @@ mod tests {
         let body = br#"{"event_name":"repository_update","project":{"path_with_namespace":"group/assets"},"refs":[""]}"#;
         let request = WebhookRequest::new("System Hook", "delivery-bad-ref", Some("token"), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRevisionPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRevisionPayload)
+        ));
     }
 
     #[test]
@@ -697,7 +724,10 @@ mod tests {
             }
         });
         let result = metadata_from_project_payload(&payload);
-        assert!(matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+        assert!(matches!(
+            result,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
     }
 
     #[test]
@@ -710,7 +740,10 @@ mod tests {
             }
         });
         let result = metadata_from_project_payload(&payload);
-        assert!(matches!(result, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+        assert!(matches!(
+            result,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
     }
 
     #[test]
@@ -723,6 +756,9 @@ mod tests {
             }
         });
         let result = metadata_from_project_payload(&payload);
-        assert!(matches!(result, Err(BuiltInProviderError::InvalidRevisionPayload)));
+        assert!(matches!(
+            result,
+            Err(BuiltInProviderError::InvalidRevisionPayload)
+        ));
     }
 }

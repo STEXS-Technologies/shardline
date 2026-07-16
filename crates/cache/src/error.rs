@@ -39,7 +39,12 @@ mod tests {
         let err = ReconstructionCacheError::Redis(redis_err);
         let source = err.source();
         assert!(source.is_some());
-        assert!(source.unwrap().downcast_ref::<redis::RedisError>().is_some());
+        assert!(
+            source
+                .unwrap()
+                .downcast_ref::<redis::RedisError>()
+                .is_some()
+        );
 
         // NumericConversion wraps a TryFromIntError
         let int_err = i64::try_from(u64::MAX).unwrap_err();

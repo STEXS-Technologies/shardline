@@ -261,8 +261,7 @@ mod tests {
         let metadata_len = file.metadata().expect("metadata").len();
         assert_eq!(metadata_len, 12, "file should be exactly 12 bytes");
 
-        let bytes = read_bounded_provider_config(&file_path, &mut file, 12)
-            .expect("read bounded");
+        let bytes = read_bounded_provider_config(&file_path, &mut file, 12).expect("read bounded");
         assert_eq!(bytes, b"hello config");
     }
 
@@ -433,7 +432,7 @@ mod tests {
         // On most platforms this results in an IO error from the read.
         assert!(
             matches!(result, Err(ProviderServiceError::Io(_)))
-            || matches!(result, Err(ProviderServiceError::ConfigLengthMismatch))
+                || matches!(result, Err(ProviderServiceError::ConfigLengthMismatch))
         );
     }
 }

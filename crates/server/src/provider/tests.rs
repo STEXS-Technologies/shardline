@@ -688,10 +688,7 @@ fn github_provider() -> Result<BuiltInProvider, ProviderServiceError> {
 
 #[test]
 fn visibility_private() {
-    assert_eq!(
-        super::visibility("private"),
-        RepositoryVisibility::Private
-    );
+    assert_eq!(super::visibility("private"), RepositoryVisibility::Private);
 }
 
 #[test]
@@ -704,10 +701,7 @@ fn visibility_internal() {
 
 #[test]
 fn visibility_public() {
-    assert_eq!(
-        super::visibility("public"),
-        RepositoryVisibility::Public
-    );
+    assert_eq!(super::visibility("public"), RepositoryVisibility::Public);
 }
 
 #[test]
@@ -720,10 +714,7 @@ fn visibility_unknown_defaults_to_public() {
 
 #[test]
 fn visibility_empty_defaults_to_public() {
-    assert_eq!(
-        super::visibility(""),
-        RepositoryVisibility::Public
-    );
+    assert_eq!(super::visibility(""), RepositoryVisibility::Public);
 }
 
 // ── parse_provider_kind ────────────────────────────────────────────────
@@ -783,7 +774,10 @@ fn webhook_request_returns_ok_with_valid_headers() {
     let mut headers = HeaderMap::new();
     headers.insert("x-github-event", HeaderValue::from_static("push"));
     headers.insert("x-github-delivery", HeaderValue::from_static("abc-123"));
-    headers.insert("x-hub-signature-256", HeaderValue::from_static("sha256=abc"));
+    headers.insert(
+        "x-hub-signature-256",
+        HeaderValue::from_static("sha256=abc"),
+    );
     let body = b"{}";
     let result = super::webhook_request(ProviderKind::GitHub, &headers, body);
     assert!(result.is_ok());
@@ -813,17 +807,30 @@ fn webhook_request_rejects_oversized_event_header() {
     headers.insert("x-github-event", HeaderValue::from_str(&oversized).unwrap());
     let body = b"{}";
     let result = super::webhook_request(ProviderKind::GitHub, &headers, body);
-    assert!(matches!(result, Err(ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookPayload))));
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::BuiltIn(
+            BuiltInProviderError::InvalidWebhookPayload
+        ))
+    ));
 }
 
 #[test]
 fn webhook_request_rejects_oversized_signature_header() {
     let mut headers = HeaderMap::new();
     let oversized = "x".repeat(5000);
-    headers.insert("x-hub-signature-256", HeaderValue::from_str(&oversized).unwrap());
+    headers.insert(
+        "x-hub-signature-256",
+        HeaderValue::from_str(&oversized).unwrap(),
+    );
     let body = b"{}";
     let result = super::webhook_request(ProviderKind::GitHub, &headers, body);
-    assert!(matches!(result, Err(ProviderServiceError::BuiltIn(BuiltInProviderError::InvalidWebhookAuthentication))));
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::BuiltIn(
+            BuiltInProviderError::InvalidWebhookAuthentication
+        ))
+    ));
 }
 
 // ── ProviderServiceError Display tests ─────────────────────────────────
@@ -837,7 +844,10 @@ fn provider_service_error_display_empty_api_key() {
 #[test]
 fn provider_service_error_display_api_key_too_large() {
     let err = ProviderServiceError::ApiKeyTooLarge;
-    assert_eq!(err.to_string(), "provider bootstrap key exceeded the supported metadata size");
+    assert_eq!(
+        err.to_string(),
+        "provider bootstrap key exceeded the supported metadata size"
+    );
 }
 
 #[test]
@@ -854,7 +864,10 @@ fn provider_service_error_display_invalid_api_key() {
 
 #[test]
 fn provider_service_error_display_config_too_large() {
-    let err = ProviderServiceError::ConfigTooLarge { observed_bytes: 100, maximum_bytes: 50 };
+    let err = ProviderServiceError::ConfigTooLarge {
+        observed_bytes: 100,
+        maximum_bytes: 50,
+    };
     let display = err.to_string();
     assert!(display.contains("provider configuration exceeded the bounded parser ceiling"));
 }
@@ -862,7 +875,10 @@ fn provider_service_error_display_config_too_large() {
 #[test]
 fn provider_service_error_display_config_length_mismatch() {
     let err = ProviderServiceError::ConfigLengthMismatch;
-    assert_eq!(err.to_string(), "provider configuration length did not match the validated length");
+    assert_eq!(
+        err.to_string(),
+        "provider configuration length did not match the validated length"
+    );
 }
 
 #[test]
@@ -874,7 +890,10 @@ fn provider_service_error_display_duplicate_provider() {
 #[test]
 fn provider_service_error_display_missing_webhook_secret() {
     let err = ProviderServiceError::MissingWebhookSecret;
-    assert_eq!(err.to_string(), "provider webhook secret must be configured");
+    assert_eq!(
+        err.to_string(),
+        "provider webhook secret must be configured"
+    );
 }
 
 #[test]
@@ -892,7 +911,10 @@ fn provider_service_error_display_unknown_provider() {
 #[test]
 fn provider_service_error_display_denied() {
     let err = ProviderServiceError::Denied;
-    assert_eq!(err.to_string(), "provider denied requested repository access");
+    assert_eq!(
+        err.to_string(),
+        "provider denied requested repository access"
+    );
 }
 
 #[test]
@@ -1057,7 +1079,10 @@ fn provider_registry_rejects_duplicate_provider() {
     };
 
     let result = ProviderRegistry::from_document(document);
-    assert!(matches!(result, Err(ProviderServiceError::DuplicateProvider)));
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::DuplicateProvider)
+    ));
 }
 
 #[test]
@@ -1180,10 +1205,7 @@ fn webhook_request_gitea_provider() {
     let mut headers = HeaderMap::new();
     headers.insert("x-gitea-event", HeaderValue::from_static("push"));
     headers.insert("x-gitea-delivery", HeaderValue::from_static("delivery-1"));
-    headers.insert(
-        "x-gitea-signature",
-        HeaderValue::from_static("sha256=abc"),
-    );
+    headers.insert("x-gitea-signature", HeaderValue::from_static("sha256=abc"));
     let body = b"{}";
     let result = super::webhook_request(ProviderKind::Gitea, &headers, body);
     assert!(result.is_ok());
@@ -1273,10 +1295,16 @@ fn webhook_request_generic_missing_signature() {
 
 #[test]
 fn repository_access_read_scope() {
-    assert_eq!(super::repository_access(TokenScope::Read), RepositoryAccess::Read);
+    assert_eq!(
+        super::repository_access(TokenScope::Read),
+        RepositoryAccess::Read
+    );
 }
 
 #[test]
 fn repository_access_write_scope() {
-    assert_eq!(super::repository_access(TokenScope::Write), RepositoryAccess::Write);
+    assert_eq!(
+        super::repository_access(TokenScope::Write),
+        RepositoryAccess::Write
+    );
 }

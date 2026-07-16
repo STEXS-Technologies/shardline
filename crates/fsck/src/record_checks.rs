@@ -563,9 +563,8 @@ mod tests {
 
     #[test]
     fn map_xorb_visit_error_visitor_passthrough_roundtrip() {
-        let err = XorbVisitError::<FsckError>::Visitor(FsckError::Io(std::io::Error::other(
-            "test",
-        )));
+        let err =
+            XorbVisitError::<FsckError>::Visitor(FsckError::Io(std::io::Error::other("test")));
         let result = map_xorb_visit_error_fsck(err);
         assert!(matches!(result, FsckError::Io(_)));
     }
@@ -600,7 +599,10 @@ mod tests {
             &mut report,
         )
         .await;
-        assert!(result.is_ok(), "scan_record_tree(Latest) failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "scan_record_tree(Latest) failed: {result:?}"
+        );
         assert_eq!(report.latest_records, 0);
         // On an empty store, there are also no pending version-record checks,
         // so the report stays clean.
@@ -635,7 +637,10 @@ mod tests {
             &mut report,
         )
         .await;
-        assert!(result.is_ok(), "scan_record_tree(Version) failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "scan_record_tree(Version) failed: {result:?}"
+        );
         assert_eq!(report.version_records, 0);
         assert!(report.is_clean());
     }
@@ -848,7 +853,10 @@ mod tests {
             chunks: Vec::new(),
         };
 
-        record_store.write_latest_record(&latest_record).await.unwrap();
+        record_store
+            .write_latest_record(&latest_record)
+            .await
+            .unwrap();
         record_store
             .write_version_record(&version_record)
             .await
@@ -939,12 +947,18 @@ mod tests {
         assert_eq!(report.latest_records, 1);
 
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidFileId),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidFileId),
             "expected InvalidFileId issue, got: {report:?}"
         );
         // Also expect MissingVersionRecord since the version record was not written
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
             "expected MissingVersionRecord issue, got: {report:?}"
         );
     }
@@ -999,7 +1013,10 @@ mod tests {
         assert_eq!(report.latest_records, 1);
 
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidContentHash),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidContentHash),
             "expected InvalidContentHash issue, got: {report:?}"
         );
     }
@@ -1054,7 +1071,10 @@ mod tests {
         assert_eq!(report.version_records, 1);
 
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidContentHash),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidContentHash),
             "expected InvalidContentHash issue, got: {report:?}"
         );
     }
@@ -1082,7 +1102,10 @@ mod tests {
             repository_scope: None,
             chunks: chunks.clone(),
         };
-        record_store.write_latest_record(&latest_record).await.unwrap();
+        record_store
+            .write_latest_record(&latest_record)
+            .await
+            .unwrap();
 
         // Write a version record with the SAME locator (same file_id + content_hash)
         // but with bytes that are not valid JSON for a FileRecord.
@@ -1214,7 +1237,10 @@ mod tests {
 
         // The chunk object doesn't exist → MissingChunk
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingChunk),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingChunk),
             "expected MissingChunk issue, got: {report:?}"
         );
     }
@@ -1287,7 +1313,10 @@ mod tests {
 
         // The chunk object doesn't exist (MissingChunk) AND content hash mismatch
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::RecordHashMismatch),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::RecordHashMismatch),
             "expected RecordHashMismatch issue, got: {report:?}"
         );
     }
@@ -1351,7 +1380,10 @@ mod tests {
         assert_eq!(report.latest_records, 1);
 
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::NonContiguousChunks),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::NonContiguousChunks),
             "expected NonContiguousChunks issue, got: {report:?}"
         );
     }
@@ -1438,7 +1470,12 @@ mod tests {
         let native_xet_refs = report
             .issues
             .iter()
-            .filter(|i| matches!(i.detail, FsckIssueDetail::ReferencedByNativeXetRecord { .. }))
+            .filter(|i| {
+                matches!(
+                    i.detail,
+                    FsckIssueDetail::ReferencedByNativeXetRecord { .. }
+                )
+            })
             .count();
         assert!(
             native_xet_refs >= 1,
@@ -1524,7 +1561,10 @@ mod tests {
 
         // The chunk object exists but content hash differs
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
             "expected ChunkHashMismatch issue, got: {report:?}"
         );
     }
@@ -1549,7 +1589,7 @@ mod tests {
         let chunks = vec![shardline_index::FileChunkRecord {
             hash: chunk_hash.clone(),
             offset: 0,
-            length: 100,   // record says 100
+            length: 100, // record says 100
             range_start: 0,
             range_end: 1,
             packed_start: 0,
@@ -1608,11 +1648,17 @@ mod tests {
 
         // Both ChunkHashMismatch (content differs) and ChunkLengthMismatch (length differs)
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
             "expected ChunkHashMismatch, got: {report:?}"
         );
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::ChunkLengthMismatch),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::ChunkLengthMismatch),
             "expected ChunkLengthMismatch, got: {report:?}"
         );
     }
@@ -1744,17 +1790,26 @@ mod tests {
             repository_scope: None,
             chunks,
         };
-        record_store.write_latest_record(&latest_record).await.unwrap();
+        record_store
+            .write_latest_record(&latest_record)
+            .await
+            .unwrap();
 
         // Write the version record normally, then corrupt its bytes.
-        record_store.write_version_record(&latest_record).await.unwrap();
+        record_store
+            .write_version_record(&latest_record)
+            .await
+            .unwrap();
         let version_locator = record_store.version_record_locator(&latest_record);
 
         let db_path = root.join("metadata.sqlite3");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
             "UPDATE shardline_file_records SET record = ?1 WHERE record_key = ?2",
-            rusqlite::params![b"this is not valid JSON at all!!!", version_locator.record_key()],
+            rusqlite::params![
+                b"this is not valid JSON at all!!!",
+                version_locator.record_key()
+            ],
         )
         .unwrap();
         drop(conn);
@@ -1788,7 +1843,10 @@ mod tests {
         // mismatch, but there IS no version record issue at all — it's silently skipped.
         // So the report should be clean (the only issue would be MissingVersionRecord
         // which doesn't apply because the version locator DOES exist).
-        assert!(report.is_clean(), "expected clean report (unparseable version silently skipped), got: {report:?}");
+        assert!(
+            report.is_clean(),
+            "expected clean report (unparseable version silently skipped), got: {report:?}"
+        );
     }
 
     // ── Version record scan: current entry parse errors ──────────────
@@ -1852,7 +1910,10 @@ mod tests {
 
         // The record has invalid JSON → InvalidRecordJson
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidRecordJson),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidRecordJson),
             "expected InvalidRecordJson issue, got: {report:?}"
         );
     }
@@ -1918,7 +1979,10 @@ mod tests {
 
         // Invalid JSON → InvalidRecordJson
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidRecordJson),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidRecordJson),
             "expected InvalidRecordJson issue, got: {report:?}"
         );
     }
@@ -2018,8 +2082,8 @@ mod tests {
         use shardline_protocol::ShardlineHash;
         use shardline_server_core::chunk_object_key;
         use shardline_xet_adapter::xorb_object_key;
-        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::merklehash::{compute_data_hash, xorb_hash};
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
 
         let storage = shardline_test_support::TempStorage::new();
@@ -2178,8 +2242,8 @@ mod tests {
         use shardline_index::RecordMutation;
         use shardline_protocol::ShardlineHash;
         use shardline_xet_adapter::xorb_object_key;
-        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::merklehash::compute_data_hash;
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
 
         let storage = shardline_test_support::TempStorage::new();
@@ -2224,13 +2288,12 @@ mod tests {
             offset: 0,
             length: chunk_len,
             range_start: 0,
-            range_end: 2,  // exceeds 1-chunk xorb
+            range_end: 2, // exceeds 1-chunk xorb
             packed_start: 0,
             packed_end: chunk_len,
         }];
         let chunk_size = 0_u64;
-        let content_hash =
-            shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
+        let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
         let record = shardline_index::FileRecord {
             file_id: "test-file-id".to_owned(),
@@ -2283,8 +2346,8 @@ mod tests {
         use shardline_index::RecordMutation;
         use shardline_protocol::ShardlineHash;
         use shardline_xet_adapter::xorb_object_key;
-        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::merklehash::compute_data_hash;
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
 
         let storage = shardline_test_support::TempStorage::new();
@@ -2335,8 +2398,7 @@ mod tests {
             packed_end: chunk_len,
         }];
         let chunk_size = 0_u64;
-        let content_hash =
-            shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
+        let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
         let record = shardline_index::FileRecord {
             file_id: "test-file-id".to_owned(),
@@ -2374,10 +2436,10 @@ mod tests {
 
         // Missing inner chunk → MissingChunk with ReferencedByNativeXetXorb
         assert!(
-            report.issues.iter().any(|i| matches!(
-                i.detail,
-                FsckIssueDetail::ReferencedByNativeXetXorb { .. }
-            )),
+            report
+                .issues
+                .iter()
+                .any(|i| matches!(i.detail, FsckIssueDetail::ReferencedByNativeXetXorb { .. })),
             "expected ReferencedByNativeXetXorb, got: {report:?}"
         );
     }
@@ -2522,7 +2584,10 @@ mod tests {
 
         // validate_reconstruction_plan rejects the record with InvalidContentHash
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::InvalidContentHash),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::InvalidContentHash),
             "expected InvalidContentHash issue (from validate_reconstruction_plan), got: {report:?}"
         );
         // inspect_chunks was never called, so inspected_chunk_references is 0
@@ -2536,8 +2601,8 @@ mod tests {
         use shardline_index::RecordMutation;
         use shardline_protocol::ShardlineHash;
         use shardline_xet_adapter::xorb_object_key;
-        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::merklehash::compute_data_hash;
+        use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
         use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
 
         let storage = shardline_test_support::TempStorage::new();
@@ -2581,7 +2646,8 @@ mod tests {
             let bytes: [u8; 32] = chunk_hash.into();
             ShardlineHash::from_bytes(bytes)
         });
-        let inner_chunk_key = shardline_server_core::chunk_object_key(&inner_chunk_hash_hex).unwrap();
+        let inner_chunk_key =
+            shardline_server_core::chunk_object_key(&inner_chunk_hash_hex).unwrap();
         let inner_path = object_root.join(inner_chunk_key.as_str());
         if let Some(parent) = inner_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -2635,17 +2701,24 @@ mod tests {
 
         // The xorb key should be in reachability
         assert!(
-            reachability.referenced_object_keys.contains(xorb_key.as_str()),
+            reachability
+                .referenced_object_keys
+                .contains(xorb_key.as_str()),
             "xorb key should be in reachability"
         );
         // The inner chunk key should also be in reachability
         assert!(
-            reachability.referenced_object_keys.contains(inner_chunk_key.as_str()),
+            reachability
+                .referenced_object_keys
+                .contains(inner_chunk_key.as_str()),
             "inner chunk key should be in reachability"
         );
         // Should have MissingVersionRecord
         assert!(
-            report.issues.iter().any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == FsckIssueKind::MissingVersionRecord),
             "expected MissingVersionRecord"
         );
     }

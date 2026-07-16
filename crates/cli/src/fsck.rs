@@ -88,7 +88,10 @@ mod tests {
         let sandbox = tempfile::tempdir().unwrap();
         let result = run_fsck(Some(sandbox.path())).await;
         // On an empty deployment with a valid temp dir, fsck should complete
-        assert!(result.is_ok(), "run_fsck should succeed on empty deployment: {result:?}");
+        assert!(
+            result.is_ok(),
+            "run_fsck should succeed on empty deployment: {result:?}"
+        );
     }
 
     #[tokio::test]

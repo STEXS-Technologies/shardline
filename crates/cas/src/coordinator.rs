@@ -75,8 +75,7 @@ mod tests {
     #[test]
     fn coordinator_with_different_type_combinations() {
         let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
-        let coordinator =
-            CasCoordinator::new(42_usize, String::from("store"), limits);
+        let coordinator = CasCoordinator::new(42_usize, String::from("store"), limits);
         assert_eq!(coordinator.index(), &42_usize);
         assert_eq!(coordinator.object_store(), &"store");
         assert_eq!(coordinator.limits(), limits);

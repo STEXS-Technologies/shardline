@@ -426,7 +426,10 @@ mod tests {
     #[test]
     fn parse_server_frontends_env_rejects_unknown_frontend() {
         let result = parse_server_frontends_env("unknown");
-        assert!(matches!(result, Err(super::ServerConfigError::InvalidServerFrontend)));
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::InvalidServerFrontend)
+        ));
     }
 
     #[test]
@@ -478,18 +481,15 @@ mod tests {
         use std::io::Write;
         tmp.write_all(b"file-key-value").unwrap();
         tmp.flush().unwrap();
-        let result = optional_token_signing_key_from_sources(
-            None,
-            Some(tmp.path().display().to_string()),
-        );
+        let result =
+            optional_token_signing_key_from_sources(None, Some(tmp.path().display().to_string()));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(b"file-key-value".to_vec()));
     }
 
     #[test]
     fn optional_token_signing_key_from_sources_direct_empty_string() {
-        let result =
-            optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
+        let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
         assert_eq!(result, Some(b"".to_vec()));
     }
 
@@ -501,24 +501,20 @@ mod tests {
         let large_data = vec![0u8; 2_000_000];
         tmp.write_all(&large_data).unwrap();
         tmp.flush().unwrap();
-        let result = optional_token_signing_key_from_sources(
-            None,
-            Some(tmp.path().display().to_string()),
-        );
+        let result =
+            optional_token_signing_key_from_sources(None, Some(tmp.path().display().to_string()));
         assert!(result.is_err());
     }
 
     #[test]
     fn optional_token_signing_key_from_sources_empty_direct_produces_empty_bytes() {
-        let result =
-            optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
+        let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
         assert_eq!(result, Some(b"".to_vec()));
     }
 
     #[test]
     fn optional_token_signing_key_from_sources_direct_empty_string_is_some() {
-        let result =
-            optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
+        let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
         assert!(result.is_some());
         assert!(result.unwrap().is_empty());
     }
@@ -555,10 +551,8 @@ mod tests {
         tmp.write_all(b"key-material-with-exact-length").unwrap();
         // This test verifies the error callback compiles and fires when the
         // observed length does not match expectations from upstream validation.
-        let result = optional_token_signing_key_from_sources(
-            None,
-            Some(tmp.path().display().to_string()),
-        );
+        let result =
+            optional_token_signing_key_from_sources(None, Some(tmp.path().display().to_string()));
         assert!(result.is_ok());
     }
 
@@ -961,10 +955,19 @@ mod tests {
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         // Provider TTL is only validated when both config + api key paths supplied
-        set_env_var("SHARDLINE_PROVIDER_CONFIG_FILE", "/tmp/test_provider_config.yml");
-        set_env_var("SHARDLINE_PROVIDER_API_KEY_FILE", "/tmp/test_provider_api_key");
+        set_env_var(
+            "SHARDLINE_PROVIDER_CONFIG_FILE",
+            "/tmp/test_provider_config.yml",
+        );
+        set_env_var(
+            "SHARDLINE_PROVIDER_API_KEY_FILE",
+            "/tmp/test_provider_api_key",
+        );
         // Token signing key required before TTL validation
-        set_env_var("SHARDLINE_TOKEN_SIGNING_KEY", "test-signing-key-32-bytes-long!!");
+        set_env_var(
+            "SHARDLINE_TOKEN_SIGNING_KEY",
+            "test-signing-key-32-bytes-long!!",
+        );
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,
@@ -984,9 +987,18 @@ mod tests {
         set_env_var("SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS", "not-a-ttl");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
-        set_env_var("SHARDLINE_PROVIDER_CONFIG_FILE", "/tmp/test_provider_config.yml");
-        set_env_var("SHARDLINE_PROVIDER_API_KEY_FILE", "/tmp/test_provider_api_key");
-        set_env_var("SHARDLINE_TOKEN_SIGNING_KEY", "test-signing-key-32-bytes-long!!");
+        set_env_var(
+            "SHARDLINE_PROVIDER_CONFIG_FILE",
+            "/tmp/test_provider_config.yml",
+        );
+        set_env_var(
+            "SHARDLINE_PROVIDER_API_KEY_FILE",
+            "/tmp/test_provider_api_key",
+        );
+        set_env_var(
+            "SHARDLINE_TOKEN_SIGNING_KEY",
+            "test-signing-key-32-bytes-long!!",
+        );
         let result = super::load_server_config_from_env();
         assert!(matches!(
             result,

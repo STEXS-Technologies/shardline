@@ -739,32 +739,45 @@ mod tests {
 
     #[test]
     fn file_record_invariant_error_chunk_hash_display() {
-        let err = FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
+        let err =
+            FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidLength);
         assert_eq!(err.to_string(), "file record chunk hash is invalid");
     }
 
     #[test]
     fn file_record_invariant_error_empty_chunk_display() {
         let err = FileRecordInvariantError::EmptyChunk;
-        assert_eq!(err.to_string(), "file record chunk length must be greater than zero");
+        assert_eq!(
+            err.to_string(),
+            "file record chunk length must be greater than zero"
+        );
     }
 
     #[test]
     fn file_record_invariant_error_non_contiguous_display() {
         let err = FileRecordInvariantError::NonContiguousChunkOffsets;
-        assert_eq!(err.to_string(), "file record chunk offsets must be contiguous");
+        assert_eq!(
+            err.to_string(),
+            "file record chunk offsets must be contiguous"
+        );
     }
 
     #[test]
     fn file_record_invariant_error_invalid_chunk_range_display() {
         let err = FileRecordInvariantError::InvalidChunkRange;
-        assert_eq!(err.to_string(), "file record chunk range must be non-empty and ordered");
+        assert_eq!(
+            err.to_string(),
+            "file record chunk range must be non-empty and ordered"
+        );
     }
 
     #[test]
     fn file_record_invariant_error_invalid_packed_range_display() {
         let err = FileRecordInvariantError::InvalidPackedRange;
-        assert_eq!(err.to_string(), "file record packed byte range must be non-empty and ordered");
+        assert_eq!(
+            err.to_string(),
+            "file record packed byte range must be non-empty and ordered"
+        );
     }
 
     #[test]
@@ -776,7 +789,10 @@ mod tests {
     #[test]
     fn file_record_invariant_error_total_bytes_mismatch_display() {
         let err = FileRecordInvariantError::TotalBytesMismatch;
-        assert_eq!(err.to_string(), "file record total bytes did not match chunk lengths");
+        assert_eq!(
+            err.to_string(),
+            "file record total bytes did not match chunk lengths"
+        );
     }
 
     #[test]
@@ -818,7 +834,8 @@ mod tests {
     fn file_chunk_record_defaults_for_range_end_and_packed_end() {
         // When range_end and packed_end are not set, they should default
         // to 1 (range_end) and 0 (packed_end) via serde defaults.
-        let json = r#"{"hash":"a".repeat(64),"offset":0,"length":4,"range_start":0,"packed_start":0}"#;
+        let json =
+            r#"{"hash":"a".repeat(64),"offset":0,"length":4,"range_start":0,"packed_start":0}"#;
         // Build a JSON string with 64 'a' chars
         let hash_64 = "a".repeat(64);
         let json = format!(
@@ -920,11 +937,7 @@ mod tests {
 
     #[test]
     fn repository_record_scope_new_and_accessors() {
-        let scope = RepositoryRecordScope::new(
-            RepositoryProvider::GitHub,
-            "my_owner",
-            "my_repo",
-        );
+        let scope = RepositoryRecordScope::new(RepositoryProvider::GitHub, "my_owner", "my_repo");
         assert_eq!(scope.provider(), RepositoryProvider::GitHub);
         assert_eq!(scope.owner(), "my_owner");
         assert_eq!(scope.name(), "my_repo");
@@ -932,8 +945,8 @@ mod tests {
 
     // ── Default visit_* trait impls ──────────────────────────────────────────
 
+    use crate::{RecordMutation, RecordStoreFuture, RecordTraversal, StoredRecord};
     use std::{collections::BTreeMap, sync::Mutex, time::Duration};
-    use crate::{RecordTraversal, RecordStoreFuture, StoredRecord, RecordMutation};
 
     /// Minimal store that backs records via BTreeMap but does NOT override any
     /// of the default `visit_*` implementations from the [`RecordTraversal`] trait.
@@ -951,11 +964,17 @@ mod tests {
         }
 
         fn write_latest(&self, key: &str, bytes: Vec<u8>) {
-            self.latest.lock().unwrap().insert(key.to_owned(), (bytes, Duration::from_secs(42)));
+            self.latest
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), (bytes, Duration::from_secs(42)));
         }
 
         fn write_version(&self, key: &str, bytes: Vec<u8>) {
-            self.version.lock().unwrap().insert(key.to_owned(), (bytes, Duration::from_secs(99)));
+            self.version
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), (bytes, Duration::from_secs(99)));
         }
     }
 
@@ -969,7 +988,14 @@ mod tests {
         fn list_latest_record_locators(
             &self,
         ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
-            let keys: Vec<DefaultVisitLocator> = self.latest.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            let keys: Vec<DefaultVisitLocator> = self
+                .latest
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .map(DefaultVisitLocator)
+                .collect();
             Box::pin(async move { Ok(keys) })
         }
 
@@ -978,14 +1004,28 @@ mod tests {
             _repository: &'operation RepositoryRecordScope,
         ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
             // For test simplicity: same as list_latest
-            let keys: Vec<DefaultVisitLocator> = self.latest.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            let keys: Vec<DefaultVisitLocator> = self
+                .latest
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .map(DefaultVisitLocator)
+                .collect();
             Box::pin(async move { Ok(keys) })
         }
 
         fn list_version_record_locators(
             &self,
         ) -> RecordStoreFuture<'_, Vec<Self::Locator>, Self::Error> {
-            let keys: Vec<DefaultVisitLocator> = self.version.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            let keys: Vec<DefaultVisitLocator> = self
+                .version
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .map(DefaultVisitLocator)
+                .collect();
             Box::pin(async move { Ok(keys) })
         }
 
@@ -993,7 +1033,14 @@ mod tests {
             &'operation self,
             _repository: &'operation RepositoryRecordScope,
         ) -> RecordStoreFuture<'operation, Vec<Self::Locator>, Self::Error> {
-            let keys: Vec<DefaultVisitLocator> = self.version.lock().unwrap().keys().cloned().map(DefaultVisitLocator).collect();
+            let keys: Vec<DefaultVisitLocator> = self
+                .version
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .map(DefaultVisitLocator)
+                .collect();
             Box::pin(async move { Ok(keys) })
         }
 
@@ -1008,7 +1055,11 @@ mod tests {
                 .get(&locator.0)
                 .cloned()
                 .or_else(|| self.version.lock().unwrap().get(&locator.0).cloned());
-            Box::pin(async move { entry.ok_or_else(|| unreachable!("test locator not found")).map(|e| e.0) })
+            Box::pin(async move {
+                entry
+                    .ok_or_else(|| unreachable!("test locator not found"))
+                    .map(|e| e.0)
+            })
         }
 
         fn read_latest_record_bytes<'operation>(
@@ -1038,7 +1089,11 @@ mod tests {
                 .get(&locator.0)
                 .cloned()
                 .or_else(|| self.version.lock().unwrap().get(&locator.0).cloned());
-            Box::pin(async move { entry.ok_or_else(|| unreachable!("test locator not found")).map(|e| e.1) })
+            Box::pin(async move {
+                entry
+                    .ok_or_else(|| unreachable!("test locator not found"))
+                    .map(|e| e.1)
+            })
         }
 
         fn latest_record_locator(&self, _record: &FileRecord) -> Self::Locator {
@@ -1099,11 +1154,7 @@ mod tests {
         let store = DefaultVisitStore::new();
         store.write_latest("r1", b"repo-data".to_vec());
 
-        let repo = RepositoryRecordScope::new(
-            RepositoryProvider::GitHub,
-            "owner",
-            "repo",
-        );
+        let repo = RepositoryRecordScope::new(RepositoryProvider::GitHub, "owner", "repo");
         let mut records = Vec::new();
         store
             .visit_repository_latest_records(&repo, |stored| {
@@ -1122,11 +1173,7 @@ mod tests {
         let store = DefaultVisitStore::new();
         store.write_version("rv1", b"repo-version".to_vec());
 
-        let repo = RepositoryRecordScope::new(
-            RepositoryProvider::GitLab,
-            "group",
-            "project",
-        );
+        let repo = RepositoryRecordScope::new(RepositoryProvider::GitLab, "group", "project");
         let mut records = Vec::new();
         store
             .visit_repository_version_records(&repo, |stored| {
@@ -1182,19 +1229,15 @@ mod tests {
         let store = DefaultVisitStore::new();
         store.write_latest("r1", vec![]);
 
-        let repo = RepositoryRecordScope::new(
-            RepositoryProvider::GitHub,
-            "o",
-            "r",
-        );
+        let repo = RepositoryRecordScope::new(RepositoryProvider::GitHub, "o", "r");
         let mut locs = Vec::new();
         store
             .visit_repository_latest_record_locators(&repo, |loc| {
                 locs.push(loc);
                 Ok::<(), std::convert::Infallible>(())
             })
-             .await
-             .unwrap();
+            .await
+            .unwrap();
 
         assert_eq!(locs.len(), 1);
     }
@@ -1204,19 +1247,15 @@ mod tests {
         let store = DefaultVisitStore::new();
         store.write_version("v1", vec![]);
 
-        let repo = RepositoryRecordScope::new(
-            RepositoryProvider::GitLab,
-            "g",
-            "p",
-        );
+        let repo = RepositoryRecordScope::new(RepositoryProvider::GitLab, "g", "p");
         let mut locs = Vec::new();
         store
             .visit_repository_version_record_locators(&repo, |loc| {
                 locs.push(loc);
                 Ok::<(), std::convert::Infallible>(())
             })
-             .await
-             .unwrap();
+            .await
+            .unwrap();
 
         assert_eq!(locs.len(), 1);
     }

@@ -45,7 +45,7 @@ mod tests {
 
     use shardline_server::BackupManifestReport;
 
-    use super::{run_backup_manifest, BackupRuntimeError};
+    use super::{BackupRuntimeError, run_backup_manifest};
 
     #[test]
     fn backup_manifest_report_new_defaults() {
@@ -162,7 +162,10 @@ mod tests {
         let output = sandbox.path().join("manifest.json");
         let result = run_backup_manifest(Some(sandbox.path()), &output).await;
         // On an empty deployment with a valid temp dir, backup should complete
-        assert!(result.is_ok(), "run_backup_manifest should succeed on empty deployment: {result:?}");
+        assert!(
+            result.is_ok(),
+            "run_backup_manifest should succeed on empty deployment: {result:?}"
+        );
         assert!(output.exists(), "manifest output file should be created");
     }
 
@@ -170,7 +173,8 @@ mod tests {
     async fn run_backup_manifest_rejects_missing_root() {
         let sandbox = tempfile::tempdir().unwrap();
         let output = sandbox.path().join("manifest.json");
-        let result = run_backup_manifest(Some(Path::new("/nonexistent-shardline-test-root")), &output).await;
+        let result =
+            run_backup_manifest(Some(Path::new("/nonexistent-shardline-test-root")), &output).await;
         assert!(result.is_err());
     }
 }

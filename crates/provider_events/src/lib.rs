@@ -229,13 +229,40 @@ mod error_display_tests {
         let cases: &[(ProviderEventsError, &str)] = &[
             (ProviderEventsError::Overflow, "overflow"),
             (ProviderEventsError::InvalidContentHash, "hash"),
-            (ProviderEventsError::InvalidProviderWebhookPayload, "payload"),
-            (ProviderEventsError::ConflictingRenameTargetRecord, "conflicting"),
-            (ProviderEventsError::Json(serde_json::from_str::<serde_json::Value>("invalid json...").unwrap_err()), "json"),
-            (ProviderEventsError::NumericConversion(u64::try_from(-1i32).unwrap_err()), "bounds"),
-            (ProviderEventsError::RetentionHold(RetentionHoldError::EmptyReason), "hold"),
-            (ProviderEventsError::WebhookDelivery(shardline_index::WebhookDeliveryError::EmptyDeliveryId), "delivery"),
-            (ProviderEventsError::ObjectStore(shardline_server_core::ServerObjectStoreError::NotFound), "object"),
+            (
+                ProviderEventsError::InvalidProviderWebhookPayload,
+                "payload",
+            ),
+            (
+                ProviderEventsError::ConflictingRenameTargetRecord,
+                "conflicting",
+            ),
+            (
+                ProviderEventsError::Json(
+                    serde_json::from_str::<serde_json::Value>("invalid json...").unwrap_err(),
+                ),
+                "json",
+            ),
+            (
+                ProviderEventsError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+                "bounds",
+            ),
+            (
+                ProviderEventsError::RetentionHold(RetentionHoldError::EmptyReason),
+                "hold",
+            ),
+            (
+                ProviderEventsError::WebhookDelivery(
+                    shardline_index::WebhookDeliveryError::EmptyDeliveryId,
+                ),
+                "delivery",
+            ),
+            (
+                ProviderEventsError::ObjectStore(
+                    shardline_server_core::ServerObjectStoreError::NotFound,
+                ),
+                "object",
+            ),
         ];
         for (error, substring) in cases {
             let msg = error.to_string();
@@ -249,9 +276,8 @@ mod error_display_tests {
 
     #[test]
     fn provider_events_error_xet_adapter_display() {
-        let error = ProviderEventsError::XetAdapter(
-            shardline_xet_adapter::XetAdapterError::NotFound
-        );
+        let error =
+            ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
         let msg = error.to_string();
         assert!(!msg.is_empty());
     }
@@ -259,7 +285,7 @@ mod error_display_tests {
     #[test]
     fn provider_events_error_index_store_display() {
         let error = ProviderEventsError::IndexStore(
-            shardline_index::LocalIndexStoreError::InvalidLegacyImportState
+            shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
         );
         let msg = error.to_string();
         assert!(!msg.is_empty());
@@ -268,7 +294,7 @@ mod error_display_tests {
     #[test]
     fn provider_events_error_memory_index_store_display() {
         let error = ProviderEventsError::MemoryIndexStore(
-            shardline_index::MemoryIndexStoreError::LockPoisoned
+            shardline_index::MemoryIndexStoreError::LockPoisoned,
         );
         let msg = error.to_string();
         assert!(!msg.is_empty());
@@ -277,7 +303,7 @@ mod error_display_tests {
     #[test]
     fn provider_events_error_memory_record_store_display() {
         let error = ProviderEventsError::MemoryRecordStore(
-            shardline_index::MemoryRecordStoreError::LockPoisoned
+            shardline_index::MemoryRecordStoreError::LockPoisoned,
         );
         let msg = error.to_string();
         assert!(!msg.is_empty());
@@ -289,7 +315,7 @@ mod error_display_tests {
             shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
                 observed_bytes: 999,
                 maximum_bytes: 100,
-            }
+            },
         );
         let msg = error.to_string();
         assert!(!msg.is_empty());
@@ -308,9 +334,8 @@ mod error_display_tests {
 
     #[test]
     fn provider_events_error_xet_adapter_display_nonempty() {
-        let error = ProviderEventsError::XetAdapter(
-            shardline_xet_adapter::XetAdapterError::NotFound,
-        );
+        let error =
+            ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
         let msg = error.to_string();
         assert!(!msg.is_empty());
         assert!(msg.contains("xet"));

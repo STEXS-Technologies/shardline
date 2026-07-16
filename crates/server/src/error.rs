@@ -406,7 +406,9 @@ impl ServerError {
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
                 StatusCode::TOO_MANY_REQUESTS
             }
-            Self::TransferLimiterClosed | Self::TransferLimiterTimedOut => StatusCode::SERVICE_UNAVAILABLE,
+            Self::TransferLimiterClosed | Self::TransferLimiterTimedOut => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Io(_)
             | Self::Json(_)
             | Self::NumericConversion(_)
@@ -1001,7 +1003,10 @@ mod tests {
         let huge = 1_000_000_000_000u64;
         let try_err = i32::try_from(huge).unwrap_err();
         let err = ServerError::NumericConversion(try_err);
-        assert_eq!(err.to_string(), "numeric conversion exceeded supported bounds");
+        assert_eq!(
+            err.to_string(),
+            "numeric conversion exceeded supported bounds"
+        );
     }
 
     #[test]
@@ -1185,10 +1190,7 @@ mod tests {
     #[test]
     fn server_error_display_invalid_upload_session() {
         let err = ServerError::InvalidUploadSession;
-        assert_eq!(
-            err.to_string(),
-            "upload session identifier was invalid"
-        );
+        assert_eq!(err.to_string(), "upload session identifier was invalid");
     }
 
     #[test]
@@ -1218,10 +1220,7 @@ mod tests {
     #[test]
     fn server_error_display_transfer_limiter_timed_out() {
         let err = ServerError::TransferLimiterTimedOut;
-        assert_eq!(
-            err.to_string(),
-            "transfer concurrency limiter timed out"
-        );
+        assert_eq!(err.to_string(), "transfer concurrency limiter timed out");
     }
 
     #[test]
@@ -1250,8 +1249,7 @@ mod tests {
 
     #[test]
     fn server_error_display_index() {
-        let err =
-            ServerError::Index(IndexError::MissingRequiredMetadataTable("test".to_owned()));
+        let err = ServerError::Index(IndexError::MissingRequiredMetadataTable("test".to_owned()));
         assert_eq!(err.to_string(), "index adapter operation failed");
     }
 
@@ -1279,7 +1277,10 @@ mod tests {
         let err = ServerError::InvalidSerializedShard(
             InvalidSerializedShardError::RetainedShardChunkHashesNotStrictlyOrdered,
         );
-        assert_eq!(err.to_string(), "shard body was not a valid serialized shard object");
+        assert_eq!(
+            err.to_string(),
+            "shard body was not a valid serialized shard object"
+        );
     }
 
     #[test]
@@ -1293,26 +1294,24 @@ mod tests {
 
     #[test]
     fn server_error_display_invalid_token() {
-        let err = ServerError::InvalidToken(
-            shardline_protocol::TokenCodecError::Expired,
-        );
+        let err = ServerError::InvalidToken(shardline_protocol::TokenCodecError::Expired);
         assert_eq!(err.to_string(), "bearer token was invalid");
     }
 
     #[test]
     fn server_error_display_provider() {
-        let err = ServerError::Provider(
-            crate::provider::ProviderServiceError::EmptyApiKey,
-        );
+        let err = ServerError::Provider(crate::provider::ProviderServiceError::EmptyApiKey);
         assert_eq!(err.to_string(), "provider token issuance failed");
     }
 
     #[test]
     fn server_error_display_reconstruction_cache() {
-        let err = ServerError::ReconstructionCache(
-            shardline_cache::ReconstructionCacheError::Operation,
+        let err =
+            ServerError::ReconstructionCache(shardline_cache::ReconstructionCacheError::Operation);
+        assert_eq!(
+            err.to_string(),
+            "reconstruction cache adapter operation failed"
         );
-        assert_eq!(err.to_string(), "reconstruction cache adapter operation failed");
     }
 
     #[test]
@@ -1376,10 +1375,7 @@ mod tests {
     #[test]
     fn server_error_display_invalid_provider_webhook_payload() {
         let err = ServerError::InvalidProviderWebhookPayload;
-        assert_eq!(
-            err.to_string(),
-            "provider webhook payload was invalid"
-        );
+        assert_eq!(err.to_string(), "provider webhook payload was invalid");
     }
 
     #[test]
@@ -1448,7 +1444,10 @@ mod tests {
     #[test]
     fn server_error_display_expected_body_hash_mismatch() {
         let err = ServerError::ExpectedBodyHashMismatch;
-        assert_eq!(err.to_string(), "uploaded body hash did not match the expected sha256");
+        assert_eq!(
+            err.to_string(),
+            "uploaded body hash did not match the expected sha256"
+        );
     }
 
     #[test]
@@ -1560,17 +1559,26 @@ mod tests {
 
     #[test]
     fn server_error_status_code_for_xorb_hash_mismatch() {
-        assert_eq!(status_for(&ServerError::XorbHashMismatch), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::XorbHashMismatch),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn server_error_status_code_for_invalid_digest() {
-        assert_eq!(status_for(&ServerError::InvalidDigest), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::InvalidDigest),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn server_error_status_code_for_missing_referenced_xorb() {
-        assert_eq!(status_for(&ServerError::MissingReferencedXorb), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::MissingReferencedXorb),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     // ---- ObjectStoreError conversion StatusCode tests ----
@@ -1585,81 +1593,126 @@ mod tests {
 
     #[test]
     fn status_code_invalid_repository_name() {
-        assert_eq!(status_for(&ServerError::InvalidRepositoryName), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::InvalidRepositoryName),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_invalid_manifest_reference() {
-        assert_eq!(status_for(&ServerError::InvalidManifestReference), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::InvalidManifestReference),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_invalid_upload_session() {
-        assert_eq!(status_for(&ServerError::InvalidUploadSession), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::InvalidUploadSession),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_invalid_xorb_prefix() {
-        assert_eq!(status_for(&ServerError::InvalidXorbPrefix), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::InvalidXorbPrefix),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_hash_parse() {
         use shardline_protocol::HashParseError;
-        assert_eq!(status_for(&ServerError::HashParse(HashParseError::InvalidLength)), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::HashParse(HashParseError::InvalidLength)),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_unauthorized_challenge() {
-        assert_eq!(status_for(&ServerError::UnauthorizedChallenge("x".into())), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_for(&ServerError::UnauthorizedChallenge("x".into())),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
     fn status_code_invalid_serialized_xorb() {
-        assert_eq!(status_for(&ServerError::InvalidSerializedXorb), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::InvalidSerializedXorb),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_request_body_read() {
         let io_err = std::io::Error::other("stream");
         let axum_err = axum::Error::new(io_err);
-        assert_eq!(status_for(&ServerError::RequestBodyRead(axum_err)), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::RequestBodyRead(axum_err)),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_request_body_frame_out_of_bounds() {
-        assert_eq!(status_for(&ServerError::RequestBodyFrameOutOfBounds), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::RequestBodyFrameOutOfBounds),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
     fn status_code_provider_tokens_disabled() {
-        assert_eq!(status_for(&ServerError::ProviderTokensDisabled), StatusCode::NOT_FOUND);
+        assert_eq!(
+            status_for(&ServerError::ProviderTokensDisabled),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[test]
     fn status_code_invalid_authorization_header() {
-        assert_eq!(status_for(&ServerError::InvalidAuthorizationHeader), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_for(&ServerError::InvalidAuthorizationHeader),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
     fn status_code_invalid_token() {
         use shardline_protocol::TokenCodecError;
-        assert_eq!(status_for(&ServerError::InvalidToken(TokenCodecError::Expired)), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_for(&ServerError::InvalidToken(TokenCodecError::Expired)),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
     fn status_code_missing_provider_api_key() {
-        assert_eq!(status_for(&ServerError::MissingProviderApiKey), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_for(&ServerError::MissingProviderApiKey),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
     fn status_code_invalid_provider_webhook_authentication() {
-        assert_eq!(status_for(&ServerError::InvalidProviderWebhookAuthentication), StatusCode::FORBIDDEN);
+        assert_eq!(
+            status_for(&ServerError::InvalidProviderWebhookAuthentication),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
     fn status_code_invalid_provider_token_request() {
-        assert_eq!(status_for(&ServerError::InvalidProviderTokenRequest), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status_for(&ServerError::InvalidProviderTokenRequest),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -1672,7 +1725,10 @@ mod tests {
     fn status_code_numeric_conversion() {
         let huge = 1_000_000_000_000u64;
         let try_err = i32::try_from(huge).unwrap_err();
-        assert_eq!(status_for(&ServerError::NumericConversion(try_err)), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_for(&ServerError::NumericConversion(try_err)),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
@@ -1689,24 +1745,35 @@ mod tests {
 
     #[test]
     fn status_code_stored_file_metadata_too_large() {
-        let err = ServerError::StoredFileMetadataTooLarge { observed_bytes: 1, maximum_bytes: 1 };
+        let err = ServerError::StoredFileMetadataTooLarge {
+            observed_bytes: 1,
+            maximum_bytes: 1,
+        };
         assert_eq!(status_for(&err), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
     fn status_code_stored_file_metadata_length_mismatch() {
-        assert_eq!(status_for(&ServerError::StoredFileMetadataLengthMismatch), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_for(&ServerError::StoredFileMetadataLengthMismatch),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
     fn status_code_config() {
-        let err = ServerError::Config(crate::config::ServerConfigError::MissingTokenSigningKeyForServedRoutes);
+        let err = ServerError::Config(
+            crate::config::ServerConfigError::MissingTokenSigningKeyForServedRoutes,
+        );
         assert_eq!(status_for(&err), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
     fn status_code_missing_reconstruction_cache_redis_url() {
-        assert_eq!(status_for(&ServerError::MissingReconstructionCacheRedisUrl), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_for(&ServerError::MissingReconstructionCacheRedisUrl),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
@@ -1722,7 +1789,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let task = rt.spawn(async { panic!("x") });
         let join_err = rt.block_on(async { task.await.unwrap_err() });
-        assert_eq!(status_for(&ServerError::BlockingTask(join_err)), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_for(&ServerError::BlockingTask(join_err)),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
@@ -1741,12 +1811,18 @@ mod tests {
 
     #[test]
     fn oci_error_code_name_invalid() {
-        assert_eq!(ServerError::InvalidRepositoryName.oci_error_code(), "NAME_INVALID");
+        assert_eq!(
+            ServerError::InvalidRepositoryName.oci_error_code(),
+            "NAME_INVALID"
+        );
     }
 
     #[test]
     fn oci_error_code_digest_invalid_for_expected_body_hash_mismatch() {
-        assert_eq!(ServerError::ExpectedBodyHashMismatch.oci_error_code(), "DIGEST_INVALID");
+        assert_eq!(
+            ServerError::ExpectedBodyHashMismatch.oci_error_code(),
+            "DIGEST_INVALID"
+        );
     }
 
     #[test]
@@ -1789,8 +1865,13 @@ mod tests {
 
     #[test]
     fn index_error_postgres_metadata_display() {
-        let err = IndexError::PostgresMetadata(shardline_index::PostgresMetadataStoreError::Json(serde_json::from_str::<()>("x").unwrap_err()));
-        assert_eq!(err.to_string(), "postgres metadata adapter operation failed");
+        let err = IndexError::PostgresMetadata(shardline_index::PostgresMetadataStoreError::Json(
+            serde_json::from_str::<()>("x").unwrap_err(),
+        ));
+        assert_eq!(
+            err.to_string(),
+            "postgres metadata adapter operation failed"
+        );
     }
 
     #[test]
@@ -1801,19 +1882,25 @@ mod tests {
 
     #[test]
     fn index_error_quarantine_candidate_display() {
-        let err = IndexError::QuarantineCandidate(shardline_index::QuarantineCandidateError::InvertedTimeline);
+        let err = IndexError::QuarantineCandidate(
+            shardline_index::QuarantineCandidateError::InvertedTimeline,
+        );
         assert_eq!(err.to_string(), "quarantine candidate input was invalid");
     }
 
     #[test]
     fn index_error_webhook_delivery_display() {
-        let err = IndexError::WebhookDelivery(shardline_index::WebhookDeliveryError::EmptyRepositoryOwner);
+        let err = IndexError::WebhookDelivery(
+            shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
+        );
         assert_eq!(err.to_string(), "webhook delivery metadata was invalid");
     }
 
     #[test]
     fn index_error_file_record_invariant_display() {
-        let err = IndexError::FileRecordInvariant(shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets);
+        let err = IndexError::FileRecordInvariant(
+            shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets,
+        );
         assert_eq!(err.to_string(), "stored file metadata was invalid");
     }
 
@@ -1824,7 +1911,10 @@ mod tests {
             delete_after_unix_seconds: 10,
             first_seen_unreachable_at_unix_seconds: 20,
         });
-        assert_eq!(err.to_string(), "lifecycle metadata was internally inconsistent");
+        assert_eq!(
+            err.to_string(),
+            "lifecycle metadata was internally inconsistent"
+        );
     }
 
     #[test]
@@ -1878,19 +1968,28 @@ mod tests {
     fn from_local_object_store_error() {
         let io_err = std::io::Error::other("local");
         let err: ServerError = shardline_storage::LocalObjectStoreError::Io(io_err).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Local(_))));
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::Local(_))
+        ));
     }
 
     #[test]
     fn from_s3_object_store_error() {
         let err: ServerError = shardline_storage::S3ObjectStoreError::IncompleteCredentials.into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::S3(_))));
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::S3(_))
+        ));
     }
 
     #[test]
     fn from_object_prefix_error() {
         let err: ServerError = shardline_storage::ObjectPrefixError::UnsafePath.into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Prefix(_))));
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::Prefix(_))
+        ));
     }
 
     #[test]
@@ -1903,43 +2002,68 @@ mod tests {
     #[test]
     fn from_memory_index_store_error() {
         let err: ServerError = shardline_index::MemoryIndexStoreError::LockPoisoned.into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryIndex(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryIndex(_))
+        ));
     }
 
     #[test]
     fn from_memory_record_store_error() {
         let err: ServerError = shardline_index::MemoryRecordStoreError::LockPoisoned.into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryRecord(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryRecord(_))
+        ));
     }
 
     #[test]
     fn from_postgres_metadata_store_error() {
-        let err: ServerError = shardline_index::PostgresMetadataStoreError::Json(serde_json::from_str::<()>("x").unwrap_err()).into();
-        assert!(matches!(err, ServerError::Index(IndexError::PostgresMetadata(_))));
+        let err: ServerError = shardline_index::PostgresMetadataStoreError::Json(
+            serde_json::from_str::<()>("x").unwrap_err(),
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn from_retention_hold_error() {
         let err: ServerError = shardline_index::RetentionHoldError::InvertedTimeline.into();
-        assert!(matches!(err, ServerError::Index(IndexError::RetentionHold(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::RetentionHold(_))
+        ));
     }
 
     #[test]
     fn from_quarantine_candidate_error() {
         let err: ServerError = shardline_index::QuarantineCandidateError::InvertedTimeline.into();
-        assert!(matches!(err, ServerError::Index(IndexError::QuarantineCandidate(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::QuarantineCandidate(_))
+        ));
     }
 
     #[test]
     fn from_webhook_delivery_error() {
         let err: ServerError = shardline_index::WebhookDeliveryError::EmptyRepositoryOwner.into();
-        assert!(matches!(err, ServerError::Index(IndexError::WebhookDelivery(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::WebhookDelivery(_))
+        ));
     }
 
     #[test]
     fn from_file_record_invariant_error() {
-        let err: ServerError = shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets.into();
-        assert!(matches!(err, ServerError::Index(IndexError::FileRecordInvariant(_))));
+        let err: ServerError =
+            shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets.into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::FileRecordInvariant(_))
+        ));
     }
 
     #[test]
@@ -1949,16 +2073,27 @@ mod tests {
             delete_after_unix_seconds: 10,
             first_seen_unreachable_at_unix_seconds: 20,
         }.into();
-        assert!(matches!(err, ServerError::Index(IndexError::InvalidLifecycleMetadata(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::InvalidLifecycleMetadata(_))
+        ));
     }
 
     #[test]
     fn from_parse_stored_file_record_too_large() {
-        let err: ServerError = shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
-            observed_bytes: 100,
-            maximum_bytes: 50,
-        }.into();
-        assert!(matches!(err, ServerError::StoredFileMetadataTooLarge { observed_bytes: 100, maximum_bytes: 50 }));
+        let err: ServerError =
+            shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+                observed_bytes: 100,
+                maximum_bytes: 50,
+            }
+            .into();
+        assert!(matches!(
+            err,
+            ServerError::StoredFileMetadataTooLarge {
+                observed_bytes: 100,
+                maximum_bytes: 50
+            }
+        ));
     }
 
     #[test]
@@ -1969,7 +2104,8 @@ mod tests {
 
     #[test]
     fn from_protocol_error_invalid_content_hash() {
-        let err: ServerError = shardline_protocol_adapters::ProtocolError::InvalidContentHash.into();
+        let err: ServerError =
+            shardline_protocol_adapters::ProtocolError::InvalidContentHash.into();
         assert!(matches!(err, ServerError::InvalidContentHash));
     }
 
@@ -1981,7 +2117,10 @@ mod tests {
         let err = ServerError::UnauthorizedChallenge("Bearer realm=\"test\"".to_owned());
         let response = err.into_response();
         let www_auth = response.headers().get(axum::http::header::WWW_AUTHENTICATE);
-        assert_eq!(www_auth, Some(&HeaderValue::from_static("Bearer realm=\"test\"")));
+        assert_eq!(
+            www_auth,
+            Some(&HeaderValue::from_static("Bearer realm=\"test\""))
+        );
     }
 
     #[test]
@@ -1990,14 +2129,22 @@ mod tests {
         let err = ServerError::MissingAuthorization;
         let response = err.into_response();
         let www_auth = response.headers().get(axum::http::header::WWW_AUTHENTICATE);
-        assert_eq!(www_auth, Some(&HeaderValue::from_static("Bearer realm=\"shardline\"")));
+        assert_eq!(
+            www_auth,
+            Some(&HeaderValue::from_static("Bearer realm=\"shardline\""))
+        );
     }
 
     #[test]
     fn into_response_not_found_has_no_www_auth() {
         let err = ServerError::NotFound;
         let response = err.into_response();
-        assert!(response.headers().get(axum::http::header::WWW_AUTHENTICATE).is_none());
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .is_none()
+        );
     }
 
     // ---- OciError tests ----
@@ -2042,9 +2189,8 @@ mod tests {
 
     #[test]
     fn from_xet_adapter_error_io() {
-        let err: ServerError = crate::xet_adapter::XetAdapterError::Io(
-            std::io::Error::other("io"),
-        ).into();
+        let err: ServerError =
+            crate::xet_adapter::XetAdapterError::Io(std::io::Error::other("io")).into();
         assert!(matches!(err, ServerError::Io(_)));
     }
 
@@ -2052,16 +2198,16 @@ mod tests {
     fn from_xet_adapter_error_numeric_conversion() {
         let huge = 1_000_000_000_000u64;
         let try_err = i32::try_from(huge).unwrap_err();
-        let err: ServerError = crate::xet_adapter::XetAdapterError::NumericConversion(try_err).into();
+        let err: ServerError =
+            crate::xet_adapter::XetAdapterError::NumericConversion(try_err).into();
         assert!(matches!(err, ServerError::NumericConversion(_)));
     }
 
     #[test]
     fn from_xet_adapter_error_hash_parse() {
         use shardline_protocol::HashParseError;
-        let err: ServerError = crate::xet_adapter::XetAdapterError::HashParse(
-            HashParseError::InvalidLength,
-        ).into();
+        let err: ServerError =
+            crate::xet_adapter::XetAdapterError::HashParse(HashParseError::InvalidLength).into();
         assert!(matches!(err, ServerError::HashParse(_)));
     }
 
@@ -2069,16 +2215,24 @@ mod tests {
     fn from_xet_adapter_error_local_object_store() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::LocalObjectStore(
             shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local")),
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Local(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::Local(_))
+        ));
     }
 
     #[test]
     fn from_xet_adapter_error_s3_object_store() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::S3ObjectStore(
             shardline_storage::S3ObjectStoreError::IncompleteCredentials,
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::S3(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::S3(_))
+        ));
     }
 
     #[test]
@@ -2086,7 +2240,8 @@ mod tests {
         let io_err = std::io::Error::other("idx");
         let err: ServerError = crate::xet_adapter::XetAdapterError::IndexStore(
             shardline_index::LocalIndexStoreError::Io(io_err),
-        ).into();
+        )
+        .into();
         assert!(matches!(err, ServerError::Index(IndexError::Local(_))));
     }
 
@@ -2094,16 +2249,24 @@ mod tests {
     fn from_xet_adapter_error_memory_index() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::MemoryIndexStore(
             shardline_index::MemoryIndexStoreError::LockPoisoned,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryIndex(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryIndex(_))
+        ));
     }
 
     #[test]
     fn from_xet_adapter_error_memory_record() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::MemoryRecordStore(
             shardline_index::MemoryRecordStoreError::LockPoisoned,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryRecord(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryRecord(_))
+        ));
     }
 
     #[test]
@@ -2112,16 +2275,24 @@ mod tests {
             shardline_index::PostgresMetadataStoreError::Json(
                 serde_json::from_str::<()>("x").unwrap_err(),
             ),
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::PostgresMetadata(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn from_xet_adapter_error_file_record_invariant() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::FileRecordInvariant(
             shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::FileRecordInvariant(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::FileRecordInvariant(_))
+        ));
     }
 
     #[test]
@@ -2153,7 +2324,8 @@ mod tests {
         use shardline_server_core::InvalidSerializedShardError;
         let err: ServerError = crate::xet_adapter::XetAdapterError::InvalidSerializedShard(
             InvalidSerializedShardError::RetainedShardChunkHashesNotStrictlyOrdered,
-        ).into();
+        )
+        .into();
         assert!(matches!(err, ServerError::InvalidSerializedShard(_)));
     }
 
@@ -2212,15 +2384,17 @@ mod tests {
     fn from_provider_events_error_conflicting_rename() {
         use shardline_provider_events::ProviderEventsError;
         let err: ServerError = ProviderEventsError::ConflictingRenameTargetRecord.into();
-        assert!(matches!(err, ServerError::Index(IndexError::ConflictingRenameTargetRecord)));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::ConflictingRenameTargetRecord)
+        ));
     }
 
     #[test]
     fn from_provider_events_error_json() {
         use shardline_provider_events::ProviderEventsError;
-        let err: ServerError = ProviderEventsError::Json(
-            serde_json::from_str::<()>("invalid").unwrap_err(),
-        ).into();
+        let err: ServerError =
+            ProviderEventsError::Json(serde_json::from_str::<()>("invalid").unwrap_err()).into();
         assert!(matches!(err, ServerError::Json(_)));
     }
 
@@ -2238,8 +2412,12 @@ mod tests {
         use shardline_provider_events::ProviderEventsError;
         let err: ServerError = ProviderEventsError::RetentionHold(
             shardline_index::RetentionHoldError::InvertedTimeline,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::RetentionHold(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::RetentionHold(_))
+        ));
     }
 
     #[test]
@@ -2247,17 +2425,21 @@ mod tests {
         use shardline_provider_events::ProviderEventsError;
         let err: ServerError = ProviderEventsError::WebhookDelivery(
             shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::WebhookDelivery(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::WebhookDelivery(_))
+        ));
     }
 
     #[test]
     fn from_provider_events_error_index_store() {
         use shardline_provider_events::ProviderEventsError;
         let io_err = std::io::Error::other("idx");
-        let err: ServerError = ProviderEventsError::IndexStore(
-            shardline_index::LocalIndexStoreError::Io(io_err),
-        ).into();
+        let err: ServerError =
+            ProviderEventsError::IndexStore(shardline_index::LocalIndexStoreError::Io(io_err))
+                .into();
         assert!(matches!(err, ServerError::Index(IndexError::Local(_))));
     }
 
@@ -2266,8 +2448,12 @@ mod tests {
         use shardline_provider_events::ProviderEventsError;
         let err: ServerError = ProviderEventsError::MemoryIndexStore(
             shardline_index::MemoryIndexStoreError::LockPoisoned,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryIndex(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryIndex(_))
+        ));
     }
 
     #[test]
@@ -2275,8 +2461,12 @@ mod tests {
         use shardline_provider_events::ProviderEventsError;
         let err: ServerError = ProviderEventsError::MemoryRecordStore(
             shardline_index::MemoryRecordStoreError::LockPoisoned,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryRecord(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryRecord(_))
+        ));
     }
 
     #[test]
@@ -2286,8 +2476,12 @@ mod tests {
             shardline_index::PostgresMetadataStoreError::Json(
                 serde_json::from_str::<()>("x").unwrap_err(),
             ),
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::PostgresMetadata(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
@@ -2297,7 +2491,8 @@ mod tests {
             shardline_server_core::ParseStoredFileRecordError::Json(
                 serde_json::from_str::<()>("x").unwrap_err(),
             ),
-        ).into();
+        )
+        .into();
         assert!(matches!(err, ServerError::Io(_)));
     }
 
@@ -2311,9 +2506,7 @@ mod tests {
     #[test]
     fn from_gc_error_json() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::Json(
-            serde_json::from_str::<()>("x").unwrap_err(),
-        ).into();
+        let err: ServerError = GcError::Json(serde_json::from_str::<()>("x").unwrap_err()).into();
         assert!(matches!(err, ServerError::Json(_)));
     }
 
@@ -2331,74 +2524,92 @@ mod tests {
         use shardline_gc::GcError;
         let err: ServerError = GcError::LocalObjectStore(
             shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local")),
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Local(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::Local(_))
+        ));
     }
 
     #[test]
     fn from_gc_error_s3_object_store() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::S3ObjectStore(
-            shardline_storage::S3ObjectStoreError::IncompleteCredentials,
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::S3(_))));
+        let err: ServerError =
+            GcError::S3ObjectStore(shardline_storage::S3ObjectStoreError::IncompleteCredentials)
+                .into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::S3(_))
+        ));
     }
 
     #[test]
     fn from_gc_error_object_prefix() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::ObjectPrefix(
-            shardline_storage::ObjectPrefixError::UnsafePath,
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Prefix(_))));
+        let err: ServerError =
+            GcError::ObjectPrefix(shardline_storage::ObjectPrefixError::UnsafePath).into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::Prefix(_))
+        ));
     }
 
     #[test]
     fn from_gc_error_index_store() {
         use shardline_gc::GcError;
         let io_err = std::io::Error::other("idx");
-        let err: ServerError = GcError::IndexStore(
-            shardline_index::LocalIndexStoreError::Io(io_err),
-        ).into();
+        let err: ServerError =
+            GcError::IndexStore(shardline_index::LocalIndexStoreError::Io(io_err)).into();
         assert!(matches!(err, ServerError::Index(IndexError::Local(_))));
     }
 
     #[test]
     fn from_gc_error_memory_index() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::MemoryIndexStore(
-            shardline_index::MemoryIndexStoreError::LockPoisoned,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryIndex(_))));
+        let err: ServerError =
+            GcError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned).into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryIndex(_))
+        ));
     }
 
     #[test]
     fn from_gc_error_memory_record() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::MemoryRecordStore(
-            shardline_index::MemoryRecordStoreError::LockPoisoned,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::MemoryRecord(_))));
+        let err: ServerError =
+            GcError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned)
+                .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::MemoryRecord(_))
+        ));
     }
 
     #[test]
     fn from_gc_error_postgres_metadata() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::PostgresMetadata(
-            shardline_index::PostgresMetadataStoreError::Json(
+        let err: ServerError =
+            GcError::PostgresMetadata(shardline_index::PostgresMetadataStoreError::Json(
                 serde_json::from_str::<()>("x").unwrap_err(),
-            ),
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::PostgresMetadata(_))));
+            ))
+            .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::PostgresMetadata(_))
+        ));
     }
 
     #[test]
     fn from_gc_error_retention_hold() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::RetentionHold(
-            shardline_index::RetentionHoldError::InvertedTimeline,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::RetentionHold(_))));
+        let err: ServerError =
+            GcError::RetentionHold(shardline_index::RetentionHoldError::InvertedTimeline).into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::RetentionHold(_))
+        ));
     }
 
     #[test]
@@ -2406,17 +2617,24 @@ mod tests {
         use shardline_gc::GcError;
         let err: ServerError = GcError::QuarantineCandidate(
             shardline_index::QuarantineCandidateError::InvertedTimeline,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::QuarantineCandidate(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::QuarantineCandidate(_))
+        ));
     }
 
     #[test]
     fn from_gc_error_webhook_delivery() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::WebhookDelivery(
-            shardline_index::WebhookDeliveryError::EmptyRepositoryOwner,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::WebhookDelivery(_))));
+        let err: ServerError =
+            GcError::WebhookDelivery(shardline_index::WebhookDeliveryError::EmptyRepositoryOwner)
+                .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::WebhookDelivery(_))
+        ));
     }
 
     #[test]
@@ -2424,8 +2642,12 @@ mod tests {
         use shardline_gc::GcError;
         let err: ServerError = GcError::FileRecordInvariant(
             shardline_index::FileRecordInvariantError::NonContiguousChunkOffsets,
-        ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::FileRecordInvariant(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::FileRecordInvariant(_))
+        ));
     }
 
     #[test]
@@ -2438,7 +2660,10 @@ mod tests {
                 first_seen_unreachable_at_unix_seconds: 20,
             },
         ).into();
-        assert!(matches!(err, ServerError::Index(IndexError::InvalidLifecycleMetadata(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::InvalidLifecycleMetadata(_))
+        ));
     }
 
     #[test]
@@ -2458,14 +2683,18 @@ mod tests {
     #[test]
     fn from_invalid_reconstruction_response_error() {
         let err: ServerError = shardline_server_core::InvalidReconstructionResponseError::TermCountExceededRecordChunkCount.into();
-        assert!(matches!(err, ServerError::Index(IndexError::InvalidReconstructionResponse(_))));
+        assert!(matches!(
+            err,
+            ServerError::Index(IndexError::InvalidReconstructionResponse(_))
+        ));
     }
 
     #[test]
     fn from_parse_stored_file_record_error_json() {
         let err: ServerError = shardline_server_core::ParseStoredFileRecordError::Json(
             serde_json::from_str::<()>("x").unwrap_err(),
-        ).into();
+        )
+        .into();
         assert!(matches!(err, ServerError::Json(_)));
     }
 
@@ -2475,14 +2704,22 @@ mod tests {
         let oci = OciError(ServerError::MissingAuthorization);
         let response = oci.into_response();
         let www_auth = response.headers().get(axum::http::header::WWW_AUTHENTICATE);
-        assert_eq!(www_auth, Some(&HeaderValue::from_static("Bearer realm=\"shardline\"")));
+        assert_eq!(
+            www_auth,
+            Some(&HeaderValue::from_static("Bearer realm=\"shardline\""))
+        );
     }
 
     #[test]
     fn oci_error_not_found_has_no_www_auth() {
         let oci = OciError(ServerError::NotFound);
         let response = oci.into_response();
-        assert!(response.headers().get(axum::http::header::WWW_AUTHENTICATE).is_none());
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .is_none()
+        );
     }
 
     // ---- Additional From implementation tests for uncovered variants ----
@@ -2491,43 +2728,42 @@ mod tests {
     fn from_xet_adapter_error_object_store() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::ObjectStore(
             crate::object_store::ServerObjectStoreError::NotFound,
-        ).into();
+        )
+        .into();
         assert!(matches!(err, ServerError::NotFound));
     }
 
     #[test]
     fn from_provider_events_error_xet_adapter_proxies() {
         use shardline_provider_events::ProviderEventsError;
-        let err: ServerError = ProviderEventsError::XetAdapter(
-            shardline_xet_adapter::XetAdapterError::NotFound,
-        ).into();
+        let err: ServerError =
+            ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound)
+                .into();
         assert!(matches!(err, ServerError::NotFound));
     }
 
     #[test]
     fn from_provider_events_error_object_store_proxies() {
         use shardline_provider_events::ProviderEventsError;
-        let err: ServerError = ProviderEventsError::ObjectStore(
-            crate::object_store::ServerObjectStoreError::Overflow,
-        ).into();
+        let err: ServerError =
+            ProviderEventsError::ObjectStore(crate::object_store::ServerObjectStoreError::Overflow)
+                .into();
         assert!(matches!(err, ServerError::Overflow));
     }
 
     #[test]
     fn from_gc_error_object_store_proxies() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::ObjectStore(
-            crate::object_store::ServerObjectStoreError::NotFound,
-        ).into();
+        let err: ServerError =
+            GcError::ObjectStore(crate::object_store::ServerObjectStoreError::NotFound).into();
         assert!(matches!(err, ServerError::NotFound));
     }
 
     #[test]
     fn from_gc_error_xet_adapter_proxies() {
         use shardline_gc::GcError;
-        let err: ServerError = GcError::XetAdapter(
-            shardline_xet_adapter::XetAdapterError::InvalidContentHash,
-        ).into();
+        let err: ServerError =
+            GcError::XetAdapter(shardline_xet_adapter::XetAdapterError::InvalidContentHash).into();
         assert!(matches!(err, ServerError::InvalidContentHash));
     }
 
@@ -2535,9 +2771,8 @@ mod tests {
 
     #[test]
     fn from_oci_adapter_error_io() {
-        let err: ServerError = shardline_oci_adapter::OciAdapterError::Io(
-            std::io::Error::other("oci io"),
-        ).into();
+        let err: ServerError =
+            shardline_oci_adapter::OciAdapterError::Io(std::io::Error::other("oci io")).into();
         assert!(matches!(err, ServerError::Io(_)));
     }
 
@@ -2545,7 +2780,8 @@ mod tests {
     fn from_oci_adapter_error_json() {
         let err: ServerError = shardline_oci_adapter::OciAdapterError::Json(
             serde_json::from_str::<()>("x").unwrap_err(),
-        ).into();
+        )
+        .into();
         assert!(matches!(err, ServerError::Json(_)));
     }
 
@@ -2553,7 +2789,8 @@ mod tests {
     fn from_oci_adapter_error_numeric_conversion() {
         let huge = 1_000_000_000_000u64;
         let try_err = i32::try_from(huge).unwrap_err();
-        let err: ServerError = shardline_oci_adapter::OciAdapterError::NumericConversion(try_err).into();
+        let err: ServerError =
+            shardline_oci_adapter::OciAdapterError::NumericConversion(try_err).into();
         assert!(matches!(err, ServerError::NumericConversion(_)));
     }
 
@@ -2561,7 +2798,8 @@ mod tests {
     fn from_oci_adapter_error_object_store_proxies() {
         let err: ServerError = shardline_oci_adapter::OciAdapterError::ObjectStore(
             crate::object_store::ServerObjectStoreError::Overflow,
-        ).into();
+        )
+        .into();
         assert!(matches!(err, ServerError::Overflow));
     }
 
@@ -2569,24 +2807,36 @@ mod tests {
     fn from_oci_adapter_error_s3_object_store() {
         let err: ServerError = shardline_oci_adapter::OciAdapterError::S3ObjectStore(
             shardline_storage::S3ObjectStoreError::IncompleteCredentials,
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::S3(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::S3(_))
+        ));
     }
 
     #[test]
     fn from_oci_adapter_error_local_object_store() {
         let err: ServerError = shardline_oci_adapter::OciAdapterError::LocalObjectStore(
             shardline_storage::LocalObjectStoreError::Io(std::io::Error::other("local")),
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Local(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::Local(_))
+        ));
     }
 
     #[test]
     fn from_oci_adapter_error_object_prefix() {
         let err: ServerError = shardline_oci_adapter::OciAdapterError::ObjectPrefix(
             shardline_storage::ObjectPrefixError::UnsafePath,
-        ).into();
-        assert!(matches!(err, ServerError::ObjectStore(ObjectStoreError::Prefix(_))));
+        )
+        .into();
+        assert!(matches!(
+            err,
+            ServerError::ObjectStore(ObjectStoreError::Prefix(_))
+        ));
     }
 
     #[test]
@@ -2615,7 +2865,8 @@ mod tests {
 
     #[test]
     fn from_oci_adapter_error_invalid_manifest_reference() {
-        let err: ServerError = shardline_oci_adapter::OciAdapterError::InvalidManifestReference.into();
+        let err: ServerError =
+            shardline_oci_adapter::OciAdapterError::InvalidManifestReference.into();
         assert!(matches!(err, ServerError::InvalidManifestReference));
     }
 
@@ -2633,7 +2884,8 @@ mod tests {
 
     #[test]
     fn from_oci_adapter_error_expected_body_hash_mismatch() {
-        let err: ServerError = shardline_oci_adapter::OciAdapterError::ExpectedBodyHashMismatch.into();
+        let err: ServerError =
+            shardline_oci_adapter::OciAdapterError::ExpectedBodyHashMismatch.into();
         assert!(matches!(err, ServerError::ExpectedBodyHashMismatch));
     }
 
@@ -2643,7 +2895,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let task = rt.spawn(async { panic!("oci task panic") });
         let join_err = rt.block_on(async { task.await.unwrap_err() });
-        let err: ServerError = shardline_oci_adapter::OciAdapterError::BlockingTask(join_err).into();
+        let err: ServerError =
+            shardline_oci_adapter::OciAdapterError::BlockingTask(join_err).into();
         assert!(matches!(err, ServerError::BlockingTask(_)));
     }
 }

@@ -358,12 +358,15 @@ mod tests {
             RepositoryVisibility::Private,
             "main",
             "https://gitea.example/team/assets.git",
-        ).unwrap();
-        catalog.register(ProviderRepositoryPolicy::new(
-            metadata,
-            HashSet::from([subject]),
-            HashSet::new(),
-        )).unwrap();
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
         let adapter = GiteaAdapter::new(catalog, None);
 
         let body = br#"{"ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#;
@@ -388,7 +391,10 @@ mod tests {
         let body = br#"{}"#;
         let request = WebhookRequest::new("unknown", "delivery-unk", None, body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::MissingWebhookAuthentication)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::MissingWebhookAuthentication)
+        ));
     }
 
     #[test]
@@ -398,7 +404,10 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-noref", signature.as_deref(), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRevisionPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRevisionPayload)
+        ));
     }
 
     #[test]
@@ -409,9 +418,12 @@ mod tests {
             "repository":{"full_name":"team/assets"}
         }"#;
         let signature = signature(body);
-        let request = WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
+        let request =
+            WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -423,9 +435,12 @@ mod tests {
             "repository":{"full_name":"team/assets"}
         }"#;
         let signature = signature(body);
-        let request = WebhookRequest::new("repository", "delivery-arch", signature.as_deref(), body);
+        let request =
+            WebhookRequest::new("repository", "delivery-arch", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -437,9 +452,12 @@ mod tests {
             "repository":{"full_name":"team/assets"}
         }"#;
         let signature = signature(body);
-        let request = WebhookRequest::new("repository", "delivery-unarch", signature.as_deref(), body);
+        let request =
+            WebhookRequest::new("repository", "delivery-unarch", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
     }
 
@@ -469,7 +487,9 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-name", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.repository().owner(), "team");
         assert_eq!(event.repository().name(), "assets");
     }
@@ -487,7 +507,9 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-login", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.repository().owner(), "team");
     }
 
@@ -501,7 +523,10 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-noowner", signature.as_deref(), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
     }
 
     #[test]
@@ -514,7 +539,10 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("push", "delivery-noname", signature.as_deref(), body);
         let event = adapter.parse_webhook(request);
-        assert!(matches!(event, Err(BuiltInProviderError::InvalidRepositoryPayload)));
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
     }
 
     #[test]
@@ -528,7 +556,9 @@ mod tests {
         let signature = signature(body);
         let request = WebhookRequest::new("repository", "delivery-alt", signature.as_deref(), body);
         let event = adapter.parse_webhook(request).unwrap();
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
         assert_eq!(event.repository().name(), "assets");
     }
 
@@ -537,6 +567,9 @@ mod tests {
         let adapter = adapter().unwrap();
         let request = WebhookRequest::new("push", "delivery-1", None, br#"{}"#);
         let event = adapter.parse_webhook(request);
-        assert_eq!(event, Err(BuiltInProviderError::MissingWebhookAuthentication));
+        assert_eq!(
+            event,
+            Err(BuiltInProviderError::MissingWebhookAuthentication)
+        );
     }
 }

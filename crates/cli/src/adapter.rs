@@ -81,12 +81,12 @@ where
 mod tests {
     use std::net::TcpListener;
 
-    use super::{
-        CliRuntimeError, endpoint, run_health_check,
-    };
+    use super::{CliRuntimeError, endpoint, run_health_check};
 
     /// Spawn a minimal blocking HTTP server that responds with the given bytes.
-    fn spawn_http_server(response: &'static [u8]) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    fn spawn_http_server(
+        response: &'static [u8],
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -132,18 +132,12 @@ mod tests {
 
     #[test]
     fn endpoint_both_slashes_trimmed() {
-        assert_eq!(
-            endpoint("http://host/", "/path/"),
-            "http://host/path/"
-        );
+        assert_eq!(endpoint("http://host/", "/path/"), "http://host/path/");
     }
 
     #[test]
     fn endpoint_empty_path_returns_base_with_slash() {
-        assert_eq!(
-            endpoint("http://host", ""),
-            "http://host/"
-        );
+        assert_eq!(endpoint("http://host", ""), "http://host/");
     }
 
     // ── CliRuntimeError Display / Debug ─────────────────────────────────
@@ -227,12 +221,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_health_check_500_response_returns_server_status_error() {
-        let response = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 12\r\n\r\nserver error";
+        let response =
+            b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 12\r\n\r\nserver error";
         let (addr, thread) = spawn_http_server(response);
         let url = format!("http://{addr}");
         let result = run_health_check(&url).await;
         thread.join().unwrap();
-        assert!(matches!(result, Err(CliRuntimeError::ServerStatus { status: 500, .. })));
+        assert!(matches!(
+            result,
+            Err(CliRuntimeError::ServerStatus { status: 500, .. })
+        ));
     }
 
     #[tokio::test]

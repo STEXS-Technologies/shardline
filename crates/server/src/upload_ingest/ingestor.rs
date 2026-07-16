@@ -318,14 +318,14 @@ impl FileUploadIngestor {
             return Err(ServerError::Overflow);
         }
 
-        let already_sorted = self
-            .completed_chunks
-            .windows(2)
-            .all(|w: &[SequencedStoredChunkOutcome]| {
-                w.first()
-                    .zip(w.get(1))
-                    .is_some_and(|(a, b)| a.sequence <= b.sequence)
-            });
+        let already_sorted =
+            self.completed_chunks
+                .windows(2)
+                .all(|w: &[SequencedStoredChunkOutcome]| {
+                    w.first()
+                        .zip(w.get(1))
+                        .is_some_and(|(a, b)| a.sequence <= b.sequence)
+                });
         if !already_sorted {
             self.completed_chunks
                 .sort_unstable_by_key(|outcome| outcome.sequence);
@@ -461,7 +461,6 @@ mod tests {
         // Only 2 should be kept (equal to max_in_flight_chunks)
         assert_eq!(ingestor.reusable_pending_buffers.len(), 2);
     }
-
 
     #[test]
     fn ingestor_allocates_pending_buffer_lazily() {
@@ -741,10 +740,7 @@ mod tests {
         let result = ingestor
             .finish(&object_store, "test.bin", None, Some("any-digest"))
             .await;
-        assert!(matches!(
-            result,
-            Err(ServerError::ExpectedBodyHashMismatch)
-        ));
+        assert!(matches!(result, Err(ServerError::ExpectedBodyHashMismatch)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

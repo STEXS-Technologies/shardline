@@ -85,6 +85,26 @@ command = "cargo"
 args = ["nextest", "run", "--all-features", "--no-tests=pass", "${@}"]
 cwd = "e2e"
 
+[tasks.test-docker]
+description = "Run Docker-backed server integration and end-to-end tests"
+workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked"]
+command = "bash"
+args = ["-c", "docker version >/dev/null && cargo nextest run -p shardline-server --features docker --no-tests=pass && (cd e2e && cargo nextest run --all-features --no-tests=pass)"]
+
+[tasks.test-kubernetes]
+description = "Run the disposable kind deployment smoke test"
+workspace = false
+command = "bash"
+args = ["scripts/k8s/kind-smoke.sh"]
+
+[tasks.test-infrastructure]
+description = "Run Docker-backed tests followed by the disposable Kubernetes smoke test"
+workspace = false
+command = "bash"
+args = ["-c", "cargo make test-docker && cargo make test-kubernetes"]
+
 [tasks.verify-release-binary]
 description = "Build the release shardline binary and smoke-test the packaged entrypoint"
 workspace = false

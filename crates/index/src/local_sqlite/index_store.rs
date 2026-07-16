@@ -512,7 +512,10 @@ mod tests {
     use shardline_storage::ObjectKey;
 
     use super::*;
-    use crate::{ProviderRepositoryState, QuarantineCandidate, RetentionHold, WebhookDelivery, ReconstructionTerm};
+    use crate::{
+        ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RetentionHold,
+        WebhookDelivery,
+    };
 
     fn make_store() -> LocalIndexStore {
         let storage = shardline_test_support::TempStorage::new();
@@ -659,8 +662,8 @@ mod tests {
     fn quarantine_candidate_returns_none_for_missing_key() {
         let store = make_store();
         let key = ObjectKey::parse("chunks/aa/missing").unwrap();
-        let loaded = LifecycleStore::quarantine_candidate(&store, &key)
-            .expect("lookup should succeed");
+        let loaded =
+            LifecycleStore::quarantine_candidate(&store, &key).expect("lookup should succeed");
         assert!(loaded.is_none());
     }
 
@@ -668,13 +671,12 @@ mod tests {
     fn quarantine_candidate_upsert_and_read_roundtrip() {
         let store = make_store();
         let key = ObjectKey::parse("chunks/aa/test-candidate").unwrap();
-        let candidate =
-            QuarantineCandidate::new(key.clone(), 100, 1000, 2000).unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 100, 1000, 2000).unwrap();
 
         LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
             .expect("upsert should succeed");
-        let loaded = LifecycleStore::quarantine_candidate(&store, &key)
-            .expect("lookup should succeed");
+        let loaded =
+            LifecycleStore::quarantine_candidate(&store, &key).expect("lookup should succeed");
         assert_eq!(loaded, Some(candidate));
     }
 
@@ -682,13 +684,12 @@ mod tests {
     fn quarantine_candidate_list_includes_upserted() {
         let store = make_store();
         let key = ObjectKey::parse("chunks/bb/list-candidate").unwrap();
-        let candidate =
-            QuarantineCandidate::new(key, 200, 2000, 3000).unwrap();
+        let candidate = QuarantineCandidate::new(key, 200, 2000, 3000).unwrap();
 
         LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
             .expect("upsert should succeed");
-        let candidates = LifecycleStore::list_quarantine_candidates(&store)
-            .expect("list should succeed");
+        let candidates =
+            LifecycleStore::list_quarantine_candidates(&store).expect("list should succeed");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].observed_length(), 200);
     }
@@ -697,15 +698,18 @@ mod tests {
     fn quarantine_candidate_delete_returns_true_then_false() {
         let store = make_store();
         let key = ObjectKey::parse("chunks/cc/del-candidate").unwrap();
-        let candidate =
-            QuarantineCandidate::new(key.clone(), 300, 3000, 4000).unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 300, 3000, 4000).unwrap();
 
         LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
             .expect("upsert should succeed");
-        assert!(LifecycleStore::delete_quarantine_candidate(&store, &key)
-            .expect("first delete should succeed"));
-        assert!(!LifecycleStore::delete_quarantine_candidate(&store, &key)
-            .expect("second delete should succeed"));
+        assert!(
+            LifecycleStore::delete_quarantine_candidate(&store, &key)
+                .expect("first delete should succeed")
+        );
+        assert!(
+            !LifecycleStore::delete_quarantine_candidate(&store, &key)
+                .expect("second delete should succeed")
+        );
     }
 
     // ── LifecycleStore: retention hold ─────────────────────────────────────
@@ -714,8 +718,7 @@ mod tests {
     fn retention_hold_returns_none_for_missing_key() {
         let store = make_store();
         let key = ObjectKey::parse("chunks/aa/missing-hold").unwrap();
-        let loaded = LifecycleStore::retention_hold(&store, &key)
-            .expect("lookup should succeed");
+        let loaded = LifecycleStore::retention_hold(&store, &key).expect("lookup should succeed");
         assert!(loaded.is_none());
     }
 
@@ -725,10 +728,8 @@ mod tests {
         let key = ObjectKey::parse("chunks/aa/test-hold").unwrap();
         let hold = RetentionHold::new(key.clone(), "test reason".into(), 100, Some(200)).unwrap();
 
-        LifecycleStore::upsert_retention_hold(&store, &hold)
-            .expect("upsert should succeed");
-        let loaded = LifecycleStore::retention_hold(&store, &key)
-            .expect("lookup should succeed");
+        LifecycleStore::upsert_retention_hold(&store, &hold).expect("upsert should succeed");
+        let loaded = LifecycleStore::retention_hold(&store, &key).expect("lookup should succeed");
         assert_eq!(loaded, Some(hold));
     }
 
@@ -738,10 +739,8 @@ mod tests {
         let key = ObjectKey::parse("chunks/bb/list-hold").unwrap();
         let hold = RetentionHold::new(key, "retain".into(), 300, None).unwrap();
 
-        LifecycleStore::upsert_retention_hold(&store, &hold)
-            .expect("upsert should succeed");
-        let holds = LifecycleStore::list_retention_holds(&store)
-            .expect("list should succeed");
+        LifecycleStore::upsert_retention_hold(&store, &hold).expect("upsert should succeed");
+        let holds = LifecycleStore::list_retention_holds(&store).expect("list should succeed");
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].reason(), "retain");
     }
@@ -752,12 +751,15 @@ mod tests {
         let key = ObjectKey::parse("chunks/cc/del-hold").unwrap();
         let hold = RetentionHold::new(key.clone(), "delete me".into(), 400, None).unwrap();
 
-        LifecycleStore::upsert_retention_hold(&store, &hold)
-            .expect("upsert should succeed");
-        assert!(LifecycleStore::delete_retention_hold(&store, &key)
-            .expect("first delete should succeed"));
-        assert!(!LifecycleStore::delete_retention_hold(&store, &key)
-            .expect("second delete should succeed"));
+        LifecycleStore::upsert_retention_hold(&store, &hold).expect("upsert should succeed");
+        assert!(
+            LifecycleStore::delete_retention_hold(&store, &key)
+                .expect("first delete should succeed")
+        );
+        assert!(
+            !LifecycleStore::delete_retention_hold(&store, &key)
+                .expect("second delete should succeed")
+        );
     }
 
     // ── LifecycleStore: webhook delivery ───────────────────────────────────
@@ -810,8 +812,8 @@ mod tests {
         .unwrap();
 
         LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
-        let deliveries = LifecycleStore::list_webhook_deliveries(&store)
-            .expect("list should succeed");
+        let deliveries =
+            LifecycleStore::list_webhook_deliveries(&store).expect("list should succeed");
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].delivery_id(), "delivery-list");
     }

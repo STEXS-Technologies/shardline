@@ -365,7 +365,10 @@ mod tests {
 
         assert!(!report.is_clean());
         assert_eq!(report.issue_count(), 1);
-        assert_eq!(report.issues[0].kind, IndexRebuildIssueKind::InvalidVersionFileId);
+        assert_eq!(
+            report.issues[0].kind,
+            IndexRebuildIssueKind::InvalidVersionFileId
+        );
         assert!(candidates.is_empty());
     }
 
@@ -484,7 +487,13 @@ mod tests {
         // different key to trigger path mismatch
         let correct_key = version_record_key("mismatch.txt", &valid_hex_hash());
         let wrong_key = correct_key.replace("mismatch.txt", "WRONG_____");
-        write_raw_version_record(&conn, &wrong_key, "mismatch.txt", &valid_hex_hash(), &json_bytes);
+        write_raw_version_record(
+            &conn,
+            &wrong_key,
+            "mismatch.txt",
+            &valid_hex_hash(),
+            &json_bytes,
+        );
 
         // Delete the init record
         conn.execute(
@@ -659,7 +668,8 @@ mod tests {
         });
 
         // Remove the init record
-        conn.execute("DELETE FROM shardline_file_records", []).unwrap();
+        conn.execute("DELETE FROM shardline_file_records", [])
+            .unwrap();
 
         // The record_key is built from length-prefixed components:
         //   push_length_prefixed("version")    = "7:version"

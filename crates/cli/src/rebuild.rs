@@ -82,7 +82,10 @@ mod tests {
         let sandbox = tempfile::tempdir().unwrap();
         let result = run_index_rebuild(Some(sandbox.path())).await;
         // On an empty deployment with a valid temp dir, rebuild should complete
-        assert!(result.is_ok(), "run_index_rebuild should succeed on empty deployment: {result:?}");
+        assert!(
+            result.is_ok(),
+            "run_index_rebuild should succeed on empty deployment: {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -174,7 +174,10 @@ mod tests {
     fn redis_cache_rejects_empty_url() {
         let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
         let result = RedisReconstructionCache::new("", ttl_seconds);
-        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+        assert!(matches!(
+            result,
+            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
+        ));
     }
 
     #[tokio::test]
@@ -233,8 +236,12 @@ mod tests {
 
     #[test]
     fn redis_key_format_with_scope() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitHub, "my-org", "my-repo", Some("main"));
+        let scope = RepositoryScope::new(
+            RepositoryProvider::GitHub,
+            "my-org",
+            "my-repo",
+            Some("main"),
+        );
         assert!(scope.is_ok());
         let Ok(scope) = scope else {
             return;
@@ -273,8 +280,7 @@ mod tests {
 
     #[test]
     fn redis_key_format_with_scope_no_revision() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
+        let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
         assert!(scope.is_ok());
         let Ok(scope) = scope else {
             return;
@@ -311,8 +317,7 @@ mod tests {
 
     #[test]
     fn redis_key_format_codeberg_provider() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::Codeberg, "user", "repo", Some("v2"));
+        let scope = RepositoryScope::new(RepositoryProvider::Codeberg, "user", "repo", Some("v2"));
         assert!(scope.is_ok());
         let Ok(scope) = scope else {
             return;
@@ -328,8 +333,7 @@ mod tests {
 
     #[test]
     fn redis_key_format_generic_provider() {
-        let scope =
-            RepositoryScope::new(RepositoryProvider::Generic, "ns", "repo-name", None);
+        let scope = RepositoryScope::new(RepositoryProvider::Generic, "ns", "repo-name", None);
         assert!(scope.is_ok());
         let Ok(scope) = scope else {
             return;
@@ -402,21 +406,30 @@ mod tests {
     fn redis_cache_rejects_whitespace_only_url() {
         let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
         let result = RedisReconstructionCache::new("   ", ttl_seconds);
-        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+        assert!(matches!(
+            result,
+            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
+        ));
     }
 
     #[test]
     fn redis_cache_rejects_url_with_only_newline() {
         let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
         let result = RedisReconstructionCache::new("\n", ttl_seconds);
-        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+        assert!(matches!(
+            result,
+            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
+        ));
     }
 
     #[test]
     fn redis_cache_rejects_url_with_tabs() {
         let ttl_seconds = NonZeroU64::new(3600).unwrap_or(NonZeroU64::MIN);
         let result = RedisReconstructionCache::new("\t\t", ttl_seconds);
-        assert!(matches!(result, Err(crate::ReconstructionCacheError::EmptyRedisUrl)));
+        assert!(matches!(
+            result,
+            Err(crate::ReconstructionCacheError::EmptyRedisUrl)
+        ));
     }
 
     #[test]
@@ -442,7 +455,10 @@ mod tests {
 
     #[test]
     fn encode_component_handles_special_characters() {
-        assert_eq!(super::encode_component("file name!"), hex::encode("file name!"));
+        assert_eq!(
+            super::encode_component("file name!"),
+            hex::encode("file name!")
+        );
         assert_eq!(super::encode_component("a/b:c"), hex::encode("a/b:c"));
     }
 
@@ -460,7 +476,10 @@ mod tests {
     fn encode_component_handles_control_characters_in_string() {
         // encode_component takes &str so we can pass strings with escaped chars
         assert_eq!(super::encode_component("a\tb"), hex::encode("a\tb"));
-        assert_eq!(super::encode_component("line1\nline2"), hex::encode("line1\nline2"));
+        assert_eq!(
+            super::encode_component("line1\nline2"),
+            hex::encode("line1\nline2")
+        );
     }
 
     // ── Clone ────────────────────────────────────────────────────────────
@@ -520,7 +539,10 @@ mod tests {
         let redis_key = RedisReconstructionCache::redis_key(&key);
         assert!(redis_key.starts_with("shardline:reconstruction:v1:global:latest:"));
         assert!(redis_key.ends_with(&hex::encode(&long_id)));
-        assert_eq!(redis_key.len(), "shardline:reconstruction:v1:global:latest:".len() + hex::encode(&long_id).len());
+        assert_eq!(
+            redis_key.len(),
+            "shardline:reconstruction:v1:global:latest:".len() + hex::encode(&long_id).len()
+        );
     }
 
     #[test]
@@ -572,7 +594,10 @@ mod tests {
                 let redis_key = RedisReconstructionCache::redis_key(&key);
                 assert!(redis_key.starts_with("shardline:reconstruction:v1:"));
                 // Without revision, "head" is used
-                assert!(redis_key.contains(":head:"), "expected :head: in key for {provider:?}");
+                assert!(
+                    redis_key.contains(":head:"),
+                    "expected :head: in key for {provider:?}"
+                );
             }
         }
     }

@@ -8,8 +8,7 @@ use super::{
     record_not_found_error,
 };
 use crate::{
-    FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal,
-    RepositoryRecordScope,
+    FileRecord, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope,
 };
 
 impl RecordTraversal for LocalRecordStore {
@@ -401,7 +400,10 @@ mod tests {
         let record = sample_record();
         let locator = RecordTraversal::version_record_locator(&store, &record);
         let result = RecordTraversal::modified_since_epoch(&store, &locator).await;
-        assert!(result.is_err(), "modified_since_epoch should error for missing record");
+        assert!(
+            result.is_err(),
+            "modified_since_epoch should error for missing record"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
