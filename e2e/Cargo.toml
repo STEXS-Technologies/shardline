@@ -59,6 +59,10 @@ name = "hub_api_e2e"
 path = "hub_api_e2e.rs"
 
 [[test]]
+name = "native_huggingface_cli_e2e"
+path = "native_huggingface_cli_e2e.rs"
+
+[[test]]
 name = "mixed_protocol_soak"
 path = "mixed_protocol_soak.rs"
 

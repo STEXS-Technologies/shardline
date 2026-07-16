@@ -15,7 +15,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 hex.workspace = true
-redis = { workspace = true, features = ["tokio-comp"] }
+redis = { workspace = true, features = ["tokio-rustls-comp"] }
+rustls.workspace = true
 shardline-protocol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

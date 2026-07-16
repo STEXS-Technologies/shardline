@@ -8,13 +8,64 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use shardline_cache::RedisTlsConfig;
 use shardline_protocol::parse_bool;
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::{
-    MAX_PROVIDER_API_KEY_BYTES, MAX_S3_CREDENTIAL_BYTES, ServerConfig, ServerConfigError,
-    run_before_secret_file_read_hook_for_tests,
+    MAX_PROVIDER_API_KEY_BYTES, MAX_REDIS_TLS_MATERIAL_BYTES, MAX_S3_CREDENTIAL_BYTES,
+    ServerConfig, ServerConfigError, run_before_secret_file_read_hook_for_tests,
 };
+
+pub(super) fn load_redis_tls_config_from_env() -> Result<Option<RedisTlsConfig>, ServerConfigError>
+{
+    const ROOT_CERT_FILE: &str = "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CA_FILE";
+    const CLIENT_CERT_FILE: &str = "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE";
+    const CLIENT_KEY_FILE: &str = "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_KEY_FILE";
+
+    let root_cert = optional_redis_tls_material_file(ROOT_CERT_FILE)?;
+    let client_cert = optional_redis_tls_material_file(CLIENT_CERT_FILE)?;
+    let client_key = optional_redis_tls_material_file(CLIENT_KEY_FILE)?;
+
+    match (root_cert, client_cert, client_key) {
+        (None, None, None) => Ok(None),
+        (root_cert, Some(client_cert), Some(client_key)) => Ok(Some(
+            RedisTlsConfig::new(root_cert).with_client_identity(client_cert, client_key),
+        )),
+        (_root_cert, Some(_), None) | (_root_cert, None, Some(_)) => {
+            Err(ServerConfigError::IncompleteRedisTlsClientIdentity)
+        }
+        (Some(root_cert), None, None) => Ok(Some(RedisTlsConfig::new(Some(root_cert)))),
+    }
+}
+
+fn optional_redis_tls_material_file(
+    env_name: &'static str,
+) -> Result<Option<Vec<u8>>, ServerConfigError> {
+    let Ok(path) = var(env_name) else {
+        return Ok(None);
+    };
+
+    read_secret_file_bytes(
+        Path::new(&path),
+        MAX_REDIS_TLS_MATERIAL_BYTES,
+        |source| ServerConfigError::RedisTlsMaterial {
+            name: env_name,
+            source,
+        },
+        |observed_bytes, maximum_bytes| ServerConfigError::RedisTlsMaterialTooLarge {
+            name: env_name,
+            observed_bytes,
+            maximum_bytes,
+        },
+        |expected_bytes, observed_bytes| ServerConfigError::RedisTlsMaterialTooLarge {
+            name: env_name,
+            observed_bytes: expected_bytes.max(observed_bytes),
+            maximum_bytes: MAX_REDIS_TLS_MATERIAL_BYTES,
+        },
+    )
+    .map(Some)
+}
 
 pub(super) fn configure_provider_runtime_from_paths(
     mut config: ServerConfig,
@@ -268,7 +319,10 @@ fn parse_env_bool(name: &str) -> Result<Option<bool>, ()> {
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
-    use super::{ensure_secret_size_within_limit, open_secret_file, read_secret_file_bytes};
+    use super::{
+        ensure_secret_size_within_limit, load_redis_tls_config_from_env, open_secret_file,
+        read_secret_file_bytes,
+    };
     use shardline_protocol::parse_bool;
     use std::io::Write;
     use std::path::Path;
@@ -442,6 +496,70 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("exceed") || err_msg.contains("TooLarge"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Redis TLS secret files
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[serial_test::serial]
+    fn redis_tls_secret_files_load_a_complete_mutual_tls_identity() {
+        let mut ca = tempfile::NamedTempFile::new().unwrap();
+        let mut client_cert = tempfile::NamedTempFile::new().unwrap();
+        let mut client_key = tempfile::NamedTempFile::new().unwrap();
+        ca.write_all(b"test-ca").unwrap();
+        client_cert.write_all(b"test-client-certificate").unwrap();
+        client_key.write_all(b"test-client-key").unwrap();
+        ca.flush().unwrap();
+        client_cert.flush().unwrap();
+        client_key.flush().unwrap();
+
+        set_env_var(
+            "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CA_FILE",
+            ca.path().to_str().unwrap(),
+        );
+        set_env_var(
+            "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE",
+            client_cert.path().to_str().unwrap(),
+        );
+        set_env_var(
+            "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_KEY_FILE",
+            client_key.path().to_str().unwrap(),
+        );
+
+        let result = load_redis_tls_config_from_env();
+
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CA_FILE");
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE");
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_KEY_FILE");
+
+        let tls = result.unwrap().expect("TLS material should produce config");
+        let rendered = format!("{tls:?}");
+        assert!(rendered.contains("***"));
+        assert!(!rendered.contains("test-ca"));
+        assert!(!rendered.contains("test-client-certificate"));
+        assert!(!rendered.contains("test-client-key"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn redis_tls_rejects_a_partial_mutual_tls_identity() {
+        let mut client_cert = tempfile::NamedTempFile::new().unwrap();
+        client_cert.write_all(b"test-client-certificate").unwrap();
+        client_cert.flush().unwrap();
+
+        set_env_var(
+            "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE",
+            client_cert.path().to_str().unwrap(),
+        );
+        let result = load_redis_tls_config_from_env();
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE");
+
+        assert!(matches!(
+            result,
+            Err(ServerConfigError::IncompleteRedisTlsClientIdentity)
+        ));
     }
 
     // -----------------------------------------------------------------------

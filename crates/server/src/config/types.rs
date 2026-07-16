@@ -9,6 +9,7 @@ use std::{
     thread::available_parallelism,
 };
 
+use shardline_cache::RedisTlsConfig;
 use shardline_protocol::{SecretBytes, SecretString};
 use shardline_storage::S3ObjectStoreConfig;
 use thiserror::Error;
@@ -49,6 +50,7 @@ pub struct CacheConfig {
     pub ttl_seconds: NonZeroU64,
     pub memory_max_entries: NonZeroUsize,
     pub redis_url: Option<SecretString>,
+    pub redis_tls: Option<RedisTlsConfig>,
 }
 
 /// Provider token issuance configuration.
@@ -171,6 +173,7 @@ impl fmt::Debug for CacheConfig {
             .field("ttl_seconds", &self.ttl_seconds)
             .field("memory_max_entries", &self.memory_max_entries)
             .field("redis_url", &self.redis_url.as_ref().map(|_url| "***"))
+            .field("redis_tls", &self.redis_tls)
             .finish()
     }
 }
@@ -240,6 +243,7 @@ pub(crate) const DEFAULT_MAX_SHARD_XORB_CHUNKS: NonZeroUsize = match NonZeroUsiz
 pub(crate) const MAX_TOKEN_SIGNING_KEY_BYTES: u64 = 1_048_576;
 pub(crate) const MAX_PROVIDER_API_KEY_BYTES: u64 = 4096;
 pub(crate) const MAX_METRICS_TOKEN_BYTES: u64 = 4096;
+pub(crate) const MAX_REDIS_TLS_MATERIAL_BYTES: u64 = 1_048_576;
 pub(crate) const MAX_S3_CREDENTIAL_BYTES: u64 = 4096;
 const DEFAULT_PARALLELISM_FALLBACK: NonZeroUsize = match NonZeroUsize::new(8) {
     Some(value) => value,
@@ -325,6 +329,7 @@ impl ServerConfig {
                 ttl_seconds: DEFAULT_RECONSTRUCTION_CACHE_TTL_SECONDS,
                 memory_max_entries: DEFAULT_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES,
                 redis_url: None,
+                redis_tls: None,
             },
             provider: ProviderConfig {
                 config_path: None,
@@ -475,6 +480,12 @@ impl ServerConfig {
             .map(SecretString::expose_secret)
     }
 
+    /// Returns optional TLS or mTLS material for the Redis reconstruction cache.
+    #[must_use]
+    pub const fn reconstruction_cache_redis_tls(&self) -> Option<&RedisTlsConfig> {
+        self.cache.redis_tls.as_ref()
+    }
+
     /// Overrides the local deployment root directory.
     #[must_use]
     pub fn with_root_dir(mut self, root_dir: PathBuf) -> Self {
@@ -565,6 +576,7 @@ impl ServerConfig {
     pub fn with_reconstruction_cache_disabled(mut self) -> Self {
         self.cache.adapter = ReconstructionCacheAdapter::Disabled;
         self.cache.redis_url = None;
+        self.cache.redis_tls = None;
         self
     }
 
@@ -579,6 +591,7 @@ impl ServerConfig {
         self.cache.ttl_seconds = reconstruction_cache_ttl_seconds;
         self.cache.memory_max_entries = reconstruction_cache_memory_max_entries;
         self.cache.redis_url = None;
+        self.cache.redis_tls = None;
         self
     }
 
@@ -639,6 +652,13 @@ impl ServerConfig {
         self.cache.ttl_seconds = reconstruction_cache_ttl_seconds;
         self.cache.redis_url = Some(SecretString::new(reconstruction_cache_redis_url));
         Ok(self)
+    }
+
+    /// Adds custom TLS trust material or a client identity to the Redis cache.
+    #[must_use]
+    pub fn with_reconstruction_cache_redis_tls(mut self, redis_tls: RedisTlsConfig) -> Self {
+        self.cache.redis_tls = Some(redis_tls);
+        self
     }
 
     /// Returns the optional Postgres metadata URL.
@@ -1181,6 +1201,30 @@ pub enum ServerConfigError {
     /// Redis reconstruction-cache configuration was incomplete.
     #[error("redis reconstruction cache requires SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL")]
     MissingReconstructionCacheRedisUrl,
+    /// A Redis TLS certificate, CA, or private key file could not be read.
+    #[error("redis TLS material from {name} could not be read")]
+    RedisTlsMaterial {
+        /// Environment variable that supplied the file path.
+        name: &'static str,
+        /// Underlying secure file-read failure.
+        #[source]
+        source: IoError,
+    },
+    /// Redis TLS material exceeded the bounded parser ceiling.
+    #[error("redis TLS material from {name} exceeded the bounded parser ceiling")]
+    RedisTlsMaterialTooLarge {
+        /// Environment variable that supplied the file path.
+        name: &'static str,
+        /// Observed secret file length in bytes.
+        observed_bytes: u64,
+        /// Maximum accepted secret file length in bytes.
+        maximum_bytes: u64,
+    },
+    /// Redis mTLS needs both halves of a client identity.
+    #[error(
+        "redis mTLS requires both SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE and SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_KEY_FILE"
+    )]
+    IncompleteRedisTlsClientIdentity,
     /// The Postgres metadata URL was empty.
     #[error("postgres metadata url must not be empty")]
     EmptyIndexPostgresUrl,

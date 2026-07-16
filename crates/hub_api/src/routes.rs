@@ -184,20 +184,30 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
     }
     r = r
         .route("/api/repos/create", post(repo_create))
+        .route("/api/repos/delete", delete(repo_delete_compat))
         .route("/api/repos", get(repo_list))
         .route("/api/{type}/search", get(repo_search))
         .route(
             "/api/{type}/{ns}/{repo}",
             post(repo_create_type).get(repo_info).delete(repo_delete),
         )
+        .route(
+            "/api/{type}/{ns}/{repo}/revision/{rev}",
+            get(repo_revision_info),
+        )
         .route("/api/{type}/{ns}/{repo}/modelcard", get(repo_modelcard))
         .route("/api/{type}/{ns}/{repo}/revisions", get(repo_revisions))
         .route("/api/{type}/{ns}/{repo}/preupload/{rev}", post(preupload))
         .route("/api/{type}/{ns}/{repo}/commit/{rev}", post(commit))
+        .route("/api/{type}/{ns}/{repo}/tree/{rev}", get(file_tree_at_root))
         .route("/api/{type}/{ns}/{repo}/tree/{rev}/{*path}", get(file_tree))
         .route(
             "/{type}/{ns}/{repo}/resolve/{rev}/{*path}",
             get(resolve_file),
+        )
+        .route(
+            "/{ns}/{repo}/resolve/{rev}/{*path}",
+            get(resolve_model_file),
         )
         .route("/objects/batch", post(lfs_batch))
         .route("/lfs/objects/{oid}", put(lfs_upload))
@@ -346,29 +356,43 @@ async fn repo_create(
     Json(request): Json<RepoCreateRequest>,
 ) -> Result<(StatusCode, Json<RepoResponse>), HubApiError> {
     authorize(&state, &headers, TokenScope::Write)?;
-    let full_name = request.name.clone();
+    let full_name = request.organization.as_deref().map_or_else(
+        || request.name.clone(),
+        |organization| format!("{organization}/{}", request.name),
+    );
     let repo_type = match request.repo_type {
         RepoType::Model => HubRepoType::Model,
         RepoType::Dataset => HubRepoType::Dataset,
         RepoType::Space => HubRepoType::Space,
     };
-    // Check for duplicate — return 409 if the repo already exists.
-    if state
+    // `huggingface_hub` calls this endpoint before every upload with
+    // `exist_ok=True`, but does not transmit that flag. It accepts the
+    // established 409 conflict response when it contains the existing
+    // repository URL, so preserve the HTTP conflict contract and return the
+    // compatibility body the native client needs.
+    if let Some(existing) = state
         .store
         .get_repo(&full_name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
-        .is_some()
     {
-        return Err(HubApiError::Conflict(format!(
-            "repo {full_name} already exists"
-        )));
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(repo_response_for_request(&headers, &existing)),
+        ));
     }
     let repo = state
         .store
-        .create_repo(repo_type, &full_name, request.private)
+        .create_repo(
+            repo_type,
+            &full_name,
+            request.private || request.visibility.as_deref() == Some("private"),
+        )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     shardline_metrics::record_hub_api_request("repo_create", "POST", 201);
-    Ok((StatusCode::CREATED, Json(repo_response_from_hub(&repo))))
+    Ok((
+        StatusCode::CREATED,
+        Json(repo_response_for_request(&headers, &repo)),
+    ))
 }
 
 // ---- Repo create (type-specific, requires Write) ----
@@ -392,12 +416,53 @@ async fn repo_create_type(
         .create_repo(rt, &name, private)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     shardline_metrics::record_hub_api_request("repo_create_type", "POST", 201);
-    Ok((StatusCode::CREATED, Json(repo_response_from_hub(&created))))
+    Ok((
+        StatusCode::CREATED,
+        Json(repo_response_for_request(&headers, &created)),
+    ))
+}
+
+fn repo_response_for_request(
+    headers: &axum::http::HeaderMap,
+    repo: &shardline_index::hub::HubRepo,
+) -> RepoResponse {
+    let mut response = repo_response_from_hub(repo);
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| matches!(*value, "http" | "https"))
+        .unwrap_or("http");
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost");
+    let path = match repo.repo_type {
+        HubRepoType::Model => repo.repo_id.as_str(),
+        HubRepoType::Dataset => {
+            return set_repo_response_url(
+                response,
+                format!("{scheme}://{host}/datasets/{}", repo.repo_id),
+            );
+        }
+        HubRepoType::Space => {
+            return set_repo_response_url(
+                response,
+                format!("{scheme}://{host}/spaces/{}", repo.repo_id),
+            );
+        }
+    };
+    response.url = format!("{scheme}://{host}/{path}");
+    response
+}
+
+fn set_repo_response_url(mut response: RepoResponse, url: String) -> RepoResponse {
+    response.url = url;
+    response
 }
 
 fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> RepoResponse {
     let last_modified = chrono::DateTime::from_timestamp(repo.updated_at_unix_seconds as i64, 0)
-        .map(|dt| dt.to_rfc3339())
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_default();
     RepoResponse {
         id: repo.repo_id.clone(),
@@ -407,11 +472,19 @@ fn repo_response_from_hub(repo: &shardline_index::hub::HubRepo) -> RepoResponse 
             HubRepoType::Space => RepoType::Space,
         },
         private: repo.private,
-        url: format!(
-            "/{}/{repo_id}",
-            repo_type_path(repo.repo_type),
-            repo_id = repo.repo_id
-        ),
+        sha: None,
+        siblings: None,
+        url: match repo.repo_type {
+            // The Hugging Face client treats a model URL as the canonical
+            // `/{namespace}/{repo}` path. Prefixing it with `/models` makes
+            // the client reinterpret `models` as the namespace.
+            HubRepoType::Model => format!("/{}", repo.repo_id),
+            HubRepoType::Dataset | HubRepoType::Space => format!(
+                "/{}/{repo_id}",
+                repo_type_path(repo.repo_type),
+                repo_id = repo.repo_id
+            ),
+        },
         default_branch: Some("main".to_owned()),
         tags: Vec::new(),
         downloads: 0,
@@ -648,6 +721,45 @@ async fn repo_info(
     Ok(Json(response))
 }
 
+async fn repo_revision_info(
+    State(state): State<HubState>,
+    headers: axum::http::HeaderMap,
+    Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
+) -> Result<Json<RepoResponse>, HubApiError> {
+    shardline_metrics::record_hub_api_request("repo_revision_info", "GET", 200);
+    authorize(&state, &headers, TokenScope::Read)?;
+    let name = format!("{ns}/{repo}");
+    let entry = state
+        .store
+        .get_repo(&name)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RepoNotFound)?;
+    let commit_sha = state
+        .store
+        .resolve_revision(&name, &rev)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .ok_or(HubApiError::RevisionNotFound)?;
+    let files = state
+        .store
+        .get_files(&commit_sha)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let mut response = repo_response_from_hub(&entry);
+    response.sha = Some(commit_sha);
+    response.siblings = Some(
+        files
+            .into_iter()
+            .map(|file| {
+                serde_json::json!({
+                    "rfilename": file.path,
+                    "size": file.size,
+                    "blobId": file.sha,
+                })
+            })
+            .collect(),
+    );
+    Ok(Json(response))
+}
+
 // ---- Repo delete (requires Write) ----
 
 async fn repo_delete(
@@ -655,18 +767,40 @@ async fn repo_delete(
     headers: axum::http::HeaderMap,
     Path((_repo_type, ns, repo)): Path<(String, String, String)>,
 ) -> Result<StatusCode, HubApiError> {
-    shardline_metrics::record_hub_api_request("repo_delete", "DELETE", 204);
-    authorize(&state, &headers, TokenScope::Write)?;
     let name = format!("{ns}/{repo}");
+    delete_repository(&state, &headers, &name)
+}
+
+/// Compatibility endpoint used by `HfApi.delete_repo` and `hf repo delete`.
+async fn repo_delete_compat(
+    State(state): State<HubState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RepoDeleteRequest>,
+) -> Result<StatusCode, HubApiError> {
+    let _repo_type = request.repo_type;
+    let name = match request.organization {
+        Some(organization) => format!("{organization}/{}", request.name),
+        None => request.name,
+    };
+    delete_repository(&state, &headers, &name)
+}
+
+fn delete_repository(
+    state: &HubState,
+    headers: &axum::http::HeaderMap,
+    name: &str,
+) -> Result<StatusCode, HubApiError> {
+    shardline_metrics::record_hub_api_request("repo_delete", "DELETE", 204);
+    authorize(state, headers, TokenScope::Write)?;
     // Verify repo exists
-    let _ = state
+    let _repo = state
         .store
-        .get_repo(&name)
+        .get_repo(name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::RepoNotFound)?;
     state
         .store
-        .delete_repo(&name)
+        .delete_repo(name)
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -705,10 +839,15 @@ async fn preupload(
         .map(|f| PreuploadResult {
             exists: existing_files.iter().any(|ef| ef.path == f.path),
             path: f.path,
+            upload_mode: "regular".to_owned(),
+            should_ignore: false,
         })
         .collect();
 
-    Ok(Json(PreuploadResponse { result }))
+    Ok(Json(PreuploadResponse {
+        files: result.clone(),
+        result,
+    }))
 }
 
 // ---- Commit (requires Write) ----
@@ -845,18 +984,45 @@ async fn apply_commit(
     deliver_webhook_events(state, repo_id, "push", &commit_sha).await;
 
     Ok(Json(CommitResponse {
-        commit_id: commit_sha,
+        commit_id: commit_sha.clone(),
+        commit_oid: commit_sha.clone(),
+        commit_url: format!("/{repo_id}/commit/{commit_sha}"),
         ref_name: Some("main".to_owned()),
     }))
 }
 
 // ---- File tree (requires Read) ----
 
+/// Lists a repository tree at its root.
+///
+/// The native `huggingface_hub` client omits the trailing slash when it lists
+/// every file, so this is deliberately a distinct route from the path variant.
+async fn file_tree_at_root(
+    State(state): State<HubState>,
+    headers: axum::http::HeaderMap,
+    Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
+    Query(query): Query<TreeQuery>,
+) -> Result<Json<Vec<TreeEntry>>, HubApiError> {
+    file_tree_for_path(state, headers, ns, repo, rev, String::new(), query).await
+}
+
 async fn file_tree(
     State(state): State<HubState>,
     headers: axum::http::HeaderMap,
     Path((_repo_type, ns, repo, rev, file_path)): Path<(String, String, String, String, String)>,
     Query(query): Query<TreeQuery>,
+) -> Result<Json<Vec<TreeEntry>>, HubApiError> {
+    file_tree_for_path(state, headers, ns, repo, rev, file_path, query).await
+}
+
+async fn file_tree_for_path(
+    state: HubState,
+    headers: axum::http::HeaderMap,
+    ns: String,
+    repo: String,
+    rev: String,
+    file_path: String,
+    query: TreeQuery,
 ) -> Result<Json<Vec<TreeEntry>>, HubApiError> {
     shardline_metrics::record_hub_api_request("file_tree", "GET", 200);
     authorize(&state, &headers, TokenScope::Read)?;
@@ -916,6 +1082,7 @@ fn tree_entries_at_path(files: &[HubFileEntry], path: &str) -> Vec<TreeEntry> {
                     entry_type: "directory".to_owned(),
                     path: dir.to_owned(),
                     size: None,
+                    oid: None,
                     lfs: None,
                 });
             }
@@ -932,6 +1099,7 @@ fn tree_entries_at_path(files: &[HubFileEntry], path: &str) -> Vec<TreeEntry> {
                 entry_type: "file".to_owned(),
                 path: relative.to_owned(),
                 size: Some(file.size),
+                oid: Some(file.sha.clone()),
                 lfs,
             });
         }
@@ -977,6 +1145,7 @@ fn tree_entries_recursive(files: &[HubFileEntry], path: &str) -> Vec<TreeEntry> 
             entry_type: "file".to_owned(),
             path: relative.to_owned(),
             size: Some(file.size),
+            oid: Some(file.sha.clone()),
             lfs,
         });
     }
@@ -992,6 +1161,25 @@ async fn resolve_file(
     headers: axum::http::HeaderMap,
     Path((_repo_type, ns, repo, rev, file_path)): Path<(String, String, String, String, String)>,
 ) -> Result<Response, HubApiError> {
+    resolve_file_for_repository(state, headers, ns, repo, rev, file_path).await
+}
+
+async fn resolve_model_file(
+    State(state): State<HubState>,
+    headers: axum::http::HeaderMap,
+    Path((ns, repo, rev, file_path)): Path<(String, String, String, String)>,
+) -> Result<Response, HubApiError> {
+    resolve_file_for_repository(state, headers, ns, repo, rev, file_path).await
+}
+
+async fn resolve_file_for_repository(
+    state: HubState,
+    headers: axum::http::HeaderMap,
+    ns: String,
+    repo: String,
+    rev: String,
+    file_path: String,
+) -> Result<Response, HubApiError> {
     shardline_metrics::record_hub_api_request("resolve_file", "GET", 200);
     authorize(&state, &headers, TokenScope::Read)?;
     let name = format!("{ns}/{repo}");
@@ -1003,15 +1191,15 @@ async fn resolve_file(
     let result = resolve::resolve_file_from_store(&state, &commit_sha, &file_path)?;
 
     match result {
-        resolve::DownloadResult::Inline {
-            size: _,
-            sha,
-            content,
-        } => {
+        resolve::DownloadResult::Inline { size, sha, content } => {
             let data = content.ok_or(HubApiError::NotFound)?;
+            let content_length = size.to_string();
             let resp_headers = [
                 ("Content-Type", "application/octet-stream"),
                 ("X-Shardline-SHA", sha.as_str()),
+                ("X-Repo-Commit", commit_sha.as_str()),
+                ("ETag", sha.as_str()),
+                ("Content-Length", content_length.as_str()),
             ];
             Ok((resp_headers, data).into_response())
         }
@@ -2048,7 +2236,7 @@ mod tests {
         assert_eq!(resp.id, "org/my-model");
         assert_eq!(resp.repo_type, RepoType::Model);
         assert!(!resp.private);
-        assert_eq!(resp.url, "/models/org/my-model");
+        assert_eq!(resp.url, "/org/my-model");
         assert_eq!(resp.default_branch.as_deref(), Some("main"));
         let lm = resp
             .last_modified
@@ -3198,7 +3386,9 @@ Bob,"say ""hi"""#;
         let req = RepoCreateRequest {
             repo_type: RepoType::Model,
             name: "ns/new-repo".to_owned(),
+            organization: None,
             private: false,
+            visibility: None,
         };
         let (status, json) = repo_create(State(state), default_headers(), Json(req))
             .await

@@ -7,8 +7,8 @@ use std::{
 use shardline_protocol::SecretString;
 
 use super::secrets::{
-    configure_provider_runtime_from_paths, load_s3_object_store_config_from_env,
-    read_secret_file_bytes,
+    configure_provider_runtime_from_paths, load_redis_tls_config_from_env,
+    load_s3_object_store_config_from_env, read_secret_file_bytes,
 };
 use super::{
     AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
@@ -166,6 +166,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         return Err(ServerConfigError::ZeroOciRegistryTokenMaxInFlightRequests);
     };
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
+    let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
     let token_signing_key = optional_token_signing_key_from_sources(
         var("SHARDLINE_TOKEN_SIGNING_KEY").ok(),
@@ -212,6 +213,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         );
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
+    config.cache.redis_tls = reconstruction_cache_redis_tls;
     if config.cache.adapter == ReconstructionCacheAdapter::Redis
         && config
             .cache

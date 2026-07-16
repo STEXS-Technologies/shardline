@@ -39,9 +39,9 @@ Point the HuggingFace CLI at your Shardline instance by setting `HF_ENDPOINT`:
 
 ```bash
 export HF_ENDPOINT=http://localhost:8080
-huggingface-cli login  # optional — hub api accepts anonymous by default
-huggingface-cli upload my-org/my-model ./model-files
-huggingface-cli download my-org/my-model
+hf auth login  # optional — hub api accepts anonymous by default
+hf upload my-org/my-model ./model-files
+hf download my-org/my-model
 ```
 
 For `huggingface-cli` to trust a local HTTP endpoint, you may also need:
@@ -80,10 +80,13 @@ file is auto-generated when LFS files are present.
 | `/api/{type}/{ns}/{repo}` | GET | Get repository info |
 | `/api/{type}/{ns}/{repo}/preupload/{rev}` | POST | Pre-upload check |
 | `/api/{type}/{ns}/{repo}/commit/{rev}` | POST | Commit file changes |
+| `/api/{type}/{ns}/{repo}/revision/{rev}` | GET | Revision metadata and siblings |
+| `/api/{type}/{ns}/{repo}/tree/{rev}` | GET | Browse the repository root |
 | `/api/{type}/{ns}/{repo}/tree/{rev}/{path}` | GET | Browse file tree |
 | `/api/{type}/{ns}/{repo}/xet-read-token/{rev}` | GET | Xet read token exchange |
 | `/api/{type}/{ns}/{repo}/xet-write-token/{rev}` | GET | Xet write token exchange |
-| `/{type}/{ns}/{repo}/resolve/{rev}/{path}` | GET | Resolve and download a file |
+| `/{type}/{ns}/{repo}/resolve/{rev}/{path}` | GET | Resolve and download a typed file |
+| `/{ns}/{repo}/resolve/{rev}/{path}` | GET | Resolve and download a model file |
 | `/{type}/{ns}/{repo}/info/refs` | GET | Git Smart HTTP refs discovery |
 | `/{type}/{ns}/{repo}/HEAD` | GET | Git HEAD reference |
 | `/{type}/{ns}/{repo}/git-upload-pack` | POST | Git clone/fetch (upload-pack) |
@@ -110,10 +113,8 @@ and TLS configuration as all other frontends.
 
 ## Limitations
 
-This is an initial implementation. Known limitations:
-
-- **No webhooks or callbacks** — repository event notifications are not implemented.
-- **No model card or metadata search** — repository README, model card, and search
-  endpoints are not yet implemented.
-- **No dataset viewer** — dataset-specific preview and streaming endpoints are not yet
-  implemented.
+Shardline implements the repository-storage workflows in the table above, not the
+entire Hugging Face SaaS product. Collections, user profiles, discussions, jobs,
+inference endpoints, Spaces runtime management, and advanced Hub administration APIs
+are outside this frontend's current contract. Webhooks, model cards, basic repository
+search, and dataset preview routes are implemented.

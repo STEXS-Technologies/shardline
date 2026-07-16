@@ -50,5 +50,5 @@ pub use disabled::DisabledReconstructionCache;
 pub use error::ReconstructionCacheError;
 pub use key::{ReconstructionCacheKey, RepositoryScopeCacheKey};
 pub use memory::MemoryReconstructionCache;
-pub use redis::RedisReconstructionCache;
+pub use redis::{RedisReconstructionCache, RedisTlsConfig};
 pub use store::{AsyncReconstructionCache, ReconstructionCacheFuture};

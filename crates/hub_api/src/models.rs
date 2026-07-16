@@ -44,9 +44,30 @@ pub struct RepoCreateRequest {
     pub repo_type: RepoType,
     /// Repository owner or namespace.
     pub name: String,
+    /// Optional organization or namespace. The official Hugging Face client
+    /// sends this separately from the repository name.
+    #[serde(default)]
+    pub organization: Option<String>,
     /// Optional repository visibility (private/public).
     #[serde(default)]
     pub private: bool,
+    /// Official Hub visibility field (`private` or `public`).
+    #[serde(default)]
+    pub visibility: Option<String>,
+}
+
+/// Repository deletion request accepted by the native Hugging Face client.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoDeleteRequest {
+    /// Repository name, without the organization when one is supplied.
+    pub name: String,
+    /// Optional repository owner or namespace.
+    #[serde(default)]
+    pub organization: Option<String>,
+    /// Repository type. It is accepted for protocol compatibility; repository
+    /// identity in Shardline is namespace/name regardless of frontend type.
+    #[serde(default, rename = "type")]
+    pub repo_type: Option<RepoType>,
 }
 
 /// Repository info response.
@@ -59,6 +80,12 @@ pub struct RepoResponse {
     pub repo_type: RepoType,
     /// Whether the repository is private.
     pub private: bool,
+    /// Resolved commit SHA for revision-aware native-client requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// Files available at the selected revision, using Hugging Face sibling shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub siblings: Option<Vec<serde_json::Value>>,
     /// URL to clone the repository.
     pub url: String,
     /// Default branch.
@@ -111,6 +138,9 @@ pub struct TreeEntry {
     /// File size in bytes (only for files).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// Blob object ID for a file entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oid: Option<String>,
     /// LFS pointer OID (only for LFS files).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lfs: Option<TreeEntryLfs>,
@@ -159,7 +189,9 @@ pub struct PreuploadFile {
 /// Preupload response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreuploadResponse {
-    /// Files classified by the server.
+    /// Official Hugging Face response field consumed by native clients.
+    pub files: Vec<PreuploadResult>,
+    /// Historical Shardline response field, retained for compatibility.
     pub result: Vec<PreuploadResult>,
 }
 
@@ -170,6 +202,12 @@ pub struct PreuploadResult {
     pub path: String,
     /// Whether this file already exists.
     pub exists: bool,
+    /// Upload transport selected for this file.
+    #[serde(rename = "uploadMode")]
+    pub upload_mode: String,
+    /// Whether the client should omit this path from the commit.
+    #[serde(rename = "shouldIgnore")]
+    pub should_ignore: bool,
 }
 
 /// Commit request body (NDJSON).
@@ -217,6 +255,12 @@ pub struct CommitDeletedEntry {
 pub struct CommitResponse {
     /// New commit SHA.
     pub commit_id: String,
+    /// Official Hugging Face commit object identifier field.
+    #[serde(rename = "commitOid")]
+    pub commit_oid: String,
+    /// Official Hugging Face commit URL field.
+    #[serde(rename = "commitUrl")]
+    pub commit_url: String,
     /// New revision ref.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_name: Option<String>,
@@ -810,6 +854,8 @@ mod tests {
             downloads: 0,
             likes: 0,
             last_modified: Some("2024-01-01T00:00:00+00:00".into()),
+            sha: None,
+            siblings: None,
             pipeline_tag: None,
             card_data: None,
             security_status: serde_json::json!({}),

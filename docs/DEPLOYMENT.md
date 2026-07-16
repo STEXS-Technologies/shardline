@@ -271,6 +271,12 @@ SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS=64
 SHARDLINE_LOG_LEVEL=info
 ```
 
+For a TLS-enabled Redis cache, use a `rediss://` URL. Private-CA and mTLS deployments
+can supply PEM files with `SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CA_FILE`,
+`SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE`, and
+`SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_KEY_FILE`; see
+[Cache adapters](CACHE_ADAPTERS.md#tls-and-mtls).
+
 Set exactly one signing-key source for a server process that exposes CAS routes:
 `SHARDLINE_TOKEN_SIGNING_KEY` for a direct environment value, or
 `SHARDLINE_TOKEN_SIGNING_KEY_FILE` for a file or mounted secret.

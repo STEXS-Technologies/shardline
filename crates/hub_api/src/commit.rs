@@ -119,8 +119,22 @@ pub fn parse_ndjson_commit(body: &str) -> Result<ParsedCommit, HubApiError> {
             continue;
         }
 
-        let parsed: HashMap<String, serde_json::Value> =
+        let mut parsed: HashMap<String, serde_json::Value> =
             serde_json::from_str(trimmed).map_err(HubApiError::Json)?;
+
+        // Native Hugging Face clients wrap each instruction in a stable
+        // `{ "key": <kind>, "value": <payload> }` envelope. Keep accepting
+        // Shardline's historical direct-object form as well.
+        if let (Some(key), Some(value)) = (
+            parsed.get("key").and_then(serde_json::Value::as_str),
+            parsed.get("value"),
+        ) {
+            let normalized_key = match key {
+                "deletedFile" | "deletedFolder" => "deletedEntry",
+                other => other,
+            };
+            parsed = HashMap::from([(normalized_key.to_owned(), value.clone())]);
+        }
 
         if let Some(header) = parsed.get("header") {
             // Accept both "message" (internal) and "summary" (HuggingFace Hub spec).

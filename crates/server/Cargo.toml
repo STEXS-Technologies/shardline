@@ -63,7 +63,7 @@ zeroize.workspace = true
 async-trait.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
 hmac.workspace = true
-redis = { workspace = true, features = ["tokio-comp"] }
+redis = { workspace = true, features = ["tokio-rustls-comp"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 serial_test = "3"

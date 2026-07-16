@@ -9,6 +9,72 @@ use crate::{
 
 const RECONSTRUCTION_CACHE_PREFIX: &str = "shardline:reconstruction:v1";
 
+/// TLS material for a Redis connection.
+///
+/// Configure a root certificate for private certificate authorities. Configure
+/// a client certificate and key together when the Redis server requires mTLS.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RedisTlsConfig {
+    root_cert: Option<Vec<u8>>,
+    client_cert: Option<Vec<u8>>,
+    client_key: Option<Vec<u8>>,
+}
+
+impl RedisTlsConfig {
+    /// Creates TLS configuration with an optional PEM-encoded root certificate.
+    #[must_use]
+    pub const fn new(root_cert: Option<Vec<u8>>) -> Self {
+        Self {
+            root_cert,
+            client_cert: None,
+            client_key: None,
+        }
+    }
+
+    /// Adds a PEM-encoded client certificate and private key for mTLS.
+    #[must_use]
+    pub fn with_client_identity(mut self, client_cert: Vec<u8>, client_key: Vec<u8>) -> Self {
+        self.client_cert = Some(client_cert);
+        self.client_key = Some(client_key);
+        self
+    }
+
+    fn is_empty(&self) -> bool {
+        self.root_cert.is_none() && self.client_cert.is_none() && self.client_key.is_none()
+    }
+
+    fn into_redis_tls_certificates(
+        self,
+    ) -> Result<redis::TlsCertificates, ReconstructionCacheError> {
+        let client_tls = match (self.client_cert, self.client_key) {
+            (None, None) => None,
+            (Some(client_cert), Some(client_key)) => Some(redis::ClientTlsConfig {
+                client_cert,
+                client_key,
+            }),
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ReconstructionCacheError::IncompleteRedisTlsClientIdentity);
+            }
+        };
+
+        Ok(redis::TlsCertificates {
+            client_tls,
+            root_cert: self.root_cert,
+        })
+    }
+}
+
+impl fmt::Debug for RedisTlsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedisTlsConfig")
+            .field("root_cert", &self.root_cert.as_ref().map(|_cert| "***"))
+            .field("client_cert", &self.client_cert.as_ref().map(|_cert| "***"))
+            .field("client_key", &self.client_key.as_ref().map(|_key| "***"))
+            .finish()
+    }
+}
+
 /// Redis-backed reconstruction cache adapter.
 pub struct RedisReconstructionCache {
     client: redis::Client,
@@ -41,12 +107,39 @@ impl RedisReconstructionCache {
     ///
     /// Returns [`ReconstructionCacheError`] when the URL is empty or invalid.
     pub fn new(redis_url: &str, ttl_seconds: NonZeroU64) -> Result<Self, ReconstructionCacheError> {
+        Self::new_with_tls(redis_url, ttl_seconds, RedisTlsConfig::default())
+    }
+
+    /// Creates a Redis-backed reconstruction cache adapter with TLS or mTLS material.
+    ///
+    /// The Redis URL must use the `rediss://` scheme whenever TLS material is
+    /// supplied. An empty config still permits `rediss://` URLs that use the
+    /// platform trust store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReconstructionCacheError`] when the URL or TLS material is invalid.
+    pub fn new_with_tls(
+        redis_url: &str,
+        ttl_seconds: NonZeroU64,
+        tls_config: RedisTlsConfig,
+    ) -> Result<Self, ReconstructionCacheError> {
         if redis_url.trim().is_empty() {
             return Err(ReconstructionCacheError::EmptyRedisUrl);
         }
 
+        if redis_url.trim_start().starts_with("rediss://") || !tls_config.is_empty() {
+            install_rustls_crypto_provider();
+        }
+
+        let client = if tls_config.is_empty() {
+            redis::Client::open(redis_url)?
+        } else {
+            redis::Client::build_with_tls(redis_url, tls_config.into_redis_tls_certificates()?)?
+        };
+
         Ok(Self {
-            client: redis::Client::open(redis_url)?,
+            client,
             ttl_seconds,
         })
     }
@@ -86,6 +179,12 @@ impl RedisReconstructionCache {
             encode_component(key.file_id())
         )
     }
+}
+
+fn install_rustls_crypto_provider() {
+    let _already_installed = rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err();
 }
 
 impl AsyncReconstructionCache for RedisReconstructionCache {
@@ -148,7 +247,7 @@ mod tests {
 
     use redis::AsyncCommands;
 
-    use super::{RECONSTRUCTION_CACHE_PREFIX, RedisReconstructionCache};
+    use super::{RECONSTRUCTION_CACHE_PREFIX, RedisReconstructionCache, RedisTlsConfig};
     use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
@@ -177,6 +276,35 @@ mod tests {
         assert!(matches!(
             result,
             Err(crate::ReconstructionCacheError::EmptyRedisUrl)
+        ));
+    }
+
+    #[test]
+    fn redis_tls_config_debug_redacts_certificate_material() {
+        let tls = RedisTlsConfig::new(Some(b"root-secret".to_vec()))
+            .with_client_identity(b"client-secret".to_vec(), b"key-secret".to_vec());
+
+        let rendered = format!("{tls:?}");
+
+        assert!(!rendered.contains("root-secret"));
+        assert!(!rendered.contains("client-secret"));
+        assert!(!rendered.contains("key-secret"));
+        assert!(rendered.contains("***"));
+    }
+
+    #[test]
+    fn redis_tls_client_identity_must_include_certificate_and_key() {
+        let tls = RedisTlsConfig {
+            root_cert: None,
+            client_cert: Some(b"certificate".to_vec()),
+            client_key: None,
+        };
+        let result =
+            RedisReconstructionCache::new_with_tls("rediss://localhost:6379", NonZeroU64::MIN, tls);
+
+        assert!(matches!(
+            result,
+            Err(crate::ReconstructionCacheError::IncompleteRedisTlsClientIdentity)
         ));
     }
 
