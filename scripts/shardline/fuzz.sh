@@ -48,6 +48,31 @@ run_smoke() {
     done
 }
 
+run_regression() {
+    mapfile -t targets < <(list_targets)
+
+    if [ "${#targets[@]}" -eq 0 ]; then
+        printf 'no shardline fuzz targets found under %s\n' "${FUZZ_DIR}" >&2
+        exit 1
+    fi
+
+    for target in "${targets[@]}"; do
+        corpus_dir="${FUZZ_DIR}/corpus/${target}"
+        printf '==> %s\n' "${target}"
+        if [ -d "${corpus_dir}" ]; then
+            # `-runs=0` makes libFuzzer replay the supplied corpus without
+            # starting an unbounded mutation campaign.
+            cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" \
+                "${target}" "${corpus_dir}" -- "-runs=0"
+        else
+            # A target without a seed corpus still receives one bounded input
+            # so a new harness cannot silently stop compiling in CI.
+            cargo +nightly fuzz run --fuzz-dir "${FUZZ_DIR}" --target "${FUZZ_TARGET}" \
+                "${target}" -- "-runs=1"
+        fi
+    done
+}
+
 main() {
     local command="${1:-smoke}"
 
@@ -63,9 +88,13 @@ main() {
             shift
             run_smoke "$@"
             ;;
+        regression)
+            shift
+            run_regression "$@"
+            ;;
         *)
             printf 'unknown command: %s\n' "${command}" >&2
-            printf 'usage: %s [list|run|smoke]\n' "${0##*/}" >&2
+            printf 'usage: %s [list|run|smoke|regression]\n' "${0##*/}" >&2
             exit 2
             ;;
     esac

@@ -220,6 +220,27 @@ pub fn decode_sideband(data: &[u8]) -> (Vec<u8>, Vec<String>) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn encoded_pkt_lines_round_trip_text(payload in ".{0,4096}") {
+            let encoded = encode_line(&payload).unwrap();
+            prop_assert_eq!(decode_lines(encoded.as_bytes()), vec![payload.into_bytes()]);
+        }
+
+        #[test]
+        fn sideband_round_trips_arbitrary_binary_payload(
+            payload in prop::collection::vec(any::<u8>(), 0..100_000),
+        ) {
+            let encoded = sideband_data(&payload);
+            let (decoded, messages) = decode_sideband(&encoded);
+            prop_assert_eq!(decoded, payload);
+            prop_assert!(messages.is_empty());
+        }
+    }
 
     #[test]
     fn encode_simple_line() {

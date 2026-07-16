@@ -216,6 +216,12 @@ workspace = false
 command = "bash"
 args = ["scripts/shardline/fuzz.sh", "smoke", "${@}"]
 
+[tasks.shardline-fuzz-regression]
+description = "Replay each checked-in Shardline fuzz corpus"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/fuzz.sh", "regression", "${@}"]
+
 [tasks.deny]
 description = "Check licenses and security advisories"
 workspace = false
@@ -224,28 +230,35 @@ command = "cargo"
 args = ["deny", "check"]
 
 [tasks.coverage]
-description = "Generate test coverage report using cargo-tarpaulin"
+description = "Print LLVM source-based workspace coverage summary"
 workspace = false
-install_crate = "cargo-tarpaulin"
+install_crate = "cargo-llvm-cov"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Stdout", "--skip", "shardline-fuzz", "${@}"]
+args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--summary-only", "${@}"]
 
 [tasks.coverage-html]
-description = "Generate HTML test coverage report using cargo-tarpaulin"
+description = "Generate an LLVM source-based HTML coverage report"
 workspace = false
-install_crate = "cargo-tarpaulin"
+install_crate = "cargo-llvm-cov"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Html", "--skip", "shardline-fuzz", "${@}"]
+args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--html", "${@}"]
 
 [tasks.coverage-json]
-description = "Generate JSON test coverage report using cargo-tarpaulin"
+description = "Write an LLVM source-based JSON coverage summary to target/coverage.json"
 workspace = false
-install_crate = "cargo-tarpaulin"
+install_crate = "cargo-llvm-cov"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Json", "--skip", "shardline-fuzz", "${@}"]
+args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--json", "--summary-only", "--output-path", "target/coverage.json", "${@}"]
+
+[tasks.coverage-check]
+description = "Generate coverage and enforce the checked-in line-coverage ratchet"
+workspace = false
+dependencies = ["coverage-json"]
+command = "bash"
+args = ["scripts/check_coverage_ratchet.sh"]
 
 [tasks.ci]
 description = "Run the core contributor CI checks"

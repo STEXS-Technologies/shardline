@@ -198,6 +198,15 @@ For dependency-policy checks too:
 cargo make ci-full
 ```
 
+Coverage uses LLVM source-based instrumentation. Generate a machine-readable summary
+and enforce the checked-in non-regression ratchet with:
+
+```bash
+cargo make coverage-check
+```
+
+Use `cargo make coverage-html` for the local HTML report.
+
 ## Architecture and code rules
 
 Follow the current project constraints:
@@ -237,6 +246,8 @@ Fuzzing workflow:
 
 - Fuzz targets and corpora are in `crates/fuzz/`.
 - Run bounded fuzz smoke locally with `cargo make shardline-fuzz-smoke`.
+- Replay every checked-in corpus deterministically with
+  `cargo make shardline-fuzz-regression`.
 - For deeper campaigns, run `bash scripts/shardline/fuzz.sh run <target>` or use the
   underlying `cargo fuzz` workflow from `crates/fuzz/` if needed.
 - When fuzz finds a crash, reproduce it, then add:

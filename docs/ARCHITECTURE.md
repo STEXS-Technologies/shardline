@@ -278,7 +278,7 @@ flowchart TD
 
 ### Layer 6 — Test infrastructure
 
-- `fuzz`: 17 fuzz targets for protocol parsers, storage boundaries, and frontends
+- `fuzz`: 31 fuzz targets for protocol parsers, storage boundaries, mutable Hub refs, and frontends
 
 Crate boundaries keep protocol handling, server operation, storage, indexing, and
 provider integration independent.

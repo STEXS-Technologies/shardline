@@ -199,6 +199,13 @@ Run Shardline targets from the repository root with
 `cargo +nightly fuzz run --fuzz-dir crates/fuzz <target>` or use
 `cargo make shardline-fuzz <target>`.
 
+Mutable protocol and storage surfaces must additionally have stateful fuzz or property
+tests. These tests model a sequence of create, update, read, and delete operations and
+assert atomicity, idempotency, authorization, and immutable-history guarantees after
+every step. Replaying checked-in corpus inputs is available through
+`cargo make shardline-fuzz-regression`; CI runs that replay on every relevant change and
+runs a bounded mutation campaign nightly.
+
 ## Regression Policy
 
 Every security or correctness bug must leave behind at least one permanent check:

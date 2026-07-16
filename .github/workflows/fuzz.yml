@@ -1,0 +1,74 @@
+name: Fuzz Regression
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile.toml"
+      - "crates/**"
+      - "scripts/shardline/fuzz.sh"
+      - ".github/workflows/fuzz.yml"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  corpus-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shardline-fuzz
+
+      - name: Install fuzz tooling
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-make,cargo-fuzz
+
+      - name: Replay checked-in fuzz corpora
+        run: cargo make shardline-fuzz-regression
+
+  nightly-campaign:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: corpus-regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shardline-fuzz
+
+      - name: Install fuzz tooling
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-make,cargo-fuzz
+
+      - name: Run bounded nightly fuzz campaign
+        env:
+          SHARDLINE_FUZZ_RUNS: "20000"
+        run: cargo make shardline-fuzz-smoke

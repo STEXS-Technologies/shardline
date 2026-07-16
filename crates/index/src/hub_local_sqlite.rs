@@ -656,6 +656,8 @@ fn escape_like(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType};
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
 
     fn make_store() -> (shardline_test_support::TempStorage, LocalIndexStore) {
         let ts = shardline_test_support::TempStorage::new();
@@ -1080,6 +1082,100 @@ mod tests {
                 .delete_ref("org/model", "refs/heads/main", initial_sha)
                 .is_err()
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn generated_ref_operations_preserve_active_ref_and_history_invariants(
+            operations in prop::collection::vec((0u8..4, 0u8..8), 1..32),
+        ) {
+            let (_ts, store) = make_store();
+            let repo_id = "org/generated-ref-operations";
+            let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+            store.create_repo(HubRepoType::Model, repo_id, false).unwrap();
+
+            let mut expected_refs = BTreeMap::from([("main".to_owned(), initial_sha.to_owned())]);
+            let mut known_branches = BTreeMap::new();
+
+            for (step, (operation, branch_id)) in operations.iter().copied().enumerate() {
+                let branch = format!("feature-{branch_id}");
+                match operation {
+                    // Create or advance a branch. Recreating a deleted branch is
+                    // valid because its parent remains immutable history.
+                    0 => {
+                        let parent = expected_refs
+                            .get(&branch)
+                            .map(String::as_str)
+                            .unwrap_or(initial_sha);
+                        let sha = format!("generated-{branch_id}-{step}");
+                        store
+                            .create_revision(
+                                repo_id,
+                                Some(parent),
+                                &sha,
+                                &format!("refs/heads/{branch}"),
+                                "generated property-test commit",
+                            )
+                            .unwrap();
+                        expected_refs.insert(branch.clone(), sha.clone());
+                        known_branches.insert(branch.clone(), sha);
+                    }
+                    // A compare-and-delete with the current target removes only
+                    // the active ref and retains the commit for SHA resolution.
+                    1 => {
+                        if let Some(current_sha) = expected_refs.get(&branch).cloned() {
+                            store
+                                .delete_ref(repo_id, &format!("refs/heads/{branch}"), &current_sha)
+                                .unwrap();
+                            expected_refs.remove(&branch);
+                            prop_assert_eq!(
+                                store.resolve_revision(repo_id, &branch).unwrap(),
+                                None,
+                            );
+                            prop_assert_eq!(
+                                store.resolve_revision(repo_id, &current_sha).unwrap(),
+                                Some(current_sha),
+                            );
+                        }
+                    }
+                    // Stale compare-and-delete requests must have no effect.
+                    2 => {
+                        let stale_sha = format!("stale-{step}");
+                        prop_assert!(
+                            store
+                                .delete_ref(repo_id, &branch, &stale_sha)
+                                .is_err(),
+                        );
+                    }
+                    // The default branch is protected regardless of its target.
+                    _ => {
+                        let main_sha = expected_refs.get("main").unwrap();
+                        prop_assert!(store.delete_ref(repo_id, "main", main_sha).is_err());
+                    }
+                }
+
+                let actual_refs = store
+                    .list_refs(repo_id)
+                    .unwrap()
+                    .into_iter()
+                    .map(|reference| (reference.ref_name, reference.sha))
+                    .collect::<BTreeMap<_, _>>();
+                prop_assert_eq!(&actual_refs, &expected_refs);
+
+                for (known_branch, known_sha) in &known_branches {
+                    prop_assert_eq!(
+                        store.resolve_revision(repo_id, known_sha).unwrap(),
+                        Some(known_sha.clone()),
+                    );
+                    prop_assert_eq!(
+                        store.resolve_revision(repo_id, known_branch).unwrap(),
+                        expected_refs.get(known_branch).cloned(),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
