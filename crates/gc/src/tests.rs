@@ -12,9 +12,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use shardline_index::{
-    AsyncIndexStore, FileRecordInvariantError, MemoryIndexStore, MemoryIndexStoreError,
-    MemoryRecordStore, MemoryRecordStoreError, PostgresMetadataStoreError, QuarantineCandidate,
-    QuarantineCandidateError, RetentionHold, RetentionHoldError, WebhookDeliveryError,
+    AsyncIndexStore, FileChunkRecord, FileRecord, FileRecordInvariantError, LocalIndexStore,
+    LocalRecordStore, MemoryIndexStore, MemoryIndexStoreError, MemoryRecordStore,
+    MemoryRecordStoreError, PostgresMetadataStoreError, QuarantineCandidate,
+    QuarantineCandidateError, RecordMutation, RetentionHold, RetentionHoldError,
+    WebhookDeliveryError,
 };
 use shardline_server_core::{
     InvalidLifecycleMetadataError, ServerObjectStore, ServerObjectStoreError,
@@ -31,7 +33,7 @@ use crate::error::GcError;
 use crate::reachability::OrphanObject;
 use crate::runner::{
     build_gc_diagnostics, orphan_inventory_entry, quarantine_record_path, quarantine_root,
-    retention_report_entry, run_gc_with_stores, run_local_gc,
+    retention_report_entry, run_gc_with_stores, run_local_gc, run_local_gc_diagnostics,
 };
 use crate::types::{
     GcOrphanQuarantineState, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
@@ -1506,5 +1508,303 @@ fn gc_with_existing_quarantine_candidates_retains_unexpired() {
             "unexpired should not be deleted"
         );
         assert_eq!(diag.report.active_quarantine_candidates, 1);
+    });
+}
+
+// ── run_local_gc_diagnostics tests ────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_local_gc_diagnostics_empty_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("chunks")).unwrap();
+    let result = run_local_gc_diagnostics(root, LocalGcOptions::dry_run()).await;
+    assert!(
+        result.is_ok(),
+        "diagnostics with empty root should succeed: {:?}",
+        result
+    );
+    let diagnostics = result.unwrap();
+    assert_eq!(diagnostics.report.scanned_records, 0);
+    assert_eq!(diagnostics.report.orphan_chunks, 0);
+    assert_eq!(diagnostics.report.deleted_chunks, 0);
+    assert!(diagnostics.retention_report.is_empty());
+    assert!(diagnostics.orphan_inventory.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_local_gc_diagnostics_with_orphan_chunks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("chunks")).unwrap();
+
+    // Put an orphan chunk directly on disk so the local object store finds it.
+    let object_store = ServerObjectStore::local(root.join("chunks")).unwrap();
+    let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let prefix = &hash[..2];
+    let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+    put_object(&object_store, &key, b"orphan chunk for diagnostics");
+    // Drop the setup store so run_local_gc_diagnostics creates its own.
+    drop(object_store);
+
+    let result = run_local_gc_diagnostics(root, LocalGcOptions::dry_run()).await;
+    assert!(
+        result.is_ok(),
+        "diagnostics with orphan should succeed: {:?}",
+        result
+    );
+    let diagnostics = result.unwrap();
+    assert_eq!(diagnostics.report.orphan_chunks, 1);
+    // "orphan chunk for diagnostics" is 28 bytes.
+    assert_eq!(diagnostics.report.orphan_chunk_bytes, 28);
+    assert_eq!(diagnostics.orphan_inventory.len(), 1);
+    assert_eq!(diagnostics.orphan_inventory[0].object_key, key.as_str());
+    assert_eq!(diagnostics.orphan_inventory[0].bytes, 28);
+}
+
+// ── run_local_gc with a pre-populated local SQLite store ──────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_local_gc_with_prepopulated_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("chunks")).unwrap();
+
+    // Initialize the local stores (creates the SQLite database).
+    let record_store = LocalRecordStore::new(root.clone()).expect("create record store");
+    let _index_store = LocalIndexStore::new(root.clone()).expect("create index store");
+
+    // Put a chunk in the object store.
+    let object_store = ServerObjectStore::local(root.join("chunks")).unwrap();
+    let hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let prefix = &hash[..2];
+    let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+    put_object(&object_store, &key, b"local prepopulated chunk");
+
+    // Commit a file record that references this chunk.
+    let record = FileRecord {
+        file_id: "local-test-file".to_owned(),
+        content_hash: hash.to_owned(),
+        total_bytes: 25,
+        chunk_size: 100,
+        repository_scope: None,
+        chunks: vec![FileChunkRecord {
+            hash: hash.to_owned(),
+            offset: 0,
+            length: 25,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 0,
+        }],
+    };
+    record_store
+        .commit_file_version_metadata(&record)
+        .await
+        .expect("commit record");
+
+    // Drop setup handles so run_local_gc opens its own connections.
+    drop(record_store);
+    drop(object_store);
+
+    // Run local GC — the referenced chunk should not be orphaned.
+    // commit_file_version_metadata inserts both a version record and a latest record,
+    // so scanned_records is 2.
+    let result = run_local_gc(root, LocalGcOptions::dry_run()).await;
+    assert!(
+        result.is_ok(),
+        "local GC with prepopulated store: {:?}",
+        result
+    );
+    let report = result.unwrap();
+    assert_eq!(report.scanned_records, 2);
+    assert_eq!(report.referenced_chunks, 1);
+    assert_eq!(report.orphan_chunks, 0);
+    assert_eq!(report.deleted_chunks, 0);
+}
+
+// ── run_gc_with_stores with populated in-memory stores ────────────────
+
+#[test]
+fn run_gc_with_stores_record_referencing_existing_chunk_no_orphan() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = std::env::temp_dir().join(format!("gc-test-rec-exists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("chunks")).unwrap();
+        let object_store = ServerObjectStore::local(&dir).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let record_store = MemoryRecordStore::new();
+
+        let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let prefix = &hash[..2];
+        let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+
+        // Put the referenced chunk in the object store.
+        put_object(&object_store, &key, b"referenced chunk data");
+
+        // Create a single record that references this chunk.
+        let record = FileRecord {
+            file_id: "test-file".to_owned(),
+            content_hash: hash.to_owned(),
+            total_bytes: 21,
+            chunk_size: 100,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash.to_owned(),
+                offset: 0,
+                length: 21,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+
+        // Also put an unrelated orphan chunk.
+        let orphan_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let orphan_prefix = &orphan_hash[..2];
+        let orphan_key = ObjectKey::parse(&format!("{orphan_prefix}/{orphan_hash}")).unwrap();
+        put_object(&object_store, &orphan_key, b"orphan");
+
+        let result = run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LocalGcOptions::dry_run(),
+        )
+        .await;
+        assert!(result.is_ok(), "GC should succeed: {:?}", result);
+        let diagnostics = result.unwrap();
+        assert_eq!(diagnostics.report.scanned_records, 1);
+        assert_eq!(diagnostics.report.referenced_chunks, 1);
+        // The orphan is not referenced → it shows up in orphan count.
+        assert_eq!(
+            diagnostics.report.orphan_chunks, 1,
+            "unreferenced orphan should be detected"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn run_gc_with_stores_dangling_record_reference_handled_gracefully() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = std::env::temp_dir().join(format!("gc-test-dangling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("chunks")).unwrap();
+        let object_store = ServerObjectStore::local(&dir).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let record_store = MemoryRecordStore::new();
+
+        // Create a record referencing a chunk that does NOT exist on disk.
+        let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let record = FileRecord {
+            file_id: "dangling-file".to_owned(),
+            content_hash: hash.to_owned(),
+            total_bytes: 100,
+            chunk_size: 100,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash.to_owned(),
+                offset: 0,
+                length: 100,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        };
+        record_store.write_latest_record(&record).await.unwrap();
+
+        // Run GC — a dangling reference should not cause an error;
+        // the non-existent chunk is referenced by the record so it is NOT orphaned.
+        let result = run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LocalGcOptions::dry_run(),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "dangling reference should not cause GC error: {:?}",
+            result
+        );
+        let diagnostics = result.unwrap();
+        assert_eq!(diagnostics.report.scanned_records, 1);
+        assert_eq!(diagnostics.report.referenced_chunks, 1);
+        assert_eq!(
+            diagnostics.report.orphan_chunks, 0,
+            "referenced (but missing) chunk should not be orphaned"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn run_gc_with_stores_multiple_records_sharing_a_chunk_no_orphan() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let dir = std::env::temp_dir().join(format!("gc-test-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("chunks")).unwrap();
+        let object_store = ServerObjectStore::local(&dir).unwrap();
+        let index_store = MemoryIndexStore::new();
+        let record_store = MemoryRecordStore::new();
+
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let prefix = &hash[..2];
+        let key = ObjectKey::parse(&format!("{prefix}/{hash}")).unwrap();
+        put_object(&object_store, &key, b"shared chunk");
+
+        // Two records sharing the same chunk hash.
+        let make_record = |file_id: &str| -> FileRecord {
+            FileRecord {
+                file_id: file_id.to_owned(),
+                content_hash: hash.to_owned(),
+                total_bytes: 12,
+                chunk_size: 100,
+                repository_scope: None,
+                chunks: vec![FileChunkRecord {
+                    hash: hash.to_owned(),
+                    offset: 0,
+                    length: 12,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 0,
+                }],
+            }
+        };
+
+        record_store
+            .write_latest_record(&make_record("file-a"))
+            .await
+            .unwrap();
+        record_store
+            .write_latest_record(&make_record("file-b"))
+            .await
+            .unwrap();
+
+        let result = run_gc_with_stores(
+            &record_store,
+            &index_store,
+            &object_store,
+            &[ServerFrontend::Xet],
+            LocalGcOptions::dry_run(),
+        )
+        .await;
+        assert!(result.is_ok(), "GC with shared chunk: {:?}", result);
+        let diagnostics = result.unwrap();
+        assert_eq!(diagnostics.report.scanned_records, 2);
+        assert_eq!(diagnostics.report.referenced_chunks, 1);
+        assert_eq!(diagnostics.report.orphan_chunks, 0);
     });
 }

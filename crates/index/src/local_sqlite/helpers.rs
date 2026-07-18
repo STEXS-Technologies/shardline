@@ -11,8 +11,8 @@ use std::{
 };
 
 use rusqlite::{
-    Connection, Error as SqliteError, OpenFlags, OptionalExtension, Params, Result as SqliteResult,
-    Row, Transaction,
+    Connection, Error as SqliteError, MappedRows, OpenFlags, OptionalExtension, Params,
+    Result as SqliteResult, Row, Transaction,
     config::DbConfig,
     params,
     types::{Type, ValueRef},
@@ -22,6 +22,7 @@ use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
     ensure_directory_path_components_are_not_symlinked as ensure_directory_path_components_are_not_symlinked_shared,
+    local_path::resolve_platform_symlinks,
 };
 
 use super::{
@@ -29,7 +30,6 @@ use super::{
     LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS, LegacyQuarantineCandidateRecord,
     LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
     MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, StoredObjectPresenceRecord,
-    i64_to_u64, invalid_metadata_path_error, invalid_record_metadata_path_error, u64_to_i64,
 };
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
@@ -62,13 +62,13 @@ impl SqliteExecutor for Transaction<'_> {
     }
 }
 
-pub(super) fn initialize_local_metadata_root(root: &Path) -> Result<(), LocalIndexStoreError> {
+pub(crate) fn initialize_local_metadata_root(root: &Path) -> Result<(), LocalIndexStoreError> {
     ensure_directory_path_components_are_not_symlinked(root)?;
     fs::create_dir_all(root)?;
     Ok(())
 }
 
-pub(super) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), LocalIndexStoreError> {
+pub(crate) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), LocalIndexStoreError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(invalid_metadata_path_error()),
         Ok(metadata) if metadata.is_file() => Ok(()),
@@ -78,7 +78,7 @@ pub(super) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), Loc
     }
 }
 
-pub(super) fn prepare_connection(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
+pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
     let _enabled = connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "FULL")?;
@@ -89,7 +89,7 @@ pub(super) fn prepare_connection(connection: &mut Connection) -> Result<(), Loca
     Ok(())
 }
 
-pub(super) const fn sqlite_open_flags() -> OpenFlags {
+pub(crate) const fn sqlite_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE
         .union(OpenFlags::SQLITE_OPEN_CREATE)
         .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
@@ -98,7 +98,7 @@ pub(super) const fn sqlite_open_flags() -> OpenFlags {
         .union(OpenFlags::SQLITE_OPEN_EXRESCODE)
 }
 
-pub(super) fn ensure_local_schema_migrations_table(
+pub(crate) fn ensure_local_schema_migrations_table(
     connection: &Connection,
 ) -> Result<(), LocalIndexStoreError> {
     connection.execute_batch(&format!(
@@ -111,7 +111,7 @@ pub(super) fn ensure_local_schema_migrations_table(
     Ok(())
 }
 
-pub(super) fn apply_pending_local_migrations(
+pub(crate) fn apply_pending_local_migrations(
     connection: &mut Connection,
 ) -> Result<(), LocalIndexStoreError> {
     let mut applied_versions = Vec::new();
@@ -159,7 +159,7 @@ pub(super) fn apply_pending_local_migrations(
     Ok(())
 }
 
-pub(super) fn ensure_legacy_import_state(
+pub(crate) fn ensure_legacy_import_state(
     connection: &mut Connection,
     root: &Path,
 ) -> Result<(), LocalIndexStoreError> {
@@ -581,7 +581,7 @@ fn import_legacy_provider_repository_states(
     Ok(())
 }
 
-pub(super) fn upsert_reconstruction_row(
+pub(crate) fn upsert_reconstruction_row(
     connection: &impl SqliteExecutor,
     file_id: &FileId,
     reconstruction: &FileReconstruction,
@@ -612,7 +612,7 @@ pub(super) fn upsert_reconstruction_row(
     Ok(())
 }
 
-pub(super) fn upsert_dedupe_mapping_row(
+pub(crate) fn upsert_dedupe_mapping_row(
     connection: &impl SqliteExecutor,
     mapping: &DedupeShardMapping,
     updated_at_unix_seconds: u64,
@@ -637,7 +637,7 @@ pub(super) fn upsert_dedupe_mapping_row(
     Ok(())
 }
 
-pub(super) fn upsert_file_record_row(
+pub(crate) fn upsert_file_record_row(
     connection: &impl SqliteExecutor,
     locator: &LocalRecordLocator,
     record: &FileRecord,
@@ -680,7 +680,7 @@ pub(super) fn upsert_file_record_row(
     Ok(())
 }
 
-pub(super) fn local_record_locator(
+pub(crate) fn local_record_locator(
     kind: LocalRecordKind,
     record: &FileRecord,
     content_hash: Option<String>,
@@ -701,7 +701,7 @@ pub(super) fn local_record_locator(
     }
 }
 
-pub(super) fn local_record_locator_from_row(
+pub(crate) fn local_record_locator_from_row(
     row: &Row<'_>,
 ) -> Result<LocalRecordLocator, SqliteError> {
     let kind = LocalRecordKind::parse(row.get_ref("record_kind")?.as_str()?)
@@ -719,7 +719,7 @@ pub(super) fn local_record_locator_from_row(
     })
 }
 
-pub(super) fn quarantine_candidate_from_row(
+pub(crate) fn quarantine_candidate_from_row(
     row: &Row<'_>,
 ) -> Result<QuarantineCandidate, SqliteError> {
     let object_key =
@@ -733,7 +733,7 @@ pub(super) fn quarantine_candidate_from_row(
     .map_err(from_sql_error)
 }
 
-pub(super) fn retention_hold_from_row(row: &Row<'_>) -> Result<RetentionHold, SqliteError> {
+pub(crate) fn retention_hold_from_row(row: &Row<'_>) -> Result<RetentionHold, SqliteError> {
     let object_key =
         ObjectKey::parse(&row.get::<_, String>("object_key")?).map_err(from_sql_error)?;
     RetentionHold::new(
@@ -748,7 +748,7 @@ pub(super) fn retention_hold_from_row(row: &Row<'_>) -> Result<RetentionHold, Sq
     .map_err(from_sql_error)
 }
 
-pub(super) fn webhook_delivery_from_row(row: &Row<'_>) -> Result<WebhookDelivery, SqliteError> {
+pub(crate) fn webhook_delivery_from_row(row: &Row<'_>) -> Result<WebhookDelivery, SqliteError> {
     let provider_name = row.get::<_, String>("provider")?;
     let provider = parse_repository_provider(&provider_name, |_| {
         SqliteError::FromSqlConversionFailure(
@@ -767,7 +767,7 @@ pub(super) fn webhook_delivery_from_row(row: &Row<'_>) -> Result<WebhookDelivery
     .map_err(from_sql_error)
 }
 
-pub(super) fn provider_repository_state_from_row(
+pub(crate) fn provider_repository_state_from_row(
     row: &Row<'_>,
 ) -> Result<ProviderRepositoryState, SqliteError> {
     let provider_name = row.get::<_, String>("provider")?;
@@ -808,7 +808,7 @@ pub(super) fn provider_repository_state_from_row(
     ))
 }
 
-pub(super) fn dedupe_shard_mapping_from_row(
+pub(crate) fn dedupe_shard_mapping_from_row(
     row: &Row<'_>,
 ) -> Result<DedupeShardMapping, SqliteError> {
     let chunk_hash =
@@ -818,7 +818,7 @@ pub(super) fn dedupe_shard_mapping_from_row(
     Ok(DedupeShardMapping::new(chunk_hash, object_key))
 }
 
-pub(super) fn parse_reconstruction_json(
+pub(crate) fn parse_reconstruction_json(
     value: &str,
 ) -> Result<FileReconstruction, LocalIndexStoreError> {
     ensure_metadata_size_within_limit(
@@ -1092,7 +1092,7 @@ fn ensure_regular_metadata_file(
     Ok(())
 }
 
-pub(super) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, SqliteError> {
+pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, SqliteError> {
     let bytes = match value {
         ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.to_vec(),
         ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => {
@@ -1191,7 +1191,7 @@ fn map_directory_path_error(
     }
 }
 
-pub(super) fn legacy_record_path(
+pub(crate) fn legacy_record_path(
     root: &Path,
     kind: LocalRecordKind,
     record: &FileRecord,
@@ -1231,13 +1231,60 @@ fn from_sql_error(error: impl StdError + Send + Sync + 'static) -> SqliteError {
     SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
 }
 
+// ── Small helpers moved from mod.rs ───────────────────────────────────
+
+pub(crate) fn normalize_local_root(root: PathBuf) -> PathBuf {
+    let mut root = root;
+    if root.file_name() == Some(OsStr::new("gc")) {
+        root = root
+            .parent()
+            .map_or_else(|| root.clone(), Path::to_path_buf);
+    }
+    resolve_platform_symlinks(&root)
+}
+
+pub(crate) fn u64_to_i64(value: u64) -> Result<i64, LocalIndexStoreError> {
+    i64::try_from(value).map_err(|err| LocalIndexStoreError::IntegerOutOfRange(err.to_string()))
+}
+
+pub(crate) fn i64_to_u64(value: i64) -> Result<u64, LocalIndexStoreError> {
+    u64::try_from(value).map_err(|err| LocalIndexStoreError::IntegerOutOfRange(err.to_string()))
+}
+
+pub(crate) fn collect_rows<T>(
+    rows: MappedRows<'_, impl FnMut(&Row<'_>) -> Result<T, SqliteError>>,
+) -> Result<Vec<T>, LocalIndexStoreError> {
+    let mut collected = Vec::new();
+    for row in rows {
+        collected.push(row?);
+    }
+    Ok(collected)
+}
+
+pub(crate) fn record_not_found_error() -> LocalIndexStoreError {
+    LocalIndexStoreError::Io(IoError::from(ErrorKind::NotFound))
+}
+
+pub(crate) fn invalid_metadata_path_error() -> LocalIndexStoreError {
+    LocalIndexStoreError::Io(IoError::new(
+        ErrorKind::InvalidData,
+        "local metadata path must be a regular file and must not be a symlink",
+    ))
+}
+
+pub(crate) fn invalid_record_metadata_path_error() -> LocalIndexStoreError {
+    LocalIndexStoreError::Io(IoError::new(
+        ErrorKind::InvalidData,
+        "local record metadata path must be a regular file and must not be a symlink",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::os::unix::ffi::OsStrExt;
 
-    use super::super::{collect_rows, normalize_local_root, record_not_found_error};
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
     // ── ensure_metadata_size_within_limit ─────────────────────────────────

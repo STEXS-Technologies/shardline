@@ -330,4 +330,79 @@ mod tests {
             "duplicate Xet frontends must not produce duplicates"
         );
     }
+
+    // ── Timeout / cancellation tests ─────────────────────────────────────
+
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    /// Verifies that `visit_protocol_object_member_chunks` completes under
+    /// `spawn_blocking` with a reasonable outer timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn visit_protocol_object_member_chunks_completes_within_timeout() {
+        let object_store = ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("xorbs/default/ab/aa".repeat(16).as_str()).unwrap();
+        let mut visited = false;
+
+        let result = timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                visit_protocol_object_member_chunks(
+                    &[ServerFrontend::Xet],
+                    &object_store,
+                    &key,
+                    |_hash| {
+                        visited = true;
+                        Ok(())
+                    },
+                )
+            }),
+        )
+        .await;
+
+        // The spawn_blocking and visit should complete well within 5 seconds.
+        assert!(result.is_ok(), "dispatch should not time out");
+        let joined = result.unwrap();
+        assert!(joined.is_ok(), "dispatch result should be Ok");
+    }
+
+    /// Verifies that a slow synchronous dispatch-like operation can be
+    /// cancelled via `tokio::time::timeout` when wrapped in `spawn_blocking`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_gc_operation_times_out_when_slow() {
+        use std::sync::Arc;
+        let slow_store = Arc::new(ServerObjectStore::blackhole());
+        let slow_key = ObjectKey::parse("xorbs/default/ab/aa".repeat(16).as_str()).unwrap();
+
+        // Simulate a slow blocking GC operation by sleeping inside
+        // spawn_blocking. This mirrors how real sync I/O (e.g. S3 reads)
+        // would behave.
+        let store_clone = Arc::clone(&slow_store);
+        let result = timeout(
+            Duration::from_millis(10),
+            tokio::task::spawn_blocking(move || {
+                // Simulate a slow I/O operation that the GC dispatch might
+                // perform (e.g. reading xorb metadata from the object store).
+                std::thread::sleep(Duration::from_millis(500));
+                let mut visited = false;
+                visit_protocol_object_member_chunks(
+                    &[ServerFrontend::Xet],
+                    &store_clone,
+                    &slow_key,
+                    |_hash| {
+                        visited = true;
+                        Ok(())
+                    },
+                )
+            }),
+        )
+        .await;
+
+        // The short 10ms outer timeout should fire before the 500ms sleep
+        // completes.
+        assert!(
+            result.is_err(),
+            "slow GC operation should be cancelled by timeout"
+        );
+    }
 }

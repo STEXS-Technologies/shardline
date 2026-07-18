@@ -216,4 +216,31 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), u32::MAX);
     }
+
+    #[tokio::test]
+    async fn acquire_times_out_deterministically_with_paused_time() {
+        // Use tokio::time::pause() for deterministic timeout control.
+        tokio::time::pause();
+
+        let limiter = TransferLimiter::new(CHUNK_SIZE, NonZeroUsize::MIN)
+            .with_acquire_timeout(Duration::from_millis(100));
+
+        // Acquire the only permit.
+        let _permit = limiter.acquire_bytes(4).await.unwrap();
+
+        // Spawn a task that will try to acquire — it should block because the
+        // semaphore is exhausted, and then time out after 100 ms.
+        let limiter_clone = limiter.clone();
+        let acquire_handle = tokio::spawn(async move { limiter_clone.acquire_bytes(4).await });
+
+        // Advance the paused clock past the 100 ms acquire timeout.
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        // The timeout should now have fired.
+        let result = acquire_handle.await.expect("spawned task panicked");
+        assert!(
+            matches!(result, Err(ServerError::TransferLimiterTimedOut)),
+            "expected TransferLimiterTimedOut after advancing past timeout, got {result:?}"
+        );
+    }
 }

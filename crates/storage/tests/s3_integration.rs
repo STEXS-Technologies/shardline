@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use futures_util::StreamExt;
 use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore,
     S3ObjectStoreConfig,
@@ -862,4 +863,148 @@ async fn s3_special_character_keys() {
             "missing key in listing: {key_str}"
         );
     }
+}
+
+// ── stream_range integration tests ─────────────────────────────────────
+//
+// NOTE: The existing test `minio_stream_range_returns_partial_content`
+// exercises `read_range` (the sync ObjectStore trait method), NOT the
+// async `S3ObjectStore::stream_range`.  These tests fill that gap.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_stream_range_returns_partial_content() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-stream-range-1")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ab/stream-range-data").unwrap();
+    let body = b"abcdefghijklmnopqrstuvwxyz";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+
+    // Stream a middle range (bytes 5-14 inclusive → "fghijklmno")
+    let range = shardline_protocol::ByteRange::new(5, 14).unwrap();
+    let mut stream = store.stream_range(&key, range).await.unwrap();
+
+    let mut observed = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        observed.extend_from_slice(&chunk);
+    }
+    assert_eq!(observed, b"fghijklmno");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_stream_range_full_object() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-stream-range-2")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ab/stream-full").unwrap();
+    let body = b"hello stream range full object";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    let mut stream = store.stream_range(&key, range).await.unwrap();
+
+    let mut observed = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        observed.extend_from_slice(&chunk);
+    }
+    assert_eq!(observed, body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_stream_range_missing_key() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-stream-range-3")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ab/nonexistent-stream-key").unwrap();
+    let range = shardline_protocol::ByteRange::new(0, 10).unwrap();
+
+    let result = store.stream_range(&key, range).await;
+    assert!(result.is_err(), "expected error for missing key");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_stream_range_single_byte() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    let Some(config) = s3_config(&stack, Some("test-stream-range-4")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ab/stream-single").unwrap();
+    let body = b"abcdef";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+
+    // Single byte at offset 3 → b"d"
+    let range = shardline_protocol::ByteRange::new(3, 3).unwrap();
+    let mut stream = store.stream_range(&key, range).await.unwrap();
+
+    let mut observed = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        observed.extend_from_slice(&chunk);
+    }
+    assert_eq!(observed, b"d");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s3_stream_range_with_key_prefix() {
+    let Some(stack) = DockerLocalStack::builder().with_minio().start().unwrap() else {
+        eprintln!("skipping: docker not available");
+        return;
+    };
+    // Use a branded key prefix to test prefix-aware streaming
+    let Some(config) = s3_config(&stack, Some("test-stream-pfx")) else {
+        return;
+    };
+    let store = S3ObjectStore::new(config).unwrap();
+    let key = ObjectKey::parse("ns/obj.xorb").unwrap();
+    let body = b"stream with key prefix data";
+    let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+
+    store
+        .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
+        .unwrap();
+
+    let end = (body.len() as u64).checked_sub(1).unwrap();
+    let range = shardline_protocol::ByteRange::new(0, end).unwrap();
+    let mut stream = store.stream_range(&key, range).await.unwrap();
+
+    let mut observed = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        observed.extend_from_slice(&chunk);
+    }
+    assert_eq!(observed, body);
 }

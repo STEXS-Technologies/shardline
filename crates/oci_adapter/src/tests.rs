@@ -2540,6 +2540,46 @@ async fn purge_expired_read_error_deletes_with_permission_denied() {
     );
 }
 
+// ── purge_expired_upload_sessions — isolated expired + fresh ──────────────
+
+#[tokio::test]
+async fn purge_expired_upload_sessions_removes_expired_and_keeps_fresh_sequentially() {
+    let root = temp_root();
+
+    // 1. Create an expired session and purge it.
+    let expired_id = create_test_session(root.path(), false).await.unwrap();
+    let far_future = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 10_000;
+    purge_expired_upload_sessions::<TestBackend>(
+        root.path(),
+        NO_BACKEND,
+        NonZeroU64::new(1).unwrap(),
+        far_future,
+    )
+    .await
+    .unwrap();
+    let result = read_upload_session(root.path(), &expired_id, ttl()).await;
+    assert!(
+        matches!(result, Err(OciAdapterError::NotFound)),
+        "expired session should be purged"
+    );
+
+    // 2. Create a fresh session and verify it survives a normal purge.
+    let fresh_id = create_test_session(root.path(), false).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    purge_expired_upload_sessions::<TestBackend>(root.path(), NO_BACKEND, ttl(), now)
+        .await
+        .unwrap();
+    let result = read_upload_session(root.path(), &fresh_id, ttl()).await;
+    assert!(result.is_ok(), "fresh session should survive purge");
+}
+
 // ── Unix anchored-file closure coverage (path-escape closures) ────────────
 // These test the error-factory closures passed to open_anchored_target.
 // They are only invoked when the path escapes the root.
