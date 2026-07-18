@@ -22,7 +22,7 @@ use url::Url;
 
 use super::{PostgresBackend, repository_references_hash_in_scope};
 use crate::{
-    InvalidReconstructionResponseError, ServerError, apply_database_migrations,
+    ServerError, apply_database_migrations, error::InvalidReconstructionResponseError,
     object_store::ServerObjectStore,
 };
 

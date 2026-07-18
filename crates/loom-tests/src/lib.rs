@@ -73,8 +73,11 @@ mod loading_dedup {
             let h2 = thread::spawn(move || assert_eq!(c2.wait_and_get(), 42));
             h1.join().unwrap();
             h2.join().unwrap();
-            assert_eq!(cache.loaded.load(Ordering::SeqCst), 1,
-                "loader must execute exactly once regardless of interleaving");
+            assert_eq!(
+                cache.loaded.load(Ordering::SeqCst),
+                1,
+                "loader must execute exactly once regardless of interleaving"
+            );
         });
     }
 }
@@ -93,8 +96,14 @@ mod atomic_counters {
             let counter = Arc::new(AtomicUsize::new(0));
             let c1 = counter.clone();
             let c2 = counter.clone();
-            let h1 = thread::spawn(move || { let v = c1.fetch_add(1, Ordering::SeqCst); assert!(v < 2); });
-            let h2 = thread::spawn(move || { let v = c2.fetch_add(1, Ordering::SeqCst); assert!(v < 2); });
+            let h1 = thread::spawn(move || {
+                let v = c1.fetch_add(1, Ordering::SeqCst);
+                assert!(v < 2);
+            });
+            let h2 = thread::spawn(move || {
+                let v = c2.fetch_add(1, Ordering::SeqCst);
+                assert!(v < 2);
+            });
             h1.join().unwrap();
             h2.join().unwrap();
             assert_eq!(counter.load(Ordering::SeqCst), 2);
@@ -110,7 +119,9 @@ mod atomic_counters {
             let h1 = thread::spawn(move || {
                 loop {
                     let v = f1.load(Ordering::SeqCst);
-                    if v == 1 { break; }
+                    if v == 1 {
+                        break;
+                    }
                     let _ = f1.compare_exchange(v, 1, Ordering::SeqCst, Ordering::SeqCst);
                 }
             });
@@ -133,15 +144,25 @@ mod quarantine_state {
     use super::*;
 
     #[derive(Clone, PartialEq, Eq, Debug)]
-    enum State { Active, Released, Swept }
+    enum State {
+        Active,
+        Released,
+        Swept,
+    }
 
     struct Quarantine {
         inner: Mutex<Vec<(u64, State)>>,
     }
 
     impl Quarantine {
-        fn new() -> Self { Self { inner: Mutex::new(Vec::new()) } }
-        fn insert(&self, id: u64) { self.inner.lock().unwrap().push((id, State::Active)); }
+        fn new() -> Self {
+            Self {
+                inner: Mutex::new(Vec::new()),
+            }
+        }
+        fn insert(&self, id: u64) {
+            self.inner.lock().unwrap().push((id, State::Active));
+        }
         fn release(&self, id: u64) {
             let mut inner = self.inner.lock().unwrap();
             if let Some(entry) = inner.iter_mut().find(|(i, _)| *i == id) {
@@ -149,7 +170,12 @@ mod quarantine_state {
             }
         }
         fn count_active(&self) -> usize {
-            self.inner.lock().unwrap().iter().filter(|(_, s)| *s == State::Active).count()
+            self.inner
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, s)| *s == State::Active)
+                .count()
         }
     }
 
@@ -159,8 +185,14 @@ mod quarantine_state {
             let q = Arc::new(Quarantine::new());
             let q1 = q.clone();
             let q2 = q.clone();
-            let h1 = thread::spawn(move || { q1.insert(1); q1.insert(2); });
-            let h2 = thread::spawn(move || { q2.insert(3); q2.release(1); });
+            let h1 = thread::spawn(move || {
+                q1.insert(1);
+                q1.insert(2);
+            });
+            let h2 = thread::spawn(move || {
+                q2.insert(3);
+                q2.release(1);
+            });
             h1.join().unwrap();
             h2.join().unwrap();
             let active = q.count_active();
@@ -178,11 +210,21 @@ mod quarantine_state {
 mod hook_registration {
     use super::*;
 
-    struct HookSystem { storage: Mutex<Option<u64>>, hook_triggered: AtomicUsize }
+    struct HookSystem {
+        storage: Mutex<Option<u64>>,
+        hook_triggered: AtomicUsize,
+    }
 
     impl HookSystem {
-        fn new() -> Self { Self { storage: Mutex::new(None), hook_triggered: AtomicUsize::new(0) } }
-        fn set_hook(&self, value: u64) { *self.storage.lock().unwrap() = Some(value); }
+        fn new() -> Self {
+            Self {
+                storage: Mutex::new(None),
+                hook_triggered: AtomicUsize::new(0),
+            }
+        }
+        fn set_hook(&self, value: u64) {
+            *self.storage.lock().unwrap() = Some(value);
+        }
         fn run_with_hook(&self) -> u64 {
             if let Some(value) = self.storage.lock().unwrap().take() {
                 self.hook_triggered.fetch_add(1, Ordering::SeqCst);
@@ -200,13 +242,20 @@ mod hook_registration {
             let s2 = sys.clone();
             let s3 = sys.clone();
             let h1 = thread::spawn(move || s1.set_hook(99));
-            let h2 = thread::spawn(move || { let _ = s2.run_with_hook(); });
-            let h3 = thread::spawn(move || { let _ = s3.run_with_hook(); });
+            let h2 = thread::spawn(move || {
+                let _ = s2.run_with_hook();
+            });
+            let h3 = thread::spawn(move || {
+                let _ = s3.run_with_hook();
+            });
             h1.join().unwrap();
             h2.join().unwrap();
             h3.join().unwrap();
             let triggered = sys.hook_triggered.load(Ordering::SeqCst);
-            assert!(triggered <= 1, "hook must fire at most once: got {triggered}");
+            assert!(
+                triggered <= 1,
+                "hook must fire at most once: got {triggered}"
+            );
         });
     }
 }
@@ -228,14 +277,24 @@ mod concurrency_limit {
 
     impl Limiter {
         fn new(max: usize) -> Self {
-            Self { max, active: AtomicUsize::new(0), peak: AtomicUsize::new(0) }
+            Self {
+                max,
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            }
         }
 
         fn acquire_blocking(&self) {
             loop {
                 let prev = self.active.load(Ordering::SeqCst);
-                if prev >= self.max { continue; }
-                if self.active.compare_exchange(prev, prev + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                if prev >= self.max {
+                    continue;
+                }
+                if self
+                    .active
+                    .compare_exchange(prev, prev + 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
                     self.peak.fetch_max(prev + 1, Ordering::SeqCst);
                     return;
                 }
@@ -253,8 +312,14 @@ mod concurrency_limit {
             let limiter = Arc::new(Limiter::new(2));
             let l1 = limiter.clone();
             let l2 = limiter.clone();
-            let h1 = thread::spawn(move || { l1.acquire_blocking(); l1.release(); });
-            let h2 = thread::spawn(move || { l2.acquire_blocking(); l2.release(); });
+            let h1 = thread::spawn(move || {
+                l1.acquire_blocking();
+                l1.release();
+            });
+            let h2 = thread::spawn(move || {
+                l2.acquire_blocking();
+                l2.release();
+            });
             h1.join().unwrap();
             h2.join().unwrap();
             let peak = limiter.peak.load(Ordering::SeqCst);
@@ -277,7 +342,11 @@ mod rwlock_concurrent {
     }
 
     impl SharedMap {
-        fn new() -> Self { Self { data: RwLock::new(Vec::new()) } }
+        fn new() -> Self {
+            Self {
+                data: RwLock::new(Vec::new()),
+            }
+        }
         fn write(&self, key: u64, value: u64) {
             let mut data = self.data.write().unwrap();
             if let Some(entry) = data.iter_mut().find(|(k, _)| *k == key) {
@@ -300,9 +369,16 @@ mod rwlock_concurrent {
             let m2 = map.clone();
             let m3 = map.clone();
 
-            let h1 = thread::spawn(move || { m1.write(1, 10); m1.write(2, 20); });
-            let h2 = thread::spawn(move || { let _ = m2.read(1); });
-            let h3 = thread::spawn(move || { let _ = m3.read(2); });
+            let h1 = thread::spawn(move || {
+                m1.write(1, 10);
+                m1.write(2, 20);
+            });
+            let h2 = thread::spawn(move || {
+                let _ = m2.read(1);
+            });
+            let h3 = thread::spawn(move || {
+                let _ = m3.read(2);
+            });
 
             h1.join().unwrap();
             h2.join().unwrap();
@@ -331,7 +407,10 @@ mod barrier_init {
 
     impl InitOnce {
         fn new() -> Self {
-            Self { value: RwLock::new(None), init_count: AtomicUsize::new(0) }
+            Self {
+                value: RwLock::new(None),
+                init_count: AtomicUsize::new(0),
+            }
         }
 
         fn get_or_init(&self) -> u64 {
@@ -352,11 +431,15 @@ mod barrier_init {
     fn three_threads_barrier_then_init_once() {
         loom::model(|| {
             let val = Arc::new(InitOnce::new());
-            let handles: Vec<_> = (0..3).map(|_| {
-                let v = val.clone();
-                thread::spawn(move || assert_eq!(v.get_or_init(), 99))
-            }).collect();
-            for h in handles { h.join().unwrap(); }
+            let handles: Vec<_> = (0..3)
+                .map(|_| {
+                    let v = val.clone();
+                    thread::spawn(move || assert_eq!(v.get_or_init(), 99))
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
             let count = val.init_count.load(Ordering::SeqCst);
             assert!(count >= 1, "must initialize at least once");
         });

@@ -1,9 +1,12 @@
 use std::fmt;
 
 use serde::Deserialize;
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Zeroizing byte-oriented secret material.
+///
+/// Constant-time equality is used for [`PartialEq`] to avoid timing side-channels.
 ///
 /// # Examples
 ///
@@ -14,8 +17,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// assert_eq!(secret.expose_secret(), b"my-secret-key");
 /// assert!(!secret.is_empty());
 /// ```
-#[derive(Clone, PartialEq, Eq, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Eq, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SecretBytes(Vec<u8>);
+
+impl PartialEq for SecretBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
 
 impl SecretBytes {
     /// Wraps owned secret bytes.
@@ -63,6 +72,8 @@ impl fmt::Debug for SecretBytes {
 
 /// Zeroizing UTF-8 secret material.
 ///
+/// Constant-time equality is used for [`PartialEq`] to avoid timing side-channels.
+///
 /// # Examples
 ///
 /// ```
@@ -71,8 +82,14 @@ impl fmt::Debug for SecretBytes {
 /// let secret = SecretString::from_secret("bootstrap-token");
 /// assert_eq!(secret.expose_secret(), "bootstrap-token");
 /// ```
-#[derive(Clone, PartialEq, Eq, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Eq, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SecretString(String);
+
+impl PartialEq for SecretString {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
 
 impl SecretString {
     /// Wraps owned secret text.

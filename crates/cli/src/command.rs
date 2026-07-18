@@ -1217,7 +1217,7 @@ impl From<CliObjectStorageAdapter> for ObjectStorageAdapter {
 fn parse_positive_usize(value: &str) -> Result<NonZeroUsize, String> {
     let parsed = value
         .parse::<usize>()
-        .map_err(|_error| "value must be a positive integer".to_owned())?;
+        .map_err(|e| format!("value must be a positive integer: {e}"))?;
     NonZeroUsize::new(parsed).ok_or_else(|| "value must be a positive integer".to_owned())
 }
 

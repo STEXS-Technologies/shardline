@@ -1957,8 +1957,7 @@ mod tests {
     #[test]
     fn from_http_range_parse_error_invalid_syntax() {
         use shardline_protocol::HttpRangeParseError;
-        let err: ServerError =
-            HttpRangeParseError::InvalidSyntax("test".to_owned()).into();
+        let err: ServerError = HttpRangeParseError::InvalidSyntax("test".to_owned()).into();
         assert!(matches!(err, ServerError::InvalidRangeHeader));
     }
 
@@ -2587,11 +2586,10 @@ mod tests {
     #[test]
     fn from_gc_error_memory_record() {
         use shardline_gc::GcError;
-        let err: ServerError =
-            GcError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned(
-                "test".to_owned(),
-            ))
-            .into();
+        let err: ServerError = GcError::MemoryRecordStore(
+            shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()),
+        )
+        .into();
         assert!(matches!(
             err,
             ServerError::Index(IndexError::MemoryRecord(_))

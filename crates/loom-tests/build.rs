@@ -1,1 +1,3 @@
-fn main() { println!("cargo::rustc-check-cfg=cfg(loom)"); }
+fn main() {
+    println!("cargo::rustc-check-cfg=cfg(loom)");
+}

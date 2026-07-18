@@ -213,8 +213,7 @@ mod from_impl_tests {
 
     #[test]
     fn from_rebuild_error_memory_index_store() {
-        let mem_err =
-            shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned());
+        let mem_err = shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned());
         let err = RebuildError::MemoryIndexStore(mem_err);
         let server_err: ServerError = err.into();
         assert!(matches!(
@@ -225,8 +224,7 @@ mod from_impl_tests {
 
     #[test]
     fn from_rebuild_error_memory_record_store() {
-        let mem_err =
-            shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned());
+        let mem_err = shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned());
         let err = RebuildError::MemoryRecordStore(mem_err);
         let server_err: ServerError = err.into();
         assert!(matches!(

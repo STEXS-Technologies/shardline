@@ -34,11 +34,11 @@ use crate::xorb_object::{
     },
     xorb_format_test_utils::{ChunkSize, build_raw_xorb, build_xorb_object},
     xorb_object_format::{
-        SerializedXorbObject, XorbObject, XorbObjectInfoV0, XorbObjectInfoV1,
-        reconstruct_xorb_with_footer, XORB_OBJECT_FORMAT_BOUNDARIES_VERSION,
+        SerializedXorbObject, XORB_OBJECT_FORMAT_BOUNDARIES_VERSION,
         XORB_OBJECT_FORMAT_HASHES_VERSION, XORB_OBJECT_FORMAT_IDENT,
         XORB_OBJECT_FORMAT_IDENT_BOUNDARIES, XORB_OBJECT_FORMAT_IDENT_HASHES,
-        XORB_OBJECT_FORMAT_VERSION, XORB_OBJECT_FORMAT_VERSION_V0,
+        XORB_OBJECT_FORMAT_VERSION, XORB_OBJECT_FORMAT_VERSION_V0, XorbObject, XorbObjectInfoV0,
+        XorbObjectInfoV1, reconstruct_xorb_with_footer,
     },
 };
 

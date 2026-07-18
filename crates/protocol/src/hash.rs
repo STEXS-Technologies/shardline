@@ -43,10 +43,12 @@ impl ShardlineHash {
             ));
         }
 
-        let decoded = hex::decode(value)
-            .map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
-        let bytes = <[u8; HASH_BYTE_LENGTH]>::try_from(decoded)
-            .map_err(|vec| { let _ = vec; HashParseError::InvalidLength })?;
+        let decoded =
+            hex::decode(value).map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
+        let bytes = <[u8; HASH_BYTE_LENGTH]>::try_from(decoded).map_err(|vec| {
+            let _ = vec;
+            HashParseError::InvalidLength
+        })?;
 
         Ok(Self { bytes })
     }

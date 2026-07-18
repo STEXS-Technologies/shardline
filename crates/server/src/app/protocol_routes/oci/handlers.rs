@@ -131,7 +131,10 @@ async fn oci_dispatch_parsed(
                 .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
                 .header("Docker-Content-Digest", format!("sha256:{digest_hex}"))
                 .body(Body::empty())
-                .map_err(|_error| ServerError::Overflow)?)
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "failed to build head blob response");
+                    ServerError::Overflow
+                })?)
         }
         (
             Method::GET,
@@ -247,7 +250,10 @@ async fn oci_delete_blob(
     Response::builder()
         .status(StatusCode::ACCEPTED)
         .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to build delete blob response");
+            ServerError::Overflow
+        })
 }
 
 /// Returns `true` if the JSON document (OCI manifest or index) contains a

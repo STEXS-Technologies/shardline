@@ -1,6 +1,5 @@
-use super::parse_oci_path;
 use crate::ServerError;
-use crate::app::protocol_routes::oci::path::OciPath;
+use crate::app::protocol_routes::oci::path::{OciPath, parse_oci_path};
 use axum::http::Uri;
 
 #[test]

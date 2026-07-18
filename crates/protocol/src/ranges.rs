@@ -396,8 +396,14 @@ mod tests {
     fn http_range_parse_error_display_all_variants() {
         let cases: &[(HttpRangeParseError, &str)] = &[
             (HttpRangeParseError::MissingBytesUnit, "syntax"),
-            (HttpRangeParseError::InvalidSyntax("test".to_owned()), "syntax"),
-            (HttpRangeParseError::InvalidNumber("test".to_owned()), "invalid number"),
+            (
+                HttpRangeParseError::InvalidSyntax("test".to_owned()),
+                "syntax",
+            ),
+            (
+                HttpRangeParseError::InvalidNumber("test".to_owned()),
+                "invalid number",
+            ),
             (HttpRangeParseError::Unsatisfiable, "satisfiable"),
         ];
         for (error, substring) in cases {

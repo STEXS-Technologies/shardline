@@ -118,7 +118,7 @@ impl JwksProvider {
             .await
             .map_err(|e| JwksProviderError::JwksFetch(e.to_string()))?;
 
-        Ok(Self {
+        let provider = Self {
             client,
             jwks_url: jwks_url.to_owned(),
             issuer: issuer.to_owned(),
@@ -129,19 +129,9 @@ impl JwksProvider {
             }))),
             background_handle: Arc::new(std::sync::OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    async fn get_or_refresh_keys(&self) -> Result<Arc<Vec<Jwk>>, AuthError> {
-        self.start_background_refresh();
-
-        let guard = self.cached_keys.read().await;
-        if let Some(cached) = guard.as_ref() {
-            return Ok(Arc::clone(&cached.keys));
-        }
-        Err(AuthError::ProviderError(
-            "JWKS keys not available".to_owned(),
-        ))
+        };
+        provider.start_background_refresh();
+        Ok(provider)
     }
 
     fn start_background_refresh(&self) {
@@ -229,32 +219,25 @@ impl JwksProvider {
         payload_b64: &str,
         signature_b64: &str,
     ) -> Result<TokenClaims, AuthError> {
-        let keys = tokio::runtime::Handle::try_current().map_or_else(
-            |_| {
-                // Fallback: read from cache synchronously (background refresh
-                // task keeps keys fresh).  If the cache is empty, fail.
-                // Retry try_read a few times to tolerate transient write-lock
-                // contention during key rotation.
-                const MAX_RETRIES: usize = 5;
-                const RETRY_DELAY_MS: u64 = 10;
-                let mut attempt: usize = 0;
-                loop {
-                    if let Ok(guard) = self.cached_keys.try_read() {
-                        break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
-                            AuthError::ProviderError("JWKS keys not available".to_owned())
-                        });
-                    }
-                    attempt = attempt.wrapping_add(1);
-                    if attempt >= MAX_RETRIES {
-                        break Err(AuthError::ProviderError(
-                            "JWKS cache lock contended".to_owned(),
-                        ));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+        let keys = {
+            const MAX_RETRIES: usize = 5;
+            const RETRY_DELAY_MS: u64 = 10;
+            let mut attempt: usize = 0;
+            loop {
+                if let Ok(guard) = self.cached_keys.try_read() {
+                    break guard.as_ref().map(|c| Arc::clone(&c.keys)).ok_or_else(|| {
+                        AuthError::ProviderError("JWKS keys not available".to_owned())
+                    });
                 }
-            },
-            |handle| handle.block_on(self.get_or_refresh_keys()),
-        )?;
+                attempt = attempt.wrapping_add(1);
+                if attempt >= MAX_RETRIES {
+                    break Err(AuthError::ProviderError(
+                        "JWKS cache lock contended".to_owned(),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+            }
+        }?;
 
         let header_json = base64_decode_url(header_b64)
             .map_err(|e| AuthError::ProviderError(format!("invalid JWT header: {e}")))?;
@@ -298,7 +281,10 @@ impl JwksProvider {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .unwrap_or_else(|e| {
+                tracing::error!("SystemTime before UNIX_EPOCH: {e}");
+                0
+            });
 
         // Reject tokens issued in the future (iat) or not yet valid (nbf).
         if let Some(iat) = payload.get("iat").and_then(|v| v.as_u64())
@@ -324,13 +310,19 @@ impl JwksProvider {
         let sub = payload
             .get("sub")
             .and_then(|v| v.as_str())
-            .unwrap_or("anonymous")
+            .unwrap_or_else(|| {
+                tracing::warn!("JWT payload missing 'sub' claim, defaulting to 'anonymous'");
+                "anonymous"
+            })
             .to_owned();
 
         let scope_str = payload
             .get("scope")
             .and_then(|v| v.as_str())
-            .unwrap_or("read");
+            .unwrap_or_else(|| {
+                tracing::warn!("JWT payload missing 'scope' claim, defaulting to 'read'");
+                "read"
+            });
         let scope = match scope_str {
             "write" | "admin" => TokenScope::Write,
             _ => TokenScope::Read,
@@ -1322,31 +1314,6 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         assert!(result.is_err(), "expected Err for empty string");
     }
 
-    // ── get_or_refresh_keys ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn get_or_refresh_keys_with_cached_keys_returns_keys() {
-        let jwk = sample_rsa_jwk();
-        let provider = make_provider(Some(CachedJwks {
-            keys: Arc::new(vec![jwk]),
-            etag: None,
-            refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
-        }));
-        let result = provider.get_or_refresh_keys().await;
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-        assert_eq!(result.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn get_or_refresh_keys_with_no_keys_returns_error() {
-        let provider = make_provider(None);
-        let result = provider.get_or_refresh_keys().await;
-        assert!(
-            matches!(result, Err(AuthError::ProviderError(_))),
-            "expected ProviderError, got {result:?}"
-        );
-    }
-
     // ── refresh_keys_if_changed ─────────────────────────────────────────
 
     #[tokio::test]
@@ -1887,7 +1854,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         let token = encode(&header, &claims, &encoding_key).expect("should sign token");
 
         // Verify the token through the provider.
-        // verify_token uses block_on internally, so call from a thread without runtime.
+        // verify_token reads from background-refreshed cache; call from non-async context to exercise sync path.
         let result = std::thread::spawn(move || provider.verify_token(&token))
             .join()
             .expect("thread should not panic");

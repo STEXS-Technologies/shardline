@@ -750,7 +750,7 @@ pub(super) fn retention_hold_from_row(row: &Row<'_>) -> Result<RetentionHold, Sq
 
 pub(super) fn webhook_delivery_from_row(row: &Row<'_>) -> Result<WebhookDelivery, SqliteError> {
     let provider_name = row.get::<_, String>("provider")?;
-    let provider = parse_repository_provider(&provider_name, || {
+    let provider = parse_repository_provider(&provider_name, |_| {
         SqliteError::FromSqlConversionFailure(
             0,
             Type::Text,
@@ -771,7 +771,7 @@ pub(super) fn provider_repository_state_from_row(
     row: &Row<'_>,
 ) -> Result<ProviderRepositoryState, SqliteError> {
     let provider_name = row.get::<_, String>("provider")?;
-    let provider = parse_repository_provider(&provider_name, || {
+    let provider = parse_repository_provider(&provider_name, |_| {
         SqliteError::FromSqlConversionFailure(
             0,
             Type::Text,
@@ -917,7 +917,7 @@ fn parse_webhook_delivery_json_bytes(
         processed_at_unix_seconds: u64,
     }
     let record = from_slice::<WebhookDeliveryRecord>(bytes)?;
-    let provider = parse_repository_provider(&record.provider, || {
+    let provider = parse_repository_provider(&record.provider, |_| {
         LocalIndexStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
     })?;
     WebhookDelivery::new(
@@ -953,7 +953,7 @@ fn parse_provider_repository_state_json_bytes(
         last_drift_checked_at_unix_seconds: Option<u64>,
     }
     let record = from_slice::<ProviderRepositoryStateRecord>(bytes)?;
-    let provider = parse_repository_provider(&record.provider, || {
+    let provider = parse_repository_provider(&record.provider, |_| {
         LocalIndexStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
     })?;
     Ok(ProviderRepositoryState::new(
