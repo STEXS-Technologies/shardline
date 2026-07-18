@@ -60,7 +60,7 @@ pub(super) async fn git_lfs_authenticate(
         "X-Xet-Cas-Url".to_owned(),
         state.config.public_base_url().to_owned(),
     );
-    header.insert("X-Xet-Access-Token".to_owned(), issued.token.clone());
+    header.insert("X-Xet-Access-Token".to_owned(), issued.token.expose_secret().to_owned());
     header.insert(
         "X-Xet-Token-Expiration".to_owned(),
         issued.expires_at_unix_seconds.to_string(),

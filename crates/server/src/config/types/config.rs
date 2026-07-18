@@ -557,9 +557,10 @@ impl ServerConfig {
     /// empty.
     pub fn with_token_signing_key(
         mut self,
-        token_signing_key: Vec<u8>,
+        token_signing_key: impl Into<SecretBytes>,
     ) -> Result<Self, ServerConfigError> {
-        if token_signing_key.is_empty() {
+        let token_signing_key = token_signing_key.into();
+        if token_signing_key.expose_secret().is_empty() {
             return Err(ServerConfigError::EmptyTokenSigningKey);
         }
         ensure_secret_size_within_limit(
@@ -571,7 +572,7 @@ impl ServerConfig {
             },
         )?;
 
-        self.auth.token_signing_key = Some(SecretBytes::new(token_signing_key));
+        self.auth.token_signing_key = Some(token_signing_key);
         Ok(self)
     }
 
@@ -609,8 +610,12 @@ impl ServerConfig {
     ///
     /// Returns [`ServerConfigError::EmptyMetricsToken`] when the metrics token is
     /// empty.
-    pub fn with_metrics_token(mut self, metrics_token: Vec<u8>) -> Result<Self, ServerConfigError> {
-        if metrics_token.is_empty() {
+    pub fn with_metrics_token(
+        mut self,
+        metrics_token: impl Into<SecretBytes>,
+    ) -> Result<Self, ServerConfigError> {
+        let metrics_token = metrics_token.into();
+        if metrics_token.expose_secret().is_empty() {
             return Err(ServerConfigError::EmptyMetricsToken);
         }
         ensure_secret_size_within_limit(
@@ -622,7 +627,7 @@ impl ServerConfig {
             },
         )?;
 
-        self.metrics_token = Some(SecretBytes::new(metrics_token));
+        self.metrics_token = Some(metrics_token);
         Ok(self)
     }
 
@@ -635,11 +640,12 @@ impl ServerConfig {
     pub fn with_provider_runtime(
         mut self,
         provider_config_path: PathBuf,
-        provider_api_key: Vec<u8>,
+        provider_api_key: impl Into<SecretBytes>,
         issuer_identity: String,
         ttl_seconds: NonZeroU64,
     ) -> Result<Self, ServerConfigError> {
-        if provider_api_key.is_empty() {
+        let provider_api_key = provider_api_key.into();
+        if provider_api_key.expose_secret().is_empty() {
             return Err(ServerConfigError::EmptyProviderApiKey);
         }
         ensure_secret_size_within_limit(
@@ -658,7 +664,7 @@ impl ServerConfig {
         }
 
         self.provider.config_path = Some(provider_config_path);
-        self.provider.api_key = Some(SecretBytes::new(provider_api_key));
+        self.provider.api_key = Some(provider_api_key);
         self.provider.token_issuer = Some(issuer_identity);
         self.provider.token_ttl_seconds = Some(ttl_seconds);
         Ok(self)

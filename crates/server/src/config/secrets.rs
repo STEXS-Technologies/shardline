@@ -9,7 +9,7 @@ use std::{
 };
 
 use shardline_cache::RedisTlsConfig;
-use shardline_protocol::parse_bool;
+use shardline_protocol::{parse_bool, SecretBytes};
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::{
@@ -46,7 +46,7 @@ fn optional_redis_tls_material_file(
         return Ok(None);
     };
 
-    read_secret_file_bytes(
+    let bytes = read_secret_file_bytes(
         Path::new(&path),
         MAX_REDIS_TLS_MATERIAL_BYTES,
         |source| ServerConfigError::RedisTlsMaterial {
@@ -63,8 +63,8 @@ fn optional_redis_tls_material_file(
             observed_bytes: expected_bytes.max(observed_bytes),
             maximum_bytes: MAX_REDIS_TLS_MATERIAL_BYTES,
         },
-    )
-    .map(Some)
+    )?;
+    Ok(Some(bytes.expose_secret().to_vec()))
 }
 
 pub(super) fn configure_provider_runtime_from_paths(
@@ -183,7 +183,7 @@ pub(super) fn optional_s3_secret_from_sources(
                     observed_bytes,
                 },
             )?;
-            String::from_utf8(bytes).map(Some).map_err(|_error| {
+            String::from_utf8(bytes.expose_secret().to_vec()).map(Some).map_err(|_error| {
                 ServerConfigError::S3CredentialUtf8 {
                     name: file_env_name,
                 }
@@ -236,7 +236,7 @@ pub(super) fn read_secret_file_bytes(
     read_error: impl Fn(IoError) -> ServerConfigError + Copy,
     error: impl Fn(u64, u64) -> ServerConfigError + Copy,
     _length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
-) -> Result<Vec<u8>, ServerConfigError> {
+) -> Result<SecretBytes, ServerConfigError> {
     let mut file = open_secret_file(path).map_err(read_error)?;
 
     run_before_secret_file_read_hook_for_tests(path);
@@ -245,7 +245,7 @@ pub(super) fn read_secret_file_bytes(
     file.read_to_end(&mut bytes).map_err(read_error)?;
     ensure_secret_size_within_limit(bytes.len() as u64, maximum_bytes, error)?;
 
-    Ok(bytes)
+    Ok(SecretBytes::new(bytes))
 }
 
 #[cfg(unix)]
@@ -461,7 +461,7 @@ mod tests {
             length_mismatch_error,
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), b"hello world");
+        assert_eq!(result.unwrap().expose_secret(), b"hello world");
     }
 
     #[test]
@@ -476,7 +476,7 @@ mod tests {
             length_mismatch_error,
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), b"");
+        assert_eq!(result.unwrap().expose_secret(), b"");
     }
 
     #[test]

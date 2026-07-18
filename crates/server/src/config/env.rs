@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use shardline_protocol::SecretString;
+use shardline_protocol::{SecretBytes, SecretString};
 
 use super::secrets::{
     configure_provider_runtime_from_paths, load_redis_tls_config_from_env,
@@ -324,13 +324,13 @@ fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, Server
 pub(super) fn optional_token_signing_key_from_sources(
     direct: Option<String>,
     file: Option<String>,
-) -> Result<Option<Vec<u8>>, ServerConfigError> {
+) -> Result<Option<SecretBytes>, ServerConfigError> {
     match (direct, file) {
         (Some(_direct), Some(_file)) => Err(ServerConfigError::TokenSigningKeySourceConflict {
             env: "SHARDLINE_TOKEN_SIGNING_KEY",
             file_env: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
         }),
-        (Some(value), None) => Ok(Some(value.into_bytes())),
+        (Some(value), None) => Ok(Some(SecretBytes::new(value.into_bytes()))),
         (None, Some(path)) => Ok(Some(read_secret_file_bytes(
             Path::new(&path),
             MAX_TOKEN_SIGNING_KEY_BYTES,
@@ -464,7 +464,8 @@ mod tests {
     fn optional_token_signing_key_from_sources_direct() {
         let result =
             optional_token_signing_key_from_sources(Some("my-key".to_owned()), None).unwrap();
-        assert_eq!(result, Some(b"my-key".to_vec()));
+        let inner = result.unwrap();
+        assert_eq!(inner.expose_secret(), b"my-key");
     }
 
     #[test]
@@ -485,13 +486,15 @@ mod tests {
         let result =
             optional_token_signing_key_from_sources(None, Some(tmp.path().display().to_string()));
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(b"file-key-value".to_vec()));
+        let inner = result.unwrap().unwrap();
+        assert_eq!(inner.expose_secret(), b"file-key-value");
     }
 
     #[test]
     fn optional_token_signing_key_from_sources_direct_empty_string() {
         let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
-        assert_eq!(result, Some(b"".to_vec()));
+        let inner = result.unwrap();
+        assert_eq!(inner.expose_secret(), b"");
     }
 
     #[test]
@@ -510,7 +513,8 @@ mod tests {
     #[test]
     fn optional_token_signing_key_from_sources_empty_direct_produces_empty_bytes() {
         let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
-        assert_eq!(result, Some(b"".to_vec()));
+        let inner = result.unwrap();
+        assert_eq!(inner.expose_secret(), b"");
     }
 
     #[test]

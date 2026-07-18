@@ -859,7 +859,8 @@ fn token_signing_key_accepts_direct_env_source() {
     let Ok(loaded) = loaded else {
         return;
     };
-    assert_eq!(loaded, Some(b"direct-signing-key".to_vec()));
+    let inner = loaded.unwrap();
+    assert_eq!(inner.expose_secret(), b"direct-signing-key");
 }
 
 #[test]
@@ -1060,7 +1061,7 @@ fn read_secret_file_bytes_accepts_projected_secret_symlink_within_directory() {
     let Ok(bytes) = bytes else {
         return;
     };
-    assert_eq!(bytes, b"test-signing-key-32-bytes-long!!".to_vec());
+    assert_eq!(bytes.expose_secret(), b"test-signing-key-32-bytes-long!!");
 }
 
 #[cfg(unix)]
@@ -1140,7 +1141,7 @@ fn read_secret_file_bytes_rejects_growth_after_validation_without_retaining_appe
 
     let expected = b"test-signing-key-32-bytes-long!!-rotated";
     assert!(bytes.is_ok());
-    assert_eq!(bytes.unwrap(), expected.to_vec());
+    assert_eq!(bytes.unwrap().expose_secret(), expected);
 }
 
 #[test]
@@ -1213,7 +1214,7 @@ fn read_secret_file_bytes_accepts_valid_regular_file() {
     );
 
     assert!(bytes.is_ok());
-    assert_eq!(bytes.unwrap(), b"test-secret-content".to_vec());
+    assert_eq!(bytes.unwrap().expose_secret(), b"test-secret-content");
 }
 
 #[test]
@@ -1239,7 +1240,7 @@ fn read_secret_file_bytes_accepts_empty_file() {
     );
 
     assert!(bytes.is_ok());
-    assert_eq!(bytes.unwrap(), Vec::<u8>::new());
+    assert_eq!(bytes.unwrap().expose_secret(), b"");
 }
 
 #[test]
