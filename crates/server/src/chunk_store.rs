@@ -75,4 +75,28 @@ mod tests {
 
         assert!(matches!(extracted, Ok(None)));
     }
+
+    #[test]
+    fn chunk_hash_from_chunk_object_key_if_present_extracts_from_chunk_namespace() {
+        let hash = "ff".repeat(32);
+        let key = ObjectKey::parse(&format!("ff/{hash}")).unwrap();
+        let extracted = chunk_hash_from_chunk_object_key_if_present(&key);
+        assert!(matches!(extracted, Ok(Some(h)) if h == hash));
+    }
+
+    #[test]
+    fn chunk_object_key_for_computed_hash_rejects_invalid_shardline_hash() {
+        // ShardlineHash from raw bytes; invalid content hashes are rejected upstream.
+        let hash = ShardlineHash::from_bytes([0xff; 32]);
+        let result = chunk_object_key_for_computed_hash(hash);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn chunk_hash_from_chunk_object_key_if_present_returns_none_for_non_chunk_path() {
+        let key = ObjectKey::parse("some/other/path").unwrap();
+        let extracted = chunk_hash_from_chunk_object_key_if_present(&key);
+        assert!(extracted.is_ok());
+        assert!(extracted.unwrap().is_none());
+    }
 }

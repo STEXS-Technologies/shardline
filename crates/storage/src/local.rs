@@ -2562,4 +2562,294 @@ mod tests {
             let _ = std::fs::remove_file(&fifo_path);
         }
     }
+
+    // ── copy_object_if_absent with hard-link I/O error (permission denied) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn local_copy_object_if_absent_hard_link_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        let source = ObjectKey::parse("ab/source").unwrap();
+        let dest = ObjectKey::parse("cd/dest").unwrap();
+        let body = b"test data for hard link error";
+        let integrity = ObjectIntegrity::new(super::chunk_hash(body), body.len() as u64);
+        store
+            .put_if_absent(&source, ObjectBody::from_slice(body), &integrity)
+            .unwrap();
+
+        // Pre-create the destination parent directory with read-only permissions
+        // so that hard_link (which needs write permission) fails with EACCES.
+        let dest_path = store.path_for_key(&dest);
+        let parent = dest_path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = store.copy_object_if_absent(&source, &dest);
+
+        // Restore permissions so tempdir cleanup works.
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(parent);
+
+        assert!(result.is_err(), "expected hard-link error, got {result:?}");
+    }
+
+    // ── read_range with short file (EOF error path) ─────────────────────
+
+    #[test]
+    fn local_read_range_eof_triggers_out_of_bounds() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("test/tiny.xorb").unwrap();
+        let body = b"abc";
+        store
+            .put_if_absent(
+                &key,
+                ObjectBody::from_slice(body),
+                &ObjectIntegrity::new(super::chunk_hash(body), body.len() as u64),
+            )
+            .unwrap();
+
+        // Request a range well past the end of the file
+        let range = ByteRange::new(1, 100).unwrap();
+        let result = store.read_range(&key, range);
+        assert!(matches!(
+            result,
+            Err(LocalObjectStoreError::RangeOutOfBounds)
+        ));
+    }
+
+    // ── metadata on non-existent key returns None ───────────────────────
+
+    #[test]
+    fn local_metadata_returns_none_for_missing() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let key = ObjectKey::parse("test/nonexistent").unwrap();
+        let result = store.metadata(&key).unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── list_prefix with mixed directory and file entries ───────────────
+
+    #[test]
+    fn local_list_prefix_skips_non_file_entries() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        // Create a file and a directory under the prefix
+        let file_key = ObjectKey::parse("mix/afile.xorb").unwrap();
+        store
+            .put_if_absent(
+                &file_key,
+                ObjectBody::from_slice(b"data"),
+                &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
+            )
+            .unwrap();
+        let dir = storage.path().join("mix").join("subdir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let prefix = ObjectPrefix::parse("mix/").unwrap();
+        let listed = store.list_prefix(&prefix).unwrap();
+        assert_eq!(listed.len(), 1, "directory entries should be skipped");
+        assert_eq!(listed[0].key().as_str(), "mix/afile.xorb");
+    }
+
+    // ── put_if_absent with AlreadyExists via race (local_fs) ────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn local_put_if_absent_handles_already_exists_from_local_fs() {
+        use std::sync::{Arc, Barrier};
+
+        let storage = Arc::new(shardline_test_support::TempStorage::new());
+        let store = Arc::new(LocalObjectStore::new(storage.path().join("objects")).unwrap());
+        let key = Arc::new(ObjectKey::parse("race/concurrent.xorb").unwrap());
+        let body = b"race data";
+        let integrity = Arc::new(ObjectIntegrity::new(
+            super::chunk_hash(body),
+            body.len() as u64,
+        ));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let s = store.clone();
+            let k = key.clone();
+            let b = ObjectBody::from_slice(body);
+            let i = integrity.clone();
+            let bar = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                bar.wait();
+                s.put_if_absent(&k, b, &i)
+            }));
+        }
+
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.len(), 2);
+        let inserts = results
+            .iter()
+            .filter(|r| matches!(r, Ok(PutOutcome::Inserted)))
+            .count();
+        let already = results
+            .iter()
+            .filter(|r| matches!(r, Ok(PutOutcome::AlreadyExists)))
+            .count();
+        assert_eq!(inserts, 1, "exactly one insert expected");
+        assert_eq!(already, 1, "exactly one AlreadyExists expected");
+    }
+
+    // ── ensure_file_matches_bytes with buffer boundary edge case ────────
+
+    #[cfg(unix)]
+    #[test]
+    fn local_ensure_file_matches_bytes_large_content() {
+        use super::ensure_file_matches_bytes;
+        use std::fs::File;
+
+        let storage = shardline_test_support::TempStorage::new();
+        // Create content larger than the 256KB buffer to exercise chunking
+        let size = 1024 * 1024; // 1MB
+        let content: Vec<u8> = (0_u8..255).cycle().take(size).collect();
+        let path = storage.path().join("large_match.bin");
+        std::fs::write(&path, &content).unwrap();
+        let file = File::open(&path).unwrap();
+        assert!(ensure_file_matches_bytes(file, &content).is_ok());
+    }
+
+    // ── ensure_files_match with content larger than buffer ─────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn local_ensure_files_match_large_content() {
+        use super::ensure_files_match;
+        use std::fs::File;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let size = 1024 * 1024;
+        let content: Vec<u8> = (0_u8..255).cycle().take(size).collect();
+        let path_a = storage.path().join("large_a.bin");
+        let path_b = storage.path().join("large_b.bin");
+        std::fs::write(&path_a, &content).unwrap();
+        std::fs::write(&path_b, &content).unwrap();
+        let a = File::open(&path_a).unwrap();
+        let b = File::open(&path_b).unwrap();
+        assert!(ensure_files_match(a, b).is_ok());
+    }
+
+    // ── put_temporary_file_if_absent with read-only parent dir ─────────
+
+    #[cfg(unix)]
+    #[test]
+    fn local_put_temporary_file_if_absent_read_only_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("objects");
+        let store = LocalObjectStore::new(root).unwrap();
+        let key = ObjectKey::parse("readonly/hash.xorb").unwrap();
+
+        // Create a temporary file with matching integrity
+        let tmp = storage.path().join("tmp-body.bin");
+        std::fs::write(&tmp, b"correct").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"correct"), 7);
+
+        // Pre-create the parent directory and remove write permission.
+        // open_anchored_target will still open it (O_RDONLY), but
+        // hard_link will fail with EACCES because the directory lacks
+        // write permission.
+        let path = store.path_for_key(&key);
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = store.put_temporary_file_if_absent(&key, &tmp, &integrity);
+
+        // Restore so cleanup works.
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+
+        assert!(
+            result.is_err(),
+            "expected EACCES error from read-only parent, got {result:?}"
+        );
+    }
+
+    // ── list_prefix with FIFO entry (non-file, non-dir) ────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn local_list_prefix_skips_non_file_entries_via_fifo() {
+        let storage = shardline_test_support::TempStorage::new();
+        let store = LocalObjectStore::new(storage.path_buf()).unwrap();
+
+        let file_key = ObjectKey::parse("fifo_ns/regular.xorb").unwrap();
+        store
+            .put_if_absent(
+                &file_key,
+                ObjectBody::from_slice(b"data"),
+                &ObjectIntegrity::new(super::chunk_hash(b"data"), 4),
+            )
+            .unwrap();
+
+        let fifo_path = storage.path().join("fifo_ns/fifo_entry");
+        let mkfifo_result = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status();
+
+        if mkfifo_result.map(|s| s.success()).unwrap_or(false) {
+            let prefix = ObjectPrefix::parse("fifo_ns/").unwrap();
+            let listed = store.list_prefix(&prefix).unwrap();
+            assert_eq!(listed.len(), 1, "FIFO entries should be skipped");
+            assert_eq!(listed[0].key().as_str(), "fifo_ns/regular.xorb");
+            let _ = std::fs::remove_file(&fifo_path);
+        }
+    }
+
+    // ── remove_empty_ancestors with race ───────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn local_remove_empty_ancestors_with_concurrent_delete() {
+        use std::sync::{Arc, Barrier};
+
+        let storage = Arc::new(shardline_test_support::TempStorage::new());
+        let store = Arc::new(LocalObjectStore::new(storage.path_buf()).unwrap());
+        let key_a = Arc::new(ObjectKey::parse("a/b/c/one.xorb").unwrap());
+        let key_b = Arc::new(ObjectKey::parse("a/b/c/two.xorb").unwrap());
+        let body = b"d";
+        let integrity = Arc::new(ObjectIntegrity::new(super::chunk_hash(body), 1));
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Create two files in the same deep directory structure
+        for key in [&key_a, &key_b] {
+            store
+                .put_if_absent(key, ObjectBody::from_slice(body), &integrity)
+                .unwrap();
+        }
+
+        // Delete both files concurrently — the first delete cleans up
+        // the now-empty directory, the second encounters NotFound.
+        let mut handles = Vec::new();
+        for k in [key_a, key_b] {
+            let s = store.clone();
+            let b = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                s.delete_if_present(&k)
+            }));
+        }
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        // The directory should be cleaned up since both files are deleted.
+        // At least one delete succeeded, maybe both.
+        assert!(
+            !storage.path().join("a/b/c").exists(),
+            "empty directory should have been removed"
+        );
+    }
 }

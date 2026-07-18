@@ -645,6 +645,134 @@ mod tests {
         );
     }
 
+    // ── put_bytes_if_absent AlreadyExists race via concurrent writes ───
+
+    #[cfg(unix)]
+    #[test]
+    fn put_bytes_if_absent_concurrent_race_handles_already_exists() {
+        use super::{PutBytesIfAbsentOutcome, put_bytes_if_absent};
+        use std::sync::{Arc, Barrier};
+
+        let sandbox = Arc::new(tempfile::tempdir().unwrap());
+        let root = Arc::new(sandbox.path().join("root"));
+
+        let path = Arc::new(root.join("race.bin"));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let t1 = {
+            let r = root.clone();
+            let p = path.clone();
+            let b = barrier.clone();
+            std::thread::spawn(move || {
+                b.wait();
+                put_bytes_if_absent(&r, &p, b"data")
+            })
+        };
+
+        let t2 = {
+            let r = root;
+            let p = path;
+            let b = barrier;
+            std::thread::spawn(move || {
+                b.wait();
+                put_bytes_if_absent(&r, &p, b"data")
+            })
+        };
+
+        let result1 = t1.join().unwrap();
+        let result2 = t2.join().unwrap();
+
+        // Both should succeed — one inserts, the other detects AlreadyExists
+        assert!(
+            result1
+                .as_ref()
+                .is_ok_and(|o| matches!(o, PutBytesIfAbsentOutcome::Inserted))
+                || result2
+                    .as_ref()
+                    .is_ok_and(|o| matches!(o, PutBytesIfAbsentOutcome::Inserted)),
+            "at least one should have inserted"
+        );
+        assert!(
+            result1.is_ok() && result2.is_ok(),
+            "both results should be Ok"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn put_bytes_if_absent_concurrent_different_bytes_mismatch() {
+        use super::put_bytes_if_absent;
+        use std::sync::{Arc, Barrier};
+
+        let sandbox = Arc::new(tempfile::tempdir().unwrap());
+        let root = Arc::new(sandbox.path().join("root2"));
+        let path = Arc::new(root.join("race-diff.bin"));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let t1 = {
+            let r = root.clone();
+            let p = path.clone();
+            let b = barrier.clone();
+            std::thread::spawn(move || {
+                b.wait();
+                put_bytes_if_absent(&r, &p, b"data1")
+            })
+        };
+
+        let t2 = {
+            let r = root;
+            let p = path;
+            let b = barrier;
+            std::thread::spawn(move || {
+                b.wait();
+                put_bytes_if_absent(&r, &p, b"data2")
+            })
+        };
+
+        let result1 = t1.join().unwrap();
+        let result2 = t2.join().unwrap();
+
+        // At least one should succeed, the other may fail with content mismatch
+        assert!(result1.is_ok() || result2.is_ok());
+        // If one failed, the error should be about content mismatch
+        if let Err(e) = &result1 {
+            assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+        if let Err(e) = &result2 {
+            assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+    }
+
+    // ── write_bytes_atomically_unix rename error path ──────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bytes_atomically_rename_error_cleans_up() {
+        use super::{set_before_local_write_hook, write_bytes_atomically};
+        let _guard = HOOK_TEST_MUTEX
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("root");
+        let dest = root.join("sub").join("target.bin");
+
+        // Hook creates a directory at the final path, causing rename to fail
+        let dest_clone = dest.clone();
+        set_before_local_write_hook(dest.clone(), move || {
+            // Create a directory where the file should go
+            let _ = std::fs::create_dir_all(&dest_clone);
+        });
+
+        let result = write_bytes_atomically(&root, &dest, b"payload");
+        // Renaming a file to a path that is already a directory fails
+        assert!(
+            result.is_err(),
+            "expected rename error when final path is a directory"
+        );
+    }
+
     // ── hard_link_file_if_absent with race via hook ───────────────────
 
     /// Serializes hook-based tests that use the global BEFORE_LOCAL_WRITE_HOOK.

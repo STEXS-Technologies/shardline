@@ -170,12 +170,8 @@ mod tests {
     #[test]
     fn object_metadata_keeps_key_length_and_checksum() {
         let hash = ShardlineHash::from_bytes([9; 32]);
-        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb");
+        let key = ObjectKey::parse("xorbs/default/aa/bb/hash.xorb").unwrap();
 
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
         let metadata = ObjectMetadata::new(key.clone(), 64, Some(hash));
 
         assert_eq!(metadata.key(), &key);
@@ -204,6 +200,26 @@ mod tests {
         let body = ObjectBody::from_slice(slice);
         let bytes = body.into_bytes();
         assert_eq!(bytes.as_ref(), slice);
+    }
+
+    #[test]
+    fn object_body_shared_from_slice() {
+        let body = ObjectBody::from_bytes(Bytes::from_static(b"test-data"));
+        assert_eq!(body.as_slice(), b"test-data");
+    }
+
+    #[test]
+    fn object_body_from_vec_empty() {
+        let body = ObjectBody::from_vec(vec![]);
+        assert!(body.as_slice().is_empty());
+        let bytes = body.into_bytes();
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn object_body_borrowed_empty() {
+        let body = ObjectBody::from_slice(b"");
+        assert!(body.as_slice().is_empty());
     }
 
     #[test]

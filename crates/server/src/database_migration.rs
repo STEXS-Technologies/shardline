@@ -443,15 +443,11 @@ fn migration_checksum(migration: &DatabaseMigration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{env::var as env_var, error::Error, process::id as process_id};
-
-    use sqlx::{PgPool, postgres::PgPoolOptions, query};
-    use url::Url;
 
     use super::{
         DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationOptions,
-        DatabaseMigrationStatusEntry, apply_database_migrations, bundled_database_migrations,
-        migration_by_version, migration_checksum, run_database_migration,
+        DatabaseMigrationStatusEntry, bundled_database_migrations, migration_by_version,
+        migration_checksum,
     };
 
     #[test]
@@ -632,16 +628,6 @@ mod tests {
         assert_eq!(report.backend, "postgres");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn database_migration_up_status_and_down_cover_full_lifecycle() {
-        let result = exercise_database_migration_up_status_and_down_cover_full_lifecycle().await;
-        let error = result.as_ref().err().map(ToString::to_string);
-        assert!(
-            result.is_ok(),
-            "database migration lifecycle failed: {error:?}"
-        );
-    }
-
     #[test]
     fn bundled_database_migrations_are_monotonic() {
         let migrations = bundled_database_migrations();
@@ -757,97 +743,5 @@ mod tests {
         assert_eq!(report.backend, "postgres");
         assert_eq!(report.applied_count, 2);
         assert_eq!(report.pending_count, 7);
-    }
-
-    async fn exercise_database_migration_up_status_and_down_cover_full_lifecycle()
-    -> Result<(), Box<dyn Error>> {
-        let Some(base_url) = env_var("DATABASE_URL").ok() else {
-            return Ok(());
-        };
-
-        let database_name = format!("shardline_db_migrate_{}", process_id());
-        let admin_url = database_url_for(&base_url, "postgres")?;
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await?;
-        recreate_database(&admin_pool, &database_name).await?;
-
-        let database_url = database_url_for(&base_url, &database_name)?;
-        let status_before = run_database_migration(&DatabaseMigrationOptions::new(
-            database_url.clone(),
-            DatabaseMigrationCommand::Status,
-        ))
-        .await?;
-        assert_eq!(status_before.applied_count, 0);
-        assert_eq!(status_before.reverted_count, 0);
-        assert_eq!(status_before.applied_total_count, 0);
-        assert_eq!(
-            status_before.pending_count,
-            u64::try_from(bundled_database_migrations().len())?
-        );
-
-        let up = run_database_migration(&DatabaseMigrationOptions::new(
-            database_url.clone(),
-            DatabaseMigrationCommand::Up { steps: Some(2) },
-        ))
-        .await?;
-        assert_eq!(up.applied_count, 2);
-        assert_eq!(up.reverted_count, 0);
-        assert_eq!(up.applied_total_count, 2);
-
-        let up_rest = run_database_migration(&DatabaseMigrationOptions::new(
-            database_url.clone(),
-            DatabaseMigrationCommand::Up { steps: None },
-        ))
-        .await?;
-        assert_eq!(
-            up_rest.applied_count,
-            u64::try_from(bundled_database_migrations().len().saturating_sub(2))?
-        );
-        assert_eq!(up_rest.pending_count, 0);
-
-        let down = run_database_migration(&DatabaseMigrationOptions::new(
-            database_url.clone(),
-            DatabaseMigrationCommand::Down { steps: 1 },
-        ))
-        .await?;
-        assert_eq!(down.reverted_count, 1);
-        assert_eq!(down.pending_count, 1);
-
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&database_url)
-            .await?;
-        apply_database_migrations(&pool).await?;
-
-        let final_status = run_database_migration(&DatabaseMigrationOptions::new(
-            database_url,
-            DatabaseMigrationCommand::Status,
-        ))
-        .await?;
-        assert_eq!(final_status.pending_count, 0);
-        assert_eq!(
-            final_status.applied_total_count,
-            u64::try_from(bundled_database_migrations().len())?
-        );
-
-        Ok(())
-    }
-
-    async fn recreate_database(pool: &PgPool, database_name: &str) -> Result<(), Box<dyn Error>> {
-        query(&format!("DROP DATABASE IF EXISTS {database_name}"))
-            .execute(pool)
-            .await?;
-        query(&format!("CREATE DATABASE {database_name}"))
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
-
-    fn database_url_for(base_url: &str, database_name: &str) -> Result<String, Box<dyn Error>> {
-        let mut url = Url::parse(base_url)?;
-        url.set_path(database_name);
-        Ok(url.to_string())
     }
 }

@@ -747,6 +747,55 @@ mod tests {
     use crate::hub::{BoxedHubStore, HubRepoType, HubStore};
     use sqlx::postgres::{PgPool, PgPoolOptions};
 
+    // ------------------------------------------------------------------
+    // Pure helper function tests (no database needed)
+    // ------------------------------------------------------------------
+    #[test]
+    fn repo_type_to_str_maps_all_variants() {
+        assert_eq!(repo_type_to_str(HubRepoType::Model), "model");
+        assert_eq!(repo_type_to_str(HubRepoType::Dataset), "dataset");
+        assert_eq!(repo_type_to_str(HubRepoType::Space), "space");
+    }
+
+    #[test]
+    fn repo_type_from_str_parses_all_variants() {
+        assert_eq!(repo_type_from_str("model").unwrap(), HubRepoType::Model);
+        assert_eq!(repo_type_from_str("dataset").unwrap(), HubRepoType::Dataset);
+        assert_eq!(repo_type_from_str("space").unwrap(), HubRepoType::Space);
+    }
+
+    #[test]
+    fn repo_type_from_str_rejects_unknown() {
+        let err = repo_type_from_str("unknown").unwrap_err();
+        assert!(matches!(
+            err,
+            PostgresMetadataStoreError::InvalidRepoType(_)
+        ));
+        assert_eq!(err.to_string(), "invalid repository type: unknown");
+    }
+
+    #[test]
+    fn escape_like_preserves_plain_strings() {
+        assert_eq!(escape_like("hello"), "hello");
+        assert_eq!(escape_like(""), "");
+        assert_eq!(escape_like("abc123"), "abc123");
+    }
+
+    #[test]
+    fn escape_like_escapes_wildcards() {
+        assert_eq!(escape_like("foo_bar"), "foo\\_bar");
+        assert_eq!(escape_like("foo%bar"), "foo\\%bar");
+        assert_eq!(escape_like("foo\\bar"), "foo\\\\bar");
+    }
+
+    #[test]
+    fn escape_like_escapes_combined_patterns() {
+        assert_eq!(escape_like("a%b_c\\d"), "a\\%b\\_c\\\\d");
+    }
+
+    // block_on_async itself is tested indirectly by every hub_postgres integration
+    // test that exercises the HubStore impl (create_repo, get_repo, etc.)
+
     async fn connect_postgres() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL")
             .or_else(|_| std::env::var("SHARDLINE_INDEX_POSTGRES_URL"))

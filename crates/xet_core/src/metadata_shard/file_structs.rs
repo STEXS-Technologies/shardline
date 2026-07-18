@@ -462,3 +462,497 @@ impl From<&MDBFileInfoView> for MDBFileInfo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::merklehash::compute_data_hash;
+
+    // ======= FileDataSequenceHeader =======
+
+    #[test]
+    fn header_new_basic() {
+        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 3u32, false, false);
+        assert_eq!(h.file_flags, 0);
+        assert_eq!(h.num_entries, 3);
+    }
+
+    #[test]
+    fn header_new_with_verification() {
+        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, false);
+        assert!(h.contains_verification());
+        assert!(!h.contains_metadata_ext());
+    }
+
+    #[test]
+    fn header_new_with_metadata_ext() {
+        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, true);
+        assert!(!h.contains_verification());
+        assert!(h.contains_metadata_ext());
+    }
+
+    #[test]
+    fn header_new_with_both() {
+        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, true, true);
+        assert!(h.contains_verification());
+        assert!(h.contains_metadata_ext());
+    }
+
+    #[test]
+    fn header_new_with_neither() {
+        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 0u32, false, false);
+        assert!(!h.contains_verification());
+        assert!(!h.contains_metadata_ext());
+    }
+
+    #[test]
+    fn header_bookend_and_is_bookend() {
+        let b = FileDataSequenceHeader::bookend();
+        assert!(b.is_bookend());
+        let h = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false);
+        assert!(!h.is_bookend());
+    }
+
+    #[test]
+    fn header_serialize_roundtrip() {
+        let h = FileDataSequenceHeader::new(compute_data_hash(b"f"), 5u32, true, false);
+        let mut buf = Vec::new();
+        h.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let h2 = FileDataSequenceHeader::deserialize(&mut r).unwrap();
+        assert_eq!(h.file_hash, h2.file_hash);
+        assert_eq!(h.file_flags, h2.file_flags);
+        assert_eq!(h.num_entries, h2.num_entries);
+    }
+
+    #[test]
+    fn header_num_info_entry_following_various() {
+        // No flags: just entries
+        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, false, false);
+        assert_eq!(h.num_info_entry_following(), 3);
+        // Verification: entries * 2
+        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, true, false);
+        assert_eq!(h.num_info_entry_following(), 6);
+        // Metadata ext: entries + 1
+        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, false, true);
+        assert_eq!(h.num_info_entry_following(), 4);
+        // Both: entries * 2 + 1
+        let h = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, true, true);
+        assert_eq!(h.num_info_entry_following(), 7);
+        // Zero entries with both flags: 0 * 2 + 1 = 1
+        let h = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, true, true);
+        assert_eq!(h.num_info_entry_following(), 1);
+    }
+
+    #[test]
+    fn header_default() {
+        let h = FileDataSequenceHeader::default();
+        assert_eq!(h.num_entries, 0);
+        assert_eq!(h.file_flags, 0);
+    }
+
+    // ======= FileDataSequenceEntry =======
+
+    #[test]
+    fn entry_new_basic() {
+        let e = FileDataSequenceEntry::new(compute_data_hash(b"seg"), 1024u32, 0u32, 512u32);
+        assert_eq!(e.unpacked_segment_bytes, 1024);
+        assert_eq!(e.chunk_index_start, 0);
+        assert_eq!(e.chunk_index_end, 512);
+        assert_eq!(e.xorb_flags, 0);
+    }
+
+    #[test]
+    fn entry_serialize_roundtrip() {
+        let e = FileDataSequenceEntry::new(compute_data_hash(b"e"), 200u32, 10u32, 20u32);
+        let mut buf = Vec::new();
+        e.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let e2 = FileDataSequenceEntry::deserialize(&mut r).unwrap();
+        assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn entry_from_xorb_entries() {
+        let hash = compute_data_hash(b"xorb");
+        let metadata = XorbChunkSequenceHeader::new(hash, 2u32, 200u32);
+        let chunks = vec![
+            XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u32, 0u32),
+            XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 100u32, 100u32),
+        ];
+        let e = FileDataSequenceEntry::from_xorb_entries(&metadata, &chunks, 0u32, 2u32);
+        assert_eq!(e.xorb_hash, hash);
+        assert_eq!(e.unpacked_segment_bytes, 200);
+        assert_eq!(e.chunk_index_start, 0);
+        assert_eq!(e.chunk_index_end, 2);
+    }
+
+    #[test]
+    fn entry_from_xorb_entries_empty_chunks() {
+        let metadata = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u32, 0u32);
+        let e = FileDataSequenceEntry::from_xorb_entries(&metadata, &[], 0u32, 0u32);
+        assert_eq!(e, FileDataSequenceEntry::default());
+    }
+
+    #[test]
+    fn entry_default() {
+        let e = FileDataSequenceEntry::default();
+        assert_eq!(e.xorb_hash, MerkleHash::default());
+        assert_eq!(e.unpacked_segment_bytes, 0);
+    }
+
+    // ======= FileVerificationEntry =======
+
+    #[test]
+    fn verification_entry_new() {
+        let v = FileVerificationEntry::new(compute_data_hash(b"v"));
+        assert_eq!(v.range_hash, compute_data_hash(b"v"));
+    }
+
+    #[test]
+    fn verification_entry_serialize_roundtrip() {
+        let v = FileVerificationEntry::new(compute_data_hash(b"v1"));
+        let mut buf = Vec::new();
+        v.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let v2 = FileVerificationEntry::deserialize(&mut r).unwrap();
+        assert_eq!(v.range_hash, v2.range_hash);
+    }
+
+    #[test]
+    fn verification_entry_default() {
+        let v = FileVerificationEntry::default();
+        assert_eq!(v.range_hash, MerkleHash::default());
+    }
+
+    // ======= FileMetadataExt =======
+
+    #[test]
+    fn metadata_ext_new() {
+        let m = FileMetadataExt::new(compute_data_hash(b"sha256"));
+        assert_eq!(m.sha256, compute_data_hash(b"sha256"));
+    }
+
+    #[test]
+    fn metadata_ext_serialize_roundtrip() {
+        let m = FileMetadataExt::new(compute_data_hash(b"ext"));
+        let mut buf = Vec::new();
+        m.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let m2 = FileMetadataExt::deserialize(&mut r).unwrap();
+        assert_eq!(m.sha256, m2.sha256);
+    }
+
+    #[test]
+    fn metadata_ext_default() {
+        let m = FileMetadataExt::default();
+        assert_eq!(m.sha256, MerkleHash::default());
+    }
+
+    // ======= MDBFileInfo =======
+
+    #[test]
+    fn file_info_num_bytes() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(MerkleHash::default(), 2u32, false, false),
+            segments: vec![
+                FileDataSequenceEntry::new(MerkleHash::default(), 100u32, 0u32, 50u32),
+                FileDataSequenceEntry::new(MerkleHash::default(), 200u32, 50u32, 100u32),
+            ],
+            verification: vec![],
+            metadata_ext: None,
+        };
+        assert!(info.num_bytes() > 0);
+    }
+
+    #[test]
+    fn file_info_file_size() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(MerkleHash::default(), 2u32, false, false),
+            segments: vec![
+                FileDataSequenceEntry::new(MerkleHash::default(), 100u32, 0u32, 50u32),
+                FileDataSequenceEntry::new(MerkleHash::default(), 200u32, 50u32, 100u32),
+            ],
+            verification: vec![],
+            metadata_ext: None,
+        };
+        assert_eq!(info.file_size(), 300);
+    }
+
+    #[test]
+    fn file_info_serialize_roundtrip_no_flags() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, false, false),
+            segments: vec![
+                FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32),
+                FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32),
+            ],
+            verification: vec![],
+            metadata_ext: None,
+        };
+        let mut buf = Vec::new();
+        info.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let info2 = MDBFileInfo::deserialize(&mut r).unwrap().unwrap();
+        assert_eq!(info.metadata.file_hash, info2.metadata.file_hash);
+        assert_eq!(info.segments.len(), info2.segments.len());
+    }
+
+    #[test]
+    fn file_info_serialize_with_verification() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, false),
+            segments: vec![FileDataSequenceEntry::new(
+                MerkleHash::default(),
+                50u32,
+                0u32,
+                25u32,
+            )],
+            verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
+            metadata_ext: None,
+        };
+        let mut buf = Vec::new();
+        info.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let info2 = MDBFileInfo::deserialize(&mut r).unwrap().unwrap();
+        assert!(info2.contains_verification());
+        assert_eq!(info2.verification.len(), 1);
+    }
+
+    #[test]
+    fn file_info_serialize_with_metadata_ext() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, true),
+            segments: vec![FileDataSequenceEntry::new(
+                MerkleHash::default(),
+                50u32,
+                0u32,
+                25u32,
+            )],
+            verification: vec![],
+            metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
+        };
+        let mut buf = Vec::new();
+        info.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let info2 = MDBFileInfo::deserialize(&mut r).unwrap().unwrap();
+        assert!(info2.contains_metadata_ext());
+        assert!(info2.metadata_ext.is_some());
+    }
+
+    #[test]
+    fn file_info_serialize_with_both() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, true),
+            segments: vec![FileDataSequenceEntry::new(
+                MerkleHash::default(),
+                50u32,
+                0u32,
+                25u32,
+            )],
+            verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
+            metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
+        };
+        let mut buf = Vec::new();
+        info.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        let info2 = MDBFileInfo::deserialize(&mut r).unwrap().unwrap();
+        assert!(info2.contains_verification());
+        assert!(info2.contains_metadata_ext());
+    }
+
+    #[test]
+    fn file_info_deserialize_bookend_returns_none() {
+        let b = FileDataSequenceHeader::bookend();
+        let mut buf = Vec::new();
+        b.serialize(&mut buf).unwrap();
+        let mut r = Cursor::new(&buf);
+        assert!(MDBFileInfo::deserialize(&mut r).unwrap().is_none());
+    }
+
+    #[test]
+    fn file_info_num_bytes_with_verification_and_metadata_ext() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, true, true),
+            segments: vec![
+                FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32),
+                FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32),
+            ],
+            verification: vec![
+                FileVerificationEntry::new(compute_data_hash(b"v1")),
+                FileVerificationEntry::new(compute_data_hash(b"v2")),
+            ],
+            metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
+        };
+        let nbytes = info.num_bytes();
+        assert!(nbytes > 0);
+        assert_eq!(info.file_size(), 125);
+    }
+
+    #[test]
+    fn file_info_default() {
+        let info = MDBFileInfo::default();
+        assert!(info.segments.is_empty());
+        assert!(info.verification.is_empty());
+        assert!(info.metadata_ext.is_none());
+    }
+
+    #[test]
+    fn file_info_contains_methods() {
+        let info = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, true),
+            segments: vec![FileDataSequenceEntry::new(
+                MerkleHash::default(),
+                50u32,
+                0u32,
+                25u32,
+            )],
+            verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
+            metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
+        };
+        assert!(info.contains_verification());
+        assert!(info.contains_metadata_ext());
+
+        let info2 = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 0u32, false, false),
+            segments: vec![],
+            verification: vec![],
+            metadata_ext: None,
+        };
+        assert!(!info2.contains_verification());
+        assert!(!info2.contains_metadata_ext());
+    }
+
+    // ======= MDBFileInfoView =======
+
+    #[test]
+    fn view_basic() {
+        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false);
+        let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+        let mut buf = Vec::new();
+        header.serialize(&mut buf).unwrap();
+        entry.serialize(&mut buf).unwrap();
+        let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
+        assert_eq!(view.num_entries(), 1);
+        assert_eq!(view.file_hash(), compute_data_hash(b"f"));
+        assert_eq!(view.file_flags(), header.file_flags);
+        assert!(!view.contains_verification());
+        assert!(!view.contains_metadata_ext());
+    }
+
+    #[test]
+    fn view_with_verification_and_metadata_ext() {
+        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, true);
+        let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+        let ver = FileVerificationEntry::new(compute_data_hash(b"v"));
+        let met = FileMetadataExt::new(compute_data_hash(b"m"));
+        let mut buf = Vec::new();
+        header.serialize(&mut buf).unwrap();
+        entry.serialize(&mut buf).unwrap();
+        ver.serialize(&mut buf).unwrap();
+        met.serialize(&mut buf).unwrap();
+        let expected_size = 4 * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
+        buf.resize(expected_size, 0);
+
+        let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
+        assert!(view.contains_verification());
+        assert!(view.contains_metadata_ext());
+        assert_eq!(view.header().file_hash, header.file_hash);
+
+        let e = view.entry(0);
+        assert_eq!(e.unpacked_segment_bytes, 100);
+        let v = view.verification(0);
+        assert_eq!(v.range_hash, compute_data_hash(b"v"));
+    }
+
+    #[test]
+    fn view_byte_size_variants() {
+        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, true, false);
+        let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32);
+        let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32);
+        let v1 = FileVerificationEntry::new(compute_data_hash(b"v1"));
+        let v2 = FileVerificationEntry::new(compute_data_hash(b"v2"));
+        let mut buf = Vec::new();
+        header.serialize(&mut buf).unwrap();
+        e1.serialize(&mut buf).unwrap();
+        e2.serialize(&mut buf).unwrap();
+        v1.serialize(&mut buf).unwrap();
+        v2.serialize(&mut buf).unwrap();
+        let size = (1 + 2 + 2) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
+        buf.resize(size, 0);
+
+        let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
+        assert_eq!(
+            view.byte_size(true),
+            (1 + 2 + 2) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE
+        );
+        assert_eq!(
+            view.byte_size(false),
+            (1 + 2) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE
+        );
+    }
+
+    #[test]
+    fn view_from_data_too_small() {
+        let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u32, false, false);
+        assert!(MDBFileInfoView::from_data_and_header(header, Bytes::from(vec![0u8; 5])).is_err());
+    }
+
+    #[test]
+    fn view_from_data_too_small_with_flags() {
+        let header = FileDataSequenceHeader::new(MerkleHash::default(), 1u32, true, true);
+        assert!(MDBFileInfoView::from_data_and_header(header, Bytes::from(vec![0u8; 10])).is_err());
+    }
+
+    #[test]
+    fn view_bytes_returns_clone() {
+        let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false);
+        let mut buf = Vec::new();
+        header.serialize(&mut buf).unwrap();
+        let view = MDBFileInfoView::new(Bytes::from(buf.clone())).unwrap();
+        assert_eq!(view.bytes().to_vec(), buf);
+    }
+
+    #[test]
+    fn view_into_mdb_file_info() {
+        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false);
+        let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+        let mut buf = Vec::new();
+        header.serialize(&mut buf).unwrap();
+        entry.serialize(&mut buf).unwrap();
+        let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
+        let info: MDBFileInfo = (&view).into();
+        assert_eq!(info.segments.len(), 1);
+        assert_eq!(info.segments[0].unpacked_segment_bytes, 100);
+    }
+
+    #[test]
+    fn view_into_mdb_file_info_with_verification() {
+        let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, false);
+        let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+        let ver = FileVerificationEntry::new(compute_data_hash(b"v"));
+        let mut buf = Vec::new();
+        header.serialize(&mut buf).unwrap();
+        entry.serialize(&mut buf).unwrap();
+        ver.serialize(&mut buf).unwrap();
+        let size = (1 + 1 + 1) * crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
+        buf.resize(size, 0);
+        let view = MDBFileInfoView::new(Bytes::from(buf)).unwrap();
+        let info: MDBFileInfo = (&view).into();
+        assert_eq!(info.segments.len(), 1);
+        assert_eq!(info.verification.len(), 1);
+    }
+
+    #[test]
+    fn file_flag_constants() {
+        assert_eq!(MDB_DEFAULT_FILE_FLAG, 0);
+        assert_eq!(MDB_FILE_FLAG_WITH_VERIFICATION, 1u32 << 31);
+        assert_eq!(MDB_FILE_FLAG_VERIFICATION_MASK, 1u32 << 31);
+        assert_eq!(MDB_FILE_FLAG_WITH_METADATA_EXT, 1u32 << 30);
+        assert_eq!(MDB_FILE_FLAG_METADATA_EXT_MASK, 1u32 << 30);
+    }
+}

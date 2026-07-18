@@ -1,5 +1,4 @@
 #![deny(unsafe_code)]
-#![allow(clippy::missing_panics_doc, clippy::let_underscore_must_use)]
 #![cfg_attr(
     test,
     allow(
@@ -7,7 +6,8 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::shadow_unrelated,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::let_underscore_must_use
     )
 )]
 
@@ -224,4 +224,39 @@ pub async fn run_gc_diagnostics(
     )
     .await
     .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod lib_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_gc_succeeds_on_valid_local_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        let options = super::gc::LocalGcOptions::default();
+        let result = run_gc(config, options).await;
+        // On a valid temp directory with default options (mark=false, sweep=false),
+        // GC should succeed as a no-op
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_gc_diagnostics_succeeds_on_valid_local_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = crate::config::ServerConfig::new(
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+            "http://localhost:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            std::num::NonZeroUsize::new(4096).unwrap(),
+        );
+        let options = super::gc::LocalGcOptions::default();
+        let result = run_gc_diagnostics(config, options).await;
+        assert!(result.is_ok());
+    }
 }

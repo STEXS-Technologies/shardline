@@ -1,6 +1,7 @@
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
+    error::Error,
     fs::{self, File, remove_file, symlink_metadata},
     io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
@@ -307,6 +308,16 @@ fn invalid_output_path_error() -> io::Error {
     )
 }
 
+/// Prints an error and its full source chain to stderr.
+pub fn print_error_chain(error: &dyn Error) {
+    eprintln!("{error}");
+    let mut source = error.source();
+    while let Some(next) = source {
+        eprintln!("caused by: {next}");
+        source = next.source();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -464,5 +475,155 @@ mod tests {
         let err = super::invalid_output_path_error();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_output_bytes_creates_file_with_content() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("output.json");
+        let wrote = write_output_bytes(&output, br#"{"ok":true}"#, true);
+        assert!(wrote.is_ok());
+        let bytes = std::fs::read(&output).unwrap();
+        assert_eq!(bytes, br#"{"ok":true}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_output_bytes_overwrites_existing_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("existing.json");
+        std::fs::write(&output, b"old").unwrap();
+        let wrote = write_output_bytes(&output, br#"{"updated":true}"#, false);
+        assert!(wrote.is_ok());
+        let bytes = std::fs::read(&output).unwrap();
+        assert_eq!(bytes, br#"{"updated":true}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_file_cleanup_on_drop() {
+        use super::AtomicOutputFile;
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("cleanup-test.json");
+        // Create and then drop without committing
+        let file = AtomicOutputFile::create(&output, true);
+        assert!(file.is_ok());
+        drop(file); // Drop should clean up the temp file
+        // The final path should not exist
+        assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_existing_target_is_regular_or_missing_rejects_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::ensure_existing_target_is_regular_or_missing(sandbox.path());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_existing_target_is_regular_or_missing_accepts_missing() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let missing = sandbox.path().join("nonexistent.json");
+        let result = super::ensure_existing_target_is_regular_or_missing(&missing);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_existing_target_is_regular_or_missing_accepts_regular_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("regular.json");
+        std::fs::write(&path, b"content").unwrap();
+        let result = super::ensure_existing_target_is_regular_or_missing(&path);
+        assert!(result.is_ok());
+    }
+
+    // ── print_error_chain ─────────────────────────────────────────────
+
+    #[derive(Debug)]
+    struct TestError(&'static str);
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for TestError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    struct ChainedError {
+        message: &'static str,
+        source: Option<Box<dyn std::error::Error>>,
+    }
+
+    impl std::fmt::Display for ChainedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for ChainedError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source.as_ref().map(|e| e.as_ref())
+        }
+    }
+
+    #[test]
+    fn print_error_chain_single_error() {
+        let err = TestError("simple error");
+        super::print_error_chain(&err);
+    }
+
+    #[test]
+    fn print_error_chain_chained_error() {
+        let inner = TestError("inner cause");
+        let outer = ChainedError {
+            message: "outer error",
+            source: Some(Box::new(inner)),
+        };
+        super::print_error_chain(&outer);
+    }
+
+    #[test]
+    fn print_error_chain_deeply_chained() {
+        let level3 = TestError("root cause");
+        let level2 = ChainedError {
+            message: "middle layer",
+            source: Some(Box::new(level3)),
+        };
+        let level1 = ChainedError {
+            message: "outer layer",
+            source: Some(Box::new(level2)),
+        };
+        super::print_error_chain(&level1);
+    }
+
+    #[test]
+    fn print_error_chain_no_source() {
+        #[derive(Debug)]
+        struct NoSourceError;
+
+        impl std::fmt::Display for NoSourceError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("no source error")
+            }
+        }
+
+        impl std::error::Error for NoSourceError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                None
+            }
+        }
+
+        super::print_error_chain(&NoSourceError);
     }
 }

@@ -220,4 +220,174 @@ mod tests {
         let result = super::validate_component("\t\t");
         assert_eq!(result, Err(VcsReferenceError::Empty));
     }
+
+    #[test]
+    fn repository_ref_rejects_control_character_in_name() {
+        let result = RepositoryRef::new(ProviderKind::GitHub, "owner", "name\x00");
+        assert_eq!(result, Err(VcsReferenceError::ControlCharacter));
+    }
+
+    #[test]
+    fn repository_ref_rejects_whitespace_only_owner() {
+        let result = RepositoryRef::new(ProviderKind::GitHub, "  ", "assets");
+        assert_eq!(result, Err(VcsReferenceError::Empty));
+    }
+
+    #[test]
+    fn repository_ref_rejects_whitespace_only_name() {
+        let result = RepositoryRef::new(ProviderKind::GitHub, "owner", " \n ");
+        assert_eq!(result, Err(VcsReferenceError::Empty));
+    }
+
+    #[test]
+    fn repository_ref_rejects_control_character_in_owner() {
+        let result = RepositoryRef::new(ProviderKind::GitHub, "own\ter", "assets");
+        assert_eq!(result, Err(VcsReferenceError::ControlCharacter));
+    }
+
+    #[test]
+    fn repository_ref_exact_max_length_owner_succeeds() {
+        let max = "a".repeat(super::MAX_REFERENCE_COMPONENT_BYTES);
+        let result = RepositoryRef::new(ProviderKind::GitHub, &max, "name");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn repository_ref_exact_max_length_name_succeeds() {
+        let max = "b".repeat(super::MAX_REFERENCE_COMPONENT_BYTES);
+        let result = RepositoryRef::new(ProviderKind::GitHub, "owner", &max);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn revision_ref_rejects_null_character() {
+        let result = RevisionRef::new("refs/heads/\x00main");
+        assert_eq!(result, Err(VcsReferenceError::ControlCharacter));
+    }
+
+    #[test]
+    fn revision_ref_rejects_newline_characters() {
+        let result = RevisionRef::new("refs/heads/main\r");
+        assert_eq!(result, Err(VcsReferenceError::ControlCharacter));
+    }
+
+    #[test]
+    fn revision_ref_rejects_whitespace_only() {
+        let result = RevisionRef::new("   ");
+        assert_eq!(result, Err(VcsReferenceError::Empty));
+    }
+
+    #[test]
+    fn revision_ref_exact_max_length_succeeds() {
+        let max = "v".repeat(super::MAX_REFERENCE_COMPONENT_BYTES);
+        let result = RevisionRef::new(&max);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn repository_ref_clone_and_eq() {
+        let a = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let b = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let c = RepositoryRef::new(ProviderKind::GitLab, "team", "assets").unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn repository_ref_clone_independent() {
+        let a = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn revision_ref_clone_independent() {
+        let a = RevisionRef::new("refs/heads/main").unwrap();
+        let b = a.clone();
+        assert_eq!(a.as_str(), b.as_str());
+    }
+
+    #[test]
+    fn revision_ref_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash(value: &RevisionRef) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        assert_eq!(
+            hash(&RevisionRef::new("main").unwrap()),
+            hash(&RevisionRef::new("main").unwrap())
+        );
+        assert_ne!(
+            hash(&RevisionRef::new("main").unwrap()),
+            hash(&RevisionRef::new("develop").unwrap())
+        );
+    }
+
+    #[test]
+    fn repository_ref_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash(value: &RepositoryRef) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        assert_eq!(
+            hash(&RepositoryRef::new(ProviderKind::GitHub, "a", "b").unwrap()),
+            hash(&RepositoryRef::new(ProviderKind::GitHub, "a", "b").unwrap())
+        );
+    }
+
+    #[test]
+    fn validate_component_rejects_all_control_characters() {
+        for c in '\x00'..='\x1f' {
+            // skip whitespace that trims to empty
+            if c.is_whitespace() {
+                continue;
+            }
+            let s = format!("valid{c}");
+            let result = super::validate_component(&s);
+            assert_eq!(
+                result,
+                Err(VcsReferenceError::ControlCharacter),
+                "failed for U+{:04X}",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn repository_ref_debug_format() {
+        let r = RepositoryRef::new(ProviderKind::GitHub, "owner", "repo").unwrap();
+        let debug = format!("{r:?}");
+        assert!(debug.contains("GitHub") || debug.contains("owner") || debug.contains("repo"));
+    }
+
+    #[test]
+    fn revision_ref_debug_format() {
+        let r = RevisionRef::new("refs/heads/main").unwrap();
+        let debug = format!("{r:?}");
+        assert!(debug.contains("refs/heads/main"));
+    }
+
+    #[test]
+    fn repository_access_debug_format() {
+        assert_eq!(format!("{:?}", RepositoryAccess::Read), "Read");
+        assert_eq!(format!("{:?}", RepositoryAccess::Write), "Write");
+    }
+
+    #[test]
+    fn vcs_reference_error_derived_traits() {
+        let err = VcsReferenceError::Empty;
+        assert_eq!(err, VcsReferenceError::Empty);
+        let copied = err;
+        assert_eq!(err, copied);
+    }
 }

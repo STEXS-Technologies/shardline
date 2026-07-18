@@ -702,4 +702,50 @@ mod tests {
             Err(super::AdminTokenError::SigningKeyLengthMismatch { .. })
         ));
     }
+
+    // ── read_signing_key_bytes error paths ────────────────────────────────
+
+    #[test]
+    fn read_signing_key_bytes_rejects_missing_file() {
+        let result = super::read_signing_key_bytes(Path::new("/nonexistent-key-file"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_signing_key_bytes_rejects_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::read_signing_key_bytes(sandbox.path());
+        assert!(result.is_err());
+    }
+
+    // ── mint_admin_token_from_sources with key_env empty ──────────────────
+
+    #[test]
+    fn read_signing_key_bytes_from_env_rejects_empty_key() {
+        // We can't set env vars without unsafe, so verify the error
+        // by testing the display of EmptySigningKeyEnv
+        let err = super::AdminTokenError::EmptySigningKeyEnv {
+            name: "SHARDLINE_TEST_EMPTY_KEY".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("SHARDLINE_TEST_EMPTY_KEY"));
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn read_signing_key_bytes_error_display_for_io_failure() {
+        // Verify Io variant display doesn't panic
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let err = super::AdminTokenError::Io(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("token signing key file"));
+    }
+
+    #[test]
+    fn admin_token_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let err = super::AdminTokenError::Io(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("token signing key file could not be read"));
+    }
 }

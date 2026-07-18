@@ -1512,3 +1512,90 @@ impl AsyncIndexStore for FailFirstRetentionHoldIndexStore {
         })
     }
 }
+
+// ── Top-level apply_provider_webhook (local backend) ────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_provider_webhook_with_local_config_uses_local_stores() {
+    use crate::ServerConfig;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    );
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap(),
+        WebhookDeliveryId::new("delivery-top-level-1").unwrap(),
+        RepositoryWebhookEventKind::AccessChanged,
+    );
+
+    let result = super::apply_provider_webhook(&config, &event).await;
+    // Without pre-populated data, the webhook should succeed as a no-op
+    assert!(result.is_ok());
+    let outcome = result.unwrap();
+    assert_eq!(outcome.affected_file_versions, 0);
+    assert_eq!(outcome.affected_chunks, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_provider_webhook_with_local_config_repository_deleted_is_noop_on_empty_store() {
+    use crate::ServerConfig;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    );
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap(),
+        WebhookDeliveryId::new("delivery-top-level-2").unwrap(),
+        RepositoryWebhookEventKind::RepositoryDeleted,
+    );
+
+    let result = super::apply_provider_webhook(&config, &event).await;
+    assert!(result.is_ok());
+    let outcome = result.unwrap();
+    assert_eq!(outcome.affected_file_versions, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_provider_webhook_with_local_config_revision_pushed_is_noop_on_empty_store() {
+    use crate::ServerConfig;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    );
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap(),
+        WebhookDeliveryId::new("delivery-top-level-3").unwrap(),
+        RepositoryWebhookEventKind::RevisionPushed {
+            revision: RevisionRef::new("refs/heads/main").unwrap(),
+        },
+    );
+
+    let result = super::apply_provider_webhook(&config, &event).await;
+    assert!(result.is_ok());
+}
+
+// ── ProviderWebhookOutcomeKind Debug ───────────────────────────────────
+
+#[test]
+fn provider_webhook_outcome_kind_debug() {
+    use super::ProviderWebhookOutcomeKind;
+    let deleted = ProviderWebhookOutcomeKind::RepositoryDeleted;
+    let debug = format!("{deleted:?}");
+    assert!(!debug.is_empty());
+
+    let access = ProviderWebhookOutcomeKind::AccessChanged;
+    let debug = format!("{access:?}");
+    assert!(!debug.is_empty());
+}

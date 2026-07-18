@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cache"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "redis",
@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cas"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "shardline-index",
  "shardline-storage",
@@ -2846,7 +2846,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-fsck"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde_json",
  "shardline-index",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-gc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2879,7 +2879,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-hub-api"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "base64",
@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-index"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-metrics"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-oci-adapter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-protocol"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "hmac",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-protocol-adapters"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "serde",
@@ -2983,7 +2983,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-provider-events"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde_json",
  "shardline-index",
@@ -2998,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-rebuild"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "base64",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-server-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "hex",
@@ -3075,7 +3075,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-storage"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3090,7 +3090,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-test-support"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "libc",
  "tempfile",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-vcs"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "hmac",
@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-xet-adapter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "serde",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-xet-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "bytes",

@@ -1160,6 +1160,44 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // canonical_ref_name
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn canonical_ref_name_preserves_short_branch_name() {
+        assert_eq!(canonical_ref_name("main"), "main");
+        assert_eq!(canonical_ref_name("feature"), "feature");
+    }
+
+    #[test]
+    fn canonical_ref_name_strips_refs_heads_prefix() {
+        assert_eq!(canonical_ref_name("refs/heads/main"), "main");
+        assert_eq!(
+            canonical_ref_name("refs/heads/feature/branch"),
+            "feature/branch"
+        );
+    }
+
+    #[test]
+    fn canonical_ref_name_preserves_tag_refs() {
+        assert_eq!(canonical_ref_name("refs/tags/v1.0"), "refs/tags/v1.0");
+    }
+
+    #[test]
+    fn canonical_ref_name_handles_empty_after_strip() {
+        // "refs/heads/" with nothing after strips to "", but filter rejects it
+        assert_eq!(canonical_ref_name("refs/heads/"), "refs/heads/");
+    }
+
+    #[test]
+    fn canonical_ref_name_preserves_other_ref_prefixes() {
+        assert_eq!(
+            canonical_ref_name("refs/notes/commits"),
+            "refs/notes/commits"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
     // In-memory HubStore for exercising all BoxedHubStore delegation paths
     // ---------------------------------------------------------------------------
 

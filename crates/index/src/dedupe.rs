@@ -52,4 +52,23 @@ mod tests {
         assert_eq!(mapping.chunk_hash(), chunk_hash);
         assert_eq!(mapping.shard_object_key(), &shard_object_key);
     }
+
+    #[test]
+    fn dedupe_shard_mapping_accessors() {
+        let chunk_hash = ShardlineHash::from_bytes([7; 32]);
+        let shard_object_key = ObjectKey::parse("shards/bb/data.shard").unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, shard_object_key);
+
+        assert_eq!(mapping.chunk_hash(), chunk_hash);
+        assert!(mapping.shard_object_key().as_str().contains("shards"));
+    }
+
+    #[test]
+    fn dedupe_shard_mapping_equality() {
+        let hash = ShardlineHash::from_bytes([3; 32]);
+        let key = ObjectKey::parse("shards/cc/data.shard").unwrap();
+        let a = DedupeShardMapping::new(hash, key.clone());
+        let b = DedupeShardMapping::new(hash, key);
+        assert_eq!(a, b);
+    }
 }

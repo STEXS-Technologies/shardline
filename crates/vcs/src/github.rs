@@ -540,4 +540,230 @@ mod tests {
             Err(BuiltInProviderError::InvalidRepositoryPayload)
         ));
     }
+
+    #[test]
+    fn github_adapter_kind_returns_github() {
+        let adapter = adapter().unwrap();
+        assert_eq!(adapter.kind(), ProviderKind::GitHub);
+    }
+
+    #[test]
+    fn github_adapter_check_access_allows_authorized_subject() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("github-user-1").unwrap();
+        let request = AuthorizationRequest::new(
+            subject.clone(),
+            repository,
+            revision,
+            RepositoryAccess::Read,
+        );
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Allow(subject));
+    }
+
+    #[test]
+    fn github_adapter_check_access_denies_unauthorized_subject() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("unknown-user").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Deny);
+    }
+
+    #[test]
+    fn github_adapter_check_access_rejects_unknown_repository() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "unknown", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("github-user-1").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let result = adapter.check_access(&request);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn github_adapter_repository_metadata_returns_metadata() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let metadata = adapter.repository_metadata(&repository).unwrap();
+        assert_eq!(metadata.repository(), &repository);
+        assert_eq!(metadata.visibility(), RepositoryVisibility::Private);
+        assert_eq!(
+            metadata.clone_url().as_str(),
+            "https://github.example/team/assets.git"
+        );
+    }
+
+    #[test]
+    fn github_adapter_repository_metadata_unknown_repo_errors() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "unknown", "repo").unwrap();
+        let result = adapter.repository_metadata(&repository);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn github_adapter_parses_repository_deleted_webhook() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"deleted",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-del", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::RepositoryDeleted);
+        assert_eq!(event.repository().owner(), "team");
+    }
+
+    #[test]
+    fn github_adapter_parses_repository_edit_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"edited",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn github_adapter_rename_with_changes_name_fallback() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"renamed",
+            "repository":{"full_name":"team/new-assets"},
+            "changes":{"name":{"from":"assets"}}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-alt2", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.repository().name(), "assets");
+    }
+
+    #[test]
+    fn github_adapter_rename_missing_changes_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"renamed",
+            "repository":{"full_name":"team/new-assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "repository",
+            "delivery-nochanges",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn github_adapter_check_allows_write_access() {
+        let mut catalog = BuiltInProviderCatalog::new("github-app").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("github-writer").unwrap();
+        let metadata = configured_metadata(
+            repository.clone(),
+            RepositoryVisibility::Private,
+            "main",
+            "https://github.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::new(),
+                HashSet::from([subject.clone()]),
+            ))
+            .unwrap();
+        let adapter = GitHubAdapter::new(catalog, None);
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let request = AuthorizationRequest::new(
+            subject.clone(),
+            repository,
+            revision,
+            RepositoryAccess::Write,
+        );
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Allow(subject));
+    }
+
+    #[test]
+    fn github_adapter_invalid_json_payload_errors() {
+        let mut catalog = BuiltInProviderCatalog::new("github-app").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://github.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        let adapter = GitHubAdapter::new(catalog, None);
+        let body = b"not-json";
+        let request = WebhookRequest::new("push", "delivery-bad", None, body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidWebhookPayload)
+        ));
+    }
+
+    #[test]
+    fn github_adapter_unknown_repository_event_action_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"some_unknown_action",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-unk", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn github_adapter_new_is_const() {
+        let catalog = BuiltInProviderCatalog::new("github-app").unwrap();
+        let adapter = GitHubAdapter::new(catalog, None);
+        assert_eq!(adapter.kind(), ProviderKind::GitHub);
+    }
+
+    #[test]
+    fn github_adapter_debug_format() {
+        let catalog = BuiltInProviderCatalog::new("github-app").unwrap();
+        let adapter = GitHubAdapter::new(catalog, None);
+        let debug = format!("{adapter:?}");
+        assert!(debug.contains("GitHubAdapter"));
+    }
+
+    #[test]
+    fn github_adapter_clone_eq() {
+        let adapter = adapter().unwrap();
+        let cloned = adapter.clone();
+        assert_eq!(adapter, cloned);
+    }
 }

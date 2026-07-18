@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use shardline_index::{AsyncIndexStore, QuarantineCandidate};
 use shardline_storage::ObjectStore;
 
-use super::{LocalGcReport, reachability::OrphanObject};
-use crate::GcError;
+use crate::types::LocalGcReport;
+use crate::{GcError, reachability::OrphanObject};
 use shardline_server_core::{checked_add, checked_increment};
 
 pub(super) async fn read_quarantine_entries<IndexAdapter>(

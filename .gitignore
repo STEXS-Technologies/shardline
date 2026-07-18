@@ -15,3 +15,7 @@ tarpaulin-report.json
 lcov*.info
 *.profraw
 coverage_report/
+coverage.json
+coverage*.lcov
+coverage_html/
+.slim/deepwork/

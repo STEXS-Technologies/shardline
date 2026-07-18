@@ -432,4 +432,65 @@ mod tests {
         // May fail, shouldn't panic
         let _ = release_result;
     }
+
+    // ── From<SqlxError> impl ──────────────────────────────────────────────
+
+    #[test]
+    fn hold_runtime_error_from_sqlx_error() {
+        use sqlx::Error as SqlxError;
+        let sqlx_err = SqlxError::Protocol("connection error".to_owned());
+        let err: HoldRuntimeError = sqlx_err.into();
+        assert!(matches!(err, HoldRuntimeError::Sqlx(_)));
+    }
+
+    // ── postgres_index_store error path ───────────────────────────────────
+
+    #[test]
+    fn postgres_index_store_rejects_invalid_url() {
+        let result = super::postgres_index_store("not-a-valid-postgres-url");
+        assert!(result.is_err());
+    }
+
+    // ── run_hold_release releases hold on local store ─────────────────────
+
+    #[tokio::test]
+    async fn run_hold_release_returns_false_for_missing_hold() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("deployment-root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = run_hold_release(Some(&root), &format!("de/{}", "de".repeat(32))).await;
+        // May succeed (returning false) or fail depending on state
+        if let Ok(released) = result {
+            assert!(!released);
+        }
+    }
+
+    // ── run_hold_list with active_only filter ─────────────────────────────
+
+    #[tokio::test]
+    async fn run_hold_list_active_only_returns_empty_on_fresh_root() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("deployment-root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = run_hold_list(Some(&root), true).await;
+        let _ = result;
+    }
+
+    // ── HoldRuntimeError Debug for all variants ───────────────────────────
+
+    #[test]
+    fn hold_runtime_error_debug_overflow() {
+        let err = HoldRuntimeError::Overflow;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Overflow"));
+    }
+
+    #[test]
+    fn hold_runtime_error_debug_config() {
+        let err = HoldRuntimeError::Config(ServerConfigError::InvalidServerRole);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Config("));
+    }
 }

@@ -371,14 +371,14 @@ mod tests {
         parse_server_frontends_env,
     };
 
-    /// SAFETY: These wrappers are only used in `#[serial_test::serial]` tests
-    /// to avoid repeating `#[allow(unsafe_code)]` on every function.
-    #[allow(clippy::undocumented_unsafe_blocks)]
+    /// SAFETY: Must only be called from `#[serial_test::serial]` tests to prevent
+    /// data races on the global environment. Callers are responsible for ensuring
+    /// no concurrent env var access.
     fn set_env_var(key: &str, value: &str) {
         unsafe { std::env::set_var(key, value) };
     }
 
-    #[allow(clippy::undocumented_unsafe_blocks)]
+    /// SAFETY: Same threading constraints as `set_env_var`.
     fn remove_env_var(key: &str) {
         unsafe { std::env::remove_var(key) };
     }

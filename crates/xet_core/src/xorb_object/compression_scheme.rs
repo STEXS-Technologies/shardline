@@ -148,3 +148,225 @@ fn lz4_decompress_from_reader<R: Read, W: Write>(
     let mut dec = FrameDecoder::new(reader);
     Ok(copy(&mut dec, writer)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn from_and_into_static_str_covers_all_variants() {
+        for scheme in [
+            CompressionScheme::None,
+            CompressionScheme::LZ4,
+            CompressionScheme::ByteGrouping4LZ4,
+            CompressionScheme::Auto,
+        ] {
+            let s: &'static str = scheme.into();
+            assert!(!s.is_empty());
+            let s_ref: &'static str = (&scheme).into();
+            assert_eq!(s, s_ref);
+        }
+    }
+
+    #[test]
+    fn try_from_u8_all_valid_values() {
+        for (val, expected) in [
+            (0u8, CompressionScheme::None),
+            (1, CompressionScheme::LZ4),
+            (2, CompressionScheme::ByteGrouping4LZ4),
+            (99, CompressionScheme::Auto),
+        ] {
+            assert_eq!(CompressionScheme::try_from(val).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn try_from_u8_invalid_values() {
+        for val in [3u8, 4, 98, 100, 200, 255] {
+            assert!(CompressionScheme::try_from(val).is_err());
+        }
+    }
+
+    #[test]
+    fn from_str_all_valid_variants() {
+        for (s, expected) in [
+            ("", CompressionScheme::Auto),
+            ("auto", CompressionScheme::Auto),
+            ("AUTO", CompressionScheme::Auto),
+            (" Auto ", CompressionScheme::Auto),
+            ("none", CompressionScheme::None),
+            ("None", CompressionScheme::None),
+            ("lz4", CompressionScheme::LZ4),
+            ("LZ4", CompressionScheme::LZ4),
+            ("bg4-lz4", CompressionScheme::ByteGrouping4LZ4),
+            ("BG4-LZ4", CompressionScheme::ByteGrouping4LZ4),
+        ] {
+            assert_eq!(
+                s.parse::<CompressionScheme>().unwrap(),
+                expected,
+                "failed for input: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_str_invalid_values() {
+        for s in ["gzip", "zstd", "lz5", "lz4-hc", "bg4", "unknown"] {
+            assert!(
+                s.parse::<CompressionScheme>().is_err(),
+                "should fail for: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_fmt_all_variants() {
+        assert_eq!(format!("{}", CompressionScheme::None), "none");
+        assert_eq!(format!("{}", CompressionScheme::LZ4), "lz4");
+        assert_eq!(
+            format!("{}", CompressionScheme::ByteGrouping4LZ4),
+            "bg4-lz4"
+        );
+        assert_eq!(format!("{}", CompressionScheme::Auto), "auto");
+    }
+
+    #[test]
+    fn resolve_for_data_all_variants() {
+        // Auto resolves to LZ4
+        assert_eq!(
+            CompressionScheme::Auto.resolve_for_data(b"data"),
+            CompressionScheme::LZ4
+        );
+        // Other schemes pass through
+        assert_eq!(
+            CompressionScheme::None.resolve_for_data(b"data"),
+            CompressionScheme::None
+        );
+        assert_eq!(
+            CompressionScheme::LZ4.resolve_for_data(b"data"),
+            CompressionScheme::LZ4
+        );
+        assert_eq!(
+            CompressionScheme::ByteGrouping4LZ4.resolve_for_data(b"data"),
+            CompressionScheme::ByteGrouping4LZ4
+        );
+    }
+
+    #[test]
+    fn compress_and_decompress_all_non_auto() {
+        let data = b"Hello, this is a comprehensive test of all compression schemes!";
+        for scheme in &[
+            CompressionScheme::None,
+            CompressionScheme::LZ4,
+            CompressionScheme::ByteGrouping4LZ4,
+        ] {
+            let compressed = scheme.compress_from_slice(data).unwrap();
+            let decompressed = scheme.decompress_from_slice(&compressed).unwrap();
+            assert_eq!(&*decompressed, data, "roundtrip failed for {scheme:?}");
+        }
+    }
+
+    #[test]
+    fn compress_auto_delegates_and_is_lz4_decompressible() {
+        let data = b"Auto compression delegation test data";
+        let compressed = CompressionScheme::Auto.compress_from_slice(data).unwrap();
+        let decompressed = CompressionScheme::LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert_eq!(&*decompressed, data);
+    }
+
+    #[test]
+    fn decompress_auto_errors() {
+        let result = CompressionScheme::Auto.decompress_from_slice(b"garbage");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CoreError::MalformedData(_)));
+    }
+
+    #[test]
+    fn decompress_from_reader_all_non_auto() {
+        let data = b"Reader-based decompression across all schemes";
+        for scheme in &[
+            CompressionScheme::None,
+            CompressionScheme::LZ4,
+            CompressionScheme::ByteGrouping4LZ4,
+        ] {
+            let compressed = scheme.compress_from_slice(data).unwrap();
+            let mut reader = Cursor::new(&*compressed);
+            let mut writer = Vec::new();
+            let n = scheme
+                .decompress_from_reader(&mut reader, &mut writer)
+                .unwrap();
+            assert_eq!(n, data.len() as u64);
+            assert_eq!(
+                &writer, data,
+                "decompress_from_reader failed for {scheme:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decompress_from_reader_auto_errors() {
+        let mut reader = Cursor::new(b"data");
+        let mut writer = Vec::new();
+        let result = CompressionScheme::Auto.decompress_from_reader(&mut reader, &mut writer);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CoreError::MalformedData(_)));
+    }
+
+    #[test]
+    fn decompress_empty_data() {
+        let compressed = CompressionScheme::LZ4.compress_from_slice(b"").unwrap();
+        let decompressed = CompressionScheme::LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[test]
+    fn lz4_compress_decompress_functions_direct() {
+        let data = b"Direct lz4 function call test";
+        let compressed = lz4_compress_from_slice(data).unwrap();
+        let decompressed = lz4_decompress_from_slice(&compressed).unwrap();
+        assert_eq!(&decompressed, data);
+    }
+
+    #[test]
+    fn compress_none_uses_cow_borrowed() {
+        let data = b"no compression test data";
+        let compressed = CompressionScheme::None.compress_from_slice(data).unwrap();
+        // None scheme returns borrowed Cow
+        assert!(matches!(compressed, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn compress_large_data_uses_lz4_compression() {
+        // Large enough that LZ4 compression actually helps
+        let data = vec![0xABu8; 10000];
+        let compressed = CompressionScheme::LZ4.compress_from_slice(&data).unwrap();
+        assert!(
+            compressed.len() < data.len(),
+            "LZ4 should compress repetitive data"
+        );
+    }
+
+    #[test]
+    fn choose_from_data_always_returns_lz4() {
+        assert_eq!(
+            CompressionScheme::choose_from_data(b""),
+            CompressionScheme::LZ4
+        );
+        assert_eq!(
+            CompressionScheme::choose_from_data(b"data"),
+            CompressionScheme::LZ4
+        );
+    }
+
+    #[test]
+    fn default_is_auto() {
+        assert_eq!(CompressionScheme::default(), CompressionScheme::Auto);
+    }
+}

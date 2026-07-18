@@ -1,4 +1,4 @@
-use std::{fmt::Write, num::NonZeroUsize, time::Duration};
+use std::{fmt::Write, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -759,4 +759,253 @@ async fn shutdown_timeout_starts_after_the_shutdown_signal() {
         return;
     };
     assert!(result.is_ok(), "server should exit cleanly: {result:?}");
+}
+
+// ── register_frontend_routes / register_*_routes edge cases ─────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_xet_api_only_role_registers_only_api_routes() {
+    let (app, _tmp) = build_test_router(&[ServerFrontend::Xet], ServerRole::Api).await;
+
+    // API route exists
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/reconstructions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Transfer route should NOT exist
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/chunks/default/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_xet_transfer_only_role_registers_only_transfer_routes() {
+    let (app, _tmp) = build_test_router(&[ServerFrontend::Xet], ServerRole::Transfer).await;
+
+    // Transfer route exists
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/chunks/default/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+
+    // API route should NOT exist
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_lfs_api_only_role_excludes_transfer_routes() {
+    let (app, _tmp) = build_test_router(&[ServerFrontend::Lfs], ServerRole::Api).await;
+
+    // Transfer route should NOT exist
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/lfs/objects/abc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_lfs_transfer_only_role_excludes_api_routes() {
+    let (app, _tmp) = build_test_router(&[ServerFrontend::Lfs], ServerRole::Transfer).await;
+
+    // API route should NOT be directly accessible.
+    // The {oid} pattern in transfer routes may match "batch" as a path segment,
+    // so the route may return 405 (method mismatch) instead of 404.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::METHOD_NOT_ALLOWED,
+        "expected 404 or 405, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_bazel_transfer_only_role_registers_transfer_routes() {
+    let (app, _tmp) = build_test_router(&[ServerFrontend::BazelHttp], ServerRole::Transfer).await;
+
+    // Transfer routes should exist
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/bazel/cache/ac/0000000000000000000000000000000000000000000000000000000000000000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_bazel_api_only_role_has_no_routes() {
+    let (app, _tmp) = build_test_router(&[ServerFrontend::BazelHttp], ServerRole::Api).await;
+
+    // BazelHttp only registers transfer routes, so API role should have none
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/bazel/cache/ac/0000000000000000000000000000000000000000000000000000000000000000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ── build_hub_state — http_client failure path ──────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_frontend_builds_router_with_xet_frontend() {
+    // When both Hub and Xet frontends are configured, Xet routes should also be present.
+    let (app, _tmp) =
+        build_test_router(&[ServerFrontend::Hub, ServerFrontend::Xet], ServerRole::All).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ── endpoint_body_limit ─────────────────────────────────────────────────
+
+#[test]
+fn endpoint_body_limit_with_zero_config_returns_overflow() {
+    use super::endpoint_body_limit;
+    use std::num::NonZeroUsize;
+    // When bounded result is 0, NonZeroUsize::new returns None → Overflow
+    let result = endpoint_body_limit(NonZeroUsize::new(0).unwrap_or(NonZeroUsize::MIN), 0);
+    assert!(matches!(result, Err(ServerError::Overflow)));
+}
+
+// ── register_oci_routes — All role includes v2/token and root ───────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn router_oci_all_role_has_all_routes() {
+    let (app, _tmp) = build_test_router(&[ServerFrontend::Oci], ServerRole::All).await;
+
+    // /v2/token should be registered
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v2/token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+
+    // /v2/ should be registered
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/v2/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ── authorize with auth=None path ───────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authorize_with_no_auth_returns_ok_none() {
+    use crate::ServerConfig;
+    use crate::config::AuthProviderKind;
+    use axum::http::HeaderMap;
+    use shardline_protocol::TokenScope;
+
+    let tmp = TempDir::new().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Local);
+    // No signing key → auth will be None
+    let state = Arc::new(crate::AppState {
+        config,
+        role: ServerRole::All,
+        backend: crate::ServerBackend::Local(
+            crate::LocalBackend::new(
+                tmp.path().to_path_buf(),
+                "http://127.0.0.1:8080".to_owned(),
+                NonZeroUsize::new(65536).unwrap(),
+            )
+            .await
+            .unwrap(),
+        ),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: crate::ReconstructionCacheService::disabled(),
+        transfer_limiter: crate::TransferLimiter::new(
+            NonZeroUsize::new(65536).unwrap(),
+            NonZeroUsize::new(4).unwrap(),
+        ),
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+        protocol_metrics: crate::ProtocolMetrics::default(),
+    });
+
+    let result = super::authorize(&state, &HeaderMap::new(), TokenScope::Read);
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none());
 }

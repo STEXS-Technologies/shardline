@@ -2636,7 +2636,7 @@ async fn create_upload_session_metadata_write_failure_cleans_up() {
         use_s3_multipart: false,
         s3_multipart: None,
     };
-    let result = super::persist_upload_session(root.path(), &session_id, session).await;
+    let result = super::persist_upload_session(root.path(), &session_id, &session).await;
     assert!(
         result.is_err(),
         "persist should fail when metadata path is a directory"
@@ -2767,4 +2767,122 @@ async fn touch_upload_session_invalid_session_id_errors() {
     };
     let result = super::touch_upload_session(root.path(), "bad/session/id", session).await;
     assert!(matches!(result, Err(OciAdapterError::InvalidUploadSession)));
+}
+
+// ── write_file_atomically tests (moved from inline module) ──────────────────
+
+#[cfg(test)]
+mod write_file_atomically_tests {
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    fn temp_root() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        (dir, root)
+    }
+
+    #[test]
+    fn creates_file_with_expected_content() {
+        let (_dir, root) = temp_root();
+        let path = root.join("metadata.json");
+        let payload = b"{\"key\":\"value\"}";
+        crate::write_file_atomically(&root, &path, payload).unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, payload);
+    }
+
+    #[test]
+    fn overwrites_existing_file() {
+        let (_dir, root) = temp_root();
+        let path = root.join("data.json");
+        crate::write_file_atomically(&root, &path, b"first").unwrap();
+        crate::write_file_atomically(&root, &path, b"second").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"second");
+    }
+
+    #[test]
+    fn handles_empty_bytes() {
+        let (_dir, root) = temp_root();
+        let path = root.join("empty.json");
+        crate::write_file_atomically(&root, &path, b"").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"");
+    }
+
+    #[test]
+    fn writes_into_nested_subdirectory() {
+        let (_dir, root) = temp_root();
+        let path = root.join("sub/dir/file.json");
+        crate::write_file_atomically(&root, &path, b"nested").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"nested");
+    }
+
+    #[test]
+    fn rejects_path_escaping_root() {
+        let (_dir, root) = temp_root();
+        // A path that resolves outside of root via `..`
+        let path = root.join("../outside.json");
+        let result = crate::write_file_atomically(&root, &path, b"escape");
+        assert!(result.is_err(), "must reject path escaping root");
+    }
+
+    #[test]
+    fn rejects_path_absolute_outside_root() {
+        let (_dir, root) = temp_root();
+        let path = Path::new("/tmp/not-under-root.json").to_path_buf();
+        let result = crate::write_file_atomically(&root, &path, b"escape");
+        assert!(result.is_err(), "must reject absolute path outside root");
+    }
+
+    #[test]
+    fn respects_root_distinct_dirs() {
+        let dir1 = TempDir::new().unwrap();
+        let dir2 = TempDir::new().unwrap();
+        let path1 = dir1.path().join("file.json");
+        let path2 = dir2.path().join("file.json");
+        crate::write_file_atomically(dir1.path(), &path1, b"alpha").unwrap();
+        crate::write_file_atomically(dir2.path(), &path2, b"beta").unwrap();
+        assert_eq!(std::fs::read(&path1).unwrap(), b"alpha");
+        assert_eq!(std::fs::read(&path2).unwrap(), b"beta");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_failure_cleans_up_temporary() {
+        let (_dir, root) = temp_root();
+        // Create a non-empty directory at the target path so rename fails
+        // (rename(2) cannot overwrite a non-empty directory with a file).
+        let target = root.join("target.json");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("child"), b"x").unwrap();
+
+        let result = crate::write_file_atomically(&root, &target, b"data");
+        assert!(
+            result.is_err(),
+            "rename should fail when target is a non-empty directory"
+        );
+        // The temporary file must have been cleaned up:
+        // the directory should still contain only "child".
+        let entries: Vec<_> = std::fs::read_dir(&target)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "temp file should have been cleaned up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_rename_parent_anchor_check_passes() {
+        // Verifies that ensure_parent_path_matches_anchor passes after a
+        // successful atomic write — the post-rename integrity check should
+        // not reject a valid path.
+        let (_dir, root) = temp_root();
+        let path = root.join("metadata.json");
+        crate::write_file_atomically(&root, &path, b"payload").unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"payload");
+    }
 }

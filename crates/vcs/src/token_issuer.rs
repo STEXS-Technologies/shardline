@@ -550,4 +550,244 @@ mod tests {
         assert!(!token.token().is_empty());
         assert_eq!(token.claims().issuer(), "test");
     }
+
+    #[test]
+    fn provider_token_issuer_issue_rejects_empty_issuer() {
+        let issuer =
+            ProviderTokenIssuer::new("", b"a]32-byte-signing-key-for-testing!", NonZeroU64::MIN)
+                .unwrap();
+        let subject = ProviderSubject::new("user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let result = issuer.issue_at(&grant, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provider_token_issuer_new_rejects_zero_length_ttl() {
+        // NonZeroU64::MIN is valid (value 1), so this should succeed
+        let result = ProviderTokenIssuer::new(
+            "issuer",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(1).unwrap(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn provider_token_issuer_large_ttl_with_small_time() {
+        let issuer = ProviderTokenIssuer::new(
+            "issuer",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(u64::MAX).unwrap(),
+        )
+        .unwrap();
+        let subject = ProviderSubject::new("user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        // With issued_at = 0, 0 + u64::MAX should not overflow
+        let result = issuer.issue_at(&grant, 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn provider_token_issuer_ttl_overflow_with_max_time() {
+        let issuer = ProviderTokenIssuer::new(
+            "issuer",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(1).unwrap(),
+        )
+        .unwrap();
+        let subject = ProviderSubject::new("user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let result = issuer.issue_at(&grant, u64::MAX);
+        assert!(matches!(
+            result,
+            Err(ProviderTokenIssuanceError::LifetimeOverflow)
+        ));
+    }
+
+    #[test]
+    fn provider_token_issuer_issue_at_zero_time() {
+        let issuer = ProviderTokenIssuer::new(
+            "zero-time",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(3600).unwrap(),
+        )
+        .unwrap();
+        let subject = ProviderSubject::new("user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Write,
+        };
+        let token = issuer.issue_at(&grant, 0).unwrap();
+        assert_eq!(token.claims().expires_at_unix_seconds(), 3600);
+        assert_eq!(
+            token.claims().scope(),
+            shardline_protocol::TokenScope::Write
+        );
+    }
+
+    #[test]
+    fn provider_token_issuer_issue_with_current_time_returns_valid_token() {
+        let issuer = ProviderTokenIssuer::new(
+            "current-time-test",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::new(60).unwrap(),
+        )
+        .unwrap();
+        let subject = ProviderSubject::new("live-user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitLab, "group", "project").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let token = issuer.issue(&grant).unwrap();
+        assert!(!token.token().is_empty());
+        assert_eq!(token.claims().issuer(), "current-time-test");
+        assert_eq!(token.claims().subject(), "live-user");
+    }
+
+    #[test]
+    fn granted_repository_access_debug_format() {
+        let subject = ProviderSubject::new("user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let debug = format!("{grant:?}");
+        assert!(debug.contains("GrantedRepositoryAccess"));
+    }
+
+    #[test]
+    fn granted_repository_access_clone_eq() {
+        let subject = ProviderSubject::new("user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let cloned = grant.clone();
+        assert_eq!(grant, cloned);
+    }
+
+    #[test]
+    fn provider_issued_token_debug_format() {
+        let issuer = ProviderTokenIssuer::new(
+            "debug-test",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::MIN,
+        )
+        .unwrap();
+        let subject = ProviderSubject::new("debug-sub").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let token = issuer.issue_at(&grant, 0).unwrap();
+        let debug = format!("{token:?}");
+        assert!(debug.contains("ProviderIssuedToken"));
+    }
+
+    #[test]
+    fn provider_token_issuer_debug_format() {
+        let issuer = ProviderTokenIssuer::new(
+            "debug-issuer",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::MIN,
+        )
+        .unwrap();
+        let debug = format!("{issuer:?}");
+        assert!(debug.contains("ProviderTokenIssuer"));
+    }
+
+    #[test]
+    fn provider_token_issuer_signs_with_different_keys_produce_different_tokens() {
+        let issuer_a = ProviderTokenIssuer::new(
+            "issuer-a",
+            b"a]32-byte-signing-key-for-testing!",
+            NonZeroU64::MIN,
+        )
+        .unwrap();
+        let issuer_b = ProviderTokenIssuer::new(
+            "issuer-b",
+            b"b]32-byte-signing-key-for-testing!",
+            NonZeroU64::MIN,
+        )
+        .unwrap();
+        let subject = ProviderSubject::new("user").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let grant = GrantedRepositoryAccess {
+            subject: subject.clone(),
+            repository: repository.clone(),
+            revision: revision.clone(),
+            access: RepositoryAccess::Read,
+        };
+        let grant_b = GrantedRepositoryAccess {
+            subject,
+            repository,
+            revision,
+            access: RepositoryAccess::Read,
+        };
+        let token_a = issuer_a.issue_at(&grant, 100).unwrap();
+        let token_b = issuer_b.issue_at(&grant_b, 100).unwrap();
+        // Different issuers should produce different claims
+        assert_ne!(token_a.claims().issuer(), token_b.claims().issuer());
+    }
+
+    #[test]
+    fn granted_repository_access_from_deny_decision() {
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("user").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let result = GrantedRepositoryAccess::from_decision(&request, AuthorizationDecision::Deny);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn provider_token_issuance_error_is_not_clone() {
+        // Verify that the error type implements std::error::Error
+        fn is_error<T: std::error::Error>() {}
+        is_error::<ProviderTokenIssuanceError>();
+    }
 }

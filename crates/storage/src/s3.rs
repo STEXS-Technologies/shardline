@@ -1509,7 +1509,10 @@ mod tests {
         normalize_prefix, stream_payload_for_range, temp_key_for, temporary_upload_location,
         validated_external_range, verify_file_length, verify_integrity,
     };
-    use crate::{ObjectIntegrity, ObjectKey, PutOutcome};
+    use crate::{
+        ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore as ObjectStoreTrait,
+        PutOutcome,
+    };
 
     #[test]
     fn s3_config_normalizes_key_prefix() {
@@ -3137,5 +3140,577 @@ mod tests {
             result,
             Err(S3ObjectStoreError::IntegrityHashMismatch)
         ));
+    }
+
+    // ── block_on / block_on_result fallback paths ──────────────────────
+
+    #[test]
+    fn s3_block_on_fallback_with_own_runtime_on_contains() {
+        // In a regular #[test] there is no tokio runtime, so Handle::try_current()
+        // returns Err, which exercises the self.runtime fallback in block_on.
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18999".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        // This will fail because there is no S3 endpoint, but the block_on
+        // fallback path through self.runtime is exercised.
+        let result = store.contains(&key);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    #[test]
+    fn s3_block_on_fallback_with_own_runtime_on_metadata() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18998".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        let result = store.metadata(&key);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    #[test]
+    fn s3_block_on_fallback_with_own_runtime_on_delete() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18997".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        let result = store.delete_if_present(&key);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    #[test]
+    fn s3_block_on_fallback_with_own_runtime_on_read_range() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18996".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let range = shardline_protocol::ByteRange::new(0, 5).unwrap();
+
+        let result = store.read_range(&key, range);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    #[test]
+    fn s3_block_on_result_fallback_on_visit_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18995".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let prefix = ObjectPrefix::parse("ns/").unwrap();
+        let result: Result<(), S3ObjectStoreError> = store.visit_prefix(&prefix, |_meta| Ok(()));
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    #[test]
+    fn s3_block_on_result_fallback_on_list_flat() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18994".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let prefix = ObjectPrefix::parse("ns/").unwrap();
+        let result = store.list_flat_namespace_page(&prefix, None, 10);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── location_for_prefix edge cases ────────────────────────────────
+
+    #[test]
+    fn location_for_prefix_with_prefix_no_key_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18993".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let prefix = ObjectPrefix::parse("subdir/").unwrap();
+        let location = store.location_for_prefix(&prefix).unwrap();
+        let path = location.as_ref();
+        assert!(path == "subdir" || path == "subdir/", "unexpected: {path}");
+    }
+
+    #[test]
+    fn location_for_prefix_non_empty_prefix_with_key_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18992".to_owned()))
+                .with_allow_http(true)
+                .with_key_prefix(Some("pfx")),
+        )
+        .unwrap();
+        let prefix = ObjectPrefix::parse("subdir/").unwrap();
+        let location = store.location_for_prefix(&prefix).unwrap();
+        let path = location.as_ref();
+        assert!(path.starts_with("pfx/"), "expected pfx/ prefix, got {path}");
+    }
+
+    // ── copy_object_if_absent edge cases ──────────────────────────────
+
+    #[test]
+    fn s3_copy_object_if_absent_source_eq_destination_with_source_exists() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18991".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        // source == destination with missing source — should Err because metadata returns None
+        // (the head() call fails with connection error, which is mapped through)
+        let key = ObjectKey::parse("test/key").unwrap();
+        let result = store.copy_object_if_absent(&key, &key);
+        // Without a connection, metadata() fails, so this should be an error
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── put_if_absent error path (connection error) ────────────────────
+
+    #[test]
+    fn s3_put_if_absent_connection_error() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18990".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let body = ObjectBody::from_slice(b"hello world");
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello world"), 11);
+        let result = store.put_if_absent(&key, body, &integrity);
+        // verify_integrity passes, then metadata() fails with connection error
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── put_overwrite error path ───────────────────────────────────────
+
+    #[test]
+    fn s3_put_overwrite_connection_error() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18989".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let body = ObjectBody::from_slice(b"hello world");
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello world"), 11);
+        let result = store.put_overwrite(&key, body, &integrity);
+        // verify_integrity passes, then put_opts fails with connection error
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── existing_object_outcome with non-zero length ───────────────────
+
+    #[test]
+    fn existing_object_outcome_nonzero_length_read_error() {
+        // existing_object_outcome with a non-zero length where store.read_range
+        // fails because there is no real endpoint.
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18988".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello"), 5);
+        // existing_length (5) == integrity.length() (5) — passes first check.
+        // Then enters the streaming compare loop — store.read_range fails.
+        let result = super::existing_object_outcome(&store, &key, 5, b"hello", &integrity);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── existing_object_outcome_from_file edge case ────────────────────
+
+    #[test]
+    fn existing_object_outcome_from_file_length_mismatch() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18987".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"hello world"), 11);
+        // existing_length (5) differs from integrity.length (11) → ExistingObjectConflict
+        let result = super::existing_object_outcome_from_file(&store, &key, 5, &path, &integrity);
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::ExistingObjectConflict)
+        ));
+    }
+
+    #[test]
+    fn existing_object_outcome_from_file_zero_length() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18986".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
+        // existing_length (0) == integrity.length (0) and source file is empty → AlreadyExists
+        let result = super::existing_object_outcome_from_file(&store, &key, 0, &path, &integrity);
+        assert!(matches!(result, Ok(PutOutcome::AlreadyExists)));
+    }
+
+    #[test]
+    fn existing_object_outcome_from_file_verify_file_length_fails() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18985".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mismatch.bin");
+        std::fs::write(&path, b"short").unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"short"), 99);
+        // verify_file_length fails
+        let result = super::existing_object_outcome_from_file(&store, &key, 99, &path, &integrity);
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::IntegrityLengthMismatch)
+        ));
+    }
+
+    // ── existing_copy_outcome edge case ────────────────────────────────
+
+    #[test]
+    fn existing_copy_outcome_missing_destination() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18984".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let src = ObjectKey::parse("test/src").unwrap();
+        let dst = ObjectKey::parse("test/dst").unwrap();
+        // destination metadata() will fail with connection error
+        let result = super::existing_copy_outcome(&store, &src, &dst, 10);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── delete_location_if_present ─────────────────────────────────────
+
+    #[test]
+    fn s3_delete_location_if_present_connection_error() {
+        use object_store::path::Path as ObjectStorePath;
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18983".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let location = ObjectStorePath::from("test/key");
+        let result = store.delete_location_if_present(&location);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── list_prefix on empty prefix ────────────────────────────────────
+
+    #[test]
+    fn s3_list_prefix_empty_prefix_with_connection() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18982".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let prefix = ObjectPrefix::parse("").unwrap();
+        // visit_prefix will fail with connection error
+        let result = store.list_prefix(&prefix);
+        assert!(
+            result.is_err(),
+            "expected error from unreachable S3: {result:?}"
+        );
+    }
+
+    // ── put_file_if_absent with non-existent file ──────────────────────
+
+    #[test]
+    fn s3_put_file_if_absent_nonexistent_file() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18981".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.bin");
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
+        // verify_file_length will fail with Io error (file not found)
+        let result = store.put_file_if_absent(&key, &path, &integrity);
+        assert!(matches!(result, Err(S3ObjectStoreError::Io(_))));
+    }
+
+    #[test]
+    fn s3_put_content_addressed_file_nonexistent_file() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18980".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.bin");
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b""), 0);
+        let result = store.put_content_addressed_file(&key, &path, &integrity);
+        assert!(matches!(result, Err(S3ObjectStoreError::Io(_))));
+    }
+
+    // ── location_for_key with key_prefix ───────────────────────────────
+
+    #[test]
+    fn s3_location_for_key_with_key_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18979".to_owned()))
+                .with_allow_http(true)
+                .with_key_prefix(Some("tenant-z")),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("ns/obj.xorb").unwrap();
+        let location = store.location_for_key(&key).unwrap();
+        assert_eq!(location.as_ref(), "tenant-z/ns/obj.xorb");
+    }
+
+    #[test]
+    fn s3_location_for_key_without_key_prefix() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18978".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("ns/obj.xorb").unwrap();
+        let location = store.location_for_key(&key).unwrap();
+        assert_eq!(location.as_ref(), "ns/obj.xorb");
+    }
+
+    // ── S3MultipartUploadWriter finish via InMemory ────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_multipart_upload_writer_finish() {
+        use object_store::{ObjectStoreExt, WriteMultipart};
+
+        let inner = InMemory::new();
+        let location = ObjectStorePath::from("test/finish-obj");
+
+        let upload = inner
+            .put_multipart(&location)
+            .await
+            .expect("should create multipart upload");
+        let writer = WriteMultipart::new_with_chunk_size(upload, 8 * 1024 * 1024);
+        let mut multipart = super::S3MultipartUploadWriter { writer };
+
+        multipart.write(b"hello finish");
+        multipart.wait_for_capacity(4).await.unwrap();
+
+        let result = multipart.finish().await;
+        assert!(result.is_ok());
+    }
+
+    // ── complete_resumable_upload validation ────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_complete_resumable_empty_parts_rejected() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18978".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        let result = store
+            .complete_resumable_upload(&key, "upload-id", vec![])
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::InvalidUploadParts)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_complete_resumable_non_consecutive_parts_rejected() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18977".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        let result = store
+            .complete_resumable_upload(&key, "upload-id", vec![(0, "e0".into()), (2, "e2".into())])
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(S3ObjectStoreError::InvalidUploadParts)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_complete_resumable_reordered_parts_validated() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18976".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        // Parts are out of order but consecutive — sort fixes them,
+        // then validation passes and we proceed to the S3 call which fails.
+        let result = store
+            .complete_resumable_upload(&key, "upload-id", vec![(1, "e1".into()), (0, "e0".into())])
+            .await;
+
+        // The connection to the fake endpoint fails after validation passes.
+        // We expect an External error, not InvalidUploadParts.
+        assert!(
+            !matches!(result, Err(S3ObjectStoreError::InvalidUploadParts)),
+            "consecutive parts should pass validation"
+        );
+        assert!(result.is_err(), "should fail with connection error");
+    }
+
+    // ── begin_content_addressed_upload early return ─────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_begin_content_addressed_upload_fails_with_connection_error() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18975".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        let result = store.begin_content_addressed_upload(&key).await;
+        // metadata() will fail with connection error before reaching the upload logic
+        assert!(result.is_err(), "expected connection error");
+    }
+
+    // ── delete_if_present with AlreadyExists from external error ────────
+
+    #[test]
+    fn s3_delete_if_present_connection_error() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18974".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+
+        let result = store.delete_if_present(&key);
+        // The S3 head/delete operation fails with connection error
+        assert!(result.is_err(), "expected connection error");
+    }
+
+    // ── list_flat_namespace_page with start_after validation ───────────
+
+    #[test]
+    fn s3_list_flat_namespace_validates_start_after() {
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18972".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        // Test that start_after is properly converted to a location
+        // (the S3 call itself will fail, but the transformation runs)
+        let prefix = ObjectPrefix::parse("ns/").unwrap();
+        let key = ObjectKey::parse("ns/key01").unwrap();
+        let result = store.list_flat_namespace_page(&prefix, Some(&key), 10);
+        // Should fail with connection error (the function validates start_after
+        // internally in its own way for S3)
+        assert!(result.is_err(), "expected connection error");
+    }
+
+    // ── existing_object_outcome with streaming comparison ───────────────
+
+    #[test]
+    fn existing_object_outcome_streaming_compare_first_chunk_fails() {
+        // existing_object_outcome with non-zero length where the first
+        // streaming read_range fails (no S3 endpoint).
+        let store = S3ObjectStore::new(
+            S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned())
+                .with_endpoint(Some("http://127.0.0.1:18973".to_owned()))
+                .with_allow_http(true),
+        )
+        .unwrap();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let integrity = ObjectIntegrity::new(super::chunk_hash(b"x"), 1);
+        // existing_length == 1 (non-zero), integrity.length() == 1 → passes first check.
+        // Then enters streaming loop → store.read_range fails.
+        let result = super::existing_object_outcome(&store, &key, 1, b"x", &integrity);
+        assert!(result.is_err(), "expected error from read_range failure");
     }
 }
