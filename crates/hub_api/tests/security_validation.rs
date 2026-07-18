@@ -152,7 +152,7 @@ fn validate_missing_exp_now_rejected() {
 /// performs DNS resolution to block private/internal IPs at delivery time.
 #[test]
 fn validate_deliver_one_webhook_has_url_validation() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+    let routes_source = include_str!("../../hub_api/src/routes/webhooks.rs");
 
     let start = routes_source.find("async fn deliver_one_webhook").unwrap();
     let fn_body = &routes_source[start..start + 2000];
@@ -173,7 +173,7 @@ fn validate_deliver_one_webhook_has_url_validation() {
 /// host presence, URL length, and rejects private/internal IPs.
 #[test]
 fn validate_webhook_url_validation_exists() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+    let routes_source = include_str!("../../hub_api/src/routes/webhooks.rs");
 
     assert!(
         routes_source.contains("fn validate_webhook_url("),
@@ -297,11 +297,10 @@ fn validate_commit_handler_body_bounded_by_router() {
 /// **[MITIGATED]**: Same as above — the router-level limit applies.
 #[test]
 fn validate_lfs_upload_unbounded_body() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+    let routes_source = include_str!("../../hub_api/src/routes/lfs.rs");
 
     assert!(
-        routes_source.contains("body: bytes::Bytes")
-            && routes_source.contains("async fn lfs_upload("),
+        routes_source.contains("body: Bytes") && routes_source.contains("async fn lfs_upload("),
         "lfs_upload accepts body: bytes::Bytes — bounded by router DefaultBodyLimit"
     );
 }
@@ -416,10 +415,10 @@ fn validate_pack_parser_shift_overflow_protected() {
 /// **[FIXED]**: The whoami handler now returns `is_admin: false` (not hardcoded true).
 #[test]
 fn validate_whoami_hardcoded_admin() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+    let handlers_source = include_str!("../../hub_api/src/routes/handlers.rs");
 
-    let whoami_start = routes_source.find("async fn whoami(").unwrap();
-    let whoami_fn = &routes_source[whoami_start..whoami_start + 800];
+    let whoami_start = handlers_source.find("async fn whoami(").unwrap();
+    let whoami_fn = &handlers_source[whoami_start..whoami_start + 800];
 
     assert!(
         whoami_fn.contains("is_admin: false"),

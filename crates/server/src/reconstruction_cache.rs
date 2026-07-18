@@ -274,6 +274,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use shardline_cache::{
@@ -287,6 +288,7 @@ mod tests {
         SharedReconstructionCache,
     };
     use crate::FileReconstructionResponse;
+    use crate::ServerError;
     use crate::xet_adapter::{
         ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
         ReconstructionUrlRange,
@@ -961,5 +963,89 @@ mod tests {
             result,
             Err(crate::ServerError::MissingReconstructionCacheRedisUrl)
         ));
+    }
+
+    // ── get_or_load — timeout / cancellation ─────────────────────────────
+
+    #[tokio::test]
+    async fn cache_service_get_or_load_times_out_with_slow_loader() {
+        tokio::time::pause();
+
+        let adapter: SharedReconstructionCache = Arc::new(StaticCache {
+            payload: None,
+            put_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let cache = ReconstructionCacheService::for_tests("static", adapter);
+        let key = ReconstructionCacheKey::latest("slow-asset.bin", None);
+
+        // A loader that never completes — keep the sender alive so the
+        // receiver hangs forever.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let _sender_kept_alive = tx;
+        let loader = || async {
+            let _ = rx.await;
+            Ok(sample_response("never-loaded"))
+        };
+
+        // Wrap get_or_load with a short timeout.
+        let result =
+            tokio::time::timeout(Duration::from_millis(50), cache.get_or_load(&key, loader)).await;
+
+        // The timeout should fire before the loader completes.
+        assert!(result.is_err(), "expected timeout elapsing, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn cache_service_concurrent_requests_race_against_timeout() {
+        tokio::time::pause();
+
+        let adapter: SharedReconstructionCache = Arc::new(StaticCache {
+            payload: None,
+            put_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let cache = Arc::new(ReconstructionCacheService::for_tests("static", adapter));
+        let key = Arc::new(ReconstructionCacheKey::latest("race-asset.bin", None));
+
+        // A helper function for the slow loader (FnOnce so we need a separate
+        // instance per call).
+        async fn slow_loader() -> Result<FileReconstructionResponse, ServerError> {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(sample_response("concurrent-loaded"))
+        }
+
+        let cache1 = Arc::clone(&cache);
+        let key1 = Arc::clone(&key);
+        let handle1 = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                cache1.get_or_load(&key1, slow_loader),
+            )
+            .await
+        });
+
+        let cache2 = Arc::clone(&cache);
+        let key2 = Arc::clone(&key);
+        let handle2 = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                cache2.get_or_load(&key2, slow_loader),
+            )
+            .await
+        });
+
+        // Advance time enough for both requests to complete.
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        let result1 = handle1.await.expect("task 1 panicked");
+        let result2 = handle2.await.expect("task 2 panicked");
+
+        // Both should succeed within the timeout.
+        assert!(result1.is_ok(), "request 1 should complete: {result1:?}");
+        assert!(result2.is_ok(), "request 2 should complete: {result2:?}");
+
+        let response1 = result1.unwrap();
+        let response2 = result2.unwrap();
+        assert!(response1.is_ok(), "get_or_load 1 should succeed");
+        assert!(response2.is_ok(), "get_or_load 2 should succeed");
     }
 }

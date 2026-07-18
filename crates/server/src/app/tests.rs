@@ -1009,3 +1009,62 @@ async fn authorize_with_no_auth_returns_ok_none() {
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
 }
+
+// ── acquire_chunk_transfer_permit timeout ──────────────────────────────────
+
+#[tokio::test]
+async fn acquire_chunk_transfer_permit_times_out_when_permits_exhausted() {
+    tokio::time::pause();
+
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let hash = "aa".repeat(32); // 64 hex chars
+
+    // Create a real chunk file so that backend.chunk_length() returns a value.
+    let prefix = &hash[..2];
+    let chunk_dir = tmp.path().join("chunks").join(prefix);
+    std::fs::create_dir_all(&chunk_dir).unwrap();
+    std::fs::write(chunk_dir.join(&hash), b"some chunk data").unwrap();
+
+    let backend = crate::LocalBackend::new(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await
+    .unwrap();
+
+    // Limiter with capacity 1 and a short acquire timeout.
+    let max_in_flight = NonZeroUsize::new(1).unwrap();
+    let transfer_limiter = crate::TransferLimiter::new(chunk_size, max_in_flight)
+        .with_acquire_timeout(std::time::Duration::from_millis(50));
+
+    let state = Arc::new(crate::AppState {
+        config: crate::ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        ),
+        role: ServerRole::All,
+        backend: crate::ServerBackend::Local(backend),
+        auth: None,
+        provider_tokens: None,
+        reconstruction_cache: crate::ReconstructionCacheService::disabled(),
+        transfer_limiter,
+        oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+        protocol_metrics: crate::ProtocolMetrics::default(),
+    });
+
+    // Exhaust the single permit.
+    let _permit = state.transfer_limiter.acquire_bytes(4).await.unwrap();
+
+    // Attempt to acquire another permit via acquire_chunk_transfer_permit.
+    // The backend should return the chunk length, but the limiter has no
+    // permits left, so it should time out.
+    let result = super::acquire_chunk_transfer_permit(&state, &hash).await;
+    assert!(
+        matches!(result, Err(ServerError::TransferLimiterTimedOut)),
+        "expected TransferLimiterTimedOut, got {result:?}"
+    );
+}

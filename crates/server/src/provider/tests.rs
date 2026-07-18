@@ -11,8 +11,8 @@ use axum::http::{HeaderMap, HeaderValue};
 use hmac::Mac;
 use shardline_protocol::{SecretBytes, SecretString, TokenScope};
 use shardline_vcs::{
-    BuiltInProviderCatalog, BuiltInProviderError, GitHubAdapter, ProviderKind,
-    ProviderRepositoryPolicy, ProviderSubject, ProviderTokenIssuer, RepositoryAccess,
+    BuiltInProviderCatalog, BuiltInProviderError, GitHubAdapter, ProviderBoundaryError,
+    ProviderKind, ProviderRepositoryPolicy, ProviderSubject, ProviderTokenIssuer, RepositoryAccess,
     RepositoryRef, RepositoryVisibility, RepositoryWebhookEventKind, configured_metadata,
 };
 
@@ -1425,4 +1425,268 @@ fn provider_service_error_config_variants_debug() {
     let mismatch = ProviderServiceError::ConfigLengthMismatch;
     let debug = format!("{mismatch:?}");
     assert!(!debug.is_empty());
+}
+
+// ── authorize_bootstrap_key — invalid key ─────────────────────────────
+
+#[test]
+fn provider_authorize_bootstrap_key_rejects_invalid_key() {
+    let issuer = ProviderTokenIssuer::new(
+        "issuer",
+        b"a]32-byte-signing-key-for-testing!",
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer,
+        registry: ProviderRegistry {
+            providers: HashMap::new(),
+        },
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-shardline-provider-key",
+        HeaderValue::from_static("wrong-key"),
+    );
+    let result = service.authorize_bootstrap_key(&headers);
+    assert!(matches!(result, Err(ProviderServiceError::InvalidApiKey)));
+}
+
+// ── issue_token — subject validation ──────────────────────────────────
+
+#[test]
+fn provider_issue_token_rejects_empty_subject() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-shardline-provider-key",
+        HeaderValue::from_static("bootstrap"),
+    );
+    let issuer = ProviderTokenIssuer::new(
+        "issuer",
+        b"a]32-byte-signing-key-for-testing!",
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer,
+        registry: {
+            let provider = github_provider();
+            assert!(provider.is_ok());
+            let Ok(provider) = provider else {
+                return;
+            };
+            ProviderRegistry {
+                providers: HashMap::from([("github".to_owned(), provider)]),
+            }
+        },
+    };
+
+    let result = service.issue_token(
+        &headers,
+        "github",
+        &ProviderTokenIssueRequest {
+            subject: String::new(),
+            owner: "team".to_owned(),
+            repo: "assets".to_owned(),
+            revision: Some("refs/heads/main".to_owned()),
+            scope: TokenScope::Read,
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::Subject(ProviderBoundaryError::Empty))
+    ));
+}
+
+#[test]
+fn provider_issue_token_denies_unauthorized_subject() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-shardline-provider-key",
+        HeaderValue::from_static("bootstrap"),
+    );
+    let issuer = ProviderTokenIssuer::new(
+        "issuer",
+        b"a]32-byte-signing-key-for-testing!",
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer,
+        registry: {
+            let provider = github_provider();
+            assert!(provider.is_ok());
+            let Ok(provider) = provider else {
+                return;
+            };
+            ProviderRegistry {
+                providers: HashMap::from([("github".to_owned(), provider)]),
+            }
+        },
+    };
+
+    let result = service.issue_token(
+        &headers,
+        "github",
+        &ProviderTokenIssueRequest {
+            subject: "unauthorized-user".to_owned(),
+            owner: "team".to_owned(),
+            repo: "assets".to_owned(),
+            revision: None,
+            scope: TokenScope::Read,
+        },
+    );
+
+    assert!(matches!(result, Err(ProviderServiceError::Denied)));
+}
+
+// ── parse_webhook — payload validation ────────────────────────────────
+
+#[test]
+fn provider_parse_webhook_malformed_json_body() {
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer: {
+            let issuer = ProviderTokenIssuer::new(
+                "issuer",
+                b"a]32-byte-signing-key-for-testing!",
+                NonZeroU64::MIN,
+            );
+            assert!(issuer.is_ok());
+            let Ok(issuer) = issuer else {
+                return;
+            };
+            issuer
+        },
+        registry: {
+            let provider = github_provider();
+            assert!(provider.is_ok());
+            let Ok(provider) = provider else {
+                return;
+            };
+            ProviderRegistry {
+                providers: HashMap::from([("github".to_owned(), provider)]),
+            }
+        },
+    };
+    let body = b"not valid json";
+    let signature = github_webhook_signature(body);
+    assert!(signature.is_some());
+    let Some(signature) = signature else {
+        return;
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(GITHUB_EVENT_HEADER, HeaderValue::from_static("repository"));
+    headers.insert(
+        GITHUB_DELIVERY_HEADER,
+        HeaderValue::from_static("delivery-1"),
+    );
+    let signature_value = HeaderValue::from_str(&signature);
+    assert!(signature_value.is_ok());
+    let Ok(signature_value) = signature_value else {
+        return;
+    };
+    headers.insert(GITHUB_SIGNATURE_HEADER, signature_value);
+
+    let result = service.parse_webhook(&headers, "github", body);
+
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::BuiltIn(
+            BuiltInProviderError::InvalidWebhookPayload
+        ))
+    ));
+}
+
+#[test]
+fn provider_parse_webhook_missing_required_fields() {
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer: {
+            let issuer = ProviderTokenIssuer::new(
+                "issuer",
+                b"a]32-byte-signing-key-for-testing!",
+                NonZeroU64::MIN,
+            );
+            assert!(issuer.is_ok());
+            let Ok(issuer) = issuer else {
+                return;
+            };
+            issuer
+        },
+        registry: {
+            let provider = github_provider();
+            assert!(provider.is_ok());
+            let Ok(provider) = provider else {
+                return;
+            };
+            ProviderRegistry {
+                providers: HashMap::from([("github".to_owned(), provider)]),
+            }
+        },
+    };
+    let body = br#"{"action":"deleted"}"#;
+    let signature = github_webhook_signature(body);
+    assert!(signature.is_some());
+    let Some(signature) = signature else {
+        return;
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(GITHUB_EVENT_HEADER, HeaderValue::from_static("repository"));
+    headers.insert(
+        GITHUB_DELIVERY_HEADER,
+        HeaderValue::from_static("delivery-1"),
+    );
+    let signature_value = HeaderValue::from_str(&signature);
+    assert!(signature_value.is_ok());
+    let Ok(signature_value) = signature_value else {
+        return;
+    };
+    headers.insert(GITHUB_SIGNATURE_HEADER, signature_value);
+
+    let result = service.parse_webhook(&headers, "github", body);
+
+    assert!(matches!(
+        result,
+        Err(ProviderServiceError::BuiltIn(
+            BuiltInProviderError::InvalidRepositoryPayload
+        ))
+    ));
+}
+
+// ── ProviderTokenService::from_file — config path and content errors ──
+
+#[test]
+fn provider_service_from_file_rejects_missing_config_path() {
+    let result = ProviderTokenService::from_file(
+        std::path::Path::new("/nonexistent/path/providers.json"),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+    );
+
+    assert!(matches!(result, Err(ProviderServiceError::Io(_))));
+}
+
+#[test]
+fn provider_service_from_file_rejects_malformed_json() {
+    let mut config = tempfile::NamedTempFile::new().unwrap();
+    config.write_all(b"this is not valid json").unwrap();
+    config.as_file().sync_all().unwrap();
+
+    let result = ProviderTokenService::from_file(
+        config.path(),
+        b"bootstrap".to_vec(),
+        "issuer",
+        NonZeroU64::MIN,
+        b"a]32-byte-signing-key-for-testing!",
+    );
+
+    assert!(matches!(result, Err(ProviderServiceError::Json(_))));
 }
