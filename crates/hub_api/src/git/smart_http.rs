@@ -2676,4 +2676,348 @@ mod tests {
             "OFS_DELTA should resolve to produce the target content"
         );
     }
+
+    // --- authorize_write with auth configured ---
+
+    #[test]
+    fn authorize_write_with_auth_rejects_missing_token() {
+        use shardline_protocol::{
+            RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS,
+        };
+        use shardline_server_core::{AuthError, AuthProvider};
+
+        let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
+        let _claims = TokenClaims::new("iss", "sub", TS::Read, repo, u64::MAX).unwrap();
+        struct MockAuth;
+        impl AuthProvider for MockAuth {
+            fn verify_token(&self, _token: &str) -> Result<TokenClaims, AuthError> {
+                Err(AuthError::InvalidToken)
+            }
+            fn mint_token(&self, _claims: &TokenClaims) -> Result<String, AuthError> {
+                Err(AuthError::ProviderError("nope".into()))
+            }
+        }
+        let state = HubState {
+            store: make_hub_state().1.store,
+            auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
+            http_client: None,
+        };
+        let headers = axum::http::HeaderMap::new();
+        let result = authorize_write(&state, &headers);
+        assert!(result.is_err());
+    }
+
+    // --- build_gitattributes_blob with nested LFS path ---
+
+    #[test]
+    fn gitattributes_blob_handles_nested_lfs_paths() {
+        let files = vec![
+            HubFileEntry {
+                path: "data/nested/model.bin".to_owned(),
+                size: 1024,
+                sha: "oid_nested".to_owned(),
+                is_lfs: true,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "data/nested/readme.md".to_owned(),
+                size: 100,
+                sha: "oid_rn".to_owned(),
+                is_lfs: false,
+                inline_content: None,
+            },
+        ];
+        let blob = build_gitattributes_blob(&files);
+        assert!(blob.is_some());
+        let content = String::from_utf8(blob.unwrap().data).unwrap();
+        assert!(content.contains("data/nested/model.bin filter=lfs"));
+    }
+
+    // --- build_git_tree_objects with nested directories ---
+
+    #[test]
+    fn tree_from_nested_lfs_files_creates_sub_trees() {
+        let files = vec![
+            HubFileEntry {
+                path: "models/a/big.bin".to_owned(),
+                size: 2_000_000,
+                sha: "lfs_oid_ab".to_owned(),
+                is_lfs: true,
+                inline_content: None,
+            },
+            HubFileEntry {
+                path: "models/b/big.bin".to_owned(),
+                size: 2_000_000,
+                sha: "lfs_oid_bb".to_owned(),
+                is_lfs: true,
+                inline_content: None,
+            },
+        ];
+        let (root, sub_trees) = build_git_tree_objects(&files);
+        // Root tree + 3 sub-trees (models/, models/a/, models/b/)
+        assert!(!sub_trees.is_empty(), "expected sub-trees for nested dirs");
+        let root_sha = root.sha1();
+        assert_ne!(root_sha, [0u8; 20]);
+    }
+
+    // --- parse_receive_pack_request with valid commands ---
+
+    #[test]
+    fn parse_receive_pack_request_skips_empty_lines() {
+        let mut body = Vec::new();
+        // Empty pkt-line (length prefix 0004 = empty)
+        body.extend_from_slice(b"0004");
+        // Valid command
+        let cmd = "0000000000000000000000000000000000000000 newsha1234567890123456789012345678901234567890 refs/heads/main\n";
+        let encoded = format!("{:04x}{}", cmd.len() + 4, cmd);
+        body.extend_from_slice(encoded.as_bytes());
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(b"PACK");
+        body.extend_from_slice(&[0, 0, 0, 2]);
+        body.extend_from_slice(&[0, 0, 0, 0]);
+
+        let (updates, pack_data) = parse_receive_pack_request(&body);
+        // The empty line (0004) is skipped, the valid command is parsed
+        assert_eq!(updates.len(), 1, "expected 1 update, got {updates:?}");
+        assert_eq!(updates[0].2, "refs/heads/main");
+        assert!(!pack_data.is_empty());
+    }
+
+    // --- receive_pack error paths ---
+
+    #[tokio::test]
+    async fn upload_pack_empty_refs_returns_empty_pack() {
+        let (_tmp, state) = make_hub_state();
+        let body = pktline::encode_line("want 0000000000000000000000000000000000000000\n")
+            .unwrap()
+            .into_bytes();
+        let result = upload_pack(
+            State(state),
+            Path(("models".into(), "empty".into(), "repo".into())),
+            axum::http::HeaderMap::new(),
+            bytes::Bytes::from(body),
+        )
+        .await;
+        assert!(result.is_ok(), "upload_pack should succeed: {result:?}");
+    }
+
+    // --- decompress_zlib error on garbage input ---
+
+    #[test]
+    fn decompress_zlib_garbage_returns_error() {
+        let result = decompress_zlib(b"garbage data that is not valid zlib");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decompress_zlib_empty_input_returns_empty() {
+        // Empty input produces an empty output with 0 bytes consumed.
+        let result = decompress_zlib(b"").unwrap();
+        assert!(result.0.is_empty());
+        assert_eq!(result.1, 0);
+    }
+
+    // --- parse_pack_data with invalid offset ---
+
+    #[test]
+    fn parse_pack_data_ofs_delta_bad_offset() {
+        // A pack with a single OFS_DELTA object (no base) should error.
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"delta data").unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let mut pack = b"PACK".to_vec();
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        pack.extend_from_slice(&1u32.to_be_bytes()); // 1 object
+        // OFS_DELTA (type=6), size <= 0x0f
+        pack.push((6 << 4) | compressed.len() as u8);
+        // OFS_DELTA offset: 2 (no base object at offset 2)
+        pack.push(0x02);
+        pack.extend_from_slice(&compressed);
+
+        let result = parse_pack_data(&pack);
+        assert!(result.is_err());
+    }
+
+    // --- parse_pack_data with OOB OFS_DELTA offset ---
+    // (offset calculation underflows)
+
+    #[test]
+    fn parse_pack_data_ofs_delta_offset_underflow() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"delta data").unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let mut pack = b"PACK".to_vec();
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        pack.extend_from_slice(&1u32.to_be_bytes());
+        // OFS_DELTA (type=6), size = compressed.len()
+        pack.push((6 << 4) | 0x0f);
+        // Large OFS_DELTA offset encoded as multi-byte varint
+        // offset = 0x01 (MSB=0 means single byte, value=1)
+        // An offset of 1 with 0 objects in the index will produce checked_sub(1) = 0
+        // but objects is empty, so base_idx(0) is out of bounds.
+        // Actually this would work: offset=1 on an empty objects vec:
+        // checked_sub(1) = None → InvalidDelta. Let's test that.
+        pack.push(0x01);
+        pack.extend_from_slice(&compressed);
+        let result = parse_pack_data(&pack);
+        assert!(result.is_err());
+    }
+
+    // --- build_git_tree_objects with inline blob creation ---
+
+    #[test]
+    fn tree_from_inline_files_creates_blobs_in_tree_entries() {
+        let files = vec![HubFileEntry {
+            path: "a/b/file.txt".to_owned(),
+            size: 3,
+            sha: "abc".to_owned(),
+            is_lfs: false,
+            inline_content: Some(b"abc".to_vec()),
+        }];
+        let (root, sub_trees) = build_git_tree_objects(&files);
+        assert_eq!(sub_trees.len(), 2, "a/ and a/b/ sub-trees");
+        let root_sha = root.sha1();
+        assert_ne!(root_sha, [0u8; 20]);
+    }
+
+    // --- receive_pack with invalid pack data (error path, lines ~262) ---
+
+    #[tokio::test]
+    async fn receive_pack_malformed_pack_data_returns_ng_refs() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/rp-bad", false)
+            .unwrap();
+        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        state
+            .store
+            .create_revision(
+                "org/rp-bad",
+                Some(initial_sha),
+                "oldsha1234567890123456789012345678901234567",
+                "refs/heads/main",
+                "initial",
+            )
+            .unwrap();
+
+        // Build a receive-pack request with valid command but garbage pack data
+        let new_sha = "0000000000000000000000000000000000000000";
+        let old_sha = "oldsha1234567890123456789012345678901234567";
+        let cmd = format!("{old_sha} {new_sha} refs/heads/main\n");
+        let encoded = format!("{:04x}{}", cmd.len() + 4, cmd);
+        let mut body = encoded.into_bytes();
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(b"PACK"); // "valid" header but no real content
+
+        let result = receive_pack(
+            State(state),
+            Path(("models".into(), "org".into(), "rp-bad".into())),
+            axum::http::HeaderMap::new(),
+            bytes::Bytes::from(body),
+        )
+        .await;
+        // Should return a response (even with errors) rather than fail
+        assert!(result.is_ok());
+    }
+
+    // --- walk_git_tree with truncated SHA (error path, line ~1163) ---
+
+    #[test]
+    fn walk_git_tree_truncated_sha_errors() {
+        // Build a tree entry with a truncated SHA (only 10 bytes instead of 20)
+        let blob = super::super::pack::create_blob_object(b"dummy");
+        let mut tree_data = Vec::new();
+        tree_data.extend_from_slice(b"100644 f\0");
+        tree_data.extend_from_slice(&[0xaa; 10]); // only 10 bytes!
+
+        // Need to also include the null byte after the name for proper parsing
+        // Actually the format is: "100644 f\0" + 20 bytes SHA. If SHA is truncated,
+        // the sha_start + 20 > data.len() check should catch it.
+        let tree = super::super::pack::GitObject::tree(tree_data);
+        let tree_sha = tree.sha1();
+
+        let owned = vec![blob, tree];
+        let objects: std::collections::HashMap<[u8; 20], &super::super::pack::GitObject> =
+            owned.iter().map(|o| (o.sha1(), o)).collect();
+
+        let result = walk_git_tree(&tree_sha, &objects, "");
+        assert!(result.is_err());
+    }
+
+    // --- build_git_tree_objects with LFS leaf blob (line ~544) ---
+
+    #[test]
+    fn build_tree_entries_lfs_leaf_blob() {
+        // A single LFS file at the root level exercises the LFS blob creation
+        // in build_tree_entries (line 538).
+        let files = vec![HubFileEntry {
+            path: "model.bin".to_owned(),
+            size: 2_000_000,
+            sha: "oid_lfs_leaf".to_owned(),
+            is_lfs: true,
+            inline_content: None,
+        }];
+        let (root, sub_trees) = build_git_tree_objects(&files);
+        assert!(sub_trees.is_empty());
+        let root_sha = root.sha1();
+        assert_ne!(root_sha, [0u8; 20]);
+    }
+
+    // --- info_refs_upload_pack / info_refs_receive_pack wrappers ---
+
+    #[tokio::test]
+    async fn info_refs_upload_pack_proxies_correctly() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/iu-test", false)
+            .unwrap();
+        let result = info_refs_upload_pack(
+            State(state),
+            Path(("models".into(), "org".into(), "iu-test".into())),
+            Query(InfoRefsQuery { service: None }),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body.contains("git-upload-pack"));
+    }
+
+    #[tokio::test]
+    async fn info_refs_receive_pack_proxies_correctly() {
+        let (_tmp, state) = make_hub_state();
+        use shardline_index::hub::HubRepoType;
+        state
+            .store
+            .create_repo(HubRepoType::Model, "org/ir-test", false)
+            .unwrap();
+        let result = info_refs_receive_pack(
+            State(state),
+            Path(("models".into(), "org".into(), "ir-test".into())),
+            Query(InfoRefsQuery { service: None }),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body.contains("git-receive-pack"));
+    }
 }

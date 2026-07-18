@@ -29,6 +29,7 @@ pub fn parse_sha256_digest<E: ProtocolValidation>(value: &str) -> Result<String,
     Ok(hash_hex.to_owned())
 }
 
+#[must_use]
 pub fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> String {
     repository_scope.map_or_else(
         || "global".to_owned(),
@@ -254,11 +255,8 @@ mod tests {
     #[test]
     fn oci_repository_scope_validator_accepts_bound_roots_and_nested_namespaces() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
 
         assert!(
             validate_oci_repository_scope::<ValidateContentHashError>("team/assets", Some(&scope))
@@ -285,11 +283,8 @@ mod tests {
     fn shared_sha256_key_uses_stable_shared_namespace() {
         let key = shared_sha256_object_key::<ValidateContentHashError>(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        )
+        .unwrap();
         assert_eq!(
             key.as_str(),
             "protocols/shared/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

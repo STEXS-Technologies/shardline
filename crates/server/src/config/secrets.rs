@@ -329,12 +329,13 @@ mod tests {
 
     use super::super::ServerConfigError;
 
-    /// SAFETY: Wrappers for env var manipulation in `#[serial_test::serial]` tests.
-    #[allow(clippy::undocumented_unsafe_blocks)]
+    /// SAFETY: Must only be called from `#[serial_test::serial]` tests to prevent
+    /// data races on the global environment. Callers are responsible for ensuring
+    /// no concurrent env var access.
     fn set_env_var(key: &str, value: &str) {
         unsafe { std::env::set_var(key, value) };
     }
-    #[allow(clippy::undocumented_unsafe_blocks)]
+    /// SAFETY: Same threading constraints as `set_env_var`.
     fn remove_env_var(key: &str) {
         unsafe { std::env::remove_var(key) };
     }
@@ -1208,46 +1209,24 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    #[allow(clippy::undocumented_unsafe_blocks)]
     fn load_s3_object_store_config_with_key_prefix() {
-        // SAFETY: serialized env var test
-        unsafe {
-            std::env::set_var("SHARDLINE_S3_BUCKET", "test-bucket");
-        }
-        unsafe {
-            std::env::set_var("SHARDLINE_S3_KEY_PREFIX", "shardline/");
-        }
-        unsafe {
-            std::env::set_var("SHARDLINE_S3_REGION", "eu-west-1");
-        }
-        unsafe {
-            std::env::set_var("SHARDLINE_S3_ENDPOINT", "https://s3.example.com");
-        }
+        set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");
+        set_env_var("SHARDLINE_S3_KEY_PREFIX", "shardline/");
+        set_env_var("SHARDLINE_S3_REGION", "eu-west-1");
+        set_env_var("SHARDLINE_S3_ENDPOINT", "https://s3.example.com");
         // Remove any credential overrides
-        unsafe {
-            std::env::remove_var("SHARDLINE_S3_ACCESS_KEY_ID");
-        }
-        unsafe {
-            std::env::remove_var("SHARDLINE_S3_SECRET_ACCESS_KEY");
-        }
+        remove_env_var("SHARDLINE_S3_ACCESS_KEY_ID");
+        remove_env_var("SHARDLINE_S3_SECRET_ACCESS_KEY");
         let result = super::load_s3_object_store_config_from_env();
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bucket(), "test-bucket");
         assert!(config.key_prefix().is_some());
         // Cleanup
-        unsafe {
-            std::env::remove_var("SHARDLINE_S3_BUCKET");
-        }
-        unsafe {
-            std::env::remove_var("SHARDLINE_S3_KEY_PREFIX");
-        }
-        unsafe {
-            std::env::remove_var("SHARDLINE_S3_REGION");
-        }
-        unsafe {
-            std::env::remove_var("SHARDLINE_S3_ENDPOINT");
-        }
+        remove_env_var("SHARDLINE_S3_BUCKET");
+        remove_env_var("SHARDLINE_S3_KEY_PREFIX");
+        remove_env_var("SHARDLINE_S3_REGION");
+        remove_env_var("SHARDLINE_S3_ENDPOINT");
     }
 
     // ── configure_provider_runtime_from_paths — TTL zero ──────────────────

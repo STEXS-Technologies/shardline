@@ -165,9 +165,9 @@ mod tests {
 
     use super::CodebergAdapter;
     use crate::{
-        BuiltInProviderCatalog, BuiltInProviderError, ProviderAdapter, ProviderKind,
-        ProviderSubject, RepositoryRef, RepositoryVisibility, RepositoryWebhookEventKind,
-        RevisionRef, WebhookRequest,
+        AuthorizationDecision, AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError,
+        ProviderAdapter, ProviderKind, ProviderSubject, RepositoryAccess, RepositoryRef,
+        RepositoryVisibility, RepositoryWebhookEventKind, RevisionRef, WebhookRequest,
         builtin::{ProviderRepositoryPolicy, configured_metadata},
     };
 
@@ -517,5 +517,339 @@ mod tests {
             event,
             Err(BuiltInProviderError::InvalidRepositoryPayload)
         ));
+    }
+
+    #[test]
+    fn codeberg_adapter_kind_returns_codeberg() {
+        let adapter = adapter().unwrap();
+        assert_eq!(adapter.kind(), ProviderKind::Codeberg);
+    }
+
+    #[test]
+    fn codeberg_adapter_check_access_allows_authorized_subject() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("codeberg-user-1").unwrap();
+        let request = AuthorizationRequest::new(
+            subject.clone(),
+            repository,
+            revision,
+            RepositoryAccess::Read,
+        );
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Allow(subject));
+    }
+
+    #[test]
+    fn codeberg_adapter_check_access_denies_unauthorized_subject() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("unknown-user").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Deny);
+    }
+
+    #[test]
+    fn codeberg_adapter_check_access_rejects_unknown_repository() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "unknown", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("codeberg-user-1").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let result = adapter.check_access(&request);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn codeberg_adapter_repository_metadata_returns_metadata() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "assets").unwrap();
+        let metadata = adapter.repository_metadata(&repository).unwrap();
+        assert_eq!(metadata.repository(), &repository);
+        assert_eq!(metadata.visibility(), RepositoryVisibility::Private);
+    }
+
+    #[test]
+    fn codeberg_adapter_repository_metadata_unknown_repo_errors() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "unknown", "repo").unwrap();
+        let result = adapter.repository_metadata(&repository);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn codeberg_adapter_repository_privatized_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"privatized",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn codeberg_adapter_repository_publicized_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"publicized",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-pub", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn codeberg_adapter_repository_unarchived_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"unarchived",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-unarch", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn codeberg_repository_uses_owner_login_fallback() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{
+                "name":"assets",
+                "owner":{"login":"team"}
+            }
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-login", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.repository().owner(), "team");
+    }
+
+    #[test]
+    fn codeberg_repository_missing_full_name_and_name_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"owner":{"username":"team"}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-noname", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn codeberg_push_event_no_ref_falls_back_to_empty_and_fails_validation() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-noref2", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRevisionPayload)
+        ));
+    }
+
+    #[test]
+    fn codeberg_repository_renamed_without_changes_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"renamed",
+            "repository":{"full_name":"team/new-assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-ren", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn codeberg_adapter_repository_missing_owner_fields_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"name":"assets","owner":{}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-nofields", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn codeberg_adapter_check_allows_write_access() {
+        let mut catalog = BuiltInProviderCatalog::new("codeberg-system").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("codeberg-writer").unwrap();
+        let metadata = configured_metadata(
+            repository.clone(),
+            RepositoryVisibility::Private,
+            "main",
+            "https://codeberg.org/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::new(),
+                HashSet::from([subject.clone()]),
+            ))
+            .unwrap();
+        let adapter = CodebergAdapter::new(catalog, None);
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let request = AuthorizationRequest::new(
+            subject.clone(),
+            repository,
+            revision,
+            RepositoryAccess::Write,
+        );
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Allow(subject));
+    }
+
+    #[test]
+    fn codeberg_adapter_new_is_const() {
+        let catalog = BuiltInProviderCatalog::new("codeberg-system").unwrap();
+        let adapter = CodebergAdapter::new(catalog, None);
+        assert_eq!(adapter.kind(), ProviderKind::Codeberg);
+    }
+
+    #[test]
+    fn codeberg_repository_full_name_with_extra_dot() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"full_name":"team/a.ssets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-dot", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.repository().name(), "a.ssets");
+    }
+
+    #[test]
+    fn codeberg_adapter_push_with_ref_but_no_repository_name_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"owner":{"username":"team"}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-norepo", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn codeberg_adapter_invalid_json_body_errors() {
+        let mut catalog = BuiltInProviderCatalog::new("codeberg-system").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://codeberg.org/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        // No webhook secret => no HMAC verification
+        let adapter = CodebergAdapter::new(catalog, None);
+        let body = b"not valid json";
+        let request = WebhookRequest::new("push", "delivery-badjson", None, body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidWebhookPayload)
+        ));
+    }
+
+    #[test]
+    fn codeberg_adapter_debug_format() {
+        let catalog = BuiltInProviderCatalog::new("codeberg-system").unwrap();
+        let adapter = CodebergAdapter::new(catalog, None);
+        let debug = format!("{adapter:?}");
+        assert!(debug.contains("CodebergAdapter"));
+    }
+
+    #[test]
+    fn codeberg_adapter_clone_eq() {
+        let adapter = adapter().unwrap();
+        let cloned = adapter.clone();
+        assert_eq!(adapter, cloned);
+    }
+
+    #[test]
+    fn codeberg_unknown_event_with_valid_signature_reaches_match_arm() {
+        let adapter = adapter().unwrap();
+        let body = b"{}";
+        let sig = signature(body);
+        let request =
+            WebhookRequest::new("unknown_event_name", "delivery-unk", sig.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn codeberg_repository_event_with_unknown_action_and_no_signature_check() {
+        let mut catalog = BuiltInProviderCatalog::new("codeberg-system").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Codeberg, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://codeberg.org/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        let adapter = CodebergAdapter::new(catalog, None);
+        let body = br#"{"action":"completely_unknown","repository":{"full_name":"team/assets"}}"#;
+        let request = WebhookRequest::new("repository", "delivery-unk2", None, body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
     }
 }

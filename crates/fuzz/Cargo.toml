@@ -221,5 +221,11 @@ path = "fuzz_targets/shardline/git_tree_walker.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "shardline_xorb_reconstruct"
+path = "fuzz_targets/shardline/xorb_reconstruct.rs"
+test = false
+doc = false
+
 [lints]
 workspace = true

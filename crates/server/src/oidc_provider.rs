@@ -178,7 +178,7 @@ impl OidcProvider {
                 }
             }
         });
-        let _ = self._background_handle.set(handle);
+        drop(self._background_handle.set(handle));
     }
 
     fn get_cached_keys(&self) -> Option<Arc<Vec<Jwk>>> {
@@ -1653,6 +1653,51 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
         // The jsonwebtoken library validates nbf before our custom check runs,
         // so this surfaces as ProviderError rather than our own InvalidToken.
         assert!(result.is_err(), "JWT with future nbf should be rejected");
+    }
+
+    // ── build_decoding_key error paths ────────────────────────────────────
+
+    #[test]
+    fn build_decoding_key_rsa_missing_n_or_e_returns_error() {
+        let jwk = Jwk {
+            kid: "missing-params".to_owned(),
+            key_type: "RSA".to_owned(),
+            n: None,
+            e: None,
+            x_coord: None,
+            y_coord: None,
+        };
+        let result = super::build_decoding_key(&jwk, Algorithm::RS256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_decoding_key_ec_missing_x_or_y_returns_error() {
+        let jwk = Jwk {
+            kid: "missing-ec-params".to_owned(),
+            key_type: "EC".to_owned(),
+            n: None,
+            e: None,
+            x_coord: None,
+            y_coord: None,
+        };
+        let result = super::build_decoding_key(&jwk, Algorithm::ES256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_decoding_key_unsupported_algorithm_returns_error() {
+        let jwk = Jwk {
+            kid: "unsupported".to_owned(),
+            key_type: "RSA".to_owned(),
+            n: Some(TEST_RSA_N.to_owned()),
+            e: Some(TEST_RSA_E.to_owned()),
+            x_coord: None,
+            y_coord: None,
+        };
+        // Use ES256 with RSA params → should fail
+        let result = super::build_decoding_key(&jwk, Algorithm::ES256);
+        assert!(result.is_err());
     }
 
     #[test]

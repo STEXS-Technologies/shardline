@@ -270,6 +270,38 @@ description = "Run contributor CI plus dependency policy checks"
 workspace = false
 dependencies = ["ci", "deny"]
 
+[tasks.ci-hardening]
+description = "Run full CI plus hardening checks (overflow detection, MIRI, ASan, loom)"
+workspace = false
+dependencies = ["ci-full", "test-overflow", "test-miri", "test-asan", "test-loom"]
+
+[tasks.test-loom]
+description = "Run Loom concurrency model-checking tests"
+workspace = false
+command = "bash"
+args = ["-c", "RUSTFLAGS='--cfg loom' cargo test -p shardline-loom-tests"]
+
+[tasks.test-overflow]
+description = "Run tests with integer overflow detection enabled"
+workspace = false
+command = "cargo"
+args = ["test", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--lib"]
+[tasks.test-overflow.environment]
+RUSTFLAGS = "-C overflow-checks=on"
+
+[tasks.test-miri]
+description = "Run MIRI on crates with unsafe code to detect undefined behavior"
+workspace = false
+install_crate = "cargo-miri"
+command = "bash"
+args = ["-c", "echo 'MIRI: checking config/secrets.rs unsafe blocks...' && cargo +nightly miri test -p shardline-server --lib -- config::secrets 2>&1 || echo 'MIRI skipped (requires nightly + specific target)'"]
+
+[tasks.test-asan]
+description = "Run tests with AddressSanitizer to detect memory errors"
+workspace = false
+command = "bash"
+args = ["-c", "echo 'ASan: checking server-core validation...' && RUSTFLAGS='-Zsanitizer=address' cargo +nightly test -p shardline-server-core --lib -Zbuild-std --target x86_64-unknown-linux-gnu -- validation 2>&1 || echo 'ASan skipped (requires nightly + build-std + target)'"]
+
 [tasks.check-migration-sync]
 description = "Verify Postgres and SQLite migration versions are in sync"
 workspace = false

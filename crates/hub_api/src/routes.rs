@@ -5305,4 +5305,452 @@ Bob,"say ""hi"""#;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), HubApiError::RepoNotFound));
     }
+
+    // ------------------------------------------------------------------
+    // repo_revision_info
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_revision_info_returns_siblings() {
+        let content = b"some content";
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/rev-info",
+            "sha_rev_info",
+            &[HubFileEntry {
+                path: "data.txt".into(),
+                size: content.len() as u64,
+                sha: "file_sha".into(),
+                is_lfs: false,
+                inline_content: Some(content.to_vec()),
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_revision_info(
+            State(state),
+            default_headers(),
+            Path((
+                "models".into(),
+                "org".into(),
+                "rev-info".into(),
+                "main".into(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.id, "org/rev-info");
+        assert!(result.sha.is_some());
+        let siblings = result.siblings.as_ref().expect("expected siblings");
+        assert_eq!(siblings.len(), 1);
+        assert_eq!(siblings[0]["rfilename"], "data.txt");
+    }
+
+    #[tokio::test]
+    async fn handler_repo_revision_info_missing_repo() {
+        let (_td, state) = make_test_state();
+        let result = repo_revision_info(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "no".into(), "repo".into(), "main".into())),
+        )
+        .await;
+        assert!(matches!(result, Err(HubApiError::RepoNotFound)));
+    }
+
+    // ------------------------------------------------------------------
+    // repo_delete_compat
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_delete_compat_success() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/compat-del");
+        let state = HubState {
+            store: store.clone(),
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_delete_compat(
+            State(state),
+            default_headers(),
+            Json(RepoDeleteRequest {
+                repo_type: Some(RepoType::Model),
+                name: "org/compat-del".to_owned(),
+                organization: None,
+            }),
+        )
+        .await;
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+        assert!(store.get_repo("org/compat-del").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_repo_delete_compat_with_organization() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/compat-org");
+        let state = HubState {
+            store: store.clone(),
+            auth: None,
+            http_client: None,
+        };
+        let result = repo_delete_compat(
+            State(state),
+            default_headers(),
+            Json(RepoDeleteRequest {
+                repo_type: Some(RepoType::Model),
+                name: "compat-org".to_owned(),
+                organization: Some("org".to_owned()),
+            }),
+        )
+        .await;
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+        assert!(store.get_repo("org/compat-org").unwrap().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // file_tree_at_root
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_file_tree_at_root_returns_files() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Model,
+            "org/tree-root",
+            "sha_root_tree",
+            &[HubFileEntry {
+                path: "README.md".into(),
+                size: 50,
+                sha: "r_sha".into(),
+                is_lfs: false,
+                inline_content: None,
+            }],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let entries = file_tree_at_root(
+            State(state),
+            default_headers(),
+            Path((
+                "models".into(),
+                "org".into(),
+                "tree-root".into(),
+                "main".into(),
+            )),
+            Query(TreeQuery {
+                limit: None,
+                cursor: None,
+                recursive: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!entries.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // git_head
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_git_head_returns_ref() {
+        let (_td, store) =
+            make_store_with_revision(HubRepoType::Model, "org/git-head", "sha_head", &[]);
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = git_head(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "git-head".into())),
+        )
+        .await
+        .unwrap();
+        assert!(result.contains("ref: refs/heads/main"));
+        assert!(result.contains("sha_head"));
+    }
+
+    #[tokio::test]
+    async fn handler_git_head_nonexistent_repo_returns_zero_sha() {
+        let (_td, state) = make_test_state();
+        let result = git_head(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "no".into(), "repo".into())),
+        )
+        .await
+        .unwrap();
+        // No revisions → falls back to the zero SHA fallback
+        assert!(result.contains("0000000000000000000000000000000000000000"));
+    }
+
+    // ------------------------------------------------------------------
+    // repo_create with organization and conflict
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_repo_create_with_organization() {
+        let (_td, state) = make_test_state();
+        let req = RepoCreateRequest {
+            repo_type: RepoType::Model,
+            name: "my-repo".to_owned(),
+            organization: Some("org".to_owned()),
+            private: false,
+            visibility: None,
+        };
+        let (status, json) = repo_create(State(state), default_headers(), Json(req))
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(json.id, "org/my-repo");
+    }
+
+    #[tokio::test]
+    async fn handler_repo_create_conflict() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "ns/existing");
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let req = RepoCreateRequest {
+            repo_type: RepoType::Model,
+            name: "ns/existing".to_owned(),
+            organization: None,
+            private: false,
+            visibility: None,
+        };
+        let result = repo_create(State(state), default_headers(), Json(req)).await;
+        assert!(result.is_ok());
+        let (status, _json) = result.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    // ------------------------------------------------------------------
+    // xet_read_token handler (requires auth)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_xet_read_token_missing_auth_returns_unauthorized() {
+        let (_td, state) = make_test_state();
+        let result = xet_read_token(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "ns".into(), "r".into(), "main".into())),
+        )
+        .await;
+        assert!(matches!(result, Err(HubApiError::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn handler_xet_write_token_missing_auth_returns_unauthorized() {
+        let (_td, state) = make_test_state();
+        let result = xet_write_token(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "ns".into(), "r".into(), "main".into())),
+        )
+        .await;
+        assert!(matches!(result, Err(HubApiError::Unauthorized)));
+    }
+
+    // ------------------------------------------------------------------
+    // repo_response_for_request — Dataset and Space URL logic
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn repo_response_for_request_dataset_url() {
+        use shardline_index::hub::HubRepo;
+        let repo = HubRepo {
+            repo_id: "org/mydata".to_owned(),
+            repo_type: HubRepoType::Dataset,
+            private: false,
+            default_branch: "main".to_owned(),
+            created_at_unix_seconds: 0,
+            updated_at_unix_seconds: 0,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert(axum::http::header::HOST, "hub.example.com".parse().unwrap());
+        let resp = repo_response_for_request(&headers, &repo);
+        assert_eq!(resp.url, "https://hub.example.com/datasets/org/mydata");
+        assert_eq!(resp.repo_type, RepoType::Dataset);
+    }
+
+    #[test]
+    fn repo_response_for_request_space_url() {
+        use shardline_index::hub::HubRepo;
+        let repo = HubRepo {
+            repo_id: "org/myspace".to_owned(),
+            repo_type: HubRepoType::Space,
+            private: false,
+            default_branch: "main".to_owned(),
+            created_at_unix_seconds: 0,
+            updated_at_unix_seconds: 0,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert(axum::http::header::HOST, "hub.example.com".parse().unwrap());
+        let resp = repo_response_for_request(&headers, &repo);
+        assert_eq!(resp.url, "https://hub.example.com/spaces/org/myspace");
+        assert_eq!(resp.repo_type, RepoType::Space);
+    }
+
+    // ------------------------------------------------------------------
+    // webhook_create — duplicate URL and too many events
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_webhook_create_duplicate_url() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-dup");
+        store
+            .create_webhook(
+                "org/wh-dup",
+                "https://example.com/dup",
+                &["push".into()],
+                None,
+            )
+            .unwrap();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let result = webhook_create(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-dup".into())),
+            Json(WebhookCreateRequest {
+                url: "https://example.com/dup".into(),
+                events: vec!["push".into()],
+                secret: None,
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(HubApiError::Conflict(_))));
+    }
+
+    // ------------------------------------------------------------------
+    // lfs_upload and lfs_download handler tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_lfs_upload_and_download_roundtrip() {
+        let oid = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let data = b"lfs file content";
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/lfs-io");
+        let state = HubState {
+            store: store.clone(),
+            auth: None,
+            http_client: None,
+        };
+        // Upload
+        let result = lfs_upload(
+            State(state.clone()),
+            default_headers(),
+            Path(oid.to_owned()),
+            bytes::Bytes::from_static(data),
+        )
+        .await;
+        assert_eq!(result.unwrap(), StatusCode::OK);
+
+        // Download
+        let (status, _headers, downloaded) =
+            lfs_download(State(state), default_headers(), Path(oid.to_owned()))
+                .await
+                .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(downloaded, data);
+    }
+
+    // ------------------------------------------------------------------
+    // dataset_parquet success path
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_dataset_parquet_finds_data_files() {
+        let (_td, store) = make_store_with_revision(
+            HubRepoType::Dataset,
+            "org/ds-parquet",
+            "sha_ds_pq",
+            &[
+                HubFileEntry {
+                    path: "data/train/data.parquet".into(),
+                    size: 1000,
+                    sha: "pq_sha".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+                HubFileEntry {
+                    path: "README.md".into(),
+                    size: 50,
+                    sha: "rm_sha".into(),
+                    is_lfs: false,
+                    inline_content: None,
+                },
+            ],
+        );
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let resp = dataset_parquet(
+            State(state),
+            default_headers(),
+            Path(("org".into(), "ds-parquet".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.files.len(), 1);
+        assert_eq!(resp.files[0].path, "data/train/data.parquet");
+    }
+
+    // ------------------------------------------------------------------
+    // webhook_list with a repo that has webhooks
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handler_webhook_list_with_hooks() {
+        let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-list");
+        store
+            .create_webhook(
+                "org/wh-list",
+                "https://example.com/hook1",
+                &["push".into()],
+                None,
+            )
+            .unwrap();
+        store
+            .create_webhook(
+                "org/wh-list",
+                "https://example.com/hook2",
+                &["push".into()],
+                None,
+            )
+            .unwrap();
+        let state = HubState {
+            store,
+            auth: None,
+            http_client: None,
+        };
+        let resp = webhook_list(
+            State(state),
+            default_headers(),
+            Path(("models".into(), "org".into(), "wh-list".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.webhooks.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // webhook_delete
+    // ------------------------------------------------------------------
 }

@@ -9,7 +9,7 @@ use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord,
     IndexStoreFuture, LifecycleStore, LocalIndexStore, LocalIndexStoreError,
     ProviderRepositoryState, QuarantineCandidate, RecordMutation, RecordTraversal, RetentionHold,
-    WebhookDelivery, XorbId, parse_xet_hash_hex, xet_hash_hex_string,
+    RetentionHoldError, WebhookDelivery, XorbId, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_server_core::{ServerObjectStore, chunk_object_key};
@@ -27,7 +27,10 @@ use shardline_xet_core::xorb_object::{
     xorb_format_test_utils::{ChunkSize, build_raw_xorb},
 };
 
-use super::{ProviderEventsError, ProviderWebhookOutcomeKind, apply_provider_webhook_with_stores};
+use super::{
+    ProviderEventsError, ProviderWebhookOutcomeKind, apply_provider_webhook_with_stores,
+    duplicate_webhook_outcome,
+};
 use shardline_index::LocalRecordStore;
 
 async fn local_latest_record_exists(
@@ -1878,4 +1881,208 @@ impl TestInvariantError {
             message: message.to_string(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests moved from lib.rs: duplicate_webhook_outcome unit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_webhook_outcome_for_deleted() {
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup").unwrap(),
+        RepositoryWebhookEventKind::RepositoryDeleted,
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(outcome.provider, ProviderKind::GitHub);
+    assert_eq!(outcome.owner, "org");
+    assert_eq!(outcome.repo, "repo");
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RepositoryDeleted
+    );
+    assert_eq!(outcome.affected_file_versions, 0);
+    assert_eq!(outcome.affected_chunks, 0);
+    assert_eq!(outcome.applied_holds, 0);
+    assert_eq!(outcome.retention_seconds, None);
+}
+
+#[test]
+fn duplicate_webhook_outcome_for_renamed() {
+    let new_repo = RepositoryRef::new(ProviderKind::GitHub, "new-org", "new-repo").unwrap();
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup-rename").unwrap(),
+        RepositoryWebhookEventKind::RepositoryRenamed {
+            new_repository: new_repo,
+        },
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RepositoryRenamed {
+            new_owner: "new-org".to_owned(),
+            new_repo: "new-repo".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn duplicate_webhook_outcome_for_revision_pushed() {
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup-rev").unwrap(),
+        RepositoryWebhookEventKind::RevisionPushed {
+            revision: RevisionRef::new("refs/heads/main").unwrap(),
+        },
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RevisionPushed {
+            revision: "refs/heads/main".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn duplicate_webhook_outcome_for_access_changed() {
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup-access").unwrap(),
+        RepositoryWebhookEventKind::AccessChanged,
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::AccessChanged
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests moved from lib.rs: ProviderEventsError display tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn provider_events_error_display_all_variants() {
+    let cases: &[(ProviderEventsError, &str)] = &[
+        (ProviderEventsError::Overflow, "overflow"),
+        (ProviderEventsError::InvalidContentHash, "hash"),
+        (
+            ProviderEventsError::InvalidProviderWebhookPayload,
+            "payload",
+        ),
+        (
+            ProviderEventsError::ConflictingRenameTargetRecord,
+            "conflicting",
+        ),
+        (
+            ProviderEventsError::Json(
+                serde_json::from_str::<serde_json::Value>("invalid json...").unwrap_err(),
+            ),
+            "json",
+        ),
+        (
+            ProviderEventsError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+            "bounds",
+        ),
+        (
+            ProviderEventsError::RetentionHold(RetentionHoldError::EmptyReason),
+            "hold",
+        ),
+        (
+            ProviderEventsError::WebhookDelivery(
+                shardline_index::WebhookDeliveryError::EmptyDeliveryId,
+            ),
+            "delivery",
+        ),
+        (
+            ProviderEventsError::ObjectStore(
+                shardline_server_core::ServerObjectStoreError::NotFound,
+            ),
+            "object",
+        ),
+    ];
+    for (error, substring) in cases {
+        let msg = error.to_string();
+        assert!(!msg.is_empty(), "empty display for {error:?}");
+        assert!(
+            msg.contains(substring),
+            "expected '{substring}' in '{msg}' from {error:?}"
+        );
+    }
+}
+
+#[test]
+fn provider_events_error_xet_adapter_display() {
+    let error = ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_index_store_display() {
+    let error = ProviderEventsError::IndexStore(
+        shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_memory_index_store_display() {
+    let error =
+        ProviderEventsError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned);
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_memory_record_store_display() {
+    let error = ProviderEventsError::MemoryRecordStore(
+        shardline_index::MemoryRecordStoreError::LockPoisoned,
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_parse_stored_file_record_display() {
+    let error = ProviderEventsError::ParseStoredFileRecord(
+        shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+            observed_bytes: 999,
+            maximum_bytes: 100,
+        },
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_postgres_metadata_display() {
+    let error = ProviderEventsError::PostgresMetadata(
+        shardline_index::PostgresMetadataStoreError::HashParse(
+            shardline_protocol::HashParseError::InvalidCharacter,
+        ),
+    );
+    let msg = error.to_string();
+    assert_eq!(msg, "postgres metadata adapter operation failed");
+}
+
+#[test]
+fn provider_events_error_xet_adapter_display_nonempty() {
+    let error = ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+    assert!(msg.contains("xet"));
+}
+
+#[test]
+fn provider_events_error_index_store_display_nonempty() {
+    let error = ProviderEventsError::IndexStore(
+        shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
 }

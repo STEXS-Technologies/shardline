@@ -596,4 +596,56 @@ mod tests {
             Err(ServerError::InvalidAuthorizationHeader)
         ));
     }
+
+    // ── ServerAuth authorize_token method ──────────────────────────────────
+
+    #[test]
+    fn server_auth_authorize_token_with_no_matching_token_provider() {
+        // When auth is built with Local provider and no token is in the header,
+        // it should go through the provider_path.
+        use shardline_server_core::auth::PassthroughProvider;
+        let provider = Box::new(PassthroughProvider);
+        let auth = super::ServerAuth::from_provider(provider);
+
+        // Empty headers → MissingAuthorization
+        let result = auth.authorize(&HeaderMap::new(), TokenScope::Read);
+        assert!(matches!(result, Err(ServerError::MissingAuthorization)));
+    }
+
+    #[test]
+    fn server_auth_authorize_token_with_invalid_scheme() {
+        use shardline_server_core::auth::PassthroughProvider;
+        let provider = Box::new(PassthroughProvider);
+        let auth = super::ServerAuth::from_provider(provider);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Basic token"));
+        let result = auth.authorize(&headers, TokenScope::Read);
+        assert!(matches!(
+            result,
+            Err(ServerError::InvalidAuthorizationHeader)
+        ));
+    }
+
+    // ── scope_allows edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn scope_allows_with_same_scope_read_read() {
+        assert!(super::scope_allows(TokenScope::Read, TokenScope::Read));
+    }
+
+    #[test]
+    fn scope_allows_with_same_scope_write_write() {
+        assert!(super::scope_allows(TokenScope::Write, TokenScope::Write));
+    }
+
+    #[test]
+    fn scope_allows_write_grants_read() {
+        assert!(super::scope_allows(TokenScope::Write, TokenScope::Read));
+    }
+
+    #[test]
+    fn scope_allows_read_denies_write() {
+        assert!(!super::scope_allows(TokenScope::Read, TokenScope::Write));
+    }
 }

@@ -810,3 +810,129 @@ fn provider_repository_state_from_row(
             .transpose()?,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_protocol::{ChunkRange, HashParseError, ShardlineHash};
+
+    use super::{PostgresFileReconstructionRecord, PostgresReconstructionTermRecord};
+    use crate::{FileReconstruction, ReconstructionTerm, StoredObjectId, XorbId};
+
+    // ------------------------------------------------------------------
+    // PostgresReconstructionTermRecord: private type, tested in-module
+    // ------------------------------------------------------------------
+    #[test]
+    fn reconstruction_term_record_roundtrips() {
+        let hash = ShardlineHash::from_bytes([42; 32]);
+        let range = ChunkRange::new(2, 5).unwrap();
+        let term = ReconstructionTerm::new(StoredObjectId::new(hash), range, 512);
+
+        let record = PostgresReconstructionTermRecord::from_domain(&term);
+        assert_eq!(record.object_hash.len(), 64);
+        assert_eq!(record.chunk_start, 2);
+        assert_eq!(record.chunk_end_exclusive, 5);
+        assert_eq!(record.unpacked_length, 512);
+
+        let restored = record.into_domain().expect("valid reconstruction term");
+        assert_eq!(restored, term);
+    }
+
+    #[test]
+    fn reconstruction_term_record_invalid_hash_returns_error() {
+        let record = PostgresReconstructionTermRecord {
+            object_hash: "not-a-valid-hex-string".into(),
+            chunk_start: 0,
+            chunk_end_exclusive: 1,
+            unpacked_length: 100,
+        };
+        let result = record.into_domain();
+        assert!(result.is_err());
+        // "not-a-valid-hex-string" has length 22 (< 64), so it fails with InvalidLength
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::HashParse(
+                HashParseError::InvalidLength
+            ))
+        ));
+    }
+
+    #[test]
+    fn reconstruction_term_record_invalid_hash_char_returns_error() {
+        // 64 characters, but contains uppercase
+        let hex_hash = "A".repeat(64);
+        let record = PostgresReconstructionTermRecord {
+            object_hash: hex_hash,
+            chunk_start: 0,
+            chunk_end_exclusive: 1,
+            unpacked_length: 100,
+        };
+        let result = record.into_domain();
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::HashParse(
+                HashParseError::InvalidCharacter
+            ))
+        ));
+    }
+
+    #[test]
+    fn reconstruction_term_record_invalid_range_returns_error() {
+        let hex_hash = "a".repeat(64);
+        let record = PostgresReconstructionTermRecord {
+            object_hash: hex_hash,
+            chunk_start: 5,
+            chunk_end_exclusive: 3,
+            unpacked_length: 100,
+        };
+        let result = record.into_domain();
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::Range(_))
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // PostgresFileReconstructionRecord: pub(super) type
+    // ------------------------------------------------------------------
+    #[test]
+    fn file_reconstruction_record_multiple_terms_roundtrips() {
+        let hash_a = ShardlineHash::from_bytes([1; 32]);
+        let hash_b = ShardlineHash::from_bytes([2; 32]);
+        let range_a = ChunkRange::new(0, 1).unwrap();
+        let range_b = ChunkRange::new(1, 3).unwrap();
+        let reconstruction = FileReconstruction::new(vec![
+            ReconstructionTerm::new(StoredObjectId::new(hash_a), range_a, 64),
+            ReconstructionTerm::new(StoredObjectId::new(hash_b), range_b, 128),
+        ]);
+        let record = PostgresFileReconstructionRecord::from_domain(&reconstruction);
+        let restored = record.into_domain().expect("valid reconstruction");
+        assert_eq!(restored.terms().len(), 2);
+    }
+
+    #[test]
+    fn file_reconstruction_record_empty_terms() {
+        let reconstruction = FileReconstruction::new(vec![]);
+        let record = PostgresFileReconstructionRecord::from_domain(&reconstruction);
+        let restored = record.into_domain().expect("empty terms is valid");
+        assert!(restored.terms().is_empty());
+    }
+
+    #[test]
+    fn file_reconstruction_record_invalid_hash_in_terms_returns_error() {
+        let record = PostgresFileReconstructionRecord {
+            terms: vec![PostgresReconstructionTermRecord {
+                object_hash: "bad".into(),
+                chunk_start: 0,
+                chunk_end_exclusive: 1,
+                unpacked_length: 0,
+            }],
+        };
+        let result = record.into_domain();
+        assert!(matches!(
+            result,
+            Err(super::PostgresMetadataStoreError::HashParse(_))
+        ));
+    }
+}

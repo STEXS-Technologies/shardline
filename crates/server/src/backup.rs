@@ -628,6 +628,18 @@ mod tests {
         assert!(json.contains("1024"));
     }
 
+    #[test]
+    fn backup_manifest_object_entry_serialize_with_long_checksum() {
+        let long_checksum = "a".repeat(64);
+        let entry = BackupManifestObjectEntry {
+            key: "xorbs/ab/abcdef".to_owned(),
+            length: 2048,
+            checksum: Some(long_checksum.clone()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(&long_checksum));
+    }
+
     // ── BackupManifestReport try_from conversions ────────────────────────
 
     #[test]

@@ -284,3 +284,238 @@ impl<W: std::io::Write> std::io::Write for HashedWrite<W> {
         self.writer.flush()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn default_is_all_zeros() {
+        let h = DataHash::default();
+        assert_eq!(*h, [0u64; 4]);
+    }
+
+    #[test]
+    fn from_u64_array() {
+        let arr = [1u64, 2, 3, 4];
+        let h = DataHash::from(arr);
+        assert_eq!(*h, arr);
+    }
+
+    #[test]
+    fn from_u8_32_and_back() {
+        let arr = [0xABu8; 32];
+        let h = DataHash::from(arr);
+        let back: [u8; 32] = h.into();
+        assert_eq!(arr, back);
+    }
+
+    #[test]
+    fn from_ref_u8_32() {
+        let arr = [0xCDu8; 32];
+        let h = DataHash::from(&arr);
+        let back: [u8; 32] = h.into();
+        assert_eq!(arr, back);
+    }
+
+    #[test]
+    fn from_slice_valid() {
+        let bytes = vec![42u8; 32];
+        let h = DataHash::from_slice(&bytes).unwrap();
+        let back: [u8; 32] = h.into();
+        assert_eq!(&bytes, &back[..]);
+    }
+
+    #[test]
+    fn from_slice_wrong_length() {
+        assert!(DataHash::from_slice(&[0u8; 31]).is_err());
+        assert!(DataHash::from_slice(&[0u8; 33]).is_err());
+    }
+
+    #[test]
+    fn try_from_slice() {
+        let bytes = [7u8; 32];
+        let h = DataHash::try_from(bytes.as_slice()).unwrap();
+        let back: [u8; 32] = h.into();
+        assert_eq!(bytes, back);
+        assert!(DataHash::try_from(&[0u8; 16][..]).is_err());
+    }
+
+    #[test]
+    fn hex_roundtrip() {
+        let arr = [0xDEADBEEFu64, 0xCAFEBABE, 0x12345678, 0x9ABCDEF0];
+        let h = DataHash::from(arr);
+        let hex = h.hex();
+        assert_eq!(hex.len(), 64);
+        let h2 = DataHash::from_hex(&hex).unwrap();
+        assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn from_hex_invalid_length() {
+        assert!(DataHash::from_hex("abc").is_err());
+        assert!(DataHash::from_hex(&"a".repeat(63)).is_err());
+        assert!(DataHash::from_hex(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn from_hex_invalid_chars() {
+        assert!(DataHash::from_hex(&"z".repeat(64)).is_err());
+        assert!(DataHash::from_hex(&"xyz".repeat(22)[..64]).is_err());
+    }
+
+    #[test]
+    fn from_hex_error_has_proper_display_and_source() {
+        use std::error::Error;
+        let err = DataHashHexParseError;
+        assert_eq!(err.to_string(), "Invalid hex input for DataHash");
+        assert!(err.source().is_none());
+
+        let from_parse: DataHashHexParseError = "garbage".parse::<u64>().unwrap_err().into();
+        assert_eq!(from_parse.to_string(), "Invalid hex input for DataHash");
+    }
+
+    #[test]
+    fn bytes_parse_error_display() {
+        let err = DataHashBytesParseError;
+        assert_eq!(err.to_string(), "Invalid bytes input for DataHash");
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn display_and_lower_hex() {
+        let h = DataHash::from([1u64, 2, 3, 4]);
+        assert_eq!(format!("{h}"), format!("{h:x}"));
+        assert_eq!(format!("{h}").len(), 64);
+    }
+
+    #[test]
+    fn debug_output_is_hex() {
+        let h = DataHash::from([0u64; 4]);
+        assert_eq!(
+            format!("{h:?}"),
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn ord_and_eq() {
+        let a = DataHash::from([1u64, 0, 0, 0]);
+        let b = DataHash::from([2u64, 0, 0, 0]);
+        assert!(a < b);
+        assert!(b > a);
+        assert_eq!(a, a);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn rem_operator() {
+        let h = DataHash::from([0, 0, 0, 10]);
+        assert_eq!(h % 3, 1);
+        assert_eq!(h % 5, 0);
+        assert_eq!(h % 10, 0);
+    }
+
+    #[test]
+    fn as_ref_bytes() {
+        let h = DataHash::from([1u64, 2, 3, 4]);
+        let bytes: &[u8] = h.as_ref();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn as_ref_data_hash() {
+        let h = DataHash::from([1u64, 2, 3, 4]);
+        let r: &DataHash = h.as_ref();
+        assert_eq!(*r, h);
+    }
+
+    #[test]
+    fn into_vec_u8() {
+        let h = DataHash::from([0xDEADBEEFu64, 0xCAFEBABE, 0x12345678, 0x9ABCDEF0]);
+        let vec: Vec<u8> = h.into();
+        assert_eq!(vec.len(), 32);
+        let back = DataHash::from_slice(&vec).unwrap();
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn hash_impl_consistent() {
+        let a = DataHash::from([1u64, 2, 3, 4]);
+        let b = DataHash::from([1u64, 2, 3, 4]);
+        let mut ha = DefaultHasher::new();
+        let mut hb = DefaultHasher::new();
+        a.hash(&mut ha);
+        b.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
+    }
+
+    #[test]
+    fn deref_mut() {
+        let mut h = DataHash::from([0u64; 4]);
+        h[0] = 42;
+        assert_eq!(h[0], 42);
+    }
+
+    #[test]
+    fn as_bytes() {
+        let h = DataHash::from([0x0102030405060708u64, 0, 0, 0]);
+        let bytes = h.as_bytes();
+        assert_eq!(bytes.len(), 32);
+        let first = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        assert_eq!(first, 0x0102030405060708);
+    }
+
+    #[test]
+    fn compute_data_hash_consistent() {
+        assert_eq!(compute_data_hash(b"hello"), compute_data_hash(b"hello"));
+        assert_ne!(compute_data_hash(b"hello"), compute_data_hash(b"world"));
+        assert_ne!(compute_data_hash(b""), DataHash::default());
+    }
+
+    #[test]
+    fn test_compute_internal_node_hash() {
+        assert_eq!(
+            compute_internal_node_hash(b"test"),
+            compute_internal_node_hash(b"test")
+        );
+        assert_ne!(
+            compute_internal_node_hash(b"test"),
+            compute_data_hash(b"test")
+        );
+    }
+
+    #[test]
+    fn hashed_write_basic() {
+        let data = b"hashed write works";
+        let mut w = HashedWrite::new(Vec::new());
+        w.write_all(data).unwrap();
+        assert_eq!(w.hash(), compute_data_hash(data));
+        assert_eq!(w.into_inner(), data);
+    }
+
+    #[test]
+    fn hashed_write_empty() {
+        let mut w = HashedWrite::new(Vec::new());
+        assert_eq!(w.hash(), compute_data_hash(b""));
+    }
+
+    #[test]
+    fn hashed_write_multiple_writes() {
+        let mut w = HashedWrite::new(Vec::new());
+        w.write_all(b"part1").unwrap();
+        w.write_all(b"part2").unwrap();
+        assert_eq!(w.hash(), compute_data_hash(b"part1part2"));
+        w.flush().unwrap();
+    }
+
+    #[test]
+    fn hashed_write_flush() {
+        let mut w = HashedWrite::new(Vec::new());
+        w.write_all(b"flush").unwrap();
+        w.flush().unwrap();
+    }
+}

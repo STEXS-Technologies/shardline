@@ -7,7 +7,8 @@
         clippy::indexing_slicing,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::panic
     )
 )]
 
@@ -43,12 +44,13 @@ mod bench;
 mod command;
 mod config;
 mod db;
+pub mod entry;
 mod fsck;
 mod gc;
 mod gc_schedule;
 mod hold;
-mod local_output;
-mod local_path;
+pub mod local_output;
+pub mod local_path;
 mod providerless;
 mod rebuild;
 mod repair;

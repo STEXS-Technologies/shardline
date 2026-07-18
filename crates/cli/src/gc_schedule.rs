@@ -1447,4 +1447,200 @@ mod tests {
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
+
+    // ── GcScheduleInstallOptions Default ────────────────────────────────
+
+    #[test]
+    fn install_options_default_values() {
+        let opts = super::GcScheduleInstallOptions::default();
+        assert_eq!(opts.output_dir, PathBuf::from("/etc/systemd/system"));
+        assert_eq!(opts.unit_prefix, "shardline-gc");
+        assert_eq!(opts.calendar, "*-*-* 03:17:00");
+        assert_eq!(opts.retention_seconds, 86_400);
+        assert_eq!(opts.binary_path, PathBuf::from("/usr/local/bin/shardline"));
+        assert_eq!(opts.env_file, PathBuf::from("/etc/shardline/shardline.env"));
+        assert_eq!(opts.working_directory, PathBuf::from("/var/lib/shardline"));
+        assert_eq!(opts.user, "shardline");
+        assert_eq!(opts.group, "shardline");
+        assert!(!opts.dry_run);
+    }
+
+    // ── uninstall_gc_schedule validation ────────────────────────────────
+
+    #[test]
+    fn uninstall_gc_schedule_rejects_empty_prefix() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::uninstall_gc_schedule(sandbox.path(), "");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::EmptyValue {
+                field: "unit-prefix"
+            })
+        ));
+    }
+
+    #[test]
+    fn uninstall_gc_schedule_rejects_control_chars_in_prefix() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::uninstall_gc_schedule(sandbox.path(), "test\nunit");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters {
+                field: "unit-prefix"
+            })
+        ));
+    }
+
+    #[test]
+    fn uninstall_gc_schedule_removes_existing_files() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let svc = sandbox.path().join("test.service");
+        let tim = sandbox.path().join("test.timer");
+        std::fs::write(&svc, b"service").unwrap();
+        std::fs::write(&tim, b"timer").unwrap();
+
+        let result = super::uninstall_gc_schedule(sandbox.path(), "test");
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert!(report.removed_service);
+        assert!(report.removed_timer);
+        assert!(!svc.exists());
+        assert!(!tim.exists());
+    }
+
+    // ── ensure_local_file_size_within_limit ─────────────────────────────
+
+    #[test]
+    fn ensure_local_file_size_within_limit_accepts_exact_max() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("test.txt");
+        let result = super::ensure_local_file_size_within_limit(
+            "test",
+            &path,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_local_file_size_within_limit_rejects_oversized() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("oversized.txt");
+        let result = super::ensure_local_file_size_within_limit(
+            "test",
+            &path,
+            100_000,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::LocalFileTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn ensure_local_file_size_within_limit_accepts_small() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("small.txt");
+        let result = super::ensure_local_file_size_within_limit(
+            "test",
+            &path,
+            100,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── ensure_regular_local_file_path ──────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_regular_local_file_path_rejects_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::ensure_regular_local_file_path(sandbox.path());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_regular_local_file_path_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("real.txt");
+        std::fs::write(&target, b"content").unwrap();
+        let link = sandbox.path().join("link.txt");
+        symlink(&target, &link).unwrap();
+
+        let result = super::ensure_regular_local_file_path(&link);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_regular_local_file_path_accepts_regular_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("regular.txt");
+        std::fs::write(&path, b"content").unwrap();
+
+        let result = super::ensure_regular_local_file_path(&path);
+        assert!(result.is_ok());
+    }
+
+    // ── read_bounded_local_text_file with trailing data ─────────────────
+
+    #[test]
+    fn read_bounded_local_text_file_rejects_trailing_data() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("trailing.txt");
+        let mut content = b"KEY=VALUE".to_vec();
+        content.push(b'\n');
+        std::fs::write(&path, &content).unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let result = super::read_bounded_local_text_file(
+            "test",
+            &path,
+            &mut file,
+            content.len() as u64 - 1, // expect 1 less byte
+        );
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::LocalFileLengthMismatch { .. })
+        ));
+    }
+
+    // ── read_text_file_with_limit rejects missing file ──────────────────
+
+    #[test]
+    fn read_text_file_with_limit_rejects_missing_file() {
+        let result = super::read_text_file_with_limit(
+            "test",
+            Path::new("/nonexistent-gc-test-file"),
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(result.is_err());
+    }
+
+    // ── validate_text_field with edge values ────────────────────────────
+
+    #[test]
+    fn validate_text_field_rejects_newline() {
+        let result = super::validate_text_field("test", "line1\nline2");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "test" })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_tab() {
+        let result = super::validate_text_field("test", "col1\tcol2");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "test" })
+        ));
+    }
 }

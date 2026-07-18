@@ -1308,3 +1308,121 @@ fn repository_access_write_scope() {
         RepositoryAccess::Write
     );
 }
+
+// ── authorize_bootstrap_key ────────────────────────────────────────────
+
+#[test]
+fn provider_authorize_bootstrap_key_validates_api_key() {
+    let issuer = ProviderTokenIssuer::new(
+        "issuer",
+        b"a]32-byte-signing-key-for-testing!",
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer,
+        registry: ProviderRegistry {
+            providers: HashMap::new(),
+        },
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-shardline-provider-key",
+        HeaderValue::from_static("bootstrap"),
+    );
+    let result = service.authorize_bootstrap_key(&headers);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn provider_authorize_bootstrap_key_rejects_missing_key() {
+    let issuer = ProviderTokenIssuer::new(
+        "issuer",
+        b"a]32-byte-signing-key-for-testing!",
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer,
+        registry: ProviderRegistry {
+            providers: HashMap::new(),
+        },
+    };
+
+    let result = service.authorize_bootstrap_key(&HeaderMap::new());
+    assert!(matches!(result, Err(ProviderServiceError::MissingApiKey)));
+}
+
+// ── ProviderServiceError Debug ─────────────────────────────────────────
+
+#[test]
+fn provider_service_error_debug_all_variants() {
+    let variants: Vec<ProviderServiceError> = vec![
+        ProviderServiceError::EmptyApiKey,
+        ProviderServiceError::ApiKeyTooLarge,
+        ProviderServiceError::MissingApiKey,
+        ProviderServiceError::InvalidApiKey,
+        ProviderServiceError::DuplicateProvider,
+        ProviderServiceError::MissingWebhookSecret,
+        ProviderServiceError::EmptyWebhookSecret,
+        ProviderServiceError::UnknownProvider,
+        ProviderServiceError::Denied,
+    ];
+    for variant in variants {
+        let debug = format!("{variant:?}");
+        assert!(!debug.is_empty());
+    }
+}
+
+// ── BuiltInProvider kind() for all variants ────────────────────────────
+
+#[test]
+fn built_in_provider_kind_returns_correct_kind() {
+    let catalog = BuiltInProviderCatalog::new("test-app").unwrap();
+    let generic = super::BuiltInProvider::Generic(shardline_vcs::GenericAdapter::new(
+        catalog,
+        Some(SecretString::from_secret("secret")),
+    ));
+    assert_eq!(generic.kind(), ProviderKind::Generic);
+}
+
+// ── ProviderTokenService parse_webhook with unknown provider ───────────
+
+#[test]
+fn provider_parse_webhook_unknown_provider_returns_error() {
+    let issuer = ProviderTokenIssuer::new(
+        "issuer",
+        b"a]32-byte-signing-key-for-testing!",
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let service = ProviderTokenService {
+        api_key: SecretBytes::from_slice(b"bootstrap"),
+        issuer,
+        registry: ProviderRegistry {
+            providers: HashMap::new(),
+        },
+    };
+
+    let result = service.parse_webhook(&HeaderMap::new(), "unknown-provider", b"{}");
+    assert!(matches!(result, Err(ProviderServiceError::UnknownProvider)));
+}
+
+// ── ProviderServiceError Debug for config and mismatch variants ────────
+
+#[test]
+fn provider_service_error_config_variants_debug() {
+    let too_large = ProviderServiceError::ConfigTooLarge {
+        observed_bytes: 100,
+        maximum_bytes: 50,
+    };
+    let debug = format!("{too_large:?}");
+    assert!(debug.contains("observed_bytes") || debug.contains("ConfigTooLarge"));
+
+    let mismatch = ProviderServiceError::ConfigLengthMismatch;
+    let debug = format!("{mismatch:?}");
+    assert!(!debug.is_empty());
+}

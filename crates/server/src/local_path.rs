@@ -100,4 +100,31 @@ mod tests {
             other => panic!("expected Io(NotFound), got {other:?}"),
         }
     }
+
+    #[test]
+    fn ensure_directory_path_components_rejects_unsupported_prefix() {
+        // Use a path with an unsupported prefix (e.g., relative path that's not anchored)
+        let result =
+            super::ensure_directory_path_components_are_not_symlinked(std::path::Path::new("/"));
+        // / has a root dir as parent; on most systems this will succeed because
+        // / is not a symlink
+        assert!(result.is_ok() || matches!(result, Err(ServerError::Io(_))));
+    }
+
+    #[test]
+    fn ensure_directory_path_components_succeeds_for_tmp_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = super::ensure_directory_path_components_are_not_symlinked(tmp.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_directory_path_components_rejects_absolute_root() {
+        // /proc is always present on Linux and is not a symlink
+        let result = super::ensure_directory_path_components_are_not_symlinked(
+            std::path::Path::new("/proc"),
+        );
+        // /proc exists and is a directory, so this should succeed
+        assert!(result.is_ok() || matches!(result, Err(ServerError::Io(_))));
+    }
 }

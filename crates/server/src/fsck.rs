@@ -182,6 +182,22 @@ mod tests {
         ));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_fsck_succeeds_on_valid_local_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bind_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let chunk_size = NonZeroUsize::new(4096).unwrap();
+        let config = ServerConfig::new(
+            bind_addr,
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        );
+        let result = run_fsck(config).await;
+        // With a valid temp directory, fsck should succeed (no records to scan)
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn fsck_re_exports_are_accessible() {
         // Verify that the re-exported types compile and are accessible.

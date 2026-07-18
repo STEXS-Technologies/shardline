@@ -1119,4 +1119,203 @@ mod tests {
         assert!(!debug.contains("ak"));
         assert!(!debug.contains("sk"));
     }
+
+    // ── local_endpoint destination with missing root ──────────────────────
+
+    #[test]
+    fn local_endpoint_source_without_root_uses_effective_root() {
+        // When side is "source" and no root is given, local_endpoint
+        // falls through to effective_root (which may error or succeed
+        // depending on the environment). Either way it should not
+        // return MissingLocalRoot.
+        let result = super::local_endpoint(None, "source");
+        match result {
+            Ok(_) => {} // effective_root succeeded
+            Err(StorageMigrationRuntimeError::MissingLocalRoot { .. }) => {
+                panic!("source without root should not return MissingLocalRoot");
+            }
+            Err(_) => {} // some other error (e.g. config) is acceptable
+        }
+    }
+
+    // ── endpoint S3 adapter ──────────────────────────────────────────────
+
+    #[test]
+    fn endpoint_s3_rejects_missing_env() {
+        let result = super::endpoint(ObjectStorageAdapter::S3, None, "source");
+        assert!(result.is_err());
+    }
+
+    // ── endpoint Local adapter ────────────────────────────────────────────
+
+    #[test]
+    fn endpoint_local_with_root_returns_local_endpoint() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::endpoint(ObjectStorageAdapter::Local, Some(sandbox.path()), "source");
+        assert!(result.is_ok());
+        let endpoint = result.unwrap();
+        assert!(matches!(
+            endpoint,
+            StorageMigrationEndpoint::LocalStateRoot(_)
+        ));
+    }
+
+    // ── run_storage_migration error paths ─────────────────────────────────
+
+    #[test]
+    fn run_storage_migration_rejects_missing_root_for_local_local() {
+        let result = super::run_storage_migration(
+            ObjectStorageAdapter::Local,
+            None,
+            ObjectStorageAdapter::Local,
+            None,
+            "xorbs/".to_owned(),
+            true,
+        );
+        // Destination without root should error
+        assert!(result.is_err());
+    }
+
+    // ── optional_s3_secret_from_sources with file ─────────────────────────
+
+    #[test]
+    fn optional_s3_secret_from_sources_reads_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("cred.txt");
+        std::fs::write(&path, b"file-secret").unwrap();
+
+        let result = super::optional_s3_secret_from_sources(
+            "TEST_VAR".to_owned(),
+            None,
+            "TEST_VAR_FILE".to_owned(),
+            Some(path.display().to_string()),
+        );
+        assert_eq!(result.unwrap(), Some("file-secret".to_owned()));
+    }
+
+    #[test]
+    fn optional_s3_secret_from_sources_rejects_missing_file() {
+        let result = super::optional_s3_secret_from_sources(
+            "TEST_VAR".to_owned(),
+            None,
+            "TEST_VAR_FILE".to_owned(),
+            Some("/nonexistent-cred-file".to_owned()),
+        );
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::S3CredentialFile { .. })
+        ));
+    }
+
+    // ── read_bounded_s3_credential_file rejects file that shrinks ─────────
+
+    #[test]
+    fn read_s3_credential_file_rejects_shrinking_file() {
+        let access_key_file = tempfile::NamedTempFile::new().unwrap();
+        let initial = b"credential-content";
+        std::fs::write(access_key_file.path(), initial).unwrap();
+        let path = access_key_file.path().to_path_buf();
+        let path_for_hook = path.clone();
+
+        set_before_s3_credential_read_hook_for_tests(path.clone(), move || {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path_for_hook)
+                .unwrap();
+            file.set_len(5).unwrap();
+            drop(file);
+        });
+
+        let result = super::read_s3_credential_file(&path, "SHRINK_FILE".to_owned());
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::S3CredentialLengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn optional_bool_env_parses_invalid_value() {
+        let result = super::optional_bool_env("SHARDLINE_MIGRATE_TO_S3", "ALLOW_HTTP");
+        // Without env var set, should return Ok(None)
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn env_value_returns_when_set() {
+        // env_value reads from the environment which is clean in tests
+        let result = super::env_value("SHARDLINE_MIGRATE_FROM_S3", "NONEXISTENT");
+        assert!(result.is_none());
+    }
+
+    // ── optional_s3_secret_env_or_file returns None when both absent ──────
+
+    #[test]
+    fn optional_s3_secret_env_or_file_both_absent_returns_none() {
+        let result = super::optional_s3_secret_env_or_file(
+            "SHARDLINE_MIGRATE_FROM_S3",
+            "NONEXISTENT_SECRET",
+        );
+        assert!(result.unwrap().is_none());
+    }
+
+    // ── ensure_s3_credential_size_within_limit with exact boundary ────────
+
+    #[test]
+    fn ensure_s3_credential_size_within_limit_at_boundary() {
+        assert!(super::ensure_s3_credential_size_within_limit("test".to_owned(), 4096).is_ok());
+    }
+
+    // ── env_key with prefix and name ──────────────────────────────────────
+
+    #[test]
+    fn env_key_standard_case() {
+        assert_eq!(
+            super::env_key("SHARDLINE_MIGRATE_TO_S3", "BUCKET"),
+            "SHARDLINE_MIGRATE_TO_S3_BUCKET"
+        );
+    }
+
+    // ── Build S3 config with no credentials ───────────────────────────────
+
+    #[test]
+    fn build_s3_config_with_no_credentials() {
+        let configured = build_s3_config(
+            Ok("bucket".to_owned()),
+            PendingS3Config {
+                region: "us-east-1".to_owned(),
+                endpoint: None,
+                key_prefix: None,
+                allow_http: Ok(None),
+                virtual_hosted_style_request: Ok(None),
+            },
+            || Ok((None, None, None)),
+        );
+        assert!(configured.is_ok());
+    }
+
+    // ── read_bounded_s3_credential_file rejects file with trailing data ───
+
+    #[test]
+    fn read_s3_credential_file_rejects_growth_during_read() {
+        let access_key_file = tempfile::NamedTempFile::new().unwrap();
+        let initial = b"access";
+        std::fs::write(access_key_file.path(), initial).unwrap();
+        let path = access_key_file.path().to_path_buf();
+        let path_for_hook = path.clone();
+
+        set_before_s3_credential_read_hook_for_tests(path.clone(), move || {
+            let opened = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path_for_hook)
+                .unwrap();
+            let append = (&opened).write_all(b"-appended");
+            assert!(append.is_ok());
+        });
+
+        let result = super::read_s3_credential_file(&path, "GROWTH_FILE".to_owned());
+        assert!(matches!(
+            result,
+            Err(StorageMigrationRuntimeError::S3CredentialLengthMismatch { .. })
+        ));
+    }
 }

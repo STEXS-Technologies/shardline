@@ -996,6 +996,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_zero_length_with_missing_object_returns_not_found() {
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/missing").unwrap();
+        let result = super::object_byte_stream(store, key, 0).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_stream_zero_length_with_nonzero_metadata_returns_stored_length_mismatch() {
+        // Create a file with content but claim length 0
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = LocalObjectStore::new(storage.path_buf()).unwrap();
+        let object_key = ObjectKey::parse("ab/zero-claim-nonzero").unwrap();
+        let path = object_store.path_for_key(&object_key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&path, b"content").await.unwrap();
+
+        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let result = super::object_byte_stream(store, object_key, 0).await;
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ObjectStore(
+                crate::error::ObjectStoreError::StoredLengthMismatch
+            ))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn object_byte_range_stream_with_blackhole_returns_not_found_alt() {
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("test/alt-blackhole-range").unwrap();
+        let range = ByteRange::new(0, 9).unwrap();
+        let result = super::object_byte_range_stream(store, key, 10, range).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_store_byte_range_stream_empty_range_with_nonempty_body_not_possible() {
         // A zero-length range is not representable by ByteRange (start <= end always).
         // Test edge: range at position 0,0 on 1-byte file.

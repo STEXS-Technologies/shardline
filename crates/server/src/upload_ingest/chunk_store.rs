@@ -547,4 +547,24 @@ mod tests {
         assert!(outcome.inserted);
         assert_eq!(outcome.chunk_length, 65536);
     }
+
+    // ------------------------------------------------------------------
+    // put_if_absent_pooled_chunk_buffer with Blackhole — all store types
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn blackhole_put_if_absent_pooled_same_content_inserted() {
+        let store = ServerObjectStore::blackhole();
+        let chunk = ChunkBuffer::Pooled(Bytes::from_static(b"dedup pool blackhole"));
+        let (outcome1, _) = put_if_absent_pooled_chunk_buffer(&store, chunk)
+            .await
+            .unwrap();
+        assert!(outcome1.inserted);
+        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"dedup pool blackhole"));
+        let (outcome2, _) = put_if_absent_pooled_chunk_buffer(&store, chunk2)
+            .await
+            .unwrap();
+        assert!(outcome2.inserted);
+        assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
+    }
 }

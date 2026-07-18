@@ -349,6 +349,26 @@ mod tests {
         assert_eq!(registration.path, path);
     }
 
+    // ── read_bounded_provider_config — UnexpectedEof during initial read ──
+
+    #[test]
+    fn read_bounded_provider_config_initial_read_unexpected_eof() {
+        // Use a pipe or similar that returns UnexpectedEof.
+        // The simplest approach is to claim a length that exceeds the file size
+        // so that read_to_end hits UnexpectedEof before filling capacity.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("config.json");
+        std::fs::write(&file_path, b"short").expect("write");
+
+        let mut file = std::fs::File::open(&file_path).expect("open");
+        // Claim 100 bytes but file only has 5 → read_to_end returns UnexpectedEof
+        let result = read_bounded_provider_config(&file_path, &mut file, 100);
+        assert!(matches!(
+            result,
+            Err(ProviderServiceError::ConfigLengthMismatch)
+        ));
+    }
+
     // ── read_bounded_provider_config — trailing UnexpectedEof ─────────────
 
     #[test]

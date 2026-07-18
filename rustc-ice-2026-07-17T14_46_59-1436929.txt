@@ -1,0 +1,33 @@
+thread 'rustc' panicked at /rustc-dev/daf2e5e18b3abc4311d9da3d96fd64138f43d508/compiler/rustc_ast/src/attr/mod.rs:307:36:
+attribute is missing tokens: Attribute { kind: Normal(NormalAttr { item: AttrItem { unsafety: Default, path: Path { span: crates/server/src/backend.rs:1067:5: 1067:12 (#8913), segments: [PathSegment { ident: rustc_test_entrypoint_marker#8913, id: NodeId(4294967040), args: None }] }, args: Unparsed(Empty) }, tokens: None }), id: AttrId(9729), style: Outer, span: crates/server/src/backend.rs:1067:5: 1067:12 (#8913) }
+stack backtrace:
+   0:     0x7f0cfcbe994b - <std[ce10694b78262c54]::backtrace::Backtrace>::create
+   1:     0x7f0cfcbe9895 - <std[ce10694b78262c54]::backtrace::Backtrace>::force_capture
+   2:     0x7f0cfbbcab21 - std[ce10694b78262c54]::panicking::update_hook::<alloc[655ffa9be629a963]::boxed::Box<rustc_driver_impl[b7363d31c325300f]::install_ice_hook::{closure#1}>>::{closure#0}
+   3:     0x7f0cfcbfd272 - std[ce10694b78262c54]::panicking::panic_with_hook
+   4:     0x7f0cfcbdeaf2 - std[ce10694b78262c54]::panicking::panic_handler::{closure#0}
+   5:     0x7f0cfcbd57b9 - std[ce10694b78262c54]::sys::backtrace::__rust_end_short_backtrace::<std[ce10694b78262c54]::panicking::panic_handler::{closure#0}, !>
+   6:     0x7f0cfcbe044d - __rustc[4c31565a732afefe]::rust_begin_unwind
+   7:     0x7f0cf99446cc - core[da78e946a5d06d53]::panicking::panic_fmt
+   8:     0x7f0cfddb6b56 - <rustc_ast[bf92cb4a89c1d262]::ast::Attribute>::token_trees
+   9:     0x7f0cfe8bcc62 - <rustc_expand[4c42811765bd8a03]::expand::MacroExpander>::fully_expand_fragment
+  10:     0x7f0cfe88bfd4 - <rustc_expand[4c42811765bd8a03]::expand::MacroExpander>::expand_crate
+  11:     0x7f0cfd98e711 - rustc_interface[2fb4e3f9120b3398]::passes::resolver_for_lowering_raw
+  12:     0x7f0cfd98df26 - rustc_query_impl[2043934c093d5d4c]::query_impl::resolver_for_lowering_raw::invoke_provider_fn::__rust_begin_short_backtrace
+  13:     0x7f0cfe37e501 - rustc_query_impl[2043934c093d5d4c]::execution::try_execute_query::<rustc_middle[e97f70cd95bc576c]::query::caches::SingleCache<rustc_middle[e97f70cd95bc576c]::query::erase::ErasedData<[u8; 24usize]>>, false>
+  14:     0x7f0cfe37e278 - rustc_query_impl[2043934c093d5d4c]::query_impl::resolver_for_lowering_raw::execute_query_non_incr::__rust_end_short_backtrace
+  15:     0x7f0cfe3032c0 - rustc_interface[2fb4e3f9120b3398]::interface::run_compiler::<(), rustc_driver_impl[b7363d31c325300f]::run_compiler::{closure#0}>::{closure#1}
+  16:     0x7f0cfe36b73a - std[ce10694b78262c54]::sys::backtrace::__rust_begin_short_backtrace::<rustc_interface[2fb4e3f9120b3398]::util::run_in_thread_with_globals<rustc_interface[2fb4e3f9120b3398]::util::run_in_thread_pool_with_globals<rustc_interface[2fb4e3f9120b3398]::interface::run_compiler<(), rustc_driver_impl[b7363d31c325300f]::run_compiler::{closure#0}>::{closure#1}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>
+  17:     0x7f0cfe36b4ed - <std[ce10694b78262c54]::thread::lifecycle::spawn_unchecked<rustc_interface[2fb4e3f9120b3398]::util::run_in_thread_with_globals<rustc_interface[2fb4e3f9120b3398]::util::run_in_thread_pool_with_globals<rustc_interface[2fb4e3f9120b3398]::interface::run_compiler<(), rustc_driver_impl[b7363d31c325300f]::run_compiler::{closure#0}>::{closure#1}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>::{closure#1} as core[da78e946a5d06d53]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  18:     0x7f0cfe36f910 - <std[ce10694b78262c54]::sys::thread::unix::Thread>::new::thread_start
+  19:     0x7f0cf7d8a3c4 - start_thread
+  20:     0x7f0cf7e0d56c - __clone3
+  21:                0x0 - <unknown>
+
+
+rustc version: 1.99.0-nightly (daf2e5e18 2026-07-13)
+platform: x86_64-unknown-linux-gnu
+
+query stack during panic:
+#0 [resolver_for_lowering_raw] getting the resolver for lowering
+end of query stack

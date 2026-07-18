@@ -171,7 +171,7 @@ impl JwksProvider {
                 }
             }
         });
-        let _ = self.background_handle.set(handle);
+        drop(self.background_handle.set(handle));
     }
 
     async fn refresh_keys_if_changed(&self) -> Result<(), AuthError> {

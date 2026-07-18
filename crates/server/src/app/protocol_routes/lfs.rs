@@ -400,7 +400,7 @@ pub(crate) async fn lfs_patch_object(
 
         if is_final {
             let assembled: Vec<u8> = std::fs::read(&tmp_path)?;
-            let _ = std::fs::remove_file(&tmp_path);
+            drop(std::fs::remove_file(&tmp_path));
             let _stored = backend.put_sha256_addressed_object_bytes_if_absent(
                 &object_key_for_closure,
                 &oid_for_closure,

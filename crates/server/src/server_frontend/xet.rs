@@ -286,4 +286,38 @@ mod tests {
             )
         ));
     }
+
+    // -----------------------------------------------------------------------
+    // visit_protocol_object_member_chunks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn visit_protocol_object_member_chunks_returns_ok_without_visitor_error() {
+        // Using a non-xorb key with blackhole store; owns_protocol_object returns
+        // false for non-xorb keys, so visit_stored_xorb_chunk_hashes is not called.
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("some/random/key").unwrap();
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(&store, &key, |_hash| {
+            visited = true;
+            Err(ServerError::Overflow)
+        });
+        // The key is not a protocol object (not under xorbs namespace), so
+        // visit_stored_xorb_chunk_hashes is never called and the function returns Ok.
+        assert!(result.is_ok());
+        assert!(!visited);
+    }
+
+    // -----------------------------------------------------------------------
+    // owns_protocol_object — key with xorb namespace
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn owns_protocol_object_returns_false_for_invalid_hash_key() {
+        let key = ObjectKey::parse("aa/short").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        // The key doesn't match xorb pattern
+        assert!(!result.unwrap());
+    }
 }

@@ -80,4 +80,43 @@ mod tests {
         assert_ne!(ProviderKind::GitLab, ProviderKind::Codeberg);
         assert_ne!(ProviderKind::Codeberg, ProviderKind::Generic);
     }
+
+    #[test]
+    fn provider_kind_is_send_and_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<ProviderKind>();
+        assert_sync::<ProviderKind>();
+    }
+
+    #[test]
+    fn provider_kind_debug_format_matches_variant_name() {
+        assert_eq!(format!("{:?}", ProviderKind::GitHub), "GitHub");
+        assert_eq!(format!("{:?}", ProviderKind::Gitea), "Gitea");
+        assert_eq!(format!("{:?}", ProviderKind::GitLab), "GitLab");
+        assert_eq!(format!("{:?}", ProviderKind::Codeberg), "Codeberg");
+        assert_eq!(format!("{:?}", ProviderKind::Generic), "Generic");
+    }
+
+    #[test]
+    fn provider_kind_clone_yields_equal_value() {
+        let original = ProviderKind::GitLab;
+        let cloned = original;
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn provider_kind_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash(value: ProviderKind) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        assert_eq!(hash(ProviderKind::GitHub), hash(ProviderKind::GitHub));
+        assert_ne!(hash(ProviderKind::GitHub), hash(ProviderKind::Gitea));
+    }
 }

@@ -646,4 +646,299 @@ mod tests {
         // public interface.
         assert!(!debug.is_empty());
     }
+
+    #[test]
+    fn provider_subject_rejects_control_characters() {
+        assert_eq!(
+            ProviderSubject::new("subject\n"),
+            Err(ProviderBoundaryError::ControlCharacter)
+        );
+    }
+
+    #[test]
+    fn provider_subject_rejects_tab() {
+        assert_eq!(
+            ProviderSubject::new("sub\tject"),
+            Err(ProviderBoundaryError::ControlCharacter)
+        );
+    }
+
+    #[test]
+    fn provider_subject_exact_max_length_succeeds() {
+        let max = "s".repeat(MAX_PROVIDER_IDENTITY_BYTES);
+        let result = ProviderSubject::new(&max);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn canonical_clone_url_rejects_empty() {
+        assert_eq!(
+            CanonicalCloneUrl::new(""),
+            Err(ProviderBoundaryError::Empty)
+        );
+    }
+
+    #[test]
+    fn canonical_clone_url_exact_max_length_succeeds() {
+        let max = "u".repeat(MAX_PROVIDER_URL_BYTES);
+        let result = CanonicalCloneUrl::new(&max);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn canonical_clone_url_rejects_whitespace_only() {
+        assert_eq!(
+            CanonicalCloneUrl::new("   "),
+            Err(ProviderBoundaryError::Empty)
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_id_rejects_control_characters() {
+        assert_eq!(
+            WebhookDeliveryId::new("delivery\x00id"),
+            Err(ProviderBoundaryError::ControlCharacter)
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_id_rejects_whitespace_only() {
+        assert_eq!(
+            WebhookDeliveryId::new(" \t\n "),
+            Err(ProviderBoundaryError::Empty)
+        );
+    }
+
+    #[test]
+    fn webhook_delivery_id_exact_max_length_succeeds() {
+        let max = "d".repeat(MAX_PROVIDER_IDENTITY_BYTES);
+        let result = WebhookDeliveryId::new(&max);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn repository_metadata_returns_all_fields() {
+        let repository = RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap();
+        let default_revision = RevisionRef::new("refs/heads/main").unwrap();
+        let clone_url = CanonicalCloneUrl::new("https://example.com/repo.git").unwrap();
+        let metadata = RepositoryMetadata::new(
+            repository.clone(),
+            RepositoryVisibility::Public,
+            default_revision.clone(),
+            clone_url.clone(),
+        );
+
+        assert_eq!(metadata.repository(), &repository);
+        assert_eq!(metadata.visibility(), RepositoryVisibility::Public);
+        assert_eq!(metadata.default_revision(), &default_revision);
+        assert_eq!(metadata.clone_url(), &clone_url);
+    }
+
+    #[test]
+    fn repository_metadata_debug_format() {
+        let metadata = RepositoryMetadata::new(
+            RepositoryRef::new(ProviderKind::GitHub, "a", "b").unwrap(),
+            RepositoryVisibility::Internal,
+            RevisionRef::new("main").unwrap(),
+            CanonicalCloneUrl::new("https://x.com").unwrap(),
+        );
+        let debug = format!("{metadata:?}");
+        assert!(debug.contains("RepositoryMetadata"));
+    }
+
+    #[test]
+    fn repository_metadata_clone_eq() {
+        let a = RepositoryMetadata::new(
+            RepositoryRef::new(ProviderKind::GitHub, "t", "r").unwrap(),
+            RepositoryVisibility::Private,
+            RevisionRef::new("main").unwrap(),
+            CanonicalCloneUrl::new("https://x.com").unwrap(),
+        );
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn repository_webhook_event_kind_all_variants() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "t", "r").unwrap();
+        let did = WebhookDeliveryId::new("d1").unwrap();
+
+        let deleted = RepositoryWebhookEvent::new(
+            repo.clone(),
+            did.clone(),
+            RepositoryWebhookEventKind::RepositoryDeleted,
+        );
+        assert_eq!(
+            deleted.kind(),
+            &RepositoryWebhookEventKind::RepositoryDeleted
+        );
+
+        let access = RepositoryWebhookEvent::new(
+            repo.clone(),
+            did.clone(),
+            RepositoryWebhookEventKind::AccessChanged,
+        );
+        assert_eq!(access.kind(), &RepositoryWebhookEventKind::AccessChanged);
+
+        let new_repo = RepositoryRef::new(ProviderKind::GitHub, "t", "r2").unwrap();
+        let renamed = RepositoryWebhookEvent::new(
+            repo.clone(),
+            did.clone(),
+            RepositoryWebhookEventKind::RepositoryRenamed {
+                new_repository: new_repo.clone(),
+            },
+        );
+        assert_eq!(
+            renamed.kind(),
+            &RepositoryWebhookEventKind::RepositoryRenamed {
+                new_repository: new_repo
+            }
+        );
+
+        let revision = RevisionRef::new("refs/heads/feat").unwrap();
+        let pushed = RepositoryWebhookEvent::new(
+            repo,
+            did,
+            RepositoryWebhookEventKind::RevisionPushed {
+                revision: revision.clone(),
+            },
+        );
+        assert_eq!(
+            pushed.kind(),
+            &RepositoryWebhookEventKind::RevisionPushed { revision }
+        );
+    }
+
+    #[test]
+    fn repository_webhook_event_debug_format() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "t", "r").unwrap();
+        let did = WebhookDeliveryId::new("d1").unwrap();
+        let event =
+            RepositoryWebhookEvent::new(repo, did, RepositoryWebhookEventKind::RepositoryDeleted);
+        let debug = format!("{event:?}");
+        assert!(debug.contains("RepositoryWebhookEvent"));
+    }
+
+    #[test]
+    fn repository_webhook_event_clone_eq() {
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "t", "r").unwrap();
+        let did = WebhookDeliveryId::new("d1").unwrap();
+        let event = RepositoryWebhookEvent::new(
+            repo,
+            did.clone(),
+            RepositoryWebhookEventKind::AccessChanged,
+        );
+        let event2 = event.clone();
+        assert_eq!(event, event2);
+        assert_eq!(event.delivery_id(), &did);
+    }
+
+    #[test]
+    fn webhook_request_no_signature() {
+        let request = WebhookRequest::new("push", "delivery-1", None, b"{}");
+        assert_eq!(request.signature(), None);
+    }
+
+    #[test]
+    fn webhook_request_empty_body() {
+        let request = WebhookRequest::new("push", "delivery-1", Some("sig"), b"");
+        assert_eq!(request.body(), b"");
+        assert_eq!(request.event_name(), "push");
+        assert_eq!(request.delivery_id(), "delivery-1");
+    }
+
+    #[test]
+    fn repository_visibility_debug_format() {
+        assert_eq!(format!("{:?}", RepositoryVisibility::Public), "Public");
+        assert_eq!(format!("{:?}", RepositoryVisibility::Private), "Private");
+        assert_eq!(format!("{:?}", RepositoryVisibility::Internal), "Internal");
+    }
+
+    #[test]
+    fn authorization_decision_debug_format() {
+        let subject = ProviderSubject::new("user").unwrap();
+        let allow = AuthorizationDecision::Allow(subject);
+        let deny = AuthorizationDecision::Deny;
+        assert!(!format!("{allow:?}").is_empty());
+        assert_eq!(format!("{deny:?}"), "Deny");
+    }
+
+    #[test]
+    fn authorization_decision_clone_eq() {
+        let subject = ProviderSubject::new("user").unwrap();
+        let allow = AuthorizationDecision::Allow(subject.clone());
+        let allow2 = AuthorizationDecision::Allow(subject);
+        assert_eq!(allow, allow2);
+        assert_eq!(AuthorizationDecision::Deny, AuthorizationDecision::Deny);
+        assert_ne!(allow, AuthorizationDecision::Deny);
+    }
+
+    #[test]
+    fn provider_subject_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash(subject: &ProviderSubject) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            subject.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let a = ProviderSubject::new("user").unwrap();
+        let b = ProviderSubject::new("user").unwrap();
+        let c = ProviderSubject::new("other").unwrap();
+        assert_eq!(hash(&a), hash(&b));
+        assert_ne!(hash(&a), hash(&c));
+    }
+
+    #[test]
+    fn provider_boundary_error_derived_traits() {
+        let err = ProviderBoundaryError::Empty;
+        assert_eq!(err, ProviderBoundaryError::Empty);
+        let copied = err;
+        assert_eq!(err, copied);
+        assert!(format!("{err:?}").contains("Empty"));
+    }
+
+    #[test]
+    fn clone_url_rejects_whitespace_only() {
+        assert_eq!(
+            CanonicalCloneUrl::new("  "),
+            Err(ProviderBoundaryError::Empty)
+        );
+    }
+
+    #[test]
+    fn provider_subject_rejects_just_whitespace() {
+        assert_eq!(
+            ProviderSubject::new("\t\n "),
+            Err(ProviderBoundaryError::Empty)
+        );
+    }
+
+    #[test]
+    fn webhook_request_clone_copy() {
+        let request = WebhookRequest::new("ping", "d1", None, b"data");
+        let copied = request;
+        assert_eq!(request.event_name(), copied.event_name());
+        assert_eq!(request.delivery_id(), copied.delivery_id());
+        assert_eq!(request.signature(), copied.signature());
+        assert_eq!(request.body(), copied.body());
+    }
+
+    #[test]
+    fn repository_visibility_is_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<RepositoryVisibility>();
+        assert_sync::<RepositoryVisibility>();
+    }
+
+    #[test]
+    fn provider_subject_is_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<ProviderSubject>();
+        assert_sync::<ProviderSubject>();
+    }
 }

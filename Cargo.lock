@@ -1162,6 +1162,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3b854b0e584ead1a33f18b2fcad7cf7be18b3875c78816b753639aa501513ae"
+dependencies = [
+ "cc",
+ "cfg-if 1.0.4",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link",
+ "windows-result",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1877,6 +1892,19 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if 1.0.4",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "lru-slab"
@@ -2941,6 +2969,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "scoped-tls"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3126,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "shardline"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "bytes",
  "clap",
@@ -3154,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-bench"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "criterion",
  "libc",
@@ -3168,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cache"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "redis",
@@ -3181,7 +3215,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-cas"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "shardline-index",
@@ -3193,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-fsck"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -3239,7 +3273,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-gc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3257,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-hub-api"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "base64",
@@ -3291,7 +3325,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-index"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3311,8 +3345,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardline-loom-tests"
+version = "0.1.0"
+dependencies = [
+ "loom",
+]
+
+[[package]]
 name = "shardline-metrics"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -3324,7 +3365,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-oci-adapter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -3344,7 +3385,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-protocol"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "criterion",
  "hex",
@@ -3359,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-protocol-adapters"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "serde",
@@ -3373,7 +3414,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-provider-events"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde_json",
  "shardline-index",
@@ -3391,7 +3432,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-rebuild"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -3411,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3469,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-server-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "hex",
@@ -3488,7 +3529,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-storage"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -3509,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-test-support"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "libc",
  "tempfile",
@@ -3518,7 +3559,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-vcs"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hex",
  "hmac",
@@ -3531,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-xet-adapter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "serde",
@@ -3548,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "shardline-xet-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "bytes",

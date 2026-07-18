@@ -342,4 +342,19 @@ mod tests {
         let value = header.to_str().unwrap();
         assert!(value.contains("last=v1.0"));
     }
+
+    // ── oci_created_response edge cases ──────────────────────────────────
+
+    #[test]
+    fn created_response_includes_location_header() {
+        let response = oci_created_response("/v2/test/blob/uploads/123", None).unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/v2/test/blob/uploads/123"
+        );
+    }
 }

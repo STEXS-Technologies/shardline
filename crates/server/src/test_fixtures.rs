@@ -122,3 +122,45 @@ pub fn shard_hash_hex(bytes: &[u8]) -> String {
     assert!(copied.is_ok());
     xet_hash_hex(&sink.hash())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_chunk_xorb_returns_bytes_and_valid_hash() {
+        let (bytes, hash) = single_chunk_xorb(b"hello world");
+        assert!(!bytes.is_empty());
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn single_chunk_xorb_empty_input() {
+        let (bytes, hash) = single_chunk_xorb(b"");
+        assert!(!bytes.is_empty());
+        assert!(!hash.is_empty());
+    }
+
+    #[test]
+    fn xet_hash_hex_returns_64_char_hex() {
+        let hash = MerkleHash::from_hex("0".repeat(64).as_str()).unwrap();
+        let hex = xet_hash_hex(&hash);
+        assert_eq!(hex.len(), 64);
+    }
+
+    #[test]
+    fn shard_hash_hex_returns_deterministic_hash() {
+        let h1 = shard_hash_hex(b"test data");
+        let h2 = shard_hash_hex(b"test data");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn shard_hash_hex_differs_for_different_input() {
+        let h1 = shard_hash_hex(b"data1");
+        let h2 = shard_hash_hex(b"data2");
+        assert_ne!(h1, h2);
+    }
+}

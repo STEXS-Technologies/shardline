@@ -794,4 +794,370 @@ mod tests {
             RepositoryWebhookEventKind::RepositoryRenamed { .. }
         ));
     }
+
+    #[test]
+    fn generic_adapter_kind_returns_generic() {
+        let adapter = adapter().unwrap();
+        assert_eq!(adapter.kind(), ProviderKind::Generic);
+    }
+
+    #[test]
+    fn generic_adapter_check_access_denies_unauthorized_subject() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("unknown-user").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Deny);
+    }
+
+    #[test]
+    fn generic_adapter_check_access_rejects_unknown_repository() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Generic, "unknown", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("generic-user-1").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let result = adapter.check_access(&request);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn generic_adapter_repository_metadata_unknown_repo_errors() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Generic, "unknown", "repo").unwrap();
+        let result = adapter.repository_metadata(&repository);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn generic_adapter_parses_access_changed_with_full_name() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "kind":"access_changed",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("access_changed", "delivery-ac2", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+        assert_eq!(event.repository().owner(), "team");
+    }
+
+    #[test]
+    fn generic_adapter_parses_event_from_event_kind_field_with_unknown_event_name() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "event":{"kind":"revision_pushed"},
+            "repository":{"owner":"team","name":"assets"},
+            "revision":"refs/heads/main"
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("custom_event", "delivery-ek", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert!(matches!(
+            event.kind(),
+            RepositoryWebhookEventKind::RevisionPushed { .. }
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_parses_event_with_kind_field_and_empty_event_name() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "kind":"revision_pushed",
+            "repository":{"owner":"team","name":"assets"},
+            "revision":"refs/heads/main"
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("", "delivery-kind2", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert!(matches!(
+            event.kind(),
+            RepositoryWebhookEventKind::RevisionPushed { .. }
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_parses_event_with_unknown_event_name_and_missing_kind_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "repository":{"owner":"team","name":"assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "unknown_event",
+            "delivery-nokind",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn generic_adapter_parses_event_with_empty_event_name_and_missing_kind_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "repository":{"owner":"team","name":"assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("", "delivery-empty", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn generic_adapter_revision_pushed_missing_repository_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "kind":"revision_pushed",
+            "revision":"refs/heads/main"
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "revision_pushed",
+            "delivery-norepo",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_repository_deleted_missing_repository_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"kind":"repository_deleted"}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "repository_deleted",
+            "delivery-norepo",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_repository_renamed_missing_repository_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"kind":"repository_renamed","new_repository":{"full_name":"team/new"}}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "repository_renamed",
+            "delivery-norepo",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_repository_renamed_missing_new_repository_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"kind":"repository_renamed","repository":{"full_name":"team/assets"}}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "repository_renamed",
+            "delivery-nonew",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_access_changed_missing_repository_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"kind":"access_changed"}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "access_changed",
+            "delivery-norepo",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_no_secret_skips_verification_and_parses() {
+        let mut catalog = BuiltInProviderCatalog::new("generic-bridge").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://forge.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        let adapter = GenericAdapter::new(catalog, None);
+        let body = br#"{
+            "kind":"revision_pushed",
+            "repository":{"owner":"team","name":"assets"},
+            "revision":"refs/heads/main"
+        }"#;
+        let request = WebhookRequest::new("revision_pushed", "delivery-nosec", None, body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn generic_adapter_secret_required_when_configured() {
+        let adapter = adapter().unwrap();
+        let request = WebhookRequest::new("revision_pushed", "delivery-1", None, br#"{}"#);
+        let event = adapter.parse_webhook(request);
+        assert_eq!(
+            event,
+            Err(BuiltInProviderError::MissingWebhookAuthentication)
+        );
+    }
+
+    #[test]
+    fn generic_adapter_new_is_const() {
+        let catalog = BuiltInProviderCatalog::new("generic-bridge").unwrap();
+        let adapter = GenericAdapter::new(catalog, None);
+        assert_eq!(adapter.kind(), ProviderKind::Generic);
+    }
+
+    #[test]
+    fn generic_adapter_debug_format() {
+        let catalog = BuiltInProviderCatalog::new("generic-bridge").unwrap();
+        let adapter = GenericAdapter::new(catalog, None);
+        let debug = format!("{adapter:?}");
+        assert!(debug.contains("GenericAdapter"));
+    }
+
+    #[test]
+    fn generic_adapter_clone_eq() {
+        let adapter = adapter().unwrap();
+        let cloned = adapter.clone();
+        assert_eq!(adapter, cloned);
+    }
+
+    #[test]
+    fn generic_unknown_kind_value_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "kind":"unknown_event_kind",
+            "repository":{"owner":"team","name":"assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new(
+            "custom_event",
+            "delivery-unk-kind",
+            signature.as_deref(),
+            body,
+        );
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn generic_adapter_invalid_json_payload_errors() {
+        let mut catalog = BuiltInProviderCatalog::new("generic-bridge").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Generic, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://forge.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        let adapter = GenericAdapter::new(catalog, None);
+        let request = WebhookRequest::new("revision_pushed", "delivery-bad", None, b"not json");
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidWebhookPayload)
+        ));
+    }
+
+    #[test]
+    fn generic_adapter_push_event_without_repository_owner_uses_namespace() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "repository":{"namespace":"team","name":"assets"},
+            "ref":"refs/heads/main"
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-ns2", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.repository().owner(), "team");
+    }
+
+    #[test]
+    fn generic_adapter_push_event_without_repository_name_uses_root_name() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "repository":{"owner":"team"},
+            "name":"assets",
+            "ref":"refs/heads/main"
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-root2", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.repository().name(), "assets");
+    }
+
+    #[test]
+    fn generic_adapter_push_event_no_ref_uses_default_fails() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "repository":{"owner":"team","name":"assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-noref", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRevisionPayload)
+        ));
+    }
 }

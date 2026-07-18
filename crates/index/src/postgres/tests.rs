@@ -3,8 +3,10 @@ use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, Shardl
 use super::PostgresRecordKind;
 use super::index_store::PostgresFileReconstructionRecord;
 use super::record_store::record_locator;
+use super::types::{PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
-    FileId, FileReconstruction, FileRecord, ReconstructionTerm, RepositoryRecordScope, XorbId,
+    FileId, FileReconstruction, FileRecord, ReconstructionTerm, RepositoryRecordScope,
+    StoredObjectId, XorbId,
     record_key::record_key as shared_record_key,
     record_key::{
         repository_record_scope_key as shared_repository_record_scope_key,
@@ -113,6 +115,101 @@ fn postgres_lifecycle_migrations_reject_inverted_timelines() {
         )
     );
     assert!(retention_migration.contains("release_after_unix_seconds >= held_at_unix_seconds"));
+}
+
+// ------------------------------------------------------------------
+// PostgresFileReconstructionRecord through public API
+// ------------------------------------------------------------------
+#[test]
+fn postgres_file_reconstruction_record_empty_terms() {
+    let reconstruction = FileReconstruction::new(vec![]);
+    let record = PostgresFileReconstructionRecord::from_domain(&reconstruction);
+    let result = record.into_domain().expect("empty terms is valid");
+    assert!(result.terms().is_empty());
+}
+
+#[test]
+fn postgres_file_reconstruction_record_multiple_terms() {
+    let hash_a = ShardlineHash::from_bytes([1; 32]);
+    let hash_b = ShardlineHash::from_bytes([2; 32]);
+    let range_a = ChunkRange::new(0, 1).unwrap();
+    let range_b = ChunkRange::new(1, 3).unwrap();
+    let reconstruction = FileReconstruction::new(vec![
+        ReconstructionTerm::new(StoredObjectId::new(hash_a), range_a, 64),
+        ReconstructionTerm::new(StoredObjectId::new(hash_b), range_b, 128),
+    ]);
+    let record = PostgresFileReconstructionRecord::from_domain(&reconstruction);
+    let restored = record.into_domain().expect("valid reconstruction");
+    assert_eq!(restored.terms().len(), 2);
+    assert_eq!(restored.terms()[0].object_id(), StoredObjectId::new(hash_a));
+    assert_eq!(restored.terms()[1].object_id(), StoredObjectId::new(hash_b));
+}
+
+// ------------------------------------------------------------------
+// record_locator (from record_store.rs) — pure function, no pool needed
+// ------------------------------------------------------------------
+#[test]
+fn postgres_record_locator_version_includes_content_hash_in_key() {
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", None).unwrap();
+    let record = file_record(scope, "content");
+    let locator = record_locator(
+        PostgresRecordKind::Version,
+        &record,
+        Some(record.content_hash.clone()),
+    );
+
+    // Use the public accessor methods
+    assert_eq!(locator.content_hash(), Some(record.content_hash.as_str()));
+    assert_ne!(locator.record_key(), locator.file_id());
+}
+
+#[test]
+fn postgres_record_locator_latest_has_no_content_hash() {
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", None).unwrap();
+    let record = file_record(scope, "content");
+    let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+
+    assert!(locator.content_hash().is_none());
+    assert_eq!(locator.file_id(), record.file_id);
+}
+
+#[test]
+fn postgres_record_locator_keys_differ_by_kind() {
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", None).unwrap();
+    let record = file_record(scope, "content");
+    let latest = record_locator(PostgresRecordKind::Latest, &record, None);
+    let version = record_locator(
+        PostgresRecordKind::Version,
+        &record,
+        Some(record.content_hash.clone()),
+    );
+
+    assert_ne!(latest.record_key(), version.record_key());
+    assert_eq!(latest.file_id(), version.file_id());
+}
+
+// ------------------------------------------------------------------
+// u64_to_i64 / i64_to_u64 tests (re-exercise the functions)
+// ------------------------------------------------------------------
+#[test]
+fn postgres_conversion_functions_roundtrip() {
+    let original: u64 = 42;
+    let as_i64 = u64_to_i64(original).unwrap();
+    let back = i64_to_u64(as_i64).unwrap();
+    assert_eq!(original, back);
+}
+
+#[test]
+fn postgres_u64_to_i64_max() {
+    assert!(matches!(u64_to_i64(i64::MAX as u64), Ok(v) if v == i64::MAX));
+    assert!(u64_to_i64(u64::MAX).is_err());
+}
+
+#[test]
+fn postgres_i64_to_u64_min() {
+    assert!(matches!(i64_to_u64(0), Ok(v) if v == 0));
+    assert!(i64_to_u64(-1).is_err());
+    assert!(i64_to_u64(i64::MIN).is_err());
 }
 
 fn file_record(scope: RepositoryScope, content_seed: &str) -> FileRecord {

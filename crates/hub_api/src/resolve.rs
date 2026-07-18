@@ -373,4 +373,29 @@ mod tests {
             other => unreachable!("expected Inline, got {other:?}"),
         }
     }
+
+    #[test]
+    #[allow(clippy::panic, clippy::unreachable)]
+    fn resolve_file_from_store_large_non_lfs_file_above_max_inline() {
+        // size > MAX_INLINE_SIZE (1 MiB) and !is_lfs → Inline (else branch)
+        let size = super::MAX_INLINE_SIZE + 1;
+        let files = vec![shardline_index::hub::HubFileEntry {
+            path: "huge.txt".into(),
+            size,
+            sha: "hugesha".into(),
+            is_lfs: false,
+            inline_content: None,
+        }];
+        let (_ts, state) = setup_resolve_state(&files);
+        let result = resolve_file_from_store(&state, "sha_resolve", "huge.txt").unwrap();
+        match result {
+            DownloadResult::Inline {
+                size: s, content, ..
+            } => {
+                assert_eq!(s, size);
+                assert!(content.is_none());
+            }
+            other => unreachable!("expected Inline, got {other:?}"),
+        }
+    }
 }

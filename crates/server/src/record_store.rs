@@ -33,4 +33,16 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn parse_stored_file_record_bytes_rejects_invalid_json() {
+        let result = parse_stored_file_record_bytes(b"not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_stored_file_record_bytes_rejects_empty_bytes() {
+        let result = parse_stored_file_record_bytes(b"");
+        assert!(result.is_err());
+    }
 }
