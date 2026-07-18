@@ -13,13 +13,17 @@ description = "Content-addressed object storage contracts and adapters for Shard
 targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = ["s3"]
+s3 = ["object_store/aws"]
+
 [dependencies]
 async-trait.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 libc.workspace = true
-object_store = { workspace = true, features = ["aws"] }
+object_store = { workspace = true, default-features = false }
 shardline-protocol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
@@ -35,6 +39,11 @@ tempfile.workspace = true
 [lints]
 workspace = true
 
+[[test]]
+name = "s3_integration"
+required-features = ["s3"]
+
 [[bench]]
 name = "s3_put_file_fixed"
+required-features = ["s3"]
 harness = false

@@ -1132,11 +1132,11 @@ pub(super) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::RetentionHold(_)
         | other @ LocalIndexStoreError::QuarantineCandidate(_)
         | other @ LocalIndexStoreError::WebhookDelivery(_)
-        | other @ LocalIndexStoreError::IntegerOutOfRange
+        | other @ LocalIndexStoreError::IntegerOutOfRange(_)
         | other @ LocalIndexStoreError::InvalidRecordKind
         | other @ LocalIndexStoreError::InvalidLegacyImportState
         | other @ LocalIndexStoreError::InvalidRepoType(_)
-        | other @ LocalIndexStoreError::BlockingTask
+        | other @ LocalIndexStoreError::BlockingTask(_)
         | other @ LocalIndexStoreError::InvalidTableName => {
             SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(other))
         }
@@ -1281,7 +1281,7 @@ mod tests {
         let too_big = (i64::MAX as u64).saturating_add(1);
         assert!(matches!(
             u64_to_i64(too_big),
-            Err(LocalIndexStoreError::IntegerOutOfRange)
+            Err(LocalIndexStoreError::IntegerOutOfRange(_))
         ));
     }
 
@@ -1299,7 +1299,7 @@ mod tests {
     fn i64_to_u64_negative_errors() {
         assert!(matches!(
             i64_to_u64(-1),
-            Err(LocalIndexStoreError::IntegerOutOfRange)
+            Err(LocalIndexStoreError::IntegerOutOfRange(_))
         ));
     }
 

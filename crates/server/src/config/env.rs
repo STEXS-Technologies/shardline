@@ -371,15 +371,14 @@ mod tests {
         parse_server_frontends_env,
     };
 
-    /// SAFETY: Must only be called from `#[serial_test::serial]` tests to prevent
-    /// data races on the global environment. Callers are responsible for ensuring
-    /// no concurrent env var access.
     fn set_env_var(key: &str, value: &str) {
+        // SAFETY: Must only be called from `#[serial_test::serial]` tests to
+        // prevent data races on the global environment.
         unsafe { std::env::set_var(key, value) };
     }
 
-    /// SAFETY: Same threading constraints as `set_env_var`.
     fn remove_env_var(key: &str) {
+        // SAFETY: Same threading constraints as `set_env_var`.
         unsafe { std::env::remove_var(key) };
     }
 

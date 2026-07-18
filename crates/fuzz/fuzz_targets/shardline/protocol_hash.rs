@@ -14,7 +14,8 @@ fuzz_target!(|data: &[u8]| {
             hex.bytes()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         );
-        assert_eq!(ShardlineHash::parse_hex(&hex), Ok(hash));
+        let parsed = ShardlineHash::parse_hex(&hex);
+        assert!(matches!(parsed, Ok(h) if h == hash));
     }
 
     let Ok(raw) = from_utf8(data) else {
@@ -24,12 +25,19 @@ fuzz_target!(|data: &[u8]| {
     // INVARIANT 1: Hash parsing is deterministic.
     let first = ShardlineHash::parse_hex(raw);
     let second = ShardlineHash::parse_hex(raw);
-    assert_eq!(first, second);
+    assert_eq!(first.is_ok(), second.is_ok());
+    if let (Ok(a), Ok(b)) = (&first, &second) {
+        assert_eq!(a, b);
+    }
+    if let (Err(a), Err(b)) = (&first, &second) {
+        assert_eq!(a.to_string(), b.to_string());
+    }
 
     // INVARIANT 2: Any accepted hash emits canonical lowercase hex.
     if let Ok(hash) = first {
         let hex = hash.hex_string();
         assert_eq!(hex, raw);
-        assert_eq!(ShardlineHash::parse_hex(&hex), Ok(hash));
+        let reparsed = ShardlineHash::parse_hex(&hex);
+        assert!(matches!(reparsed, Ok(h) if h == hash));
     }
 });

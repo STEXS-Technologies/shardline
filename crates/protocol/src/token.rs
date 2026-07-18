@@ -247,8 +247,8 @@ const MIN_SIGNING_KEY_BYTES: usize = 32;
 #[derive(Debug, Error)]
 pub enum TokenCodecError {
     /// The signing key was empty.
-    #[error("token signing key must not be empty")]
-    EmptySigningKey,
+    #[error("token signing key must not be empty: {0}")]
+    EmptySigningKey(String),
     /// The signing key is too short.
     #[error("token signing key must be at least {MIN_SIGNING_KEY_BYTES} bytes, got {actual_bytes}")]
     SigningKeyTooShort { actual_bytes: usize },
@@ -295,7 +295,9 @@ impl TokenSigner {
     /// Returns [`TokenCodecError::EmptySigningKey`] when the signing key is empty.
     pub fn new(signing_key: &[u8]) -> Result<Self, TokenCodecError> {
         if signing_key.is_empty() {
-            return Err(TokenCodecError::EmptySigningKey);
+            return Err(TokenCodecError::EmptySigningKey(
+                "provided key is empty".to_owned(),
+            ));
         }
         if signing_key.len() < MIN_SIGNING_KEY_BYTES {
             return Err(TokenCodecError::SigningKeyTooShort {
@@ -385,7 +387,7 @@ impl TokenSigner {
 
     fn signature(&self, payload: &[u8]) -> Result<Vec<u8>, TokenCodecError> {
         let mut mac = TokenMac::new_from_slice(self.signing_key.expose_secret())
-            .map_err(|_error| TokenCodecError::EmptySigningKey)?;
+            .map_err(|err| TokenCodecError::EmptySigningKey(err.to_string()))?;
         mac.update(payload);
         Ok(mac.finalize().into_bytes().to_vec())
     }
@@ -770,7 +772,7 @@ mod tests {
 
     #[test]
     fn token_codec_error_display_variants() {
-        let msg = TokenCodecError::EmptySigningKey.to_string();
+        let msg = TokenCodecError::EmptySigningKey("test".to_owned()).to_string();
         assert!(!msg.is_empty());
         assert!(msg.contains("empty"));
 
@@ -826,7 +828,7 @@ mod tests {
     #[test]
     fn token_signer_rejects_empty_key() {
         let signer = TokenSigner::new(&[]);
-        assert!(matches!(signer, Err(TokenCodecError::EmptySigningKey)));
+        assert!(matches!(signer, Err(TokenCodecError::EmptySigningKey(_))));
     }
 
     #[test]
@@ -1024,7 +1026,7 @@ mod tests {
 
     #[test]
     fn token_codec_error_empty_signing_key_display() {
-        let msg = TokenCodecError::EmptySigningKey.to_string();
+        let msg = TokenCodecError::EmptySigningKey("test".to_owned()).to_string();
         assert!(msg.contains("empty"));
     }
 

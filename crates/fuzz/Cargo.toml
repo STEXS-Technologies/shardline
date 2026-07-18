@@ -29,7 +29,7 @@ shardline-protocol.workspace = true
 shardline-rebuild.workspace = true
 shardline-server.workspace = true
 shardline-server-core.workspace = true
-shardline-storage.workspace = true
+shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }

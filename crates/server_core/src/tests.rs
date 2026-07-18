@@ -786,7 +786,7 @@ fn auth_error_from_token_codec_error_claims() {
 
 #[test]
 fn auth_error_from_token_codec_error_empty_key() {
-    let err: AuthError = TokenCodecError::EmptySigningKey.into();
+    let err: AuthError = TokenCodecError::EmptySigningKey("test".to_owned()).into();
     assert!(matches!(err, AuthError::ProviderError(_)));
 }
 

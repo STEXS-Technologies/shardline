@@ -49,6 +49,7 @@ mod local;
 mod local_fs;
 pub mod local_path;
 mod object;
+#[cfg(feature = "s3")]
 mod s3;
 mod store;
 
@@ -59,6 +60,7 @@ pub use local_path::{
     resolve_platform_symlinks,
 };
 pub use object::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
+#[cfg(feature = "s3")]
 pub use s3::{
     BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,
     S3ObjectStoreConfig, S3ObjectStoreError,

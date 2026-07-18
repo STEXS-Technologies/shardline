@@ -775,15 +775,8 @@ mod tests {
             serialized.len() <= max,
             "sample response must fit within max bound for this test"
         );
-        // Pad the serialized payload to exactly max bytes with trailing spaces (JSON allows them)
-        let padded = serialized.clone();
-        // Actually, we can't pad the JSON payload without breaking it. Instead,
-        // use an exact-sized payload that is valid JSON for a reconstruction response.
-        // Since sample_response is small, this just tests that normal-sized payloads
-        // within bound are accepted (already tested by cache_service_uses_cached_payload_after_first_load).
-        // This test documents the border behavior.
         let adapter: SharedReconstructionCache = Arc::new(StaticCache {
-            payload: Some(padded),
+            payload: Some(serialized),
             put_calls: Arc::new(AtomicUsize::new(0)),
         });
         let cache = ReconstructionCacheService::for_tests("static", adapter);

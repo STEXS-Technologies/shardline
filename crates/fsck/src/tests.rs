@@ -202,8 +202,9 @@ fn reconstruction_plan_issue_total_bytes_mismatch() {
 
 #[test]
 fn reconstruction_plan_error_detail_chunk_hash() {
-    let err =
-        FileRecordInvariantError::ChunkHash(shardline_protocol::HashParseError::InvalidCharacter);
+    let err = FileRecordInvariantError::ChunkHash(
+        shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
+    );
     assert_eq!(
         reconstruction_plan_error_detail(&err),
         FsckReconstructionPlanDetail::ChunkHashInvalid
@@ -947,7 +948,7 @@ fn fsck_error_from_local_index_store_error() {
 #[test]
 fn fsck_error_from_memory_index_store_error() {
     use shardline_index::MemoryIndexStoreError;
-    let err = FsckError::from(MemoryIndexStoreError::LockPoisoned);
+    let err = FsckError::from(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
     let msg = err.to_string();
     assert!(!msg.is_empty());
 }
@@ -1236,7 +1237,8 @@ fn fsck_error_display_xet_adapter() {
 #[test]
 fn fsck_error_display_memory_index_store() {
     use shardline_index::MemoryIndexStoreError;
-    let err = FsckError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned);
+    let err =
+        FsckError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
     let msg = err.to_string();
     assert!(msg.contains("memory index"), "msg: {msg}");
 }

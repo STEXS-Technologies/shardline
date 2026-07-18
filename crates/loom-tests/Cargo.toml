@@ -7,3 +7,6 @@ publish = false
 
 [dependencies]
 loom = "0.7.2"
+
+[lints]
+workspace = true

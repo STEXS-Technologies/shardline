@@ -127,8 +127,8 @@ pub enum PostgresMetadataStoreError {
     #[error("stored webhook delivery was invalid")]
     WebhookDelivery(#[from] WebhookDeliveryError),
     /// A stored integer exceeded the supported range.
-    #[error("stored integer exceeded the supported range")]
-    IntegerOutOfRange,
+    #[error("stored integer exceeded the supported range: {0}")]
+    IntegerOutOfRange(String),
     /// The requested record locator does not exist.
     #[error("postgres record locator was not found")]
     RecordNotFound,
@@ -147,11 +147,13 @@ impl From<SqlxError> for PostgresMetadataStoreError {
 }
 
 pub(crate) fn u64_to_i64(value: u64) -> Result<i64, PostgresMetadataStoreError> {
-    i64::try_from(value).map_err(|_error| PostgresMetadataStoreError::IntegerOutOfRange)
+    i64::try_from(value)
+        .map_err(|err| PostgresMetadataStoreError::IntegerOutOfRange(err.to_string()))
 }
 
 pub(crate) fn i64_to_u64(value: i64) -> Result<u64, PostgresMetadataStoreError> {
-    u64::try_from(value).map_err(|_error| PostgresMetadataStoreError::IntegerOutOfRange)
+    u64::try_from(value)
+        .map_err(|err| PostgresMetadataStoreError::IntegerOutOfRange(err.to_string()))
 }
 
 #[cfg(test)]
@@ -273,11 +275,10 @@ mod tests {
 
     #[test]
     fn postgres_metadata_store_error_display_integer_out_of_range() {
-        let err = PostgresMetadataStoreError::IntegerOutOfRange;
-        assert_eq!(
-            err.to_string(),
-            "stored integer exceeded the supported range"
-        );
+        let err = PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned());
+        let msg = err.to_string();
+        assert!(msg.contains("stored integer exceeded the supported range"));
+        assert!(msg.contains("test"));
     }
 
     #[test]
@@ -341,14 +342,14 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange)
+            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
         ));
 
         let result = u64_to_i64(u64::MAX);
         assert!(result.is_err());
         assert!(matches!(
             result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange)
+            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
         ));
     }
 
@@ -368,14 +369,14 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange)
+            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
         ));
 
         let result = i64_to_u64(i64::MIN);
         assert!(result.is_err());
         assert!(matches!(
             result,
-            Err(PostgresMetadataStoreError::IntegerOutOfRange)
+            Err(PostgresMetadataStoreError::IntegerOutOfRange(_))
         ));
     }
 }

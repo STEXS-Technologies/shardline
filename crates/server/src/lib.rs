@@ -81,18 +81,28 @@ pub use app::{
     MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES, MAX_PROVIDER_WEBHOOK_BODY_BYTES,
     acquire_chunk_transfer_permit, full_byte_stream_response,
 };
-pub use backend::{
-    BenchmarkBackend, ServerBackend, clear_repository_reference_probe_filter,
-    lock_repository_reference_probe_test, repository_reference_probe_count,
-    reset_repository_reference_probe_count_for_hash,
-};
+pub use backend::{BenchmarkBackend, ServerBackend};
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
 pub use local_backend::chunk_hash;
 pub use object_store::ServerObjectStore;
 pub use oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 pub use protocol_support::shared_sha256_object_key;
 pub use reconstruction_cache::ReconstructionCacheService;
-pub(crate) use shardline_oci_adapter as oci_adapter;
+pub(crate) mod oci_adapter {
+    pub use shardline_oci_adapter::{
+        oci_blob_key, oci_manifest_key, oci_manifest_media_type_key,
+    };
+    pub(crate) use shardline_oci_adapter::{
+        abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
+        append_upload_bytes, create_upload_session, delete_upload_session,
+        finalize_s3_multipart_upload_session, lock_upload_sessions, oci_blob_location,
+        oci_manifest_location, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
+        oci_tag_target_key, oci_tag_target_prefix, OciReference, parse_reference,
+        read_upload_session, touch_upload_session, upload_body_integrity,
+        upload_body_path_for_session, upload_length, upload_session_length,
+        upload_session_location, validate_repository,
+    };
+}
 pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
 pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
@@ -100,7 +110,28 @@ mod gc_tests;
 mod transfer_limiter;
 mod upload_ingest;
 mod validation;
-pub(crate) use shardline_xet_adapter as xet_adapter;
+pub(crate) mod xet_adapter {
+    pub use shardline_xet_adapter::{
+        BatchReconstructionResponse, FileReconstructionResponse, FileReconstructionV2Response,
+        XorbUploadResponse, decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
+        validate_serialized_xorb,
+    };
+    pub(crate) use shardline_xet_adapter::{
+        XetAdapterError, XorbParseError, XorbVisitError, ShardUploadResponse,
+        register_uploaded_shard_bytes, store_uploaded_xorb_bytes, xorb_object_key,
+        resolve_dedupe_shard_object, build_reconstruction_response,
+        build_batch_reconstruction_response, build_xorb_transfer_url, normalize_serialized_xorb,
+        reconstruction_v2_from_v1, retained_shard_chunk_hashes, visit_stored_xorb_chunk_hashes,
+        xorb_hash_from_object_key_if_present, shard_hash_from_object_key_if_present,
+        validate_hash_path, validate_optional_content_hash, validate_xorb_transfer_namespace,
+        XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+    };
+    #[cfg(test)]
+    pub(crate) use shardline_xet_adapter::{
+        ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
+        ReconstructionUrlRange, shard_object_key, store_uploaded_xorb,
+    };
+}
 
 pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
@@ -155,7 +186,17 @@ pub use reconstruction_cache::{
 pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
-pub(crate) use shardline_gc as gc;
+pub(crate) mod gc {
+    pub use shardline_gc::{
+        DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
+    };
+    pub(crate) use shardline_gc::run_gc_with_stores;
+    #[cfg(test)]
+    pub(crate) use shardline_gc::{
+        GcError, GcOrphanQuarantineState, quarantine_record_path, quarantine_root, run_local_gc,
+        run_local_gc_diagnostics,
+    };
+}
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
 };

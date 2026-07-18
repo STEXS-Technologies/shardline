@@ -222,7 +222,7 @@ impl FileRecord {
 }
 
 /// File-record reconstruction-plan invariant failure.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error)]
 pub enum FileRecordInvariantError {
     /// A chunk hash was not a lowercase Xet API hash.
     #[error("file record chunk hash is invalid")]
@@ -560,10 +560,10 @@ mod tests {
                 packed_end: 1,
             }],
         };
-        assert_eq!(
+        assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::EmptyChunk)
-        );
+        ));
     }
 
     #[test]
@@ -584,10 +584,10 @@ mod tests {
                 packed_end: 4,
             }],
         };
-        assert_eq!(
+        assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::InvalidChunkRange)
-        );
+        ));
     }
 
     #[test]
@@ -608,10 +608,10 @@ mod tests {
                 packed_end: 2,
             }],
         };
-        assert_eq!(
+        assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::InvalidPackedRange)
-        );
+        ));
     }
 
     #[test]
@@ -624,10 +624,10 @@ mod tests {
             repository_scope: None,
             chunks: vec![],
         };
-        assert_eq!(
+        assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::TotalBytesMismatch)
-        );
+        ));
     }
 
     #[test]
@@ -695,8 +695,8 @@ mod tests {
                 },
             ],
         };
-
-        assert_eq!(record.validate_reconstruction_plan(), Ok(()));
+        
+        assert!(record.validate_reconstruction_plan().is_ok());
     }
 
     #[test]
@@ -728,11 +728,11 @@ mod tests {
                 },
             ],
         };
-
-        assert_eq!(
+        
+        assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::NonContiguousChunkOffsets)
-        );
+        ));
     }
 
     // ── FileRecordInvariantError Display ─────────────────────────────────
@@ -824,10 +824,10 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(
+        assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::LengthOverflow)
-        );
+        ));
     }
 
     #[test]
@@ -904,10 +904,10 @@ mod tests {
                 packed_end: 8,
             }],
         };
-        assert_eq!(
+        assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::TotalBytesMismatch)
-        );
+        ));
     }
 
     #[test]
@@ -920,7 +920,7 @@ mod tests {
             repository_scope: None,
             chunks: vec![],
         };
-        assert_eq!(record.validate_reconstruction_plan(), Ok(()));
+        assert!(record.validate_reconstruction_plan().is_ok());
     }
 
     #[test]
@@ -931,7 +931,7 @@ mod tests {
         }
         let err = convert(shardline_protocol::HashParseError::InvalidLength);
         assert_eq!(err.to_string(), "file record chunk hash is invalid");
-        let err = convert(shardline_protocol::HashParseError::InvalidCharacter);
+        let err = convert(shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()));
         assert_eq!(err.to_string(), "file record chunk hash is invalid");
     }
 

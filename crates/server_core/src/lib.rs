@@ -21,12 +21,15 @@
 // Submodules
 // ---------------------------------------------------------------------------
 
-pub mod auth;
+/// Backward-compatible re-exports from the `shardline-auth` crate.
+pub mod auth {
+    pub use shardline_auth::*;
+}
+
 pub mod object_store;
 pub mod ops;
 pub mod protocol_support;
 pub mod server_frontend;
-pub mod types;
 pub mod validation;
 
 #[cfg(test)]
@@ -36,32 +39,22 @@ mod tests;
 // Re-exports from submodules
 // ---------------------------------------------------------------------------
 
-// Auth — selective to avoid ambiguity
-pub use auth::{AuthContext, AuthError, AuthProvider};
-
 // Object store
 pub use object_store::{
     OpsRecordKind, OpsRecordStore, ServerObjectStore, ServerObjectStoreError, read_full_object,
 };
 
-// Validation
+// Validation (leftover functions that depend on server_core types)
 pub use validation::{
-    ValidateContentHashError, ValidateIdentifierError, chunk_hash,
-    chunk_hash_from_chunk_object_key_if_present, chunk_object_key, content_hash,
-    validate_content_hash, validate_content_hash_with, validate_identifier,
+    chunk_hash, chunk_hash_from_chunk_object_key_if_present, chunk_object_key, content_hash,
 };
 
-// Types (shared data structures, error enums, constants)
-pub use types::{
-    DEFAULT_LOCAL_GC_RETENTION_SECONDS, DEFAULT_MAX_SHARD_FILES,
-    DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    DEFAULT_SHARD_METADATA_LIMITS, InvalidLifecycleMetadataError,
-    InvalidReconstructionResponseError, InvalidSerializedShardError, ShardMetadataLimits,
-};
+// Ops (leftover functions that depend on server_core or external crate types)
+pub use ops::{ParseStoredFileRecordError, parse_stored_file_record_bytes, provider_directory};
 
-// Ops (misc utility functions, error, constants)
-pub use ops::{
-    MAX_LOCAL_RECORD_METADATA_BYTES, ParseStoredFileRecordError, RebuildOverflowError, checked_add,
-    checked_increment, parse_stored_file_record_bytes, provider_directory,
-    unix_now_seconds_checked,
-};
+// ---------------------------------------------------------------------------
+// Re-exports from new crates (full backward compatibility)
+// ---------------------------------------------------------------------------
+
+pub use shardline_auth::*;
+pub use shardline_validation::*;

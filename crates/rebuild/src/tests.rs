@@ -575,7 +575,8 @@ fn rebuild_error_from_index_store_error() {
 
 #[test]
 fn rebuild_error_from_memory_index_store_error() {
-    let err = shardline_index::MemoryIndexStoreError::LockPoisoned;
+    let err =
+        shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned());
     let error: RebuildError = err.into();
     assert!(matches!(error, RebuildError::MemoryIndexStore(_)));
     assert!(!error.to_string().is_empty());
@@ -583,7 +584,8 @@ fn rebuild_error_from_memory_index_store_error() {
 
 #[test]
 fn rebuild_error_from_memory_record_store_error() {
-    let err = shardline_index::MemoryRecordStoreError::LockPoisoned;
+    let err =
+        shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned());
     let error: RebuildError = err.into();
     assert!(matches!(error, RebuildError::MemoryRecordStore(_)));
     assert!(!error.to_string().is_empty());
@@ -686,8 +688,12 @@ fn rebuild_error_display_all_variants_non_empty() {
         RebuildError::IndexStore(shardline_index::LocalIndexStoreError::Io(
             std::io::Error::other("test"),
         )),
-        RebuildError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned),
-        RebuildError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned),
+        RebuildError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned(
+            "test".to_owned(),
+        )),
+        RebuildError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned(
+            "test".to_owned(),
+        )),
         RebuildError::HashParse(shardline_protocol::HashParseError::InvalidLength),
         RebuildError::StoredFileMetadataTooLarge {
             observed_bytes: 1,
@@ -704,7 +710,7 @@ fn rebuild_error_display_all_variants_non_empty() {
 #[test]
 fn rebuild_error_display_postgres_metadata() {
     let err = RebuildError::PostgresMetadata(
-        shardline_index::PostgresMetadataStoreError::IntegerOutOfRange,
+        shardline_index::PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned()),
     );
     let msg = err.to_string();
     assert_eq!(msg, "postgres metadata adapter operation failed");

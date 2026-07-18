@@ -36,8 +36,11 @@ impl AnchoredPathOptions {
 
 /// Open parent directory and final filename for a write anchored under a root.
 pub struct AnchoredTarget {
+    /// Open file descriptor for the parent directory (used for fd-relative operations).
     parent_dir: File,
+    /// The logical path to the parent directory (used for anchor verification).
     parent_path: PathBuf,
+    /// The final filename component within the anchored parent directory.
     file_name: OsString,
 }
 

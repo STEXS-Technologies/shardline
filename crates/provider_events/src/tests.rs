@@ -2033,7 +2033,9 @@ fn provider_events_error_index_store_display() {
 #[test]
 fn provider_events_error_memory_index_store_display() {
     let error =
-        ProviderEventsError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned);
+        ProviderEventsError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned(
+            "test".to_owned(),
+        ));
     let msg = error.to_string();
     assert!(!msg.is_empty());
 }
@@ -2041,7 +2043,7 @@ fn provider_events_error_memory_index_store_display() {
 #[test]
 fn provider_events_error_memory_record_store_display() {
     let error = ProviderEventsError::MemoryRecordStore(
-        shardline_index::MemoryRecordStoreError::LockPoisoned,
+        shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()),
     );
     let msg = error.to_string();
     assert!(!msg.is_empty());
@@ -2063,7 +2065,7 @@ fn provider_events_error_parse_stored_file_record_display() {
 fn provider_events_error_postgres_metadata_display() {
     let error = ProviderEventsError::PostgresMetadata(
         shardline_index::PostgresMetadataStoreError::HashParse(
-            shardline_protocol::HashParseError::InvalidCharacter,
+            shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
         ),
     );
     let msg = error.to_string();

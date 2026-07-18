@@ -501,7 +501,7 @@ impl XorbObject {
             return Ok(None);
         };
 
-        let mut hash_chunks = Vec::new();
+        let mut hash_chunks = Vec::with_capacity(xorb.info.num_chunks as usize);
         let mut cumulative_compressed_length: u32 = 0;
         let mut unpacked_chunk_offset = 0;
         let mut start_offset = 0;
@@ -1505,7 +1505,7 @@ pub mod test_utils {
         }
 
         c.info.unpacked_chunk_offsets = raw_chunk_boundaries.iter().map(|(_, b)| *b).collect();
-        c.info.chunk_hashes = chunk_hashes.clone();
+        c.info.chunk_hashes = chunk_hashes;
 
         c.info.xorb_hash = xorb_hash(&chunks);
 
