@@ -63,6 +63,8 @@ shardline-server = { version = "1.0.1", path = "crates/server" }
 shardline-server-core = { version = "1.0.1", path = "crates/server_core" }
 shardline-storage = { version = "1.0.1", path = "crates/storage" }
 shardline-test-support = { version = "1.0.1", path = "crates/test_support" }
+shardline-validation = { version = "1.0.1", path = "crates/shardline-validation" }
+shardline-auth = { version = "1.0.1", path = "crates/shardline-auth" }
 shardline-vcs = { version = "1.0.1", path = "crates/vcs" }
 shardline-xet-adapter = { version = "1.0.1", path = "crates/xet_adapter" }
 shardline-xet-core = { version = "1.0.1", path = "crates/xet_core" }

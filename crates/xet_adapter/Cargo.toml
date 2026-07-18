@@ -22,7 +22,12 @@ tokio = { workspace = true, features = ["rt"] }
 shardline-xet-core.workspace = true
 
 [dev-dependencies]
+criterion = { workspace = true, features = ["cargo_bench_support"] }
 tempfile.workspace = true
+
+[[bench]]
+name = "xorb_validate"
+harness = false
 
 [lints]
 workspace = true

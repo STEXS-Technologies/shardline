@@ -297,7 +297,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::panic, clippy::unreachable)]
     fn resolve_file_from_store_small_inline_file() {
         let content = b"small file content".to_vec();
         let files = vec![shardline_index::hub::HubFileEntry {
@@ -309,22 +308,24 @@ mod tests {
         }];
         let (_ts, state) = setup_resolve_state(&files);
         let result = resolve_file_from_store(&state, "sha_resolve", "readme.md").unwrap();
-        match result {
+        match &result {
             DownloadResult::Inline {
                 size,
                 sha,
                 content: c,
             } => {
-                assert_eq!(size, content.len() as u64);
-                assert_eq!(sha, "abc123");
-                assert_eq!(c, Some(content));
+                assert_eq!(*size, content.len() as u64);
+                assert_eq!(sha.as_str(), "abc123");
+                assert_eq!(c, &Some(content));
             }
-            other => unreachable!("expected Inline, got {other:?}"),
+            _ => assert!(
+                matches!(result, DownloadResult::Inline { .. }),
+                "expected Inline, got {result:?}"
+            ),
         }
     }
 
     #[test]
-    #[allow(clippy::panic, clippy::unreachable)]
     fn resolve_file_from_store_large_lfs_redirect() {
         let size = 2_000_000u64;
         let files = vec![shardline_index::hub::HubFileEntry {
@@ -336,12 +337,15 @@ mod tests {
         }];
         let (_ts, state) = setup_resolve_state(&files);
         let result = resolve_file_from_store(&state, "sha_resolve", "model.bin").unwrap();
-        match result {
+        match &result {
             DownloadResult::LfsRedirect { oid, size: s } => {
-                assert_eq!(oid, "oid123");
-                assert_eq!(s, size);
+                assert_eq!(oid.as_str(), "oid123");
+                assert_eq!(*s, size);
             }
-            other => unreachable!("expected LfsRedirect, got {other:?}"),
+            _ => assert!(
+                matches!(result, DownloadResult::LfsRedirect { .. }),
+                "expected LfsRedirect, got {result:?}"
+            ),
         }
     }
 
@@ -353,7 +357,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::panic, clippy::unreachable)]
     fn resolve_file_from_store_large_non_lfs_inline() {
         let content = vec![0u8; 100_000];
         let files = vec![shardline_index::hub::HubFileEntry {
@@ -365,17 +368,19 @@ mod tests {
         }];
         let (_ts, state) = setup_resolve_state(&files);
         let result = resolve_file_from_store(&state, "sha_resolve", "big.txt").unwrap();
-        match result {
+        match &result {
             DownloadResult::Inline { size, .. } => {
                 // size <= MAX_INLINE_SIZE → Inline
-                assert!(size <= 1_048_576);
+                assert!(*size <= 1_048_576);
             }
-            other => unreachable!("expected Inline, got {other:?}"),
+            _ => assert!(
+                matches!(result, DownloadResult::Inline { .. }),
+                "expected Inline, got {result:?}"
+            ),
         }
     }
 
     #[test]
-    #[allow(clippy::panic, clippy::unreachable)]
     fn resolve_file_from_store_large_non_lfs_file_above_max_inline() {
         // size > MAX_INLINE_SIZE (1 MiB) and !is_lfs → Inline (else branch)
         let size = super::MAX_INLINE_SIZE + 1;
@@ -388,14 +393,17 @@ mod tests {
         }];
         let (_ts, state) = setup_resolve_state(&files);
         let result = resolve_file_from_store(&state, "sha_resolve", "huge.txt").unwrap();
-        match result {
+        match &result {
             DownloadResult::Inline {
                 size: s, content, ..
             } => {
-                assert_eq!(s, size);
+                assert_eq!(*s, size);
                 assert!(content.is_none());
             }
-            other => unreachable!("expected Inline, got {other:?}"),
+            _ => assert!(
+                matches!(result, DownloadResult::Inline { .. }),
+                "expected Inline, got {result:?}"
+            ),
         }
     }
 }

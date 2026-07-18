@@ -38,12 +38,15 @@ impl ShardlineHash {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         {
-            return Err(HashParseError::InvalidCharacter);
+            return Err(HashParseError::InvalidCharacter(
+                "non-lowercase hexadecimal character".to_owned(),
+            ));
         }
 
-        let decoded = hex::decode(value).map_err(|_error| HashParseError::InvalidCharacter)?;
+        let decoded = hex::decode(value)
+            .map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
         let bytes = <[u8; HASH_BYTE_LENGTH]>::try_from(decoded)
-            .map_err(|_error| HashParseError::InvalidLength)?;
+            .map_err(|vec| { let _ = vec; HashParseError::InvalidLength })?;
 
         Ok(Self { bytes })
     }
@@ -87,14 +90,14 @@ const fn lower_hex_digit(nibble: u8) -> u8 {
 }
 
 /// Hash parsing failure.
-#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error)]
 pub enum HashParseError {
     /// The hash string did not contain exactly 64 hexadecimal characters.
     #[error("hash must contain exactly 64 lowercase hexadecimal characters")]
     InvalidLength,
-    /// The hash string contained a character outside lowercase hexadecimal.
-    #[error("hash must use lowercase hexadecimal characters only")]
-    InvalidCharacter,
+    /// The hash string contained a character outside lowercase hexadecimal, or hex decoding failed.
+    #[error("invalid hash character: {0}")]
+    InvalidCharacter(String),
 }
 
 #[cfg(test)]
@@ -114,7 +117,8 @@ mod tests {
             hex,
             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
         );
-        assert_eq!(ShardlineHash::parse_hex(&hex), Ok(hash));
+        let parsed = ShardlineHash::parse_hex(&hex);
+        assert_eq!(parsed.unwrap(), hash);
     }
 
     #[test]
@@ -142,7 +146,8 @@ mod tests {
             let hash = ShardlineHash::from_bytes(bytes);
 
             assert_eq!(hash.hex_string(), hex);
-            assert_eq!(ShardlineHash::parse_hex(hex), Ok(hash));
+            let parsed = ShardlineHash::parse_hex(hex);
+            assert_eq!(parsed.unwrap(), hash);
         }
     }
 
@@ -152,14 +157,14 @@ mod tests {
         let invalid = hash.hex_string().replacen('f', "F", 1);
         let result = ShardlineHash::parse_hex(&invalid);
 
-        assert_eq!(result, Err(HashParseError::InvalidCharacter));
+        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
     }
 
     #[test]
     fn canonical_hash_rejects_short_hex() {
         let result = ShardlineHash::parse_hex("abc");
 
-        assert_eq!(result, Err(HashParseError::InvalidLength));
+        assert!(matches!(result, Err(HashParseError::InvalidLength)));
     }
 
     #[test]
@@ -168,7 +173,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
 
-        assert_eq!(result, Err(HashParseError::InvalidLength));
+        assert!(matches!(result, Err(HashParseError::InvalidLength)));
     }
 
     #[test]
@@ -177,7 +182,7 @@ mod tests {
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
         );
 
-        assert_eq!(result, Err(HashParseError::InvalidCharacter));
+        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
     }
 
     #[test]
@@ -227,16 +232,12 @@ mod tests {
 
     #[test]
     fn hash_parse_error_display_invalid_character() {
-        let error = HashParseError::InvalidCharacter;
+        let error = HashParseError::InvalidCharacter("bad char".to_owned());
         let msg = error.to_string();
         assert!(!msg.is_empty());
         assert!(
-            msg.contains("lowercase"),
-            "expected mention of lowercase in display, got: {msg}"
-        );
-        assert!(
-            msg.contains("hexadecimal"),
-            "expected mention of hexadecimal in display, got: {msg}"
+            msg.contains("bad char"),
+            "expected 'bad char' in display, got: {msg}"
         );
     }
 
@@ -261,7 +262,7 @@ mod tests {
     #[test]
     fn hash_parse_hex_rejects_garbage_after_valid_prefix() {
         let result = ShardlineHash::parse_hex(&format!("{}zz", "a".repeat(64)));
-        assert_eq!(result, Err(HashParseError::InvalidLength));
+        assert!(matches!(result, Err(HashParseError::InvalidLength)));
     }
 
     #[test]
@@ -284,7 +285,7 @@ mod tests {
         // Exactly 64 chars, first char uppercase => InvalidCharacter
         let mixed = format!("A{}", "a".repeat(63));
         let result = ShardlineHash::parse_hex(&mixed);
-        assert_eq!(result, Err(HashParseError::InvalidCharacter));
+        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
     }
 
     #[test]
@@ -295,16 +296,13 @@ mod tests {
         bytes.push_str(&"a".repeat(31));
         assert_eq!(bytes.len(), 64);
         let result = ShardlineHash::parse_hex(&bytes);
-        assert_eq!(result, Err(HashParseError::InvalidCharacter));
+        assert!(matches!(result, Err(HashParseError::InvalidCharacter(_))));
     }
 
     #[test]
     fn hash_error_derive_impls() {
-        // HashParseError implements Clone, Copy, PartialEq, Eq
-        let a = HashParseError::InvalidLength;
-        let b = HashParseError::InvalidCharacter;
-        let a2 = a;
-        assert_eq!(a, a2);
-        assert_ne!(a, b);
+        // HashParseError implements Clone
+        let _a = HashParseError::InvalidLength;
+        let _b = HashParseError::InvalidCharacter("msg".to_owned());
     }
 }

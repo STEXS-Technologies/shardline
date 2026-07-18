@@ -871,7 +871,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(super::PostgresMetadataStoreError::HashParse(
-                HashParseError::InvalidCharacter
+                HashParseError::InvalidCharacter(_)
             ))
         ));
     }

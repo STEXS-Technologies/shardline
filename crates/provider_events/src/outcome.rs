@@ -49,34 +49,29 @@ mod tests {
         );
     }
 
-    #[allow(clippy::panic, clippy::wildcard_enum_match_arm)]
     #[test]
     fn duplicate_event_kind_revision_pushed() {
         let revision = RevisionRef::new("refs/heads/feature").unwrap();
         let kind = RepositoryWebhookEventKind::RevisionPushed { revision };
-        match duplicate_webhook_event_kind(&kind) {
-            ProviderWebhookOutcomeKind::RevisionPushed { revision } => {
-                assert_eq!(revision, "refs/heads/feature");
+        assert_eq!(
+            duplicate_webhook_event_kind(&kind),
+            ProviderWebhookOutcomeKind::RevisionPushed {
+                revision: "refs/heads/feature".to_owned(),
             }
-            other => panic!("expected RevisionPushed, got {other:?}"),
-        }
+        );
     }
 
-    #[allow(clippy::panic, clippy::wildcard_enum_match_arm)]
     #[test]
     fn duplicate_event_kind_repository_renamed() {
         let new_repository =
             RepositoryRef::new(ProviderKind::GitHub, "new-owner", "new-repo").unwrap();
         let kind = RepositoryWebhookEventKind::RepositoryRenamed { new_repository };
-        match duplicate_webhook_event_kind(&kind) {
+        assert_eq!(
+            duplicate_webhook_event_kind(&kind),
             ProviderWebhookOutcomeKind::RepositoryRenamed {
-                new_owner,
-                new_repo,
-            } => {
-                assert_eq!(new_owner, "new-owner");
-                assert_eq!(new_repo, "new-repo");
+                new_owner: "new-owner".to_owned(),
+                new_repo: "new-repo".to_owned(),
             }
-            other => panic!("expected RepositoryRenamed, got {other:?}"),
-        }
+        );
     }
 }

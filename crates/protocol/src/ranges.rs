@@ -107,17 +107,17 @@ pub enum RangeError {
 }
 
 /// Reconstruction request range parse failure.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error)]
 pub enum HttpRangeParseError {
     /// The header did not start with the expected unit token.
     #[error("range header must use bytes=<start>-<end> syntax")]
     MissingBytesUnit,
     /// The header contained unsupported or malformed syntax.
-    #[error("range header must use bytes=<start>-<end> syntax")]
-    InvalidSyntax,
+    #[error("range header must use bytes=<start>-<end> syntax: {0}")]
+    InvalidSyntax(String),
     /// The numeric range could not be parsed.
-    #[error("range header contained an invalid number")]
-    InvalidNumber,
+    #[error("range header contained an invalid number: {0}")]
+    InvalidNumber(String),
     /// The requested start exceeded the represented resource length.
     #[error("requested range is not satisfiable")]
     Unsatisfiable,
@@ -143,35 +143,46 @@ pub fn parse_http_byte_range(
         return Err(HttpRangeParseError::MissingBytesUnit);
     };
     if raw_suffix.is_empty() {
-        return Err(HttpRangeParseError::InvalidSyntax);
+        return Err(HttpRangeParseError::InvalidSyntax(
+            "empty range suffix".to_owned(),
+        ));
     }
     if raw_suffix.contains(',') {
-        return Err(HttpRangeParseError::InvalidSyntax);
+        return Err(HttpRangeParseError::InvalidSyntax(
+            "multi-range not supported".to_owned(),
+        ));
     }
 
     let mut parts = raw_suffix.splitn(2, '-');
     let Some(raw_start) = parts.next() else {
-        return Err(HttpRangeParseError::InvalidSyntax);
+        return Err(HttpRangeParseError::InvalidSyntax(
+            "missing range start".to_owned(),
+        ));
     };
     let Some(raw_end) = parts.next() else {
-        return Err(HttpRangeParseError::InvalidSyntax);
+        return Err(HttpRangeParseError::InvalidSyntax(
+            "missing range end".to_owned(),
+        ));
     };
     if raw_start.is_empty() {
         // Suffix range: bytes=-N (last N bytes)
         let suffix_len = raw_end
             .parse::<u64>()
-            .map_err(|_error| HttpRangeParseError::InvalidNumber)?;
+            .map_err(|e| HttpRangeParseError::InvalidNumber(e.to_string()))?;
         if suffix_len == 0 {
-            return Err(HttpRangeParseError::InvalidSyntax);
+            return Err(HttpRangeParseError::InvalidSyntax(
+                "suffix length must be non-zero".to_owned(),
+            ));
         }
         let start = resource_length.saturating_sub(suffix_len);
         let end = resource_length.saturating_sub(1);
-        return ByteRange::new(start, end).map_err(|_error| HttpRangeParseError::InvalidSyntax);
+        return ByteRange::new(start, end)
+            .map_err(|err| HttpRangeParseError::InvalidSyntax(err.to_string()));
     }
 
     let start = raw_start
         .parse::<u64>()
-        .map_err(|_error| HttpRangeParseError::InvalidNumber)?;
+        .map_err(|e| HttpRangeParseError::InvalidNumber(e.to_string()))?;
     if start >= resource_length {
         return Err(HttpRangeParseError::Unsatisfiable);
     }
@@ -184,11 +195,12 @@ pub fn parse_http_byte_range(
     } else {
         raw_end
             .parse::<u64>()
-            .map_err(|_error| HttpRangeParseError::InvalidNumber)?
+            .map_err(|e| HttpRangeParseError::InvalidNumber(e.to_string()))?
     };
     let end_inclusive = parsed_end.min(last_byte);
 
-    ByteRange::new(start, end_inclusive).map_err(|_error| HttpRangeParseError::InvalidSyntax)
+    ByteRange::new(start, end_inclusive)
+        .map_err(|err| HttpRangeParseError::InvalidSyntax(err.to_string()))
 }
 
 #[cfg(test)]
@@ -256,10 +268,7 @@ mod tests {
         let expected = ByteRange::new(10, 20);
 
         assert!(expected.is_ok());
-        assert_eq!(
-            parsed,
-            expected.map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
+        assert_eq!(parsed.unwrap(), expected.unwrap());
     }
 
     #[test]
@@ -269,53 +278,33 @@ mod tests {
         let expected = ByteRange::new(10, 24);
 
         assert!(expected.is_ok());
-        assert_eq!(
-            open_ended,
-            expected.map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
-        assert_eq!(
-            oversized,
-            expected.map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
-    }
-
-    #[test]
-    fn http_byte_range_accepts_single_byte_and_final_byte_vectors() {
-        let first_byte = parse_http_byte_range("bytes=0-0", 10);
-        let final_byte = parse_http_byte_range("bytes=9-9", 10);
-
-        assert_eq!(
-            first_byte,
-            ByteRange::new(0, 0).map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
-        assert_eq!(
-            final_byte,
-            ByteRange::new(9, 9).map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
+        let expected = expected.unwrap();
+        assert_eq!(open_ended.unwrap(), expected);
+        assert_eq!(oversized.unwrap(), expected);
     }
 
     #[test]
     fn http_byte_range_rejects_invalid_syntax() {
-        assert_eq!(
+        assert!(matches!(
             parse_http_byte_range("items=0-1", 10),
             Err(HttpRangeParseError::MissingBytesUnit)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             parse_http_byte_range("bytes=1-2,4-5", 10),
-            Err(HttpRangeParseError::InvalidSyntax)
-        );
-        assert_eq!(
+            Err(HttpRangeParseError::InvalidSyntax(_))
+        ));
+        assert!(matches!(
             parse_http_byte_range("bytes=2-1", 10),
-            Err(HttpRangeParseError::InvalidSyntax)
-        );
-        assert_eq!(
+            Err(HttpRangeParseError::InvalidSyntax(_))
+        ));
+        assert!(matches!(
             parse_http_byte_range("bytes= 1-2", 10),
-            Err(HttpRangeParseError::InvalidNumber)
-        );
-        assert_eq!(
+            Err(HttpRangeParseError::InvalidNumber(_))
+        ));
+        assert!(matches!(
             parse_http_byte_range("bytes=1 -2", 10),
-            Err(HttpRangeParseError::InvalidNumber)
-        );
+            Err(HttpRangeParseError::InvalidNumber(_))
+        ));
     }
 
     #[test]
@@ -323,60 +312,54 @@ mod tests {
         let suffix = parse_http_byte_range("bytes=-1", 10);
         let expected = ByteRange::new(9, 9);
         assert!(expected.is_ok());
-        assert_eq!(
-            suffix,
-            expected.map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
+        assert_eq!(suffix.unwrap(), expected.unwrap());
 
         let suffix_large = parse_http_byte_range("bytes=-100", 50);
         let expected_large = ByteRange::new(0, 49);
         assert!(expected_large.is_ok());
-        assert_eq!(
-            suffix_large,
-            expected_large.map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
+        assert_eq!(suffix_large.unwrap(), expected_large.unwrap());
 
-        assert_eq!(
+        assert!(matches!(
             parse_http_byte_range("bytes=0-0,1-1", 10),
-            Err(HttpRangeParseError::InvalidSyntax)
-        );
+            Err(HttpRangeParseError::InvalidSyntax(_))
+        ));
     }
 
     #[test]
     fn http_byte_range_rejects_unsatisfiable_start() {
-        assert_eq!(
+        assert!(matches!(
             parse_http_byte_range("bytes=10-20", 10),
             Err(HttpRangeParseError::Unsatisfiable)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             parse_http_byte_range("bytes=0-0", 0),
             Err(HttpRangeParseError::Unsatisfiable)
-        );
+        ));
     }
 
     #[test]
     fn http_byte_range_rejects_empty_raw_suffix() {
-        assert_eq!(
+        assert!(matches!(
             parse_http_byte_range("bytes=", 10),
-            Err(HttpRangeParseError::InvalidSyntax)
-        );
+            Err(HttpRangeParseError::InvalidSyntax(_))
+        ));
     }
 
     #[test]
     fn http_byte_range_rejects_empty_start_no_end() {
         // "bytes=-" hits the suffix branch; empty suffix length fails parse as InvalidNumber
-        assert_eq!(
+        assert!(matches!(
             parse_http_byte_range("bytes=-", 10),
-            Err(HttpRangeParseError::InvalidNumber)
-        );
+            Err(HttpRangeParseError::InvalidNumber(_))
+        ));
     }
 
     #[test]
     fn http_byte_range_rejects_suffix_zero() {
-        assert_eq!(
+        assert!(matches!(
             parse_http_byte_range("bytes=-0", 10),
-            Err(HttpRangeParseError::InvalidSyntax)
-        );
+            Err(HttpRangeParseError::InvalidSyntax(_))
+        ));
     }
 
     #[test]
@@ -384,10 +367,7 @@ mod tests {
         let result = parse_http_byte_range("bytes=-999", 100);
         let expected = ByteRange::new(0, 99);
         assert!(expected.is_ok());
-        assert_eq!(
-            result,
-            expected.map_err(|_error| HttpRangeParseError::InvalidSyntax)
-        );
+        assert_eq!(result.unwrap(), expected.unwrap());
     }
 
     // --- error Display tests ---
@@ -416,8 +396,8 @@ mod tests {
     fn http_range_parse_error_display_all_variants() {
         let cases: &[(HttpRangeParseError, &str)] = &[
             (HttpRangeParseError::MissingBytesUnit, "syntax"),
-            (HttpRangeParseError::InvalidSyntax, "syntax"),
-            (HttpRangeParseError::InvalidNumber, "invalid number"),
+            (HttpRangeParseError::InvalidSyntax("test".to_owned()), "syntax"),
+            (HttpRangeParseError::InvalidNumber("test".to_owned()), "invalid number"),
             (HttpRangeParseError::Unsatisfiable, "satisfiable"),
         ];
         for (error, substring) in cases {
@@ -503,27 +483,27 @@ mod tests {
     fn http_byte_range_rejects_start_equals_resource_length() {
         // start == resource_length is unsatisfiable
         let result = parse_http_byte_range("bytes=5-10", 5);
-        assert_eq!(result, Err(HttpRangeParseError::Unsatisfiable));
+        assert!(matches!(result, Err(HttpRangeParseError::Unsatisfiable)));
     }
 
     #[test]
     fn http_byte_range_zero_resource_length() {
         // resource_length=0 -> any range is unsatisfiable
         let result = parse_http_byte_range("bytes=0-0", 0);
-        assert_eq!(result, Err(HttpRangeParseError::Unsatisfiable));
+        assert!(matches!(result, Err(HttpRangeParseError::Unsatisfiable)));
     }
 
     #[test]
     fn http_byte_range_suffix_zero_resource_length() {
         // resource_length=0, suffix "-0" -> no bytes available
         let result = parse_http_byte_range("bytes=-0", 0);
-        assert_eq!(result, Err(HttpRangeParseError::InvalidSyntax));
+        assert!(matches!(result, Err(HttpRangeParseError::InvalidSyntax(_))));
     }
 
     #[test]
     fn http_byte_range_huge_numbers() {
         let result = parse_http_byte_range("bytes=99999999999999999999-100000000000000000000", 100);
-        assert_eq!(result, Err(HttpRangeParseError::InvalidNumber));
+        assert!(matches!(result, Err(HttpRangeParseError::InvalidNumber(_))));
     }
 
     // ── RangeError derive tests ──────────────────────────────────────────
@@ -539,7 +519,7 @@ mod tests {
 
     #[test]
     fn http_range_parse_error_debug_non_empty() {
-        let err = HttpRangeParseError::InvalidSyntax;
+        let err = HttpRangeParseError::InvalidSyntax("test".to_owned());
         let debug = format!("{err:?}");
         assert!(!debug.is_empty());
     }

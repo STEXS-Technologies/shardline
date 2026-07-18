@@ -38,7 +38,7 @@ shardline-provider-events.workspace = true
 shardline-oci-adapter.workspace = true
 shardline-metrics.workspace = true
 shardline-server-core.workspace = true
-shardline-storage.workspace = true
+shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 shardline-xet-adapter.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }

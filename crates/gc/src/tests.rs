@@ -371,7 +371,7 @@ fn gc_error_index_store_display() {
 
 #[test]
 fn gc_error_memory_index_store_display() {
-    let inner = MemoryIndexStoreError::LockPoisoned;
+    let inner = MemoryIndexStoreError::LockPoisoned("test".to_owned());
     let err = GcError::MemoryIndexStore(inner);
     assert_eq!(err.to_string(), "memory index adapter operation failed");
 }
@@ -385,8 +385,9 @@ fn gc_error_memory_record_store_display() {
 
 #[test]
 fn gc_error_postgres_metadata_display() {
-    let inner =
-        PostgresMetadataStoreError::HashParse(shardline_protocol::HashParseError::InvalidCharacter);
+    let inner = PostgresMetadataStoreError::HashParse(
+        shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
+    );
     let err = GcError::PostgresMetadata(inner);
     assert_eq!(
         err.to_string(),
@@ -445,7 +446,7 @@ fn gc_error_from_local_index_store_error() {
 
 #[test]
 fn gc_error_from_memory_index_store_error() {
-    let inner = MemoryIndexStoreError::LockPoisoned;
+    let inner = MemoryIndexStoreError::LockPoisoned("test".to_owned());
     let gc_err: GcError = inner.into();
     assert!(matches!(gc_err, GcError::MemoryIndexStore(_)));
 }
@@ -459,8 +460,9 @@ fn gc_error_from_memory_record_store_error() {
 
 #[test]
 fn gc_error_from_postgres_metadata_store_error() {
-    let inner =
-        PostgresMetadataStoreError::HashParse(shardline_protocol::HashParseError::InvalidCharacter);
+    let inner = PostgresMetadataStoreError::HashParse(
+        shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
+    );
     let gc_err: GcError = inner.into();
     assert!(matches!(gc_err, GcError::PostgresMetadata(_)));
 }
@@ -549,7 +551,8 @@ fn gc_error_into_server_object_store_error_index_store() {
 
 #[test]
 fn gc_error_into_server_object_store_error_memory_index_store() {
-    let gc_err = GcError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned);
+    let gc_err =
+        GcError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
     let server_err: ServerObjectStoreError = gc_err.into();
     assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
 }
@@ -563,8 +566,9 @@ fn gc_error_into_server_object_store_error_memory_record_store() {
 
 #[test]
 fn gc_error_into_server_object_store_error_postgres_metadata() {
-    let inner =
-        PostgresMetadataStoreError::HashParse(shardline_protocol::HashParseError::InvalidCharacter);
+    let inner = PostgresMetadataStoreError::HashParse(
+        shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
+    );
     let gc_err = GcError::PostgresMetadata(inner);
     let server_err: ServerObjectStoreError = gc_err.into();
     assert!(matches!(server_err, ServerObjectStoreError::Io(_)));

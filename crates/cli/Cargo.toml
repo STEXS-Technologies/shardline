@@ -42,7 +42,7 @@ serde_json.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-server.workspace = true
-shardline-storage.workspace = true
+shardline-storage = { workspace = true, features = ["s3"] }
 sqlx = { workspace = true, features = [
     "runtime-tokio",
     "tls-rustls",

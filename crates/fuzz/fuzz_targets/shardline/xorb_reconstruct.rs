@@ -33,6 +33,6 @@ fuzz_target!(|data: &[u8]| {
 
         // Validation may pass or fail — arbitrary chunk data may not form
         // a valid xorb. Either outcome is fine.
-        let _ = validated;
+        drop(validated);
     }
 });

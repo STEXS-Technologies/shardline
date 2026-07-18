@@ -1981,7 +1981,7 @@ mod tests {
                 .map(|(h, d)| (*h, d.len() as u64))
                 .collect::<Vec<_>>(),
         );
-        let payload: Vec<u8> = chunks_data.iter().flat_map(|d| d.clone()).collect();
+        let payload: Vec<u8> = chunks_data.iter().flatten().copied().collect();
         let boundaries: Vec<_> = hashes
             .iter()
             .scan(0u32, |acc, h| {

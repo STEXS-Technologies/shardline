@@ -22,7 +22,7 @@ impl RecordTraversal for LocalRecordStore {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || store.list_record_locators(LocalRecordKind::Latest))
                 .await
-                .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+                .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -37,7 +37,7 @@ impl RecordTraversal for LocalRecordStore {
                 store.list_repository_record_locators(LocalRecordKind::Latest, &repository)
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -50,7 +50,7 @@ impl RecordTraversal for LocalRecordStore {
                 store.list_record_locators(LocalRecordKind::Version)
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -65,7 +65,7 @@ impl RecordTraversal for LocalRecordStore {
                 store.list_repository_record_locators(LocalRecordKind::Version, &repository)
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -82,7 +82,9 @@ impl RecordTraversal for LocalRecordStore {
                     .ok_or_else(record_not_found_error)
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e: tokio::task::JoinError| {
+                LocalIndexStoreError::BlockingTask(e.to_string())
+            })?
         })
     }
 
@@ -98,7 +100,7 @@ impl RecordTraversal for LocalRecordStore {
                 store.read_record_bytes_raw(&locator)
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -121,7 +123,7 @@ impl RecordTraversal for LocalRecordStore {
                 Ok(exists != 0)
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -147,7 +149,7 @@ impl RecordTraversal for LocalRecordStore {
                 Ok(Duration::from_secs(i64_to_u64(value)?))
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -184,7 +186,7 @@ impl RecordMutation for LocalRecordStore {
                 Ok(())
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -207,7 +209,7 @@ impl RecordMutation for LocalRecordStore {
                 Ok(())
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -230,7 +232,7 @@ impl RecordMutation for LocalRecordStore {
                 Ok(())
             })
             .await
-            .map_err(|_error| LocalIndexStoreError::BlockingTask)?
+            .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
         })
     }
 
@@ -395,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn modified_since_epoch_errors_for_nonexistent_record() {
+    async fn modified_since_epoches_for_nonexistent_record() {
         let store = make_store();
         let record = sample_record();
         let locator = RecordTraversal::version_record_locator(&store, &record);
@@ -461,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_record_locator_errors_for_missing() {
+    async fn delete_record_locatores_for_missing() {
         let store = make_store();
         let record = sample_record();
         let locator = RecordTraversal::version_record_locator(&store, &record);

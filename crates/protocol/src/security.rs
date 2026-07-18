@@ -4,6 +4,16 @@ use serde::Deserialize;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Zeroizing byte-oriented secret material.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol::SecretBytes;
+///
+/// let secret = SecretBytes::from_slice(b"my-secret-key");
+/// assert_eq!(secret.expose_secret(), b"my-secret-key");
+/// assert!(!secret.is_empty());
+/// ```
 #[derive(Clone, PartialEq, Eq, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SecretBytes(Vec<u8>);
 
@@ -52,6 +62,15 @@ impl fmt::Debug for SecretBytes {
 }
 
 /// Zeroizing UTF-8 secret material.
+///
+/// # Examples
+///
+/// ```
+/// use shardline_protocol::SecretString;
+///
+/// let secret = SecretString::from_secret("bootstrap-token");
+/// assert_eq!(secret.expose_secret(), "bootstrap-token");
+/// ```
 #[derive(Clone, PartialEq, Eq, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SecretString(String);
 

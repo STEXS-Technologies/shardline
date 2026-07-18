@@ -233,7 +233,7 @@ impl LocalRecordStore {
             Ok::<_, LocalIndexStoreError>(())
         })
         .await
-        .map_err(|_err| LocalIndexStoreError::BlockingTask)?
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     /// Atomically commits native shard metadata.
@@ -268,7 +268,7 @@ impl LocalRecordStore {
             Ok::<_, LocalIndexStoreError>(())
         })
         .await
-        .map_err(|_err| LocalIndexStoreError::BlockingTask)?
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
     fn list_record_locators(
@@ -406,8 +406,8 @@ pub enum LocalIndexStoreError {
     #[error("stored webhook delivery was invalid")]
     WebhookDelivery(#[from] WebhookDeliveryError),
     /// A stored integer exceeded the supported range.
-    #[error("stored integer exceeded the supported range")]
-    IntegerOutOfRange,
+    #[error("stored integer exceeded the supported range: {0}")]
+    IntegerOutOfRange(String),
     /// A stored record kind was invalid.
     #[error("stored local record kind was invalid")]
     InvalidRecordKind,
@@ -418,8 +418,8 @@ pub enum LocalIndexStoreError {
     #[error("invalid repository type: {0}")]
     InvalidRepoType(String),
     /// A blocking computation task failed (panicked).
-    #[error("blocking task failed")]
-    BlockingTask,
+    #[error("blocking task failed: {0}")]
+    BlockingTask(String),
     /// An invalid local table name was encountered.
     #[error("invalid local table name")]
     InvalidTableName,
@@ -518,11 +518,11 @@ fn normalize_local_root(root: PathBuf) -> PathBuf {
 }
 
 pub(super) fn u64_to_i64(value: u64) -> Result<i64, LocalIndexStoreError> {
-    i64::try_from(value).map_err(|_error| LocalIndexStoreError::IntegerOutOfRange)
+    i64::try_from(value).map_err(|err| LocalIndexStoreError::IntegerOutOfRange(err.to_string()))
 }
 
 pub(super) fn i64_to_u64(value: i64) -> Result<u64, LocalIndexStoreError> {
-    u64::try_from(value).map_err(|_error| LocalIndexStoreError::IntegerOutOfRange)
+    u64::try_from(value).map_err(|err| LocalIndexStoreError::IntegerOutOfRange(err.to_string()))
 }
 
 pub(super) fn collect_rows<T>(

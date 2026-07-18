@@ -464,8 +464,8 @@ impl From<HttpRangeParseError> for ServerError {
         match value {
             HttpRangeParseError::Unsatisfiable => Self::RangeNotSatisfiable,
             HttpRangeParseError::MissingBytesUnit
-            | HttpRangeParseError::InvalidSyntax
-            | HttpRangeParseError::InvalidNumber => Self::InvalidRangeHeader,
+            | HttpRangeParseError::InvalidSyntax(_)
+            | HttpRangeParseError::InvalidNumber(_) => Self::InvalidRangeHeader,
         }
     }
 }
@@ -1853,13 +1853,17 @@ mod tests {
 
     #[test]
     fn index_error_memory_index_display() {
-        let err = IndexError::MemoryIndex(shardline_index::MemoryIndexStoreError::LockPoisoned);
+        let err = IndexError::MemoryIndex(shardline_index::MemoryIndexStoreError::LockPoisoned(
+            "test".to_owned(),
+        ));
         assert_eq!(err.to_string(), "memory index adapter operation failed");
     }
 
     #[test]
     fn index_error_memory_record_display() {
-        let err = IndexError::MemoryRecord(shardline_index::MemoryRecordStoreError::LockPoisoned);
+        let err = IndexError::MemoryRecord(shardline_index::MemoryRecordStoreError::LockPoisoned(
+            "test".to_owned(),
+        ));
         assert_eq!(err.to_string(), "memory record adapter operation failed");
     }
 
@@ -1953,7 +1957,8 @@ mod tests {
     #[test]
     fn from_http_range_parse_error_invalid_syntax() {
         use shardline_protocol::HttpRangeParseError;
-        let err: ServerError = HttpRangeParseError::InvalidSyntax.into();
+        let err: ServerError =
+            HttpRangeParseError::InvalidSyntax("test".to_owned()).into();
         assert!(matches!(err, ServerError::InvalidRangeHeader));
     }
 
@@ -2001,7 +2006,8 @@ mod tests {
 
     #[test]
     fn from_memory_index_store_error() {
-        let err: ServerError = shardline_index::MemoryIndexStoreError::LockPoisoned.into();
+        let err: ServerError =
+            shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()).into();
         assert!(matches!(
             err,
             ServerError::Index(IndexError::MemoryIndex(_))
@@ -2010,7 +2016,8 @@ mod tests {
 
     #[test]
     fn from_memory_record_store_error() {
-        let err: ServerError = shardline_index::MemoryRecordStoreError::LockPoisoned.into();
+        let err: ServerError =
+            shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()).into();
         assert!(matches!(
             err,
             ServerError::Index(IndexError::MemoryRecord(_))
@@ -2248,7 +2255,7 @@ mod tests {
     #[test]
     fn from_xet_adapter_error_memory_index() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::MemoryIndexStore(
-            shardline_index::MemoryIndexStoreError::LockPoisoned,
+            shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()),
         )
         .into();
         assert!(matches!(
@@ -2260,7 +2267,7 @@ mod tests {
     #[test]
     fn from_xet_adapter_error_memory_record() {
         let err: ServerError = crate::xet_adapter::XetAdapterError::MemoryRecordStore(
-            shardline_index::MemoryRecordStoreError::LockPoisoned,
+            shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()),
         )
         .into();
         assert!(matches!(
@@ -2447,7 +2454,7 @@ mod tests {
     fn from_provider_events_error_memory_index() {
         use shardline_provider_events::ProviderEventsError;
         let err: ServerError = ProviderEventsError::MemoryIndexStore(
-            shardline_index::MemoryIndexStoreError::LockPoisoned,
+            shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()),
         )
         .into();
         assert!(matches!(
@@ -2460,7 +2467,7 @@ mod tests {
     fn from_provider_events_error_memory_record() {
         use shardline_provider_events::ProviderEventsError;
         let err: ServerError = ProviderEventsError::MemoryRecordStore(
-            shardline_index::MemoryRecordStoreError::LockPoisoned,
+            shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()),
         )
         .into();
         assert!(matches!(
@@ -2567,8 +2574,10 @@ mod tests {
     #[test]
     fn from_gc_error_memory_index() {
         use shardline_gc::GcError;
-        let err: ServerError =
-            GcError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned).into();
+        let err: ServerError = GcError::MemoryIndexStore(
+            shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()),
+        )
+        .into();
         assert!(matches!(
             err,
             ServerError::Index(IndexError::MemoryIndex(_))
@@ -2579,8 +2588,10 @@ mod tests {
     fn from_gc_error_memory_record() {
         use shardline_gc::GcError;
         let err: ServerError =
-            GcError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned)
-                .into();
+            GcError::MemoryRecordStore(shardline_index::MemoryRecordStoreError::LockPoisoned(
+                "test".to_owned(),
+            ))
+            .into();
         assert!(matches!(
             err,
             ServerError::Index(IndexError::MemoryRecord(_))

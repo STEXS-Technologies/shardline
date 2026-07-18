@@ -115,7 +115,7 @@ impl MemoryIndexStore {
     fn lock_state(&self) -> Result<MutexGuard<'_, MemoryIndexState>, MemoryIndexStoreError> {
         self.state
             .lock()
-            .map_err(|_error| MemoryIndexStoreError::LockPoisoned)
+            .map_err(|e| MemoryIndexStoreError::LockPoisoned(e.to_string()))
     }
 }
 
@@ -465,11 +465,11 @@ const fn provider_sort_key(provider: RepositoryProvider) -> &'static str {
 }
 
 /// Memory index-store failure.
-#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error)]
 pub enum MemoryIndexStoreError {
     /// The in-memory state lock was poisoned.
-    #[error("memory index store lock was poisoned")]
-    LockPoisoned,
+    #[error("memory index store lock was poisoned: {0}")]
+    LockPoisoned(String),
 }
 
 #[derive(Debug, Default)]
@@ -581,7 +581,7 @@ impl MemoryRecordStore {
     fn lock_state(&self) -> Result<MutexGuard<'_, MemoryRecordState>, MemoryRecordStoreError> {
         self.state
             .lock()
-            .map_err(|_error| MemoryRecordStoreError::LockPoisoned)
+            .map_err(|e| MemoryRecordStoreError::LockPoisoned(e.to_string()))
     }
 }
 
@@ -954,8 +954,8 @@ impl MemoryRecordLocator {
 #[derive(Debug, Error)]
 pub enum MemoryRecordStoreError {
     /// The in-memory state lock was poisoned.
-    #[error("memory record store lock was poisoned")]
-    LockPoisoned,
+    #[error("memory record store lock was poisoned: {0}")]
+    LockPoisoned(String),
     /// The requested record locator does not exist.
     #[error("memory record locator was not found")]
     RecordNotFound,
@@ -2346,32 +2346,36 @@ mod tests {
         assert!(visited.is_empty());
     }
 
-    // ── MemoryIndexStoreError Display / Debug / Clone / Copy ───────────────
+    // ── MemoryIndexStoreError Display / Debug / Clone ─────────────────────
 
     #[test]
     fn memory_index_store_error_display() {
-        let err = MemoryIndexStoreError::LockPoisoned;
-        assert_eq!(format!("{err}"), "memory index store lock was poisoned");
+        let err = MemoryIndexStoreError::LockPoisoned("poisoned".to_owned());
+        let msg = format!("{err}");
+        assert!(msg.contains("memory index store lock was poisoned"));
+        assert!(msg.contains("poisoned"));
     }
 
     #[test]
     fn memory_index_store_error_debug() {
-        let err = MemoryIndexStoreError::LockPoisoned;
+        let err = MemoryIndexStoreError::LockPoisoned("test".to_owned());
         let debug = format!("{err:?}");
         assert!(debug.contains("LockPoisoned"));
     }
 
     #[test]
-    fn memory_index_store_error_clone_copy() {
-        let err = MemoryIndexStoreError::LockPoisoned;
-        let cloned = err;
-        assert_eq!(err, cloned);
+    fn memory_index_store_error_clone() {
+        let err = MemoryIndexStoreError::LockPoisoned("test".to_owned());
+        let cloned = err.clone();
+        assert!(matches!(format!("{err:?}"), d if d == format!("{cloned:?}")));
     }
 
     #[test]
     fn memory_record_store_error_display_lock_poisoned() {
-        let err = MemoryRecordStoreError::LockPoisoned;
-        assert_eq!(format!("{err}"), "memory record store lock was poisoned");
+        let err = MemoryRecordStoreError::LockPoisoned("poisoned".to_owned());
+        let msg = format!("{err}");
+        assert!(msg.contains("memory record store lock was poisoned"));
+        assert!(msg.contains("poisoned"));
     }
 
     #[test]

@@ -414,7 +414,7 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::RetentionHold(_)
         | PostgresMetadataStoreError::QuarantineCandidate(_)
         | PostgresMetadataStoreError::WebhookDelivery(_)
-        | PostgresMetadataStoreError::IntegerOutOfRange
+        | PostgresMetadataStoreError::IntegerOutOfRange(_)
         | PostgresMetadataStoreError::InvalidRecordKind
         | PostgresMetadataStoreError::InvalidRepoType(_) => {
             ServerError::Index(IndexError::PostgresMetadata(error))
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn map_record_store_error_integer_out_of_range() {
-        let error = PostgresMetadataStoreError::IntegerOutOfRange;
+        let error = PostgresMetadataStoreError::IntegerOutOfRange("test".to_owned());
         let result = map_record_store_error(error);
         assert!(matches!(
             result,

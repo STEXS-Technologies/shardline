@@ -3187,6 +3187,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardline-auth"
+version = "1.0.1"
+dependencies = [
+ "hex",
+ "serde_json",
+ "shardline-protocol",
+ "subtle",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "shardline-bench"
 version = "1.0.1"
 dependencies = [
@@ -3204,6 +3216,7 @@ dependencies = [
 name = "shardline-cache"
 version = "1.0.1"
 dependencies = [
+ "criterion",
  "hex",
  "redis",
  "rustls",
@@ -3513,18 +3526,19 @@ name = "shardline-server-core"
 version = "1.0.1"
 dependencies = [
  "blake3",
+ "criterion",
  "hex",
  "proptest",
- "serde",
  "serde_json",
  "sha2",
+ "shardline-auth",
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",
  "shardline-test-support",
+ "shardline-validation",
  "tempfile",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -3558,6 +3572,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardline-validation"
+version = "1.0.1"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "shardline-vcs"
 version = "1.0.1"
 dependencies = [
@@ -3575,6 +3596,7 @@ name = "shardline-xet-adapter"
 version = "1.0.1"
 dependencies = [
  "axum",
+ "criterion",
  "serde",
  "shardline-index",
  "shardline-metrics",
