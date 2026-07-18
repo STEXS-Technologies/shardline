@@ -10,8 +10,8 @@ use std::{
 };
 
 use shardline_protocol::{
-    RepositoryScope, TokenClaims, TokenClaimsError, TokenCodecError, TokenScope, TokenSigner,
-    unix_now_seconds_lossy,
+    RepositoryScope, SecretBytes, TokenClaims, TokenClaimsError, TokenCodecError, TokenScope,
+    TokenSigner, unix_now_seconds_lossy,
 };
 use thiserror::Error;
 
@@ -99,7 +99,7 @@ pub fn mint_admin_token(
     ttl_seconds: u64,
 ) -> Result<String, AdminTokenError> {
     let signing_key = read_signing_key_bytes(key_file)?;
-    let signer = TokenSigner::new(&signing_key)?;
+    let signer = TokenSigner::new(signing_key.expose_secret())?;
     let expires_at_unix_seconds = unix_now_seconds_lossy()
         .checked_add(ttl_seconds)
         .ok_or(AdminTokenError::TtlOverflow)?;
@@ -128,7 +128,7 @@ pub fn mint_admin_token_from_sources(
         (None, None) => return Err(AdminTokenError::MissingSigningKeySource),
         (Some(_path), Some(_name)) => return Err(AdminTokenError::SigningKeySourceConflict),
     };
-    let signer = TokenSigner::new(&signing_key)?;
+    let signer = TokenSigner::new(signing_key.expose_secret())?;
     let expires_at_unix_seconds = unix_now_seconds_lossy()
         .checked_add(ttl_seconds)
         .ok_or(AdminTokenError::TtlOverflow)?;
@@ -136,7 +136,7 @@ pub fn mint_admin_token_from_sources(
     Ok(signer.sign(&claims)?)
 }
 
-pub(crate) fn read_signing_key_bytes(path: &Path) -> Result<Vec<u8>, AdminTokenError> {
+pub(crate) fn read_signing_key_bytes(path: &Path) -> Result<SecretBytes, AdminTokenError> {
     let mut file = open_signing_key_file(path)?;
     let metadata = file.metadata()?;
     ensure_signing_key_size_within_limit(metadata.len())?;
@@ -146,10 +146,10 @@ pub(crate) fn read_signing_key_bytes(path: &Path) -> Result<Vec<u8>, AdminTokenE
     let bytes = read_bounded_signing_key(&mut file, metadata.len())?;
     ensure_signing_key_size_within_limit(metadata.len())?;
 
-    Ok(bytes)
+    Ok(SecretBytes::new(bytes))
 }
 
-pub(crate) fn read_signing_key_bytes_from_env(name: &str) -> Result<Vec<u8>, AdminTokenError> {
+pub(crate) fn read_signing_key_bytes_from_env(name: &str) -> Result<SecretBytes, AdminTokenError> {
     let value = var(name).map_err(|_error| AdminTokenError::MissingSigningKeyEnv {
         name: name.to_owned(),
     })?;
@@ -160,7 +160,7 @@ pub(crate) fn read_signing_key_bytes_from_env(name: &str) -> Result<Vec<u8>, Adm
             name: name.to_owned(),
         });
     }
-    Ok(bytes)
+    Ok(SecretBytes::new(bytes))
 }
 
 #[cfg(unix)]

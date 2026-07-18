@@ -103,7 +103,7 @@ pub(super) async fn issue_xet_token(
     Ok(Json(XetCasTokenResponse {
         cas_url: state.config.public_base_url().to_owned(),
         exp: issued.expires_at_unix_seconds,
-        access_token: issued.token,
+        access_token: issued.token.expose_secret().to_owned(),
     }))
 }
 
@@ -1100,11 +1100,12 @@ mod provider_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_provider_repository_state_with_store_no_existing() {
         use crate::model::ProviderTokenIssueResponse;
+        use shardline_protocol::SecretString;
         // When there is no existing state, reconcile is a no-op (returns Ok).
         let tmp = tempfile::TempDir::new().unwrap();
         let store = shardline_index::LocalIndexStore::open(tmp.path().to_path_buf());
         let issued = ProviderTokenIssueResponse {
-            token: "tok".to_owned(),
+            token: SecretString::from_secret("tok"),
             issuer: "iss".to_owned(),
             subject: "sub".to_owned(),
             provider: shardline_protocol::RepositoryProvider::GitHub,
@@ -1121,7 +1122,7 @@ mod provider_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_provider_repository_state_with_store_matching_noop() {
         use crate::model::ProviderTokenIssueResponse;
-        use shardline_protocol::RepositoryProvider;
+        use shardline_protocol::{RepositoryProvider, SecretString};
         // When existing == reconciled the function returns early (no-op).
         let tmp = tempfile::TempDir::new().unwrap();
         let store = shardline_index::LocalIndexStore::open(tmp.path().to_path_buf());
@@ -1142,7 +1143,7 @@ mod provider_tests {
         // Call reconcile — since the reconciled values already exceed the
         // signals, they should match existing and return early (no-op).
         let issued = ProviderTokenIssueResponse {
-            token: "tok".to_owned(),
+            token: SecretString::from_secret("tok"),
             issuer: "iss".to_owned(),
             subject: "sub".to_owned(),
             provider: RepositoryProvider::GitHub,
@@ -1172,7 +1173,7 @@ mod provider_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_provider_repository_state_with_store_different_upserts() {
         use crate::model::ProviderTokenIssueResponse;
-        use shardline_protocol::RepositoryProvider;
+        use shardline_protocol::{RepositoryProvider, SecretString};
         // When existing != reconciled, the function upserts the new state.
         let tmp = tempfile::TempDir::new().unwrap();
         let store = shardline_index::LocalIndexStore::open(tmp.path().to_path_buf());
@@ -1192,7 +1193,7 @@ mod provider_tests {
         store.upsert_provider_repository_state(&seed).await.unwrap();
 
         let issued = ProviderTokenIssueResponse {
-            token: "tok".to_owned(),
+            token: SecretString::from_secret("tok"),
             issuer: "iss".to_owned(),
             subject: "sub".to_owned(),
             provider: RepositoryProvider::GitHub,

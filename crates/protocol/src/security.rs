@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -64,6 +64,12 @@ impl AsRef<[u8]> for SecretBytes {
     }
 }
 
+impl From<Vec<u8>> for SecretBytes {
+    fn from(secret: Vec<u8>) -> Self {
+        Self(secret)
+    }
+}
+
 impl fmt::Debug for SecretBytes {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("***")
@@ -82,7 +88,7 @@ impl fmt::Debug for SecretBytes {
 /// let secret = SecretString::from_secret("bootstrap-token");
 /// assert_eq!(secret.expose_secret(), "bootstrap-token");
 /// ```
-#[derive(Clone, Eq, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SecretString(String);
 
 impl PartialEq for SecretString {
@@ -99,6 +105,9 @@ impl SecretString {
     }
 
     /// Copies borrowed secret text into zeroizing storage.
+    ///
+    /// Note: the input `&str` memory is not zeroed; callers should independently
+    /// clear their source buffer if it contains secret data.
     #[must_use]
     pub fn from_secret(secret: &str) -> Self {
         Self(secret.to_owned())

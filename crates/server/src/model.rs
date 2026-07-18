@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use shardline_protocol::{RepositoryProvider, TokenScope};
+use shardline_protocol::{RepositoryProvider, SecretString, TokenScope};
 
 /// Health response returned by the HTTP server.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,7 +91,7 @@ pub struct ProviderTokenIssueRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderTokenIssueResponse {
     /// Signed bearer token for subsequent CAS requests.
-    pub token: String,
+    pub token: SecretString,
     /// Issuer embedded into the token.
     pub issuer: String,
     /// Subject embedded into the token.
@@ -181,7 +181,7 @@ pub struct ProviderWebhookResponse {
 mod tests {
     use std::collections::BTreeMap;
 
-    use shardline_protocol::{RepositoryProvider, TokenScope};
+use shardline_protocol::{RepositoryProvider, SecretString, TokenScope};
 
     use super::*;
 
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn provider_token_issue_response_serde_round_trip() {
         let original = ProviderTokenIssueResponse {
-            token: "bearer-token".to_owned(),
+            token: SecretString::from_secret("bearer-token"),
             issuer: "shardline".to_owned(),
             subject: "user".to_owned(),
             provider: RepositoryProvider::GitHub,

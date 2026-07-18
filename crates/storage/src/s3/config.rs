@@ -43,6 +43,9 @@ impl S3ObjectStoreConfig {
     }
 
     /// Adds static access-key credentials.
+    ///
+    /// Note: the `String` values passed in are not zeroized; callers should
+    /// independently clear their source buffers if they contain secret data.
     #[must_use]
     pub fn with_credentials(
         mut self,
