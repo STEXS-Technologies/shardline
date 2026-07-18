@@ -15,6 +15,7 @@ pub(crate) use lfs::{
     lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object, lfs_patch_object,
     lfs_put_object, lfs_verify_object,
 };
+#[cfg(feature = "fuzzing")]
 pub(crate) use oci::parse_oci_path;
 pub(crate) use oci::{
     oci_api_dispatch, oci_dispatch, oci_registry_token, oci_transfer_dispatch, oci_v2_root,

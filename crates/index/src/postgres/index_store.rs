@@ -761,7 +761,7 @@ fn retention_hold_from_row(row: &PgRow) -> Result<RetentionHold, PostgresMetadat
 
 fn webhook_delivery_from_row(row: &PgRow) -> Result<WebhookDelivery, PostgresMetadataStoreError> {
     let provider_name = row.try_get::<String, _>("provider")?;
-    let provider = parse_repository_provider(&provider_name, || {
+    let provider = parse_repository_provider(&provider_name, |_| {
         PostgresMetadataStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
     })?;
     let owner = row.try_get::<String, _>("owner")?;
@@ -783,7 +783,7 @@ fn provider_repository_state_from_row(
     row: &PgRow,
 ) -> Result<ProviderRepositoryState, PostgresMetadataStoreError> {
     let provider_name = row.try_get::<String, _>("provider")?;
-    let provider = parse_repository_provider(&provider_name, || {
+    let provider = parse_repository_provider(&provider_name, |_| {
         PostgresMetadataStoreError::InvalidRepoType(provider_name.clone())
     })?;
     Ok(ProviderRepositoryState::new(

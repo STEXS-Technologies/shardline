@@ -17,6 +17,7 @@ use shardline_vcs::{
     ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind, RevisionRef,
     WebhookDeliveryId,
 };
+use shardline_xet_adapter::normalize_serialized_xorb;
 use shardline_xet_core::xorb_object::{
     CompressionScheme, SerializedXorbObject,
     xorb_format_test_utils::{ChunkSize, build_raw_xorb},
@@ -31,7 +32,7 @@ use crate::{
     record_store::LocalRecordStore,
     test_invariant_error::ServerTestInvariantError,
     try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
-    xet_adapter::{normalize_serialized_xorb, store_uploaded_xorb, xorb_object_key},
+    xet_adapter::{store_uploaded_xorb, xorb_object_key},
 };
 
 async fn local_latest_record_exists(

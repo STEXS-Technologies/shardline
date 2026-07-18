@@ -56,5 +56,18 @@ pub use ops::{ParseStoredFileRecordError, parse_stored_file_record_bytes, provid
 // Re-exports from new crates (full backward compatibility)
 // ---------------------------------------------------------------------------
 
-pub use shardline_auth::*;
-pub use shardline_validation::*;
+// Explicit re-exports from shardline-auth (backward compatibility)
+pub use shardline_auth::{
+    AuthContext, AuthError, AuthProvider, LocalHmacProvider, PassthroughProvider,
+};
+// Explicit re-exports from shardline-validation (backward compatibility)
+pub use shardline_validation::{
+    DEFAULT_LOCAL_GC_RETENTION_SECONDS, DEFAULT_MAX_SHARD_FILES,
+    DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
+    DEFAULT_SHARD_METADATA_LIMITS, InvalidLifecycleMetadataError,
+    InvalidReconstructionResponseError, InvalidSerializedShardError,
+    MAX_LOCAL_RECORD_METADATA_BYTES, RebuildOverflowError, ShardMetadataLimits,
+    ValidateContentHashError, ValidateIdentifierError, checked_add, checked_increment,
+    unix_now_seconds_checked, validate_content_hash, validate_content_hash_with,
+    validate_identifier,
+};

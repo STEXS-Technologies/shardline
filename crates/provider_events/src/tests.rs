@@ -2032,10 +2032,9 @@ fn provider_events_error_index_store_display() {
 
 #[test]
 fn provider_events_error_memory_index_store_display() {
-    let error =
-        ProviderEventsError::MemoryIndexStore(shardline_index::MemoryIndexStoreError::LockPoisoned(
-            "test".to_owned(),
-        ));
+    let error = ProviderEventsError::MemoryIndexStore(
+        shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()),
+    );
     let msg = error.to_string();
     assert!(!msg.is_empty());
 }

@@ -1237,8 +1237,7 @@ fn fsck_error_display_xet_adapter() {
 #[test]
 fn fsck_error_display_memory_index_store() {
     use shardline_index::MemoryIndexStoreError;
-    let err =
-        FsckError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
+    let err = FsckError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
     let msg = err.to_string();
     assert!(msg.contains("memory index"), "msg: {msg}");
 }

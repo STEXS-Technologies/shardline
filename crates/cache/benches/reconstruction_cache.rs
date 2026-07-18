@@ -24,9 +24,7 @@ use tokio::runtime::Runtime;
 
 /// Pre-populate a cache with `key -> payload` and return the prepared cache.
 /// Must be called from within a tokio runtime context (it uses `Handle::current()`).
-fn prepare_hit_cache(
-    payload: &[u8],
-) -> (MemoryReconstructionCache, ReconstructionCacheKey) {
+fn prepare_hit_cache(payload: &[u8]) -> (MemoryReconstructionCache, ReconstructionCacheKey) {
     let cache = MemoryReconstructionCache::new(
         NonZeroU64::new(3600).unwrap(),
         NonZeroUsize::new(10_000).unwrap(),
@@ -97,9 +95,7 @@ fn bench_get_or_load_cache_miss(c: &mut Criterion) {
                     |(cache, key, payload)| async move {
                         let result = cache
                             .get_or_load(&key, || {
-                                Box::pin(async {
-                                    Ok::<_, ReconstructionCacheError>(payload)
-                                })
+                                Box::pin(async { Ok::<_, ReconstructionCacheError>(payload) })
                             })
                             .await;
                         black_box(result.expect("get_or_load miss"));
@@ -133,11 +129,11 @@ fn bench_get_or_load_concurrent_dedup(c: &mut Criterion) {
             |(cache, key, payload)| async move {
                 let mut handles = Vec::with_capacity(10);
                 for _ in 0..10 {
-                    let c = Arc::clone(&cache);
+                    let cache_clone = Arc::clone(&cache);
                     let k = key.clone();
                     let p = payload.clone();
                     handles.push(tokio::spawn(async move {
-                        let result = c
+                        let result = cache_clone
                             .get_or_load(&k, || {
                                 let data = p.clone();
                                 Box::pin(async { Ok::<_, ReconstructionCacheError>(data) })

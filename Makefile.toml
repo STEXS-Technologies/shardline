@@ -263,12 +263,12 @@ args = ["scripts/check_coverage_ratchet.sh"]
 [tasks.ci]
 description = "Run the core contributor CI checks"
 workspace = false
-dependencies = ["format-check", "clippy", "test", "verify-release-binary", "check-migration-sync"]
+dependencies = ["format-check", "clippy", "deny", "test", "verify-release-binary", "check-migration-sync"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"
 workspace = false
-dependencies = ["ci", "deny"]
+dependencies = ["ci"]
 
 [tasks.ci-hardening]
 description = "Run full CI plus hardening checks (overflow detection, MIRI, ASan, loom)"
@@ -294,13 +294,13 @@ description = "Run MIRI on crates with unsafe code to detect undefined behavior"
 workspace = false
 install_crate = "cargo-miri"
 command = "bash"
-args = ["-c", "echo 'MIRI: checking config/secrets.rs unsafe blocks...' && cargo +nightly miri test -p shardline-server --lib -- config::secrets 2>&1 || echo 'MIRI skipped (requires nightly + specific target)'"]
+args = ["-c", "echo 'MIRI: checking config/secrets.rs unsafe blocks...' && cargo +nightly miri test -p shardline-server --lib -- config::secrets 2>&1 || { if [ \"${CI:-}\" = \"true\" ]; then exit 1; else echo 'MIRI skipped (requires nightly + specific target)'; fi; }"]
 
 [tasks.test-asan]
 description = "Run tests with AddressSanitizer to detect memory errors"
 workspace = false
 command = "bash"
-args = ["-c", "echo 'ASan: checking server-core validation...' && RUSTFLAGS='-Zsanitizer=address' cargo +nightly test -p shardline-server-core --lib -Zbuild-std --target x86_64-unknown-linux-gnu -- validation 2>&1 || echo 'ASan skipped (requires nightly + build-std + target)'"]
+args = ["-c", "echo 'ASan: checking server-core validation...' && RUSTFLAGS='-Zsanitizer=address' cargo +nightly test -p shardline-server-core --lib -Zbuild-std --target x86_64-unknown-linux-gnu -- validation 2>&1 || { if [ \"${CI:-}\" = \"true\" ]; then exit 1; else echo 'ASan skipped (requires nightly + build-std + target)'; fi; }"]
 
 [tasks.check-migration-sync]
 description = "Verify Postgres and SQLite migration versions are in sync"

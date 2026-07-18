@@ -56,6 +56,7 @@ use protocol_routes::{
     lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
     oci_registry_token, oci_transfer_dispatch, oci_v2_root,
 };
+#[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
 use provider_routes::{
     git_lfs_authenticate, handle_provider_webhook, issue_provider_token, issue_xet_read_token,

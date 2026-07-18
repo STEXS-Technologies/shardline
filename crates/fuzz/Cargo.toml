@@ -27,7 +27,7 @@ shardline-hub-api.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
 shardline-rebuild.workspace = true
-shardline-server.workspace = true
+shardline-server = { workspace = true, features = ["fuzzing"] }
 shardline-server-core.workspace = true
 shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true

@@ -76,6 +76,8 @@ xet-runtime.workspace = true
 
 [features]
 docker = ["shardline-test-support/docker"]
+fuzzing = []
+test-utils = []
 
 [lints]
 workspace = true

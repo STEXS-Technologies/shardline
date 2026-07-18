@@ -44,6 +44,7 @@ pub fn shared_sha256_object_key(
     core_ps::shared_sha256_object_key(digest_hex)
 }
 
+#[cfg(feature = "fuzzing")]
 pub(crate) fn validate_oci_repository_name(value: &str) -> Result<(), ServerError> {
     core_ps::validate_oci_repository_name(value)
 }
@@ -59,6 +60,7 @@ pub(crate) fn validate_oci_tag(value: &str) -> Result<(), ServerError> {
     core_ps::validate_oci_tag(value)
 }
 
+#[cfg(feature = "fuzzing")]
 pub(crate) fn validate_upload_session_id(value: &str) -> Result<(), ServerError> {
     core_ps::validate_upload_session_id(value)
 }
@@ -66,11 +68,14 @@ pub(crate) fn validate_upload_session_id(value: &str) -> Result<(), ServerError>
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_sha256_digest, shared_sha256_object_key, validate_oci_repository_name,
-        validate_oci_repository_scope, validate_oci_tag, validate_upload_session_id,
+        parse_sha256_digest, shared_sha256_object_key, validate_oci_repository_scope,
+        validate_oci_tag,
     };
     use crate::ServerError;
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
+
+    #[cfg(feature = "fuzzing")]
+    use super::{validate_oci_repository_name, validate_upload_session_id};
 
     #[test]
     fn sha256_digest_parser_requires_prefixed_lowercase_hex() {
@@ -94,6 +99,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "fuzzing")]
     #[test]
     fn oci_repository_validator_rejects_traversal_and_uppercase() {
         assert!(validate_oci_repository_name("team/assets").is_ok());
@@ -125,6 +131,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "fuzzing")]
     #[test]
     fn upload_session_validator_accepts_hex_and_hyphen_only() {
         assert!(validate_upload_session_id("0000000000000001").is_ok());

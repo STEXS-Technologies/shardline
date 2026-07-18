@@ -14,20 +14,18 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use shardline_protocol::{
-    RepositoryProvider, RepositoryScope, TokenClaims, TokenScope,
-};
-use shardline_server_core::auth::LocalHmacProvider;
+use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::AuthProvider;
+use shardline_server_core::auth::LocalHmacProvider;
 
 /// Signing key consistent with production-like configuration.
 const SIGNING_KEY: &[u8] = b"benchmark-hmac-signing-key-32-bytes!";
 
 /// Builds a token with realistic claims and returns both the token string
 /// and the provider.
-fn build_token(claims: TokenClaims) -> (String, LocalHmacProvider) {
+fn build_token(claims: &TokenClaims) -> (String, LocalHmacProvider) {
     let provider = LocalHmacProvider::new(SIGNING_KEY).expect("provider");
-    let token = provider.mint_token(&claims).expect("mint");
+    let token = provider.mint_token(claims).expect("mint");
     (token, provider)
 }
 
@@ -51,7 +49,7 @@ fn bench_verify_token(c: &mut Criterion) {
     )
     .expect("claims");
 
-    let (token, _provider) = build_token(claims);
+    let (token, _provider) = build_token(&claims);
     let provider = LocalHmacProvider::new(SIGNING_KEY).expect("provider");
 
     group.bench_function("hmac_sha256_verify", |b| {
@@ -100,22 +98,11 @@ fn bench_verify_varying_token_size(c: &mut Criterion) {
 
     for subject_len in [8, 32, 128, 512] {
         let subject = "x".repeat(subject_len);
-        let repo = RepositoryScope::new(
-            RepositoryProvider::Generic,
-            "o",
-            "r",
-            None,
-        )
-        .expect("repo scope");
-        let claims = TokenClaims::new(
-            "issuer",
-            &subject,
-            TokenScope::Read,
-            repo,
-            u64::MAX,
-        )
-        .expect("claims");
-        let (token, _provider) = build_token(claims);
+        let repo =
+            RepositoryScope::new(RepositoryProvider::Generic, "o", "r", None).expect("repo scope");
+        let claims =
+            TokenClaims::new("issuer", &subject, TokenScope::Read, repo, u64::MAX).expect("claims");
+        let (token, _provider) = build_token(&claims);
 
         group.bench_with_input(
             BenchmarkId::from_parameter(subject_len),
@@ -132,5 +119,10 @@ fn bench_verify_varying_token_size(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_verify_token, bench_mint_and_verify, bench_verify_varying_token_size);
+criterion_group!(
+    benches,
+    bench_verify_token,
+    bench_mint_and_verify,
+    bench_verify_varying_token_size
+);
 criterion_main!(benches);

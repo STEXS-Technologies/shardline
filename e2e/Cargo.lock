@@ -2788,6 +2788,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardline-auth"
+version = "1.0.1"
+dependencies = [
+ "shardline-protocol",
+ "subtle",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "shardline-cache"
 version = "1.0.1"
 dependencies = [
@@ -3063,14 +3073,14 @@ version = "1.0.1"
 dependencies = [
  "blake3",
  "hex",
- "serde",
  "serde_json",
  "sha2",
+ "shardline-auth",
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",
+ "shardline-validation",
  "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -3094,6 +3104,13 @@ version = "1.0.1"
 dependencies = [
  "libc",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "shardline-validation"
+version = "1.0.1"
+dependencies = [
  "thiserror",
 ]
 

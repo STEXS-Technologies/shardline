@@ -47,6 +47,7 @@ mod database_migration;
 pub mod download_stream;
 mod error;
 mod fsck;
+#[cfg(feature = "fuzzing")]
 mod fuzz;
 mod ingest_bench;
 mod jwks_provider;
@@ -72,7 +73,9 @@ mod runtime_check;
 mod server_frontend;
 mod server_role;
 mod storage_migration;
+#[cfg(test)]
 pub mod test_fixtures;
+#[cfg(test)]
 pub mod test_invariant_error;
 
 pub use app::ProtocolMetrics;
@@ -89,19 +92,16 @@ pub use oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_ke
 pub use protocol_support::shared_sha256_object_key;
 pub use reconstruction_cache::ReconstructionCacheService;
 pub(crate) mod oci_adapter {
-    pub use shardline_oci_adapter::{
-        oci_blob_key, oci_manifest_key, oci_manifest_media_type_key,
-    };
     pub(crate) use shardline_oci_adapter::{
-        abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
+        OciReference, abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes,
         append_upload_bytes, create_upload_session, delete_upload_session,
         finalize_s3_multipart_upload_session, lock_upload_sessions, oci_blob_location,
         oci_manifest_location, oci_manifest_prefix, oci_tag_key, oci_tag_prefix,
-        oci_tag_target_key, oci_tag_target_prefix, OciReference, parse_reference,
-        read_upload_session, touch_upload_session, upload_body_integrity,
-        upload_body_path_for_session, upload_length, upload_session_length,
-        upload_session_location, validate_repository,
+        oci_tag_target_key, oci_tag_target_prefix, parse_reference, read_upload_session,
+        touch_upload_session, upload_body_integrity, upload_body_path_for_session, upload_length,
+        upload_session_length, upload_session_location, validate_repository,
     };
+    pub use shardline_oci_adapter::{oci_blob_key, oci_manifest_key, oci_manifest_media_type_key};
 }
 pub use shardline_protocol_adapters::{BazelCacheKind, bazel_cache_object_key, lfs_object_key};
 pub use transfer_limiter::TransferLimiter;
@@ -116,20 +116,23 @@ pub(crate) mod xet_adapter {
         XorbUploadResponse, decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
         validate_serialized_xorb,
     };
-    pub(crate) use shardline_xet_adapter::{
-        XetAdapterError, XorbParseError, XorbVisitError, ShardUploadResponse,
-        register_uploaded_shard_bytes, store_uploaded_xorb_bytes, xorb_object_key,
-        resolve_dedupe_shard_object, build_reconstruction_response,
-        build_batch_reconstruction_response, build_xorb_transfer_url, normalize_serialized_xorb,
-        reconstruction_v2_from_v1, retained_shard_chunk_hashes, visit_stored_xorb_chunk_hashes,
-        xorb_hash_from_object_key_if_present, shard_hash_from_object_key_if_present,
-        validate_hash_path, validate_optional_content_hash, validate_xorb_transfer_namespace,
-        XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
-    };
     #[cfg(test)]
     pub(crate) use shardline_xet_adapter::{
         ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
         ReconstructionUrlRange, shard_object_key, store_uploaded_xorb,
+    };
+    pub(crate) use shardline_xet_adapter::{
+        ShardUploadResponse, XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE, XORB_TRANSFER_ROUTE,
+        XetAdapterError, XorbParseError, XorbVisitError, build_batch_reconstruction_response,
+        build_reconstruction_response, reconstruction_v2_from_v1, register_uploaded_shard_bytes,
+        resolve_dedupe_shard_object, shard_hash_from_object_key_if_present,
+        store_uploaded_xorb_bytes, validate_hash_path, validate_optional_content_hash,
+        validate_xorb_transfer_namespace, visit_stored_xorb_chunk_hashes,
+        xorb_hash_from_object_key_if_present, xorb_object_key,
+    };
+    #[cfg(feature = "fuzzing")]
+    pub(crate) use shardline_xet_adapter::{
+        build_xorb_transfer_url, normalize_serialized_xorb, retained_shard_chunk_hashes,
     };
 }
 
@@ -143,13 +146,17 @@ pub use database_migration::{
     DatabaseMigrationReport, DatabaseMigrationStatusEntry, apply_database_migrations,
     bundled_database_migrations, run_database_migration,
 };
-pub(crate) use error::{InvalidReconstructionResponseError, InvalidSerializedShardError};
+#[cfg(feature = "fuzzing")]
+pub(crate) use error::InvalidReconstructionResponseError;
+pub(crate) use error::InvalidSerializedShardError;
 pub use error::{ObjectStoreError, ServerError};
 pub use fsck::{
     FsckIssueDetail, FsckIssueKind, FsckReconstructionPlanDetail, LocalFsckIssue,
     LocalFsckIssueKind, LocalFsckReport, ProviderRepositoryStateTimestampField, run_fsck,
     run_local_fsck,
 };
+#[doc(hidden)]
+#[cfg(feature = "fuzzing")]
 pub use fuzz::{
     FuzzBazelHttpFrontendSummary, FuzzLfsFrontendSummary, FuzzLifecycleRepairSummary,
     FuzzOciFrontendSummary, FuzzProtocolFrontendSummary, FuzzQuarantineAction,
@@ -187,10 +194,10 @@ pub use runtime_check::{ConfigCheckReport, run_config_check};
 pub use server_frontend::{ServerFrontend, ServerFrontendParseError};
 pub use server_role::{ServerRole, ServerRoleParseError};
 pub(crate) mod gc {
+    pub(crate) use shardline_gc::run_gc_with_stores;
     pub use shardline_gc::{
         DEFAULT_LOCAL_GC_RETENTION_SECONDS, LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
     };
-    pub(crate) use shardline_gc::run_gc_with_stores;
     #[cfg(test)]
     pub(crate) use shardline_gc::{
         GcError, GcOrphanQuarantineState, quarantine_record_path, quarantine_root, run_local_gc,

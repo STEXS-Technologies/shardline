@@ -575,8 +575,7 @@ fn rebuild_error_from_index_store_error() {
 
 #[test]
 fn rebuild_error_from_memory_index_store_error() {
-    let err =
-        shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned());
+    let err = shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned());
     let error: RebuildError = err.into();
     assert!(matches!(error, RebuildError::MemoryIndexStore(_)));
     assert!(!error.to_string().is_empty());
@@ -584,8 +583,7 @@ fn rebuild_error_from_memory_index_store_error() {
 
 #[test]
 fn rebuild_error_from_memory_record_store_error() {
-    let err =
-        shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned());
+    let err = shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned());
     let error: RebuildError = err.into();
     assert!(matches!(error, RebuildError::MemoryRecordStore(_)));
     assert!(!error.to_string().is_empty());

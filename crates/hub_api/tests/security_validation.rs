@@ -55,16 +55,17 @@ fn validate_jwt_signature_checked_oidc() {
 
 /// Verifies JWKS provider now performs proper JWT signature verification.
 ///
-/// **[FIXED]**: The provider now uses `self.get_or_refresh_keys()` (not `_keys`),
-/// calls `decode()` with proper key material, validates the issuer, and
-/// requires the `exp` claim.
+/// **[FIXED]**: The provider now reads from a background-refreshed cache
+/// (via `try_read()` retry loop) instead of calling `block_on`-based
+/// `get_or_refresh_keys()`. It calls `decode()` with proper key material,
+/// validates the issuer, and requires the `exp` claim.
 #[test]
 fn validate_jwt_signature_checked_jwks() {
     let jwks_source = include_str!("../../server/src/jwks_provider.rs");
 
     assert!(
-        jwks_source.contains("get_or_refresh_keys()"),
-        "JWKS provider calls get_or_refresh_keys()"
+        jwks_source.contains("cached_keys.try_read()"),
+        "JWKS provider reads from background-refreshed cache via try_read()"
     );
     assert!(
         jwks_source.contains("decode::<serde_json::Value>("),

@@ -695,7 +695,7 @@ mod tests {
                 },
             ],
         };
-        
+
         assert!(record.validate_reconstruction_plan().is_ok());
     }
 
@@ -728,7 +728,7 @@ mod tests {
                 },
             ],
         };
-        
+
         assert!(matches!(
             record.validate_reconstruction_plan(),
             Err(FileRecordInvariantError::NonContiguousChunkOffsets)
@@ -931,7 +931,9 @@ mod tests {
         }
         let err = convert(shardline_protocol::HashParseError::InvalidLength);
         assert_eq!(err.to_string(), "file record chunk hash is invalid");
-        let err = convert(shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()));
+        let err = convert(shardline_protocol::HashParseError::InvalidCharacter(
+            "test".to_owned(),
+        ));
         assert_eq!(err.to_string(), "file record chunk hash is invalid");
     }
 

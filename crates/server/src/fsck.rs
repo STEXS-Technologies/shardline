@@ -333,8 +333,7 @@ mod tests {
 
     #[test]
     fn from_fsck_error_memory_index_store() {
-        let mem_err =
-            shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned());
+        let mem_err = shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned());
         let fsck_err = FsckError::MemoryIndexStore(mem_err);
         let server_err: ServerError = fsck_err.into();
         assert!(matches!(
@@ -345,8 +344,7 @@ mod tests {
 
     #[test]
     fn from_fsck_error_memory_record_store() {
-        let mem_err =
-            shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned());
+        let mem_err = shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned());
         let fsck_err = FsckError::MemoryRecordStore(mem_err);
         let server_err: ServerError = fsck_err.into();
         assert!(matches!(

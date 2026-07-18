@@ -48,8 +48,11 @@ pub(crate) async fn oci_get_manifest(
     let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
     let total_length = state.backend.object_length(&manifest_key).await?;
-    let media_type = String::from_utf8(state.backend.read_object(&media_type_key).await?)
-        .map_err(|_error| ServerError::InvalidManifestReference)?;
+    let media_type =
+        String::from_utf8(state.backend.read_object(&media_type_key).await?).map_err(|e| {
+            tracing::warn!(error = %e, "invalid media type utf-8");
+            ServerError::InvalidManifestReference
+        })?;
     ensure_manifest_representation_is_acceptable(headers, &media_type)?;
     if head_only {
         return Response::builder()
@@ -58,7 +61,10 @@ pub(crate) async fn oci_get_manifest(
             .header(CONTENT_TYPE, media_type)
             .header("Docker-Content-Digest", format!("sha256:{digest_hex}"))
             .body(Body::empty())
-            .map_err(|_error| ServerError::Overflow);
+            .map_err(|e| {
+                tracing::warn!(error = %e, "failed to build head manifest response");
+                ServerError::Overflow
+            });
     }
 
     direct_object_response(
@@ -133,9 +139,10 @@ pub(crate) async fn oci_put_manifest(
         let joined = accepted_tags.join(", ");
         builder = builder.header("OCI-Tag", joined);
     }
-    builder
-        .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+    builder.body(Body::empty()).map_err(|e| {
+        tracing::warn!(error = %e, "failed to build put manifest response body");
+        ServerError::Overflow
+    })
 }
 
 #[tracing::instrument(skip(state, headers), fields(repository, reference))]
@@ -168,7 +175,10 @@ pub(crate) async fn oci_delete_manifest(
     Response::builder()
         .status(StatusCode::ACCEPTED)
         .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to build delete manifest response body");
+            ServerError::Overflow
+        })
 }
 
 async fn resolve_manifest_digest(
@@ -193,7 +203,10 @@ async fn load_oci_tag_digest(
 ) -> Result<String, ServerError> {
     let tag_key = oci_tag_key(repository, tag, repository_scope)?;
     let bytes = state.backend.read_object(&tag_key).await?;
-    let digest_hex = String::from_utf8(bytes).map_err(|_error| ServerError::InvalidDigest)?;
+    let digest_hex = String::from_utf8(bytes).map_err(|e| {
+        tracing::warn!(error = %e, "invalid digest utf-8");
+        ServerError::InvalidDigest
+    })?;
     parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
     Ok(digest_hex)
 }
@@ -205,8 +218,10 @@ async fn validate_oci_manifest_document(
     media_type: &str,
     bytes: &[u8],
 ) -> Result<(), ServerError> {
-    let document: Value =
-        serde_json::from_slice(bytes).map_err(|_error| ServerError::InvalidManifestReference)?;
+    let document: Value = serde_json::from_slice(bytes).map_err(|e| {
+        tracing::warn!(error = %e, "invalid manifest json");
+        ServerError::InvalidManifestReference
+    })?;
     validate_oci_schema_version(&document)?;
     let normalized_media_type = normalize_media_type(media_type);
     if let Some(document_media_type) = document.get("mediaType").and_then(Value::as_str)
@@ -351,9 +366,10 @@ fn ensure_manifest_representation_is_acceptable(
     }
 
     for value in accepted_iter {
-        let value = value
-            .to_str()
-            .map_err(|_error| ServerError::NotAcceptable)?;
+        let value = value.to_str().map_err(|e| {
+            tracing::warn!(error = %e, "invalid accept header utf-8");
+            ServerError::NotAcceptable
+        })?;
         for candidate in value.split(',') {
             let candidate = normalize_media_type(candidate);
             if candidate.is_empty() {

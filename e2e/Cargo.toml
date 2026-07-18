@@ -67,7 +67,7 @@ name = "mixed_protocol_soak"
 path = "mixed_protocol_soak.rs"
 
 [dependencies]
-shardline-server = { path = "../crates/server" }
+shardline-server = { path = "../crates/server", features = ["test-utils"] }
 shardline-hub-api = { path = "../crates/hub_api" }
 shardline-server-core = { path = "../crates/server_core" }
 shardline-protocol = { path = "../crates/protocol" }

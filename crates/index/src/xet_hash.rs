@@ -25,14 +25,16 @@ pub fn parse_xet_hash_hex(value: &str) -> Result<ShardlineHash, HashParseError> 
         ));
     }
 
-    let decoded = hex::decode(value)
-        .map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
+    let decoded =
+        hex::decode(value).map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
     let reordered = decoded
         .chunks_exact(XET_HASH_GROUP_BYTES)
         .flat_map(|chunk| chunk.iter().rev().copied())
         .collect::<Vec<u8>>();
-    let bytes = <[u8; 32]>::try_from(reordered)
-        .map_err(|vec| { let _ = vec; HashParseError::InvalidLength })?;
+    let bytes = <[u8; 32]>::try_from(reordered).map_err(|vec| {
+        let _ = vec;
+        HashParseError::InvalidLength
+    })?;
 
     Ok(ShardlineHash::from_bytes(bytes))
 }

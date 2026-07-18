@@ -551,8 +551,7 @@ fn gc_error_into_server_object_store_error_index_store() {
 
 #[test]
 fn gc_error_into_server_object_store_error_memory_index_store() {
-    let gc_err =
-        GcError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
+    let gc_err = GcError::MemoryIndexStore(MemoryIndexStoreError::LockPoisoned("test".to_owned()));
     let server_err: ServerObjectStoreError = gc_err.into();
     assert!(matches!(server_err, ServerObjectStoreError::Io(_)));
 }

@@ -98,7 +98,10 @@ pub(crate) async fn oci_post_blob_upload(
         .header(LOCATION, upload_session_location(repository, &session_id))
         .header(RANGE, "0-0")
         .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to build post blob upload response");
+            ServerError::Overflow
+        })
 }
 
 #[tracing::instrument(
@@ -134,9 +137,10 @@ pub(crate) async fn oci_patch_blob_upload(
         upload_length(state.config.root_dir(), session_id).await?
     };
     if let Some(content_range) = headers.get(CONTENT_RANGE) {
-        let content_range = content_range
-            .to_str()
-            .map_err(|_error| ServerError::InvalidRangeHeader)?;
+        let content_range = content_range.to_str().map_err(|e| {
+            tracing::warn!(error = %e, "invalid content-range header utf-8");
+            ServerError::InvalidRangeHeader
+        })?;
         let expected_range = parse_upload_content_range(content_range)?;
         if expected_range.start() != current_length {
             return Err(ServerError::RangeNotSatisfiable);
@@ -172,7 +176,10 @@ pub(crate) async fn oci_patch_blob_upload(
         .header(LOCATION, upload_session_location(repository, session_id))
         .header(RANGE, format!("0-{last}"))
         .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to build patch blob upload response");
+            ServerError::Overflow
+        })
 }
 
 #[tracing::instrument(skip(state, headers, uri, body), fields(repository, session_id))]
@@ -208,9 +215,10 @@ pub(crate) async fn oci_put_blob_upload(
         upload_length(state.config.root_dir(), session_id).await?
     };
     if let Some(content_range) = headers.get(CONTENT_RANGE) {
-        let content_range = content_range
-            .to_str()
-            .map_err(|_error| ServerError::InvalidRangeHeader)?;
+        let content_range = content_range.to_str().map_err(|e| {
+            tracing::warn!(error = %e, "invalid content-range header utf-8");
+            ServerError::InvalidRangeHeader
+        })?;
         let expected_range = parse_upload_content_range(content_range)?;
         if expected_range.start() != current_length {
             return Err(ServerError::RangeNotSatisfiable);
@@ -297,7 +305,10 @@ pub(crate) async fn oci_get_blob_upload(
         .header(LOCATION, upload_session_location(repository, session_id))
         .header(RANGE, format!("0-{last}"))
         .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to build get blob upload response");
+            ServerError::Overflow
+        })
 }
 
 #[tracing::instrument(skip(state, headers), fields(repository, session_id))]

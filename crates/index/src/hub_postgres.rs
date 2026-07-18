@@ -529,10 +529,9 @@ impl HubStore for PostgresIndexStore {
             .bind(&oid)
             .bind(&data)
             .bind(
-                i64::try_from(data.len())
-                    .map_err(|err| {
-                        PostgresMetadataStoreError::IntegerOutOfRange(err.to_string())
-                    })?,
+                i64::try_from(data.len()).map_err(|err| {
+                    PostgresMetadataStoreError::IntegerOutOfRange(err.to_string())
+                })?,
             )
             .execute(&pool)
             .await?;
