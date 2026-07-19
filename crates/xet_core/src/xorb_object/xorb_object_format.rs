@@ -11,6 +11,7 @@ use super::xorb_chunk_format::{
 };
 use super::{CompressionScheme, XorbChunkHeader};
 use crate::error::{CoreError, Validate};
+use crate::merklehash::compute_data_hash;
 use crate::merklehash::MerkleHash;
 use crate::utils::serialization_utils::*;
 
@@ -544,7 +545,7 @@ impl XorbObject {
                 return Ok(None);
             };
 
-            let chunk_hash = crate::merklehash::compute_data_hash(&data);
+            let chunk_hash = compute_data_hash(&data);
             hash_chunks.push((chunk_hash, chunk_uncompressed_length as u64));
 
             cumulative_compressed_length += compressed_chunk_length as u64;
@@ -671,7 +672,7 @@ impl SerializedXorbObject {
         xorb_object_info.chunk_hashes = xorb
             .data
             .iter()
-            .map(|chunk_data| crate::merklehash::compute_data_hash(chunk_data))
+            .map(|chunk_data| compute_data_hash(chunk_data))
             .collect();
         xorb_object_info.unpacked_chunk_offsets = xorb
             .xorb_info
@@ -743,7 +744,7 @@ pub fn reconstruct_xorb_with_footer(
             .decompress_from_slice(&compressed_buf)
             .map_err(|e| CoreError::MalformedData(format!("Failed to decompress chunk: {e}")))?;
 
-        let chunk_hash = crate::merklehash::compute_data_hash(&uncompressed_data);
+        let chunk_hash = compute_data_hash(&uncompressed_data);
         chunk_hash_and_size.push((chunk_hash, uncompressed_data.len() as u64));
 
         info.chunk_hashes.push(chunk_hash);
@@ -774,7 +775,6 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::merklehash::compute_data_hash;
     use crate::xorb_object::RawXorbData;
     use crate::xorb_object::xorb_chunk_format::serialize_chunk;
 
@@ -1483,7 +1483,7 @@ pub mod test_utils {
                 ChunkSize::Fixed(size) => size,
             };
             let bytes = vec![0u8; chunk_size as usize];
-            let chunk_hash = crate::merklehash::compute_data_hash(&bytes);
+            let chunk_hash = compute_data_hash(&bytes);
             chunks.push(super::super::Chunk {
                 hash: chunk_hash,
                 data: bytes.into(),
@@ -1513,7 +1513,7 @@ pub mod test_utils {
             };
 
             let bytes = vec![0u8; chunk_size as usize];
-            let chunk_hash = crate::merklehash::compute_data_hash(&bytes);
+            let chunk_hash = compute_data_hash(&bytes);
             chunks.push((chunk_hash, bytes.len() as u64));
 
             data_contents_raw.extend_from_slice(&bytes);

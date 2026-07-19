@@ -30,7 +30,7 @@ pub(crate) async fn lfs_batch(
                 LfsBatchOperation::Download => {
                     if exists {
                         Some(LfsObjectActions {
-                            download: Some(crate::models::LfsObjectAction {
+                            download: Some(LfsObjectAction {
                                 href: format!("/lfs/objects/{}", obj.oid),
                                 header: None,
                                 ssh: None,
@@ -47,7 +47,7 @@ pub(crate) async fn lfs_batch(
                         Some(LfsObjectActions {
                             download: None,
                             upload: None,
-                            verify: Some(crate::models::LfsObjectAction {
+                            verify: Some(LfsObjectAction {
                                 href: format!("/lfs/objects/{}", obj.oid),
                                 header: None,
                                 ssh: None,
@@ -56,7 +56,7 @@ pub(crate) async fn lfs_batch(
                     } else {
                         Some(LfsObjectActions {
                             download: None,
-                            upload: Some(crate::models::LfsObjectAction {
+                            upload: Some(LfsObjectAction {
                                 href: format!("/lfs/objects/{}", obj.oid),
                                 header: None,
                                 ssh: None,
@@ -70,7 +70,7 @@ pub(crate) async fn lfs_batch(
                         Some(LfsObjectActions {
                             download: None,
                             upload: None,
-                            verify: Some(crate::models::LfsObjectAction {
+                            verify: Some(LfsObjectAction {
                                 href: format!("/lfs/objects/{}", obj.oid),
                                 header: None,
                                 ssh: None,
