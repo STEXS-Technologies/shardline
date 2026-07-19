@@ -336,10 +336,11 @@ mod tests {
         reconstruct_file_record_bytes, reconstruct_local_file_bytes,
         set_before_local_object_read_hook, visit_object_prefix,
     };
-    use crate::ServerError;
     use crate::chunk_store::chunk_object_key;
+    use crate::ServerConfig;
     use crate::error::ObjectStoreError;
     use crate::object_store::ServerObjectStore;
+    use crate::ServerError;
 
     #[test]
     fn local_object_read_rejects_growth_after_length_validation_without_retaining_growth_bytes() {
@@ -723,21 +724,18 @@ mod tests {
 
     #[test]
     fn server_object_store_error_not_found_converts_to_not_found() {
-        use crate::ServerError;
         let err: ServerError = shardline_server_core::ServerObjectStoreError::NotFound.into();
         assert!(matches!(err, ServerError::NotFound));
     }
 
     #[test]
     fn server_object_store_error_overflow_converts_to_overflow() {
-        use crate::ServerError;
         let err: ServerError = shardline_server_core::ServerObjectStoreError::Overflow.into();
         assert!(matches!(err, ServerError::Overflow));
     }
 
     #[test]
     fn server_object_store_error_invalid_content_hash_converts() {
-        use crate::ServerError;
         let err: ServerError =
             shardline_server_core::ServerObjectStoreError::InvalidContentHash.into();
         assert!(matches!(err, ServerError::InvalidContentHash));
@@ -748,7 +746,7 @@ mod tests {
     #[test]
     fn object_store_from_config_local_adapter_returns_local_store() {
         let tmp = tempfile::tempdir().unwrap();
-        let config = crate::ServerConfig::new(
+        let config = ServerConfig::new(
             std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
@@ -762,7 +760,7 @@ mod tests {
     #[test]
     fn object_store_from_config_s3_without_config_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let config = crate::ServerConfig::new(
+        let config = ServerConfig::new(
             std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
@@ -772,8 +770,8 @@ mod tests {
         let store = super::object_store_from_config(&config);
         assert!(matches!(
             store,
-            Err(crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::MissingS3Config
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::MissingS3Config
             ))
         ));
     }
@@ -782,22 +780,22 @@ mod tests {
 
     #[test]
     fn server_object_store_error_stored_length_mismatch_converts() {
-        let err: crate::ServerError =
+        let err: ServerError =
             shardline_server_core::ServerObjectStoreError::StoredObjectLengthMismatch.into();
         assert!(matches!(
             err,
-            crate::ServerError::ObjectStore(crate::error::ObjectStoreError::StoredLengthMismatch)
+            ServerError::ObjectStore(ObjectStoreError::StoredLengthMismatch)
         ));
     }
 
     #[test]
     fn server_object_store_error_local_converts() {
         let io_err = std::io::Error::other("test");
-        let err: crate::ServerError =
+        let err: ServerError =
             shardline_server_core::ServerObjectStoreError::Local(io_err.into()).into();
         assert!(matches!(
             err,
-            crate::ServerError::ObjectStore(crate::error::ObjectStoreError::Local(_))
+            ServerError::ObjectStore(ObjectStoreError::Local(_))
         ));
     }
 
@@ -827,7 +825,7 @@ mod tests {
         let result = super::read_open_local_object(&path, file, 5);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -844,7 +842,7 @@ mod tests {
         let result = super::read_open_local_object(&path, file, 10);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -872,7 +870,7 @@ mod tests {
         let result = super::validate_local_object_length(&file, 10);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -923,7 +921,7 @@ mod tests {
             packed_end: 4,
         }];
         let result = reconstruct_chunk_file_bytes(&store, &chunks, 4);
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     // ── visit_object_prefix with local store ────────────────────────────
@@ -956,7 +954,7 @@ mod tests {
             "bucket".to_owned(),
             "us-east-1".to_owned(),
         );
-        let config = crate::ServerConfig::new(
+        let config = ServerConfig::new(
             std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
             "http://127.0.0.1:8080".to_owned(),
             tmp.path().to_path_buf(),
@@ -984,7 +982,7 @@ mod tests {
         let result = read_full_object(&store, &key, 100);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -1031,7 +1029,7 @@ mod tests {
         let result = read_open_local_object_append(&path, file, 100, &mut output);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -1079,7 +1077,7 @@ mod tests {
         let result = reconstruct_chunk_file_bytes(&store, &chunks, 99);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -1132,7 +1130,7 @@ mod tests {
         let result = read_open_local_object_append(&path, file, 4, &mut output);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -1143,18 +1141,18 @@ mod tests {
     #[test]
     fn server_object_store_error_io_converts() {
         let io_err = std::io::Error::other("disk error");
-        let err: crate::ServerError =
+        let err: ServerError =
             shardline_server_core::ServerObjectStoreError::Io(io_err).into();
-        assert!(matches!(err, crate::ServerError::Io(_)));
+        assert!(matches!(err, ServerError::Io(_)));
     }
 
     #[test]
     fn server_object_store_error_numeric_conversion_converts() {
         // TryFromIntError from a value that overflows i32
         let int_err = i32::try_from(3_000_000_000_i64).unwrap_err();
-        let err: crate::ServerError =
+        let err: ServerError =
             shardline_server_core::ServerObjectStoreError::NumericConversion(int_err).into();
-        assert!(matches!(err, crate::ServerError::NumericConversion(_)));
+        assert!(matches!(err, ServerError::NumericConversion(_)));
     }
 
     // ── read_full_object via non-local (archive) path ─────────────────────
@@ -1174,7 +1172,7 @@ mod tests {
         let result = read_full_object(&store, &key, 10);
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
+            Err(ServerError::ObjectStore(
                 ObjectStoreError::StoredLengthMismatch
             ))
         ));
@@ -1203,7 +1201,7 @@ mod tests {
         let mut output = Vec::new();
         let result = read_open_local_object_append(&dir_path, dir_file, meta_len, &mut output);
         assert!(
-            matches!(result, Err(crate::ServerError::Io(_))),
+            matches!(result, Err(ServerError::Io(_))),
             "expected Io error when reading from a directory fd, got {result:?}"
         );
     }
@@ -1228,10 +1226,10 @@ mod tests {
         use shardline_storage::S3ObjectStoreError;
         let s3_err =
             shardline_server_core::ServerObjectStoreError::S3(S3ObjectStoreError::EmptyBucket);
-        let err: crate::ServerError = s3_err.into();
+        let err: ServerError = s3_err.into();
         assert!(matches!(
             err,
-            crate::ServerError::ObjectStore(crate::error::ObjectStoreError::S3(_))
+            ServerError::ObjectStore(ObjectStoreError::S3(_))
         ));
     }
 

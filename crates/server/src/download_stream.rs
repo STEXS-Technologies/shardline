@@ -201,8 +201,10 @@ mod tests {
     use tokio::fs;
 
     use super::{local_object_byte_range_stream, local_object_byte_stream};
-    use crate::ServerError;
     use crate::error::ObjectStoreError;
+    use crate::object_store::ServerObjectStore;
+    use crate::object_store::set_before_local_object_read_hook;
+    use crate::ServerError;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_stream_reads_object_in_segments() {
         let storage = shardline_test_support::TempStorage::new();
@@ -308,7 +310,7 @@ mod tests {
                 .open(&writer_path)
                 .unwrap(),
         );
-        crate::object_store::set_before_local_object_read_hook(path, move || {
+        set_before_local_object_read_hook(path, move || {
             let mut writer = hook_writer.lock().unwrap();
             let _ = writer.write_all(b"extra");
             let _ = writer.sync_all();
@@ -382,31 +384,28 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_stream_with_blackhole_returns_not_found_for_nonzero_length() {
-        use crate::object_store::ServerObjectStore;
         let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/key").unwrap();
         let result = super::object_byte_stream(store, key, 10).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_range_stream_with_blackhole_returns_not_found() {
-        use crate::object_store::ServerObjectStore;
         let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/key").unwrap();
         let range = ByteRange::new(0, 9).unwrap();
         let result = super::object_byte_range_stream(store, key, 10, range).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_stream_blackhole_zero_length_checks_metadata() {
-        use crate::object_store::ServerObjectStore;
         let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/key").unwrap();
         // Blackhole returns None for metadata, so this should return NotFound
         let result = super::object_byte_stream(store, key, 0).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -443,8 +442,8 @@ mod tests {
         let result = local_object_byte_stream(object_store, object_key, 0).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
             ))
         ));
     }
@@ -465,7 +464,7 @@ mod tests {
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::RangeNotSatisfiable)
+            Err(ServerError::RangeNotSatisfiable)
         ));
     }
 
@@ -480,18 +479,18 @@ mod tests {
         }
         tokio::fs::write(&path, b"stream-me").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 9).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_range_stream_with_local_store_returns_error_for_blackhole() {
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let object_key = ObjectKey::parse("ab/any-key").unwrap();
         let range = ByteRange::new(0, 4).unwrap();
         let result = super::object_byte_range_stream(store, object_key, 10, range).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -505,12 +504,12 @@ mod tests {
         }
         tokio::fs::write(&path, b"data").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
             ))
         ));
     }
@@ -553,7 +552,7 @@ mod tests {
         let content = b"stream-payload-data";
         tokio::fs::write(&path, content).await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result =
             super::object_byte_stream(store.clone(), object_key.clone(), content.len() as u64)
                 .await;
@@ -573,11 +572,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_range_stream_with_s3_store_returns_error_when_not_configured() {
         // S3 variant: cannot test actual S3, so verify blackhole falls through
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let object_key = ObjectKey::parse("ab/s3-test").unwrap();
         let range = ByteRange::new(0, 9).unwrap();
         let result = super::object_byte_range_stream(store, object_key, 10, range).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -639,7 +638,7 @@ mod tests {
         }
         tokio::fs::write(&path, b"").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
         assert!(result.is_ok());
         let mut stream = result.unwrap();
@@ -658,12 +657,12 @@ mod tests {
         }
         tokio::fs::write(&path, b"data").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
             ))
         ));
     }
@@ -689,7 +688,7 @@ mod tests {
         // We need to access the file after the stream is created and truncate it.
         // Use the before_read_hook to truncate after length validation passes.
         let truncate_path = path.clone();
-        crate::object_store::set_before_local_object_read_hook(path.clone(), move || {
+        set_before_local_object_read_hook(path.clone(), move || {
             // Truncate the file to a very small size so the read loop gets 0
             let _ = std::fs::write(&truncate_path, b"tiny");
         });
@@ -700,8 +699,8 @@ mod tests {
         let result = local_object_byte_range_stream(object_store, object_key, 24, range).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
             ))
         ));
     }
@@ -792,7 +791,7 @@ mod tests {
         }
         tokio::fs::write(&path, b"").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
         assert!(result.is_ok());
         let mut stream = result.unwrap();
@@ -816,8 +815,8 @@ mod tests {
         let result = local_object_byte_range_stream(object_store, object_key, 100, range).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
             ))
         ));
     }
@@ -840,7 +839,7 @@ mod tests {
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::RangeNotSatisfiable)
+            Err(ServerError::RangeNotSatisfiable)
         ));
     }
 
@@ -862,7 +861,7 @@ mod tests {
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::RangeNotSatisfiable)
+            Err(ServerError::RangeNotSatisfiable)
         ));
     }
 
@@ -870,11 +869,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_stream_blackhole_missing_metadata() {
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/missing-key").unwrap();
         // Blackhole returns None for all metadata → NotFound
         let result = super::object_byte_stream(store, key, 0).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -882,11 +881,11 @@ mod tests {
         // When metadata reports non-zero length but we asked for length 0, should error
         // via StoredLengthMismatch. However, Blackhole metadata() returns None,
         // so this is a type-level check that the branch compiles.
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/zero-claim-nonzero").unwrap();
         // Blackhole metadata returns None → NotFound before length check
         let result = super::object_byte_stream(store, key, 0).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     // ── overflow edge cases ──────────────────────────────────────────────
@@ -904,7 +903,7 @@ mod tests {
         }
         tokio::fs::write(&path, b"").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
         // Zero-length existing empty file → empty stream
         assert!(result.is_ok());
@@ -913,11 +912,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_range_stream_with_blackhole_not_found() {
         // Blackhole returns NotFound for all stores
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/blackhole-range").unwrap();
         let range = ByteRange::new(0, 9).unwrap();
         let result = super::object_byte_range_stream(store, key, 10, range).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     // ── object_byte_range_stream via Local store with mid-range ──────────
@@ -933,7 +932,7 @@ mod tests {
         }
         tokio::fs::write(&path, b"0123456789").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let range = ByteRange::new(3, 7).unwrap();
         let result = super::object_byte_range_stream(store, object_key, 10, range).await;
         assert!(result.is_ok());
@@ -997,10 +996,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_stream_zero_length_with_missing_object_returns_not_found() {
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/missing").unwrap();
         let result = super::object_byte_stream(store, key, 0).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1015,23 +1014,23 @@ mod tests {
         }
         tokio::fs::write(&path, b"content").await.unwrap();
 
-        let store = crate::object_store::ServerObjectStore::Local(object_store);
+        let store = ServerObjectStore::Local(object_store);
         let result = super::object_byte_stream(store, object_key, 0).await;
         assert!(matches!(
             result,
-            Err(crate::ServerError::ObjectStore(
-                crate::error::ObjectStoreError::StoredLengthMismatch
+            Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch
             ))
         ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_range_stream_with_blackhole_returns_not_found_alt() {
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let key = ObjectKey::parse("test/alt-blackhole-range").unwrap();
         let range = ByteRange::new(0, 9).unwrap();
         let result = super::object_byte_range_stream(store, key, 10, range).await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
