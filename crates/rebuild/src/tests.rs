@@ -1120,7 +1120,7 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_unchanged_mapping() {
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data.len() as u32,
@@ -1209,7 +1209,7 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data.len() as u32,
@@ -1319,7 +1319,7 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_keeps_smaller_
     let mut shard1 = MDBInMemoryShard::default();
     shard1
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data.len() as u32,
@@ -1347,7 +1347,7 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_keeps_smaller_
     let mut shard2 = MDBInMemoryShard::default();
     shard2
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val2, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data.len() as u32,
@@ -1453,7 +1453,7 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_
     let mut shard_big = MDBInMemoryShard::default();
     shard_big
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data.len() as u32,
@@ -1480,7 +1480,7 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_
     let mut shard_small = MDBInMemoryShard::default();
     shard_small
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val2, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data.len() as u32,
@@ -1604,7 +1604,7 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
     // File record #1
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data1.len() as u32,
@@ -1619,7 +1619,7 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
     // File record #2
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val2, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
                 chunk_data2.len() as u32,

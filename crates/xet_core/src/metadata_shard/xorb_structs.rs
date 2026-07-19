@@ -20,20 +20,16 @@ pub struct XorbChunkSequenceHeader {
 }
 
 impl XorbChunkSequenceHeader {
-    pub fn new<I1: TryInto<u32>, I2: TryInto<u32> + Copy>(
+    pub fn new(
         xorb_hash: MerkleHash,
-        num_entries: I1,
-        num_bytes_in_xorb: I2,
-    ) -> Self
-    where
-        <I1 as TryInto<u32>>::Error: std::fmt::Debug,
-        <I2 as TryInto<u32>>::Error: std::fmt::Debug,
-    {
+        num_entries: u32,
+        num_bytes_in_xorb: u32,
+    ) -> Self {
         Self {
             xorb_hash,
             xorb_flags: MDB_DEFAULT_XORB_FLAG,
-            num_entries: num_entries.try_into().unwrap(),
-            num_bytes_in_xorb: num_bytes_in_xorb.try_into().unwrap(),
+            num_entries,
+            num_bytes_in_xorb,
             num_bytes_on_disk: 0,
         }
     }
@@ -89,19 +85,15 @@ pub struct XorbChunkSequenceEntry {
 }
 
 impl XorbChunkSequenceEntry {
-    pub fn new<I1: TryInto<u32>, I2: TryInto<u32>>(
+    pub fn new(
         chunk_hash: MerkleHash,
-        unpacked_segment_bytes: I1,
-        chunk_byte_range_start: I2,
-    ) -> Self
-    where
-        <I1 as TryInto<u32>>::Error: std::fmt::Debug,
-        <I2 as TryInto<u32>>::Error: std::fmt::Debug,
-    {
+        unpacked_segment_bytes: u32,
+        chunk_byte_range_start: u32,
+    ) -> Self {
         Self {
             chunk_hash,
-            unpacked_segment_bytes: unpacked_segment_bytes.try_into().unwrap(),
-            chunk_byte_range_start: chunk_byte_range_start.try_into().unwrap(),
+            unpacked_segment_bytes,
+            chunk_byte_range_start,
             flags: 0,
             _unused: 0,
         }

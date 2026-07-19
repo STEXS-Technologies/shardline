@@ -1,3 +1,16 @@
+//! Metrics collection for shardline.
+//!
+//! # Error handling convention
+//!
+//! All metrics use prometheus counters/gauges/histograms registered in a shared
+//! registry. `registry.register(...)` returns an error only when the same metric
+//! name is registered twice — which cannot happen in normal operation because
+//! each metric is registered exactly once at module init via `lazy_static!`.
+//!
+//! Errors are intentionally discarded with `.ok()`: metrics must be best-effort
+//! and must never cause a crash or abort program flow. Duplicate registration
+//! (should it occur) is benign and produces no incorrect behavior.
+
 #![deny(unsafe_code)]
 #![cfg_attr(
     test,
