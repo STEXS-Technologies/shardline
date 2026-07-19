@@ -1239,6 +1239,25 @@ mod tests {
         remove_env_var("SHARDLINE_S3_ENDPOINT");
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn load_s3_object_store_config_empty_region() {
+        // SAFETY: serialized env var test
+        set_env_var("SHARDLINE_S3_BUCKET", "test-bucket");
+        set_env_var("SHARDLINE_S3_REGION", "");
+        // Remove any credential overrides
+        remove_env_var("SHARDLINE_S3_ACCESS_KEY_ID");
+        remove_env_var("SHARDLINE_S3_SECRET_ACCESS_KEY");
+        let result = super::load_s3_object_store_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+        assert_eq!(config.bucket(), "test-bucket");
+        // region is pub(crate); we verify the config is valid
+        // Cleanup
+        remove_env_var("SHARDLINE_S3_BUCKET");
+        remove_env_var("SHARDLINE_S3_REGION");
+    }
+
     // ── configure_provider_runtime_from_paths — TTL zero ──────────────────
 
     #[test]

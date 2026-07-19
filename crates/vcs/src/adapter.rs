@@ -163,12 +163,23 @@ impl CanonicalCloneUrl {
 }
 
 /// Normalized provider webhook request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct WebhookRequest<'request> {
     event_name: &'request str,
     delivery_id: &'request str,
     signature: Option<&'request str>,
     body: &'request [u8],
+}
+
+impl std::fmt::Debug for WebhookRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookRequest")
+            .field("event_name", &self.event_name)
+            .field("delivery_id", &self.delivery_id)
+            .field("signature", &"<redacted>")
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 impl<'request> WebhookRequest<'request> {

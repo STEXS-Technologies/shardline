@@ -1257,4 +1257,188 @@ mod tests {
         remove_env_var("SHARDLINE_ROOT_DIR");
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
+
+    // ── load_server_config_from_env: empty index postgres url ─────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_empty_index_postgres_url() {
+        // SAFETY: test-only env var manipulation under serial_test
+        set_env_var("SHARDLINE_INDEX_POSTGRES_URL", "");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::EmptyIndexPostgresUrl)
+        ), "expected EmptyIndexPostgresUrl, got {result:?}");
+        // SAFETY: test-only env var cleanup under serial_test
+        remove_env_var("SHARDLINE_INDEX_POSTGRES_URL");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── load_server_config_from_env: whitespace reconstruction cache redis url ─
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_whitespace_reconstruction_cache_redis_url() {
+        // SAFETY: test-only env var manipulation under serial_test
+        set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "redis");
+        set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL", "   ");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::MissingReconstructionCacheRedisUrl)
+        ), "expected MissingReconstructionCacheRedisUrl, got {result:?}");
+        // SAFETY: test-only env var cleanup under serial_test
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER");
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── load_server_config_from_env: empty provider token issuer ──────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_empty_provider_token_issuer() {
+        // SAFETY: test-only env var and tempfile under serial_test
+        use std::io::Write;
+
+        // Provider config file and api key file must exist for the
+        // validation to reach with_provider_runtime.
+        let mut api_key_file = tempfile::NamedTempFile::new().unwrap();
+        api_key_file.write_all(b"valid-api-key").unwrap();
+        api_key_file.flush().unwrap();
+        let mut config_file = tempfile::NamedTempFile::new().unwrap();
+        config_file.write_all(b"config: {}").unwrap();
+        config_file.flush().unwrap();
+
+        set_env_var("SHARDLINE_PROVIDER_TOKEN_ISSUER", "");
+        set_env_var(
+            "SHARDLINE_PROVIDER_CONFIG_FILE",
+            config_file.path().to_str().unwrap(),
+        );
+        set_env_var(
+            "SHARDLINE_PROVIDER_API_KEY_FILE",
+            api_key_file.path().to_str().unwrap(),
+        );
+        set_env_var("SHARDLINE_TOKEN_SIGNING_KEY", "test-signing-key-32-bytes-long!!");
+        set_env_var("SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS", "300");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::EmptyProviderTokenIssuer)
+        ), "expected EmptyProviderTokenIssuer, got {result:?}");
+        // SAFETY: test-only env var cleanup under serial_test
+        remove_env_var("SHARDLINE_PROVIDER_TOKEN_ISSUER");
+        remove_env_var("SHARDLINE_PROVIDER_CONFIG_FILE");
+        remove_env_var("SHARDLINE_PROVIDER_API_KEY_FILE");
+        remove_env_var("SHARDLINE_TOKEN_SIGNING_KEY");
+        remove_env_var("SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    // ── load_server_config_from_env: end-to-end integration ───────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn load_server_config_integration_end_to_end() {
+        // SAFETY: test-only env var manipulation under serial_test
+        set_env_var("SHARDLINE_BIND_ADDR", "127.0.0.1:9090");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "https://example.com:9090");
+        set_env_var("SHARDLINE_SERVER_ROLE", "all");
+        set_env_var("SHARDLINE_SERVER_FRONTENDS", "xet,lfs,oci");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_e2e");
+        set_env_var("SHARDLINE_OBJECT_STORAGE_ADAPTER", "local");
+        set_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES", "2097152");
+        set_env_var("SHARDLINE_CHUNK_SIZE_BYTES", "65536");
+        set_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS", "256");
+        set_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS", "128");
+        set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER", "memory");
+        set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS", "60");
+        set_env_var("SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES", "8192");
+        set_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS", "7200");
+        set_env_var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS", "500");
+        set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS", "600");
+        set_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS", "128");
+        set_env_var("SHARDLINE_MAX_SHARD_FILES", "1000");
+        set_env_var("SHARDLINE_MAX_SHARD_XORBS", "1000");
+        set_env_var("SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS", "5000");
+        set_env_var("SHARDLINE_MAX_SHARD_XORB_CHUNKS", "5000");
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
+        set_env_var(
+            "SHARDLINE_AUTH_OIDC_ISSUER",
+            "https://accounts.example.com",
+        );
+        set_env_var(
+            "SHARDLINE_TOKEN_SIGNING_KEY",
+            "test-signing-key-32-bytes-long!!",
+        );
+
+        let result = super::load_server_config_from_env();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let config = result.unwrap();
+
+        assert_eq!(config.bind_addr().to_string(), "127.0.0.1:9090");
+        assert_eq!(config.public_base_url(), "https://example.com:9090");
+        assert_eq!(config.server_role(), crate::ServerRole::All);
+        assert_eq!(config.server_frontends().len(), 3);
+        assert!(config
+            .server_frontends()
+            .contains(&crate::ServerFrontend::Xet));
+        assert!(config
+            .server_frontends()
+            .contains(&crate::ServerFrontend::Lfs));
+        assert!(config
+            .server_frontends()
+            .contains(&crate::ServerFrontend::Oci));
+        assert_eq!(
+            config.root_dir(),
+            std::path::Path::new("/tmp/shardline_e2e")
+        );
+        assert_eq!(
+            config.object_storage_adapter(),
+            super::ObjectStorageAdapter::Local
+        );
+        assert!(config.s3_object_store_config().is_none());
+        assert_eq!(config.auth_provider(), super::AuthProviderKind::Oidc);
+        assert_eq!(
+            config.auth_oidc_issuer(),
+            Some("https://accounts.example.com")
+        );
+        assert!(config.token_signing_key().is_some());
+
+        // SAFETY: test-only env var cleanup under serial_test
+        remove_env_var("SHARDLINE_BIND_ADDR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+        remove_env_var("SHARDLINE_SERVER_ROLE");
+        remove_env_var("SHARDLINE_SERVER_FRONTENDS");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_OBJECT_STORAGE_ADAPTER");
+        remove_env_var("SHARDLINE_MAX_REQUEST_BODY_BYTES");
+        remove_env_var("SHARDLINE_CHUNK_SIZE_BYTES");
+        remove_env_var("SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS");
+        remove_env_var("SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS");
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER");
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS");
+        remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES");
+        remove_env_var("SHARDLINE_OCI_UPLOAD_SESSION_TTL_SECONDS");
+        remove_env_var("SHARDLINE_OCI_UPLOAD_MAX_ACTIVE_SESSIONS");
+        remove_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_TTL_SECONDS");
+        remove_env_var("SHARDLINE_OCI_REGISTRY_TOKEN_MAX_IN_FLIGHT_REQUESTS");
+        remove_env_var("SHARDLINE_MAX_SHARD_FILES");
+        remove_env_var("SHARDLINE_MAX_SHARD_XORBS");
+        remove_env_var("SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS");
+        remove_env_var("SHARDLINE_MAX_SHARD_XORB_CHUNKS");
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
+        remove_env_var("SHARDLINE_TOKEN_SIGNING_KEY");
+    }
 }

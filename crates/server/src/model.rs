@@ -111,7 +111,7 @@ pub struct ProviderTokenIssueResponse {
 }
 
 /// Xet CAS access-token response consumed by reference clients.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct XetCasTokenResponse {
     /// CAS server endpoint base URL.
@@ -122,8 +122,18 @@ pub struct XetCasTokenResponse {
     pub access_token: String,
 }
 
+impl std::fmt::Debug for XetCasTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XetCasTokenResponse")
+            .field("cas_url", &self.cas_url)
+            .field("exp", &self.exp)
+            .field("access_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Git LFS authenticate response carrying Xet custom-transfer bootstrap headers.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitLfsAuthenticateResponse {
     /// CAS endpoint URL.
     pub href: String,
@@ -133,8 +143,18 @@ pub struct GitLfsAuthenticateResponse {
     pub expires_in: u64,
 }
 
+impl std::fmt::Debug for GitLfsAuthenticateResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitLfsAuthenticateResponse")
+            .field("href", &self.href)
+            .field("header", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// OCI registry bearer-token exchange response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OciRegistryTokenResponse {
     /// Bearer token returned by the registry token service.
     pub token: String,
@@ -142,6 +162,16 @@ pub struct OciRegistryTokenResponse {
     pub access_token: String,
     /// Relative token lifetime in seconds.
     pub expires_in: u64,
+}
+
+impl std::fmt::Debug for OciRegistryTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OciRegistryTokenResponse")
+            .field("token", &"<redacted>")
+            .field("access_token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Provider webhook handling response.
