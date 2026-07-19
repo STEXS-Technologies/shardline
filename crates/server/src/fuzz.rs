@@ -10,9 +10,13 @@ use crate::{
     config::ShardMetadataLimits,
     lfs_object_key,
     lifecycle_repair::{
-        QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
-        classify_quarantine_repair_action, classify_retention_hold_repair_action,
-        classify_webhook_delivery_repair_action,
+        classification::{
+            classify_quarantine_repair_action, classify_retention_hold_repair_action,
+            classify_webhook_delivery_repair_action,
+        },
+        types::{
+            QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
+        },
     },
     oci_adapter::{oci_blob_key, oci_manifest_key, parse_reference},
     protocol_support::{parse_sha256_digest, validate_oci_repository_name, validate_oci_tag},
@@ -720,7 +724,7 @@ mod tests {
     use super::*;
     use crate::{
         InvalidReconstructionResponseError, ServerError,
-        lifecycle_repair::{
+        lifecycle_repair::types::{
             QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
         },
     };

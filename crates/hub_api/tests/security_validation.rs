@@ -373,7 +373,7 @@ fn validate_commit_has_path_validation() {
 /// decompression. Oversized output is rejected.
 #[test]
 fn validate_decompress_zlib_has_size_limit() {
-    let smart_http_source = include_str!("../../hub_api/src/git/smart_http.rs");
+    let smart_http_source = include_str!("../../hub_api/src/git/smart_http/pack_parse.rs");
 
     assert!(
         smart_http_source.contains("MAX_DECOMPRESSED_SIZE"),
@@ -395,7 +395,7 @@ fn validate_decompress_zlib_has_size_limit() {
 /// before left-shifting, preventing integer overflow from malicious packs.
 #[test]
 fn validate_pack_parser_shift_overflow_protected() {
-    let smart_http_source = include_str!("../../hub_api/src/git/smart_http.rs");
+    let smart_http_source = include_str!("../../hub_api/src/git/smart_http/pack_parse.rs");
 
     let parse_start = smart_http_source.find("fn parse_pack_data").unwrap();
     let parse_fn = &smart_http_source[parse_start..parse_start + 2500];
