@@ -13,6 +13,7 @@ use shardline_protocol::TokenScope;
 use crate::{
     ServerError,
     oci_adapter::{oci_tag_key, oci_tag_prefix, oci_tag_target_key, oci_tag_target_prefix},
+    protocol_support::validate_oci_tag,
 };
 
 use super::super::{AppState, parse_query_map, scope_from_auth};
@@ -34,7 +35,7 @@ pub(crate) async fn oci_tags_list(
     let page_size = parse_oci_tag_list_page_size(query.get("n").map(String::as_str))?;
     let last = query.get("last").map(String::as_str);
     if let Some(last) = last {
-        crate::protocol_support::validate_oci_tag(last)?;
+        validate_oci_tag(last)?;
     }
 
     // Per the OCI Distribution spec, when n is zero the endpoint MUST return
@@ -101,7 +102,7 @@ fn list_oci_tags(
         let Some(tag) = object.key().as_str().rsplit('/').next() else {
             continue;
         };
-        crate::protocol_support::validate_oci_tag(tag)?;
+        validate_oci_tag(tag)?;
         let _inserted = tags.insert(tag.to_owned());
     }
     let has_more = tags.len() > page_size;
@@ -123,7 +124,7 @@ pub(crate) async fn update_oci_tags(
 ) -> Result<(), ServerError> {
     let digest_bytes = digest_hex.as_bytes().to_vec();
     for tag in tags {
-        crate::protocol_support::validate_oci_tag(tag)?;
+        validate_oci_tag(tag)?;
         let tag_key = oci_tag_key(repository, tag, repository_scope)?;
         let previous_digest = match state.backend.read_object(&tag_key).await {
             Ok(bytes) => {
@@ -326,7 +327,6 @@ mod tests {
 
     #[test]
     fn validate_oci_tag_accepts_valid_rejects_invalid() {
-        use crate::protocol_support::validate_oci_tag;
         assert!(validate_oci_tag("valid-tag").is_ok());
         assert!(validate_oci_tag("v1.0.0").is_ok());
         assert!(validate_oci_tag("").is_err());

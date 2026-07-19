@@ -4,9 +4,7 @@ use axum::{
     extract::{Path, State},
 };
 
-use crate::commit::{self, CommitInstruction, ParsedCommit};
-use crate::error::HubApiError;
-use crate::models::*;
+use crate::{commit::{self, CommitInstruction, ParsedCommit}, error::HubApiError, models::*};
 use shardline_index::hub::HubFileEntry;
 use shardline_protocol::TokenScope;
 

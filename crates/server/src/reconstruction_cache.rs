@@ -269,7 +269,9 @@ fn duration_micros(duration: Duration) -> Result<u64, ServerError> {
 #[cfg(test)]
 mod tests {
     use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
         num::{NonZeroU64, NonZeroUsize},
+        path::PathBuf,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -284,14 +286,16 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{
-        MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES, ReconstructionCacheService,
-        SharedReconstructionCache,
+        MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES, ReconstructionCacheAdapter,
+        ReconstructionCacheService, SharedReconstructionCache,
+        benchmark_memory_reconstruction_cache_with_loader, payload_within_bound,
     };
-    use crate::FileReconstructionResponse;
-    use crate::ServerError;
-    use crate::xet_adapter::{
-        ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
-        ReconstructionUrlRange,
+    use crate::{
+        FileReconstructionResponse, ServerConfig, ServerConfigError, ServerError,
+        xet_adapter::{
+            ReconstructionChunkRange, ReconstructionFetchInfo, ReconstructionTerm,
+            ReconstructionUrlRange,
+        },
     };
 
     #[derive(Debug)]
@@ -528,7 +532,6 @@ mod tests {
 
     #[test]
     fn adapter_parse_disabled() {
-        use super::ReconstructionCacheAdapter;
         assert_eq!(
             ReconstructionCacheAdapter::parse("disabled").unwrap(),
             ReconstructionCacheAdapter::Disabled
@@ -537,7 +540,6 @@ mod tests {
 
     #[test]
     fn adapter_parse_memory() {
-        use super::ReconstructionCacheAdapter;
         assert_eq!(
             ReconstructionCacheAdapter::parse("memory").unwrap(),
             ReconstructionCacheAdapter::Memory
@@ -546,7 +548,6 @@ mod tests {
 
     #[test]
     fn adapter_parse_redis() {
-        use super::ReconstructionCacheAdapter;
         assert_eq!(
             ReconstructionCacheAdapter::parse("redis").unwrap(),
             ReconstructionCacheAdapter::Redis
@@ -555,8 +556,6 @@ mod tests {
 
     #[test]
     fn adapter_parse_invalid() {
-        use super::ReconstructionCacheAdapter;
-        use crate::ServerConfigError;
         assert!(matches!(
             ReconstructionCacheAdapter::parse("unknown"),
             Err(ServerConfigError::InvalidReconstructionCacheAdapter)
@@ -565,7 +564,6 @@ mod tests {
 
     #[test]
     fn adapter_as_str() {
-        use super::ReconstructionCacheAdapter;
         assert_eq!(ReconstructionCacheAdapter::Disabled.as_str(), "disabled");
         assert_eq!(ReconstructionCacheAdapter::Memory.as_str(), "memory");
         assert_eq!(ReconstructionCacheAdapter::Redis.as_str(), "redis");
@@ -575,20 +573,17 @@ mod tests {
 
     #[test]
     fn payload_within_bound_accepts_small_payload() {
-        use super::payload_within_bound;
         assert!(payload_within_bound(b"small"));
     }
 
     #[test]
     fn payload_within_bound_rejects_oversized() {
-        use super::{MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES, payload_within_bound};
         let oversized = vec![0u8; (MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES + 1) as usize];
         assert!(!payload_within_bound(&oversized));
     }
 
     #[test]
     fn payload_within_bound_accepts_exact_max() {
-        use super::{MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES, payload_within_bound};
         let exact = vec![0u8; MAX_RECONSTRUCTION_CACHE_PAYLOAD_BYTES as usize];
         assert!(payload_within_bound(&exact));
     }
@@ -597,11 +592,6 @@ mod tests {
 
     #[test]
     fn from_config_disabled_adapter_returns_disabled_service() {
-        use crate::config::ServerConfig;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        use std::path::PathBuf;
-
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://localhost:8080".to_owned(),
@@ -616,11 +606,6 @@ mod tests {
 
     #[test]
     fn from_config_memory_adapter_returns_memory_service() {
-        use crate::config::ServerConfig;
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        use std::path::PathBuf;
-
         let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://localhost:8080".to_owned(),
@@ -650,11 +635,7 @@ mod tests {
 
     #[test]
     fn from_config_redis_without_url_errors() {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        use std::path::PathBuf;
-
-        let _config = crate::config::ServerConfig::new(
+        let _config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://localhost:8080".to_owned(),
             PathBuf::from("/tmp/test"),
@@ -669,13 +650,9 @@ mod tests {
 
     #[test]
     fn from_config_redis_adapter_missing_url() {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        use std::path::PathBuf;
-
         // Create a config where reconstruction cache adapter is Redis but no URL
         // is set. This requires reaching into the config internals.
-        let _config = crate::config::ServerConfig::new(
+        let _config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://localhost:8080".to_owned(),
             PathBuf::from("/tmp/test"),
@@ -685,7 +662,7 @@ mod tests {
         // public API. The with_reconstruction_cache_redis method requires a URL.
         // Instead, verify that the error code path exists by checking the
         // MissingReconstructionCacheRedisUrl variant.
-        let _err = crate::ServerError::MissingReconstructionCacheRedisUrl;
+        let _err = ServerError::MissingReconstructionCacheRedisUrl;
     }
 
     // ── ready() method ───────────────────────────────────────────────────
@@ -700,7 +677,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_ready_with_memory_adapter_succeeds() {
-        use super::MemoryReconstructionCache;
         let ttl = NonZeroU64::new(60).unwrap_or(NonZeroU64::MIN);
         let adapter: SharedReconstructionCache = Arc::new(MemoryReconstructionCache::new(
             ttl,
@@ -810,10 +786,10 @@ mod tests {
         let key = ReconstructionCacheKey::latest("asset.bin", None);
 
         let result = cache
-            .get_or_load(&key, || async { Err(crate::ServerError::NotFound) })
+            .get_or_load(&key, || async { Err(ServerError::NotFound) })
             .await;
 
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     // ── get_or_load — put failure is silently ignored ────────────────────
@@ -837,14 +813,12 @@ mod tests {
 
     #[test]
     fn duration_micros_returns_micros() {
-        use std::time::Duration;
         let result = super::duration_micros(Duration::from_micros(42)).unwrap();
         assert_eq!(result, 42);
     }
 
     #[test]
     fn duration_micros_rejects_overflow() {
-        use std::time::Duration;
         let huge = Duration::from_secs(u64::MAX);
         let result = super::duration_micros(huge);
         assert!(result.is_err());
@@ -854,7 +828,6 @@ mod tests {
 
     #[test]
     fn payload_within_bound_accepts_zero_length() {
-        use super::payload_within_bound;
         assert!(payload_within_bound(b""));
     }
 
@@ -862,7 +835,6 @@ mod tests {
 
     #[test]
     fn adapter_as_str_all_variants() {
-        use super::ReconstructionCacheAdapter;
         assert_eq!(ReconstructionCacheAdapter::Disabled.as_str(), "disabled");
         assert_eq!(ReconstructionCacheAdapter::Memory.as_str(), "memory");
         assert_eq!(ReconstructionCacheAdapter::Redis.as_str(), "redis");
@@ -880,7 +852,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn benchmark_memory_reconstruction_cache_with_loader_hits_cache() {
-        let report = super::benchmark_memory_reconstruction_cache_with_loader(
+        let report = benchmark_memory_reconstruction_cache_with_loader(
             "bench-file.bin",
             "aa".repeat(32).as_str(),
             None,
@@ -906,14 +878,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn benchmark_memory_reconstruction_cache_with_loader_propagates_error() {
-        let result = super::benchmark_memory_reconstruction_cache_with_loader(
+        let result = benchmark_memory_reconstruction_cache_with_loader(
             "error-file.bin",
             "bb".repeat(32).as_str(),
             None,
-            || async { Err(crate::ServerError::NotFound) },
+            || async { Err(ServerError::NotFound) },
         )
         .await;
-        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+        assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
     // ── benchmark_memory_reconstruction_cache (delegation wrapper) ──────
@@ -944,24 +916,20 @@ mod tests {
 
     #[test]
     fn from_config_redis_without_url_returns_error() {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        use std::path::PathBuf;
-
-        let mut config = crate::config::ServerConfig::new(
+        let mut config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             "http://localhost:8080".to_owned(),
             PathBuf::from("/tmp/test"),
             NonZeroUsize::new(4096).unwrap(),
         );
         // Set the adapter to Redis without setting a URL.
-        config.cache.adapter = super::ReconstructionCacheAdapter::Redis;
+        config.cache.adapter = ReconstructionCacheAdapter::Redis;
         config.cache.redis_url = None;
 
         let result = ReconstructionCacheService::from_config(&config);
         assert!(matches!(
             result,
-            Err(crate::ServerError::MissingReconstructionCacheRedisUrl)
+            Err(ServerError::MissingReconstructionCacheRedisUrl)
         ));
     }
 

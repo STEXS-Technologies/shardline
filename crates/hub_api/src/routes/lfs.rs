@@ -6,9 +6,7 @@ use axum::{
 };
 use bytes::Bytes;
 
-use crate::commit;
-use crate::error::HubApiError;
-use crate::models::*;
+use crate::{commit, error::HubApiError, models::*};
 use shardline_protocol::TokenScope;
 
 use super::{HubState, authorize};

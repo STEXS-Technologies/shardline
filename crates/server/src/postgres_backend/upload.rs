@@ -6,7 +6,7 @@ use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
     protocol_support::shared_sha256_object_key,
-    upload_ingest::{FileUploadIngestor, RequestBodyReader},
+    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes},
     validation::validate_identifier,
     xet_adapter::{
         ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_bytes,
@@ -180,7 +180,7 @@ impl super::PostgresBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
+        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let object_store = self.object_store();
         store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
             .map_err(ServerError::from)
@@ -198,7 +198,7 @@ impl super::PostgresBackend {
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
-        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
+        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
         register_uploaded_shard_bytes(
@@ -229,6 +229,7 @@ mod tests {
     use super::*;
     use crate::object_store::ServerObjectStore;
     use crate::protocol_support::shared_sha256_object_key;
+    use crate::test_fixtures::single_chunk_xorb;
     use crate::upload_ingest::RequestBodyReader;
 
     const TEST_PG_URL: &str = "postgres://localhost:5432/test";
@@ -437,7 +438,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         // Build a valid single-chunk xorb using the test fixture.
         let content = b"hello xorb world";
-        let (xorb_bytes, expected_hash) = crate::test_fixtures::single_chunk_xorb(content);
+        let (xorb_bytes, expected_hash) = single_chunk_xorb(content);
         let result = backend.upload_xorb(&expected_hash, xorb_bytes).await;
         assert!(result.is_ok(), "upload_xorb should accept a valid xorb");
     }
@@ -446,7 +447,7 @@ mod tests {
     async fn upload_xorb_rejects_valid_xorb_with_wrong_hash() {
         let (backend, _root) = make_backend().await;
         let content = b"valid content but wrong hash declared";
-        let (xorb_bytes, _actual_hash) = crate::test_fixtures::single_chunk_xorb(content);
+        let (xorb_bytes, _actual_hash) = single_chunk_xorb(content);
         let wrong_hash = "ff".repeat(32);
         let result = backend.upload_xorb(&wrong_hash, xorb_bytes).await;
         assert!(
@@ -634,7 +635,7 @@ mod tests {
     async fn upload_shard_stream_rejects_empty_body() {
         let (backend, _root) = make_backend().await;
         let body = RequestBodyReader::from_bytes(axum::body::Bytes::new());
-        let limits = crate::ShardMetadataLimits::new(
+        let limits = ShardMetadataLimits::new(
             std::num::NonZeroUsize::new(100).unwrap(),
             std::num::NonZeroUsize::new(100).unwrap(),
             std::num::NonZeroUsize::new(100).unwrap(),

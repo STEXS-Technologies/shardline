@@ -17,7 +17,7 @@ use crate::{
     ServerError,
     oci_adapter::{
         oci_blob_key, oci_manifest_key, oci_manifest_location, oci_manifest_media_type_key,
-        oci_tag_key, parse_reference,
+        oci_tag_key, parse_reference, OciReference,
     },
     protocol_support::parse_sha256_digest,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
@@ -93,7 +93,7 @@ pub(crate) async fn oci_put_manifest(
     let bytes = read_body_to_bytes(&mut body).await?;
     let digest_hex = hex::encode(Sha256::digest(&bytes));
     let reference = parse_reference(reference)?;
-    if let crate::oci_adapter::OciReference::Digest(reference_digest) = &reference
+    if let OciReference::Digest(reference_digest) = &reference
         && reference_digest != &digest_hex
     {
         return Err(ServerError::ExpectedBodyHashMismatch);
@@ -115,8 +115,8 @@ pub(crate) async fn oci_put_manifest(
         .backend
         .put_object_bytes_if_absent(&media_type_key, media_type.clone().into_bytes())?;
     let mut accepted_tags = match reference {
-        crate::oci_adapter::OciReference::Tag(tag) => vec![tag],
-        crate::oci_adapter::OciReference::Digest(_) => Vec::new(),
+        OciReference::Tag(tag) => vec![tag],
+        OciReference::Digest(_) => Vec::new(),
     };
     accepted_tags.extend(parse_query_values(uri, "tag")?);
     if accepted_tags.len() > super::super::MAX_OCI_MANIFEST_TAGS {
@@ -188,8 +188,8 @@ async fn resolve_manifest_digest(
     repository_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> Result<String, ServerError> {
     match parse_reference(reference)? {
-        crate::oci_adapter::OciReference::Digest(digest_hex) => Ok(digest_hex),
-        crate::oci_adapter::OciReference::Tag(tag) => {
+        OciReference::Digest(digest_hex) => Ok(digest_hex),
+        OciReference::Tag(tag) => {
             load_oci_tag_digest(state, repository, repository_scope, &tag).await
         }
     }

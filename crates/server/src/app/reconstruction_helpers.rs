@@ -402,7 +402,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_stream_ends_early_returns_length_mismatch() {
-        let limiter = crate::TransferLimiter::new(
+        let limiter = TransferLimiter::new(
             std::num::NonZeroUsize::new(1024).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
@@ -414,7 +414,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_stream_has_extra_data_returns_length_mismatch() {
-        let limiter = crate::TransferLimiter::new(
+        let limiter = TransferLimiter::new(
             std::num::NonZeroUsize::new(1024).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
@@ -426,7 +426,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_accepts_exact_stream() {
-        let limiter = crate::TransferLimiter::new(
+        let limiter = TransferLimiter::new(
             std::num::NonZeroUsize::new(1024).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
@@ -438,7 +438,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_empty_stream_returns_length_mismatch() {
-        let limiter = crate::TransferLimiter::new(
+        let limiter = TransferLimiter::new(
             std::num::NonZeroUsize::new(1024).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
@@ -450,7 +450,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_detects_too_large_chunk() {
-        let limiter = crate::TransferLimiter::new(
+        let limiter = TransferLimiter::new(
             std::num::NonZeroUsize::new(1024).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );

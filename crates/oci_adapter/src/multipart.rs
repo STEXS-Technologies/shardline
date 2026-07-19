@@ -4,16 +4,18 @@ use bytes::Bytes;
 use shardline_storage::{ObjectKey, PutOutcome};
 use tokio::fs;
 
-use crate::OciAdapterError;
-use crate::fs::{persist_upload_session, unix_now_seconds_checked, upload_tail_path};
-use crate::key::validate_repository;
-use crate::protocol_support::{
-    object_key, shared_sha256_object_key, stable_hex_id, validate_upload_session_id,
-};
-use crate::traits::OciBackend;
-use crate::types::{
-    OCI_S3_MULTIPART_CHUNK_BYTES, OciS3MultipartUploadSession, OciUploadSession,
-    SerializableSha256State,
+use crate::{
+    OciAdapterError,
+    fs::{persist_upload_session, unix_now_seconds_checked, upload_tail_path},
+    key::validate_repository,
+    protocol_support::{
+        object_key, shared_sha256_object_key, stable_hex_id, validate_upload_session_id,
+    },
+    traits::OciBackend,
+    types::{
+        OCI_S3_MULTIPART_CHUNK_BYTES, OciS3MultipartUploadSession, OciUploadSession,
+        SerializableSha256State,
+    },
 };
 
 /// # Errors

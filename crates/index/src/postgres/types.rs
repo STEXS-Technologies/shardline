@@ -296,21 +296,21 @@ mod tests {
 
     #[test]
     fn postgres_metadata_store_error_display_retention_hold() {
-        let err: PostgresMetadataStoreError = crate::RetentionHoldError::EmptyReason.into();
+        let err: PostgresMetadataStoreError = RetentionHoldError::EmptyReason.into();
         assert_eq!(err.to_string(), "stored retention hold was invalid");
     }
 
     #[test]
     fn postgres_metadata_store_error_display_quarantine_candidate() {
         let err: PostgresMetadataStoreError =
-            crate::QuarantineCandidateError::InvertedTimeline.into();
+            QuarantineCandidateError::InvertedTimeline.into();
         assert_eq!(err.to_string(), "stored quarantine candidate was invalid");
     }
 
     #[test]
     fn postgres_metadata_store_error_display_webhook_delivery() {
         let err: PostgresMetadataStoreError =
-            crate::WebhookDeliveryError::EmptyRepositoryOwner.into();
+            WebhookDeliveryError::EmptyRepositoryOwner.into();
         assert_eq!(err.to_string(), "stored webhook delivery was invalid");
     }
 

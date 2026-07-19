@@ -1,12 +1,14 @@
 use shardline_protocol::RepositoryScope;
 use shardline_storage::{ObjectKey, ObjectPrefix};
 
-use crate::OciAdapterError;
-use crate::protocol_support::{
-    object_key, parse_sha256_digest, scope_namespace, stable_hex_id, validate_oci_repository_name,
-    validate_oci_repository_scope, validate_oci_tag,
+use crate::{
+    OciAdapterError,
+    protocol_support::{
+        object_key, parse_sha256_digest, scope_namespace, stable_hex_id,
+        validate_oci_repository_name, validate_oci_repository_scope, validate_oci_tag,
+    },
+    types::OciReference,
 };
-use crate::types::OciReference;
 
 /// # Errors
 ///

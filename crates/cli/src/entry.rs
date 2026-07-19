@@ -8,11 +8,9 @@ use serde_json::to_string_pretty;
 use shardline_protocol::RepositoryScope;
 use shardline_server::serve;
 
-use crate::local_output::print_error_chain;
-use crate::local_path::resolve_root;
-use crate::report_output;
 use crate::{
-    BenchConfig, BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
+    local_output::print_error_chain, local_path::resolve_root, report_output, BenchConfig,
+    BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
     install_gc_schedule, load_runtime_server_config, mint_admin_token_from_sources,
     print_hold_list_summary, print_hold_summary, render_completion, render_manpage,
     run_backup_manifest, run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc,

@@ -12,18 +12,20 @@ use shardline_server_core::{
 };
 use shardline_storage::ObjectStore;
 
-use crate::error::GcError;
-use crate::quarantine::{
-    read_active_retention_hold_object_keys, read_quarantine_entries, reconcile_quarantine_entries,
-    sweep_quarantine_entries,
-};
-use crate::reachability::{
-    OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys,
-    managed_object_hash_or_object_key, scan_orphan_objects,
-};
-use crate::types::{
-    GcOrphanInventoryEntry, GcOrphanQuarantineState, GcRetentionReportEntry, LocalGcDiagnostics,
-    LocalGcOptions, LocalGcReport,
+use crate::{
+    error::GcError,
+    quarantine::{
+        read_active_retention_hold_object_keys, read_quarantine_entries,
+        reconcile_quarantine_entries, sweep_quarantine_entries,
+    },
+    reachability::{
+        OrphanObject, ReachabilityAccumulator, collect_referenced_object_keys,
+        managed_object_hash_or_object_key, scan_orphan_objects,
+    },
+    types::{
+        GcOrphanInventoryEntry, GcOrphanQuarantineState, GcRetentionReportEntry,
+        LocalGcDiagnostics, LocalGcOptions, LocalGcReport,
+    },
 };
 
 /// Runs local filesystem garbage collection.

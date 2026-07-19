@@ -19,10 +19,9 @@ use shardline_protocol::TokenScope;
 use futures_util::StreamExt;
 use shardline_storage::DeleteOutcome;
 
-use crate::upload_ingest::read_body_to_bytes;
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    ServerError, lfs_object_key, upload_ingest::RequestBodyReader,
+    ServerError, lfs_object_key, upload_ingest::{read_body_to_bytes, RequestBodyReader},
 };
 
 use super::{AppState, MAX_LFS_BATCH_OBJECTS, authorize, direct_object_response, scope_from_auth};

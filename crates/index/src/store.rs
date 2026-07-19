@@ -3,11 +3,10 @@ use std::{future::Future, pin::Pin};
 use shardline_protocol::{RepositoryProvider, ShardlineHash};
 use shardline_storage::ObjectKey;
 
-use crate::hub::HubStore;
-use crate::record::RecordStore;
 use crate::{
-    DedupeShardMapping, FileId, FileReconstruction, ProviderRepositoryState, QuarantineCandidate,
-    RetentionHold, StoredObjectId, WebhookDelivery, XorbId,
+    hub::HubStore, record::RecordStore, DedupeShardMapping, FileId, FileReconstruction,
+    ProviderRepositoryState, QuarantineCandidate, RetentionHold, StoredObjectId, WebhookDelivery,
+    XorbId,
 };
 
 macro_rules! visit_items {
