@@ -296,7 +296,6 @@ mod tests {
         routing::get,
     };
     use sha2::{Digest, Sha256};
-    use shardline_protocol::{RepositoryProvider, RepositoryScope};
     use shardline_protocol_adapters::ProtocolError;
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -310,11 +309,6 @@ mod tests {
         bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas,
         bazel_put, bazel_put_ac, bazel_put_cas,
     };
-
-    #[allow(dead_code)]
-    fn test_scope() -> RepositoryScope {
-        RepositoryScope::new(RepositoryProvider::GitHub, "acme", "repo", None).unwrap()
-    }
 
     /// Builds a minimal [`AppState`] backed by a fresh temp directory.
     async fn build_test_state() -> (Arc<AppState>, TempDir) {

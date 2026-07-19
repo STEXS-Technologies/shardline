@@ -494,6 +494,7 @@ impl<T: RecordTraversal + RecordMutation> RecordStore for T {}
 
 #[cfg(test)]
 mod tests {
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use, clippy::unwrap_err_used)]
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
     use super::{FileChunkRecord, FileRecord, FileRecordInvariantError, RepositoryRecordScope};
@@ -834,8 +835,6 @@ mod tests {
     fn file_chunk_record_defaults_for_range_end_and_packed_end() {
         // When range_end and packed_end are not set, they should default
         // to 1 (range_end) and 0 (packed_end) via serde defaults.
-        let json =
-            r#"{"hash":"a".repeat(64),"offset":0,"length":4,"range_start":0,"packed_start":0}"#;
         // Build a JSON string with 64 'a' chars
         let hash_64 = "a".repeat(64);
         let json = format!(
@@ -947,7 +946,7 @@ mod tests {
 
     // ── Default visit_* trait impls ──────────────────────────────────────────
 
-    use crate::{RecordMutation, RecordStoreFuture, RecordTraversal, StoredRecord};
+    use crate::{RecordStoreFuture, RecordTraversal};
     use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 
     /// Minimal store that backs records via BTreeMap but does NOT override any

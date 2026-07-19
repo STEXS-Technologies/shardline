@@ -776,7 +776,6 @@ mod tests {
     use super::*;
     use crate::merklehash::compute_data_hash;
     use crate::xorb_object::RawXorbData;
-    use crate::xorb_object::compression_scheme::lz4_compress_from_slice;
     use crate::xorb_object::xorb_chunk_format::serialize_chunk;
 
     fn make_v1_info(num_chunks: u64, hash_data: &[u8]) -> XorbObjectInfoV1 {
@@ -866,7 +865,7 @@ mod tests {
         let info = make_v0_info(0, b"zero");
         let mut buf = Vec::new();
         #[allow(deprecated)]
-        let written = info.serialize(&mut buf).unwrap();
+        let _written = info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         #[allow(deprecated)]
         let (info2, _) = XorbObjectInfoV0::deserialize(&mut r).unwrap();
@@ -931,7 +930,7 @@ mod tests {
     fn v1_serialize_zero_chunks() {
         let info = XorbObjectInfoV1::default();
         let mut buf = Vec::new();
-        let written = info.serialize(&mut buf).unwrap();
+        let _written = info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
         let (info2, _) = XorbObjectInfoV1::deserialize(&mut r).unwrap();
         assert_eq!(info2.num_chunks, 0);

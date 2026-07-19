@@ -1,19 +1,5 @@
 #![deny(unsafe_code)]
 #![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::shadow_unrelated,
-        clippy::let_underscore_must_use,
-        clippy::format_push_string,
-        clippy::panic,
-        clippy::match_wild_err_arm,
-        clippy::ignored_unit_patterns
-    )
-)]
 
 //! OCI Distribution protocol adapter for the Shardline server ecosystem.
 //!

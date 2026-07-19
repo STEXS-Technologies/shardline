@@ -655,6 +655,7 @@ fn escape_like(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use, clippy::unwrap_err_used)]
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType};
     use proptest::prelude::*;
@@ -1483,7 +1484,7 @@ mod tests {
         boxed
             .create_repo(HubRepoType::Model, "org/m", false)
             .unwrap();
-        let initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
+        let _initial_sha = "4b825dc642cb6eb9a060e54bf899d69f8f5ce8e3";
 
         // Create revision via boxed
         let rev = boxed
@@ -2103,7 +2104,7 @@ mod tests {
         store.store_files("sha2", &files2).unwrap();
 
         // Create a webhook
-        let wh = store
+        let _wh = store
             .create_webhook(
                 "org/model",
                 "https://example.com/hook",

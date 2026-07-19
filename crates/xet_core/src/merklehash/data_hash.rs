@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn hashed_write_empty() {
-        let mut w = HashedWrite::new(Vec::new());
+        let w = HashedWrite::new(Vec::new());
         assert_eq!(w.hash(), compute_data_hash(b""));
     }
 
