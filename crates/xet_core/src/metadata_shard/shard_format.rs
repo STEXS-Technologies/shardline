@@ -8,20 +8,20 @@ use crate::error::{CoreError, Result};
 use crate::merklehash::HMACKey;
 use crate::utils::serialization_utils::*;
 
-pub const MDB_FILE_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u32>();
+pub const MDB_FILE_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u64>();
 
-static_assertions::const_assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileDataSequenceHeader>());
-static_assertions::const_assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileDataSequenceEntry>());
-static_assertions::const_assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileVerificationEntry>());
-static_assertions::const_assert!(MDB_FILE_INFO_ENTRY_SIZE == size_of::<FileMetadataExt>());
+static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceHeader>());
+static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceEntry>());
+static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileVerificationEntry>());
+static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileMetadataExt>());
 
-const MDB_XORB_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u32>();
+const MDB_XORB_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u64>();
 static_assertions::const_assert!(MDB_XORB_INFO_ENTRY_SIZE == size_of::<XorbChunkSequenceHeader>());
 static_assertions::const_assert!(MDB_XORB_INFO_ENTRY_SIZE == size_of::<XorbChunkSequenceEntry>());
 
 const MDB_SHARD_FOOTER_SIZE: i64 = size_of::<MDBShardFileFooter>() as i64;
-const MDB_SHARD_HEADER_VERSION: u64 = 2;
-const MDB_SHARD_FOOTER_VERSION: u64 = 1;
+const MDB_SHARD_HEADER_VERSION: u64 = 3;
+const MDB_SHARD_FOOTER_VERSION: u64 = 2;
 
 const MDB_SHARD_HEADER_TAG: [u8; 32] = [
     b'H', b'F', b'R', b'e', b'p', b'o', b'M', b'e', b't', b'a', b'D', b'a', b't', b'a', 0, 85, 105,
@@ -230,10 +230,11 @@ impl MDBShardInfo {
     ) -> std::result::Result<Self, CoreError> {
         let header = MDBShardFileHeader::deserialize(reader)
             .map_err(|e| CoreError::MalformedData(format!("Failed to read header: {e}")))?;
+        let version = header.version;
 
         let mut file_infos = Vec::new();
         loop {
-            match MDBFileInfo::deserialize(reader) {
+            match MDBFileInfo::deserialize(reader, version) {
                 Ok(Some(file_info)) => file_infos.push(file_info),
                 Ok(None) => break,
                 Err(e) => {
@@ -249,7 +250,7 @@ impl MDBShardInfo {
 
         let mut xorb_infos = Vec::new();
         loop {
-            match MDBXorbInfo::deserialize(reader) {
+            match MDBXorbInfo::deserialize(reader, version) {
                 Ok(Some(xorb_info)) => xorb_infos.push(xorb_info),
                 Ok(None) => break,
                 Err(e) => {
@@ -274,10 +275,11 @@ impl MDBShardInfo {
     pub fn read_all_file_info_sections<R: Read>(
         &self,
         reader: &mut R,
+        version: u64,
     ) -> std::result::Result<Vec<MDBFileInfo>, CoreError> {
         let mut file_infos = Vec::new();
         loop {
-            match MDBFileInfo::deserialize(reader) {
+            match MDBFileInfo::deserialize(reader, version) {
                 Ok(Some(file_info)) => file_infos.push(file_info),
                 Ok(None) => break,
                 Err(_) => break,
@@ -289,10 +291,11 @@ impl MDBShardInfo {
     pub fn read_all_xorb_blocks_full<R: Read>(
         &self,
         reader: &mut R,
+        version: u64,
     ) -> std::result::Result<Vec<MDBXorbInfo>, CoreError> {
         let mut xorb_infos = Vec::new();
         loop {
-            match MDBXorbInfo::deserialize(reader) {
+            match MDBXorbInfo::deserialize(reader, version) {
                 Ok(Some(xorb_info)) => xorb_infos.push(xorb_info),
                 Ok(None) => break,
                 Err(_) => break,
@@ -320,7 +323,7 @@ impl MDBShardInfo {
     pub fn stored_bytes(&self) -> u64 {
         self.xorb_infos
             .iter()
-            .map(|x| x.metadata.num_bytes_in_xorb as u64)
+            .map(|x| x.metadata.num_bytes_in_xorb)
             .sum()
     }
 }
@@ -333,10 +336,10 @@ mod tests {
     use crate::merklehash::MerkleHash;
     use crate::merklehash::compute_data_hash;
 
-    fn make_file_info(num_entries: u32) -> MDBFileInfo {
+    fn make_file_info(num_entries: u64) -> MDBFileInfo {
         let entries: Vec<FileDataSequenceEntry> = (0..num_entries)
             .map(|i| {
-                FileDataSequenceEntry::new(compute_data_hash(b"x"), 100u32, i * 100, (i + 1) * 100)
+                FileDataSequenceEntry::new(compute_data_hash(b"x"), 100u64, i * 100, (i + 1) * 100)
             })
             .collect();
         MDBFileInfo {
@@ -352,7 +355,7 @@ mod tests {
         }
     }
 
-    fn make_xorb_info(num_chunks: u32, bytes_per_chunk: u32) -> MDBXorbInfo {
+    fn make_xorb_info(num_chunks: u64, bytes_per_chunk: u64) -> MDBXorbInfo {
         let entries: Vec<XorbChunkSequenceEntry> = (0..num_chunks)
             .map(|i| {
                 XorbChunkSequenceEntry::new(
@@ -396,7 +399,7 @@ mod tests {
     #[test]
     fn header_default() {
         let h = MDBShardFileHeader::default();
-        assert_eq!(h.version, 2);
+        assert_eq!(h.version, 3);
         assert_eq!(h.tag, MDB_SHARD_HEADER_TAG);
         assert!(h.footer_size > 0);
     }
@@ -428,7 +431,7 @@ mod tests {
     #[test]
     fn footer_default() {
         let f = MDBShardFileFooter::default();
-        assert_eq!(f.version, 1);
+        assert_eq!(f.version, 2);
         assert_eq!(f.shard_key_expiry, u64::MAX);
     }
 
@@ -500,15 +503,13 @@ mod tests {
                 MDBFileInfo {
                     metadata: FileDataSequenceHeader::new(
                         MerkleHash::default(),
-                        1u32,
+                        1u64,
                         false,
                         false,
                     ),
                     segments: vec![FileDataSequenceEntry::new(
                         MerkleHash::default(),
-                        500u32,
-                        0u32,
-                        0u32,
+                        500u64, 0u64, 0u64,
                     )],
                     verification: vec![],
                     metadata_ext: None,
@@ -516,15 +517,13 @@ mod tests {
                 MDBFileInfo {
                     metadata: FileDataSequenceHeader::new(
                         MerkleHash::default(),
-                        1u32,
+                        1u64,
                         false,
                         false,
                     ),
                     segments: vec![FileDataSequenceEntry::new(
                         MerkleHash::default(),
-                        300u32,
-                        0u32,
-                        0u32,
+                        300u64, 0u64, 0u64,
                     )],
                     verification: vec![],
                     metadata_ext: None,
@@ -545,8 +544,7 @@ mod tests {
             .unwrap();
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf))
-            .unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
         assert!(files.is_empty());
     }
 
@@ -562,8 +560,7 @@ mod tests {
             .unwrap();
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf))
-            .unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
         assert_eq!(files.len(), 2);
     }
 
@@ -575,8 +572,7 @@ mod tests {
         buf.extend_from_slice(b"CORRUPTED");
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf))
-            .unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
         assert_eq!(files.len(), 1);
     }
 
@@ -590,7 +586,7 @@ mod tests {
             .unwrap();
         let info = MDBShardInfo::default();
         let x = info
-            .read_all_xorb_blocks_full(&mut Cursor::new(&buf))
+            .read_all_xorb_blocks_full(&mut Cursor::new(&buf), 3)
             .unwrap();
         assert!(x.is_empty());
     }
@@ -607,7 +603,7 @@ mod tests {
             .unwrap();
         let info = MDBShardInfo::default();
         let x = info
-            .read_all_xorb_blocks_full(&mut Cursor::new(&buf))
+            .read_all_xorb_blocks_full(&mut Cursor::new(&buf), 3)
             .unwrap();
         assert_eq!(x.len(), 2);
         assert_eq!(x[0].chunks.len(), 1);
@@ -621,7 +617,7 @@ mod tests {
         buf.extend_from_slice(b"CORRUPTED");
         let info = MDBShardInfo::default();
         let x = info
-            .read_all_xorb_blocks_full(&mut Cursor::new(&buf))
+            .read_all_xorb_blocks_full(&mut Cursor::new(&buf), 3)
             .unwrap();
         assert_eq!(x.len(), 1);
     }
@@ -742,7 +738,7 @@ mod tests {
         assert_eq!(info.num_xorb_entries(), 2);
         assert_eq!(info.total_num_chunks(), 3);
         // Footer is default (version=1), not from the buffer
-        assert_eq!(info.footer.version, 1);
+        assert_eq!(info.footer.version, 2);
     }
 
     #[test]
@@ -769,8 +765,7 @@ mod tests {
         buf.extend_from_slice(b"GARBAGE");
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf))
-            .unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
         assert_eq!(files.len(), 1);
     }
 
@@ -781,7 +776,7 @@ mod tests {
         buf.extend_from_slice(b"GARBAGE");
         let info = MDBShardInfo::default();
         let x = info
-            .read_all_xorb_blocks_full(&mut Cursor::new(&buf))
+            .read_all_xorb_blocks_full(&mut Cursor::new(&buf), 3)
             .unwrap();
         assert_eq!(x.len(), 1);
     }
@@ -801,8 +796,8 @@ mod tests {
     fn serialize_from_with_multiple_files_and_xorbs() {
         fn make_xorb_info_v2(
             hash_data: &[u8],
-            num_chunks: u32,
-            bytes_per_chunk: u32,
+            num_chunks: u64,
+            bytes_per_chunk: u64,
         ) -> MDBXorbInfo {
             let entries: Vec<XorbChunkSequenceEntry> = (0..num_chunks)
                 .map(|i| {
@@ -822,12 +817,12 @@ mod tests {
                 chunks: entries,
             }
         }
-        fn make_file_info_v2(hash_data: &[u8], num_entries: u32) -> MDBFileInfo {
+        fn make_file_info_v2(hash_data: &[u8], num_entries: u64) -> MDBFileInfo {
             let entries: Vec<FileDataSequenceEntry> = (0..num_entries)
                 .map(|i| {
                     FileDataSequenceEntry::new(
                         compute_data_hash(b"x"),
-                        100u32,
+                        100u64,
                         i * 100,
                         (i + 1) * 100,
                     )

@@ -196,14 +196,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -257,14 +257,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -301,14 +301,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -362,14 +362,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 

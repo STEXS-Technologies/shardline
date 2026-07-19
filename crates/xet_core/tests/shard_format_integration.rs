@@ -18,8 +18,8 @@ use shardline_xet_core::metadata_shard::{
 
 fn make_file_info(
     file_hash_data: &[u8],
-    num_segments: u32,
-    unpacked_per_segment: u32,
+    num_segments: u64,
+    unpacked_per_segment: u64,
     with_verification: bool,
     with_metadata_ext: bool,
 ) -> MDBFileInfo {
@@ -61,7 +61,10 @@ fn make_file_info(
     }
 }
 
-fn make_xorb_info(xorb_hash_data: &[u8], num_chunks: u32, bytes_per_chunk: u32) -> MDBXorbInfo {
+fn make_xorb_info(
+    xorb_hash_data: &[u8],
+    num_chunks: u64,
+    bytes_per_chunk: u64) -> MDBXorbInfo {
     let chunks: Vec<XorbChunkSequenceEntry> = (0..num_chunks)
         .map(|i| {
             XorbChunkSequenceEntry::new(
@@ -390,7 +393,7 @@ fn shard_read_sections() {
 
     let info = MDBShardInfo::default();
     let files = info
-        .read_all_file_info_sections(&mut Cursor::new(&file_buf))
+        .read_all_file_info_sections(&mut Cursor::new(&file_buf), 3)
         .unwrap();
     assert_eq!(files.len(), 2);
     assert_eq!(files[0].segments[0].unpacked_segment_bytes, 100);
@@ -407,7 +410,7 @@ fn shard_read_sections() {
         .unwrap();
 
     let xorbs = info
-        .read_all_xorb_blocks_full(&mut Cursor::new(&xorb_buf))
+        .read_all_xorb_blocks_full(&mut Cursor::new(&xorb_buf), 3)
         .unwrap();
     assert_eq!(xorbs.len(), 2);
     assert_eq!(xorbs[0].chunks.len(), 2);
