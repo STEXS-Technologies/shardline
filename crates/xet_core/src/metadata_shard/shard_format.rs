@@ -4,9 +4,7 @@ use std::mem::size_of;
 use super::file_structs::*;
 use super::shard_in_memory::MDBInMemoryShard;
 use super::xorb_structs::*;
-use crate::error::{CoreError, Result};
-use crate::merklehash::HMACKey;
-use crate::utils::serialization_utils::*;
+use crate::{error::{CoreError, Result}, merklehash::HMACKey, utils::serialization_utils::*};
 
 pub const MDB_FILE_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u64>();
 

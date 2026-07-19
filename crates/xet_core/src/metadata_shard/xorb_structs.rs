@@ -4,8 +4,7 @@ use std::mem::size_of;
 use bytes::Bytes;
 
 use super::hash_is_global_dedup_eligible;
-use crate::merklehash::MerkleHash;
-use crate::utils::serialization_utils::*;
+use crate::{merklehash::MerkleHash, utils::serialization_utils::*};
 
 pub const MDB_DEFAULT_XORB_FLAG: u32 = 0;
 pub const MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG: u32 = 1 << 31;

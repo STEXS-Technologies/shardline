@@ -8,8 +8,7 @@ use axum::{
     http::StatusCode,
 };
 
-use crate::error::HubApiError;
-use crate::models::*;
+use crate::{error::HubApiError, models::*};
 // HubRepoType used in the webhook_create handler for repo lookup
 // (used implicitly via state.store methods)
 use shardline_protocol::{SecretString, TokenScope};

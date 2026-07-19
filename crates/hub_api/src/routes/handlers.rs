@@ -2,8 +2,7 @@ use axum::extract::Path;
 use axum::http::HeaderMap;
 use axum::{Json, extract::State};
 
-use crate::error::HubApiError;
-use crate::models::*;
+use crate::{error::HubApiError, models::*};
 use shardline_protocol::TokenScope;
 
 use super::HubState;
