@@ -6,7 +6,7 @@ use axum::{
 };
 use shardline_protocol::{ByteRange, parse_http_byte_range};
 
-use crate::ServerError;
+use crate::{ServerError, metrics};
 
 use super::{AppState, byte_range_stream_response, full_byte_stream_response};
 
@@ -48,7 +48,7 @@ pub(crate) async fn direct_object_response(
             .headers_mut()
             .insert("Docker-Content-Digest", digest_value);
     }
-    crate::metrics::record_download(protocol, total_length, 0.0, true);
+    metrics::record_download(protocol, total_length, 0.0, true);
     Ok(response)
 }
 

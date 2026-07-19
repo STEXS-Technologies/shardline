@@ -78,14 +78,16 @@ impl<T> Validate<T> for std::result::Result<T, CoreError> {
 
 pub type Result<T> = std::result::Result<T, CoreError>;
 
-impl From<crate::merklehash::DataHashHexParseError> for CoreError {
-    fn from(_: crate::merklehash::DataHashHexParseError) -> Self {
+use crate::merklehash::{DataHashBytesParseError, DataHashHexParseError};
+
+impl From<DataHashHexParseError> for CoreError {
+    fn from(_: DataHashHexParseError) -> Self {
         CoreError::Other("Invalid hex input for DataHash".to_string())
     }
 }
 
-impl From<crate::merklehash::DataHashBytesParseError> for CoreError {
-    fn from(_: crate::merklehash::DataHashBytesParseError) -> Self {
+impl From<DataHashBytesParseError> for CoreError {
+    fn from(_: DataHashBytesParseError) -> Self {
         CoreError::Other("Invalid bytes input for DataHash".to_string())
     }
 }

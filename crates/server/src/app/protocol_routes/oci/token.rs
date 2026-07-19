@@ -9,7 +9,14 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use shardline_protocol::{TokenClaims, TokenScope, TokenSigner};
 
-use crate::ServerError;
+use crate::{
+    ServerError,
+    auth::AuthContext,
+    clock::unix_now_seconds_checked,
+    model::OciRegistryTokenResponse,
+    oci_adapter::validate_repository,
+    protocol_support::validate_oci_repository_scope,
+};
 
 use super::super::{AppState, authorize, parse_query_values};
 
@@ -24,7 +31,7 @@ pub(crate) async fn oci_registry_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     uri: Uri,
-) -> Result<Json<crate::model::OciRegistryTokenResponse>, ServerError> {
+) -> Result<Json<OciRegistryTokenResponse>, ServerError> {
     state
         .protocol_metrics
         .increment_oci_registry_token_requests();
@@ -81,7 +88,7 @@ pub(crate) async fn oci_registry_token(
         })?;
     let (requested_scope, requested_repository) = parse_oci_registry_token_scopes(&query.scopes)?;
     if let Some(repository) = requested_repository.as_deref() {
-        crate::protocol_support::validate_oci_repository_scope(
+        validate_oci_repository_scope(
             repository,
             Some(bootstrap_claims.repository()),
         )?;
@@ -90,7 +97,7 @@ pub(crate) async fn oci_registry_token(
         return Err(ServerError::InsufficientScope);
     }
 
-    let now = crate::clock::unix_now_seconds_checked()?;
+    let now = unix_now_seconds_checked()?;
     let expires_at_unix_seconds = bootstrap_claims
         .expires_at_unix_seconds()
         .min(now.saturating_add(state.config.oci_registry_token_ttl_seconds().get()));
@@ -103,7 +110,7 @@ pub(crate) async fn oci_registry_token(
     )
     .map_err(|_error| ServerError::InvalidProviderTokenRequest)?;
     let token = signer.sign(&issued_claims)?;
-    Ok(Json(crate::model::OciRegistryTokenResponse {
+    Ok(Json(OciRegistryTokenResponse {
         access_token: token.clone(),
         token,
         expires_in: issued_claims
@@ -118,7 +125,7 @@ pub(super) fn oci_authorize(
     headers: &HeaderMap,
     repository: Option<&str>,
     required_scope: TokenScope,
-) -> Result<Option<crate::auth::AuthContext>, ServerError> {
+) -> Result<Option<AuthContext>, ServerError> {
     match authorize(state, headers, required_scope) {
         Ok(auth) => Ok(auth),
         Err(ServerError::MissingAuthorization)
@@ -199,7 +206,7 @@ fn parse_oci_registry_token_scope(
     if resource_type != "repository" {
         return Err(ServerError::InvalidManifestReference);
     }
-    crate::oci_adapter::validate_repository(repository)?;
+    validate_repository(repository)?;
     let requested_scope = parse_oci_registry_actions(actions)?;
     Ok((Some(requested_scope), Some(repository.to_owned())))
 }

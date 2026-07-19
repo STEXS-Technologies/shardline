@@ -10,7 +10,7 @@ use shardline_storage::{ObjectMetadata, ObjectPrefix};
 
 use crate::{
     ServerConfig, ServerError,
-    object_store::{ServerObjectStore, object_store_from_config},
+    object_store::{ServerObjectStore, object_store_from_config, visit_object_prefix},
     ops_record_store::OpsRecordStore,
     overflow::{checked_add, checked_increment},
     postgres_backend::connect_postgres_metadata_pool,
@@ -269,7 +269,7 @@ where
     writer.write_all(b"[")?;
 
     let mut first_object = true;
-    crate::object_store::visit_object_prefix(object_store, &prefix, |metadata| {
+    visit_object_prefix(object_store, &prefix, |metadata| {
         if first_object {
             first_object = false;
         } else {

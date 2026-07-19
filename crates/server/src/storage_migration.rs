@@ -13,7 +13,7 @@ use crate::{
     chunk_store::chunk_hash_from_chunk_object_key_if_present,
     error::ObjectStoreError,
     local_backend::chunk_hash,
-    object_store::{ServerObjectStore, read_full_object},
+    object_store::{ServerObjectStore, read_full_object, visit_object_prefix},
     overflow::checked_add,
     xet_adapter::{
         shard_hash_from_object_key_if_present, validate_serialized_xorb,
@@ -134,7 +134,7 @@ pub fn run_storage_migration(
     let prefix = ObjectPrefix::parse(&options.prefix)?;
     let mut report = StorageMigrationReport::new(options);
 
-    crate::object_store::visit_object_prefix(&source, &prefix, |metadata| {
+    visit_object_prefix(&source, &prefix, |metadata| {
         report.scanned_objects = checked_add(report.scanned_objects, 1)?;
         report.scanned_bytes = checked_add(report.scanned_bytes, metadata.length())?;
         if options.dry_run {

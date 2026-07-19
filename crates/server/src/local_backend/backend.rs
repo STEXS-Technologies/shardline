@@ -7,10 +7,11 @@ use shardline_storage::{ObjectPrefix, ObjectStore};
 
 use crate::{
     ServerError, ServerFrontend,
+    chunk_store::chunk_hash_from_chunk_object_key_if_present,
     config::default_upload_max_in_flight_chunks,
     local_path::ensure_directory_path_components_are_not_symlinked,
     model::ServerStatsResponse,
-    object_store::ServerObjectStore,
+    object_store::{ServerObjectStore, visit_object_prefix},
     overflow::{checked_add, checked_increment},
 };
 
@@ -162,10 +163,9 @@ impl LocalBackend {
         let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
         let mut chunks = 0_u64;
         let mut chunk_bytes = 0_u64;
-        crate::object_store::visit_object_prefix(&object_store, &prefix, |metadata| {
+        visit_object_prefix(&object_store, &prefix, |metadata| {
             let is_chunk =
-                crate::chunk_store::chunk_hash_from_chunk_object_key_if_present(metadata.key())?
-                    .is_some();
+                chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
             if is_chunk {
                 chunks = checked_increment(chunks)?;
                 chunk_bytes = checked_add(chunk_bytes, metadata.length())?;

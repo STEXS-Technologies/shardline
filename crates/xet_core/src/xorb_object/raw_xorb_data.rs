@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use serde::Serialize;
 
-use crate::merklehash::{MerkleHash, xorb_hash};
+use crate::merklehash::{MerkleHash, compute_data_hash, xorb_hash};
 
 use super::chunk::Chunk;
 
@@ -52,7 +52,7 @@ impl RawXorbData {
         let chunks_and_sizes: Vec<(MerkleHash, u64)> = self
             .data
             .iter()
-            .map(|d| (crate::merklehash::compute_data_hash(d), d.len() as u64))
+            .map(|d| (compute_data_hash(d), d.len() as u64))
             .collect();
         xorb_hash(&chunks_and_sizes)
     }

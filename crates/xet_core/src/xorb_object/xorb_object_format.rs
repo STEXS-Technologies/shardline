@@ -10,7 +10,7 @@ use super::xorb_chunk_format::{
     deserialize_chunk, deserialize_chunk_header, serialize_chunk, write_chunk_header,
 };
 use super::{CompressionScheme, XorbChunkHeader};
-use crate::{error::{CoreError, Validate}, merklehash::{compute_data_hash, MerkleHash}, utils::serialization_utils::*};
+use crate::{error::{CoreError, Validate}, merklehash::{compute_data_hash, xorb_hash, MerkleHash}, utils::serialization_utils::*};
 
 pub type XorbObjectIdent = [u8; 7];
 pub(crate) const XORB_OBJECT_FORMAT_IDENT: XorbObjectIdent =
@@ -594,7 +594,7 @@ impl XorbObject {
             return Ok(None);
         }
 
-        let xorb_hash = crate::merklehash::xorb_hash(&hash_chunks);
+        let xorb_hash = xorb_hash(&hash_chunks);
         if xorb_hash != *hash || xorb_hash != xorb.info.xorb_hash {
             warn!("XORB Validation: Computed hash does not match provided hash or Info hash.");
             return Ok(None);
@@ -756,7 +756,7 @@ pub fn reconstruct_xorb_with_footer(
         writer.write_all(&compressed_buf)?;
     }
 
-    let computed_hash = crate::merklehash::xorb_hash(&chunk_hash_and_size);
+    let computed_hash = xorb_hash(&chunk_hash_and_size);
     info.xorb_hash = computed_hash;
     info.num_chunks = chunk_hash_and_size.len() as u64;
     info.fill_in_boundary_offsets();
