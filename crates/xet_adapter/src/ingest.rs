@@ -196,7 +196,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -257,7 +257,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -301,7 +301,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -362,7 +362,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
