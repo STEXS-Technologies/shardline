@@ -1,9 +1,11 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::let_underscore_must_use)]
+
 use shardline_protocol::{ChunkRange, RepositoryProvider, RepositoryScope, ShardlineHash};
 
 use super::PostgresRecordKind;
 use super::index_store::PostgresFileReconstructionRecord;
 use super::record_store::record_locator;
-use super::types::{PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
+use super::types::{i64_to_u64, u64_to_i64};
 use crate::{
     FileId, FileReconstruction, FileRecord, ReconstructionTerm, RepositoryRecordScope,
     StoredObjectId, XorbId,

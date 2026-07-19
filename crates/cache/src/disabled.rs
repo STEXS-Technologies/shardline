@@ -63,6 +63,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn get_returns_none() {
         let cache = DisabledReconstructionCache::new();
@@ -80,6 +81,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn delete_returns_false() {
         let cache = DisabledReconstructionCache::new();
@@ -101,6 +103,7 @@ mod tests {
         let _: &dyn crate::AsyncReconstructionCache = &a;
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn get_with_scope_returns_none() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
@@ -113,6 +116,7 @@ mod tests {
         assert_eq!(result.unwrap(), None);
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn get_with_version_key_returns_none() {
         let cache = DisabledReconstructionCache::new();
@@ -130,6 +134,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn delete_with_scoped_key_returns_false() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};

@@ -158,6 +158,7 @@ pub(crate) fn i64_to_u64(value: i64) -> Result<u64, PostgresMetadataStoreError> 
 
 #[cfg(test)]
 mod tests {
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use, clippy::unwrap_err_used)]
     use shardline_protocol::{HashParseError, RangeError};
     use shardline_storage::ObjectKeyError;
 

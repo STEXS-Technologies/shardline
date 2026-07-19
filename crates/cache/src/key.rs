@@ -173,6 +173,7 @@ mod tests {
 
     // ── Scope with no revision ───────────────────────────────────────────
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_scope_without_revision() {
         let scope = RepositoryScope::new(RepositoryProvider::GitLab, "group", "project", None);
@@ -206,6 +207,7 @@ mod tests {
 
     // ── latest with all provider combinations ────────────────────────────
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_latest_with_each_provider() {
         let providers = [
@@ -234,6 +236,7 @@ mod tests {
 
     // ── version with all provider combinations ───────────────────────────
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_version_with_each_provider() {
         let providers = [
@@ -278,6 +281,7 @@ mod tests {
         assert!(key.repository_scope().is_none());
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn cache_key_version_with_each_provider_no_revision() {
         let providers = [

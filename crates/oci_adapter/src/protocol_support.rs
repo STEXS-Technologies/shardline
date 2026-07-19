@@ -157,6 +157,7 @@ mod tests {
         ));
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn oci_repository_scope_validator_accepts_bound_roots_and_nested_namespaces() {
         let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None)
@@ -174,6 +175,7 @@ mod tests {
         ));
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn shared_sha256_key_uses_stable_shared_namespace() {
         let key = shared_sha256_object_key(
@@ -212,6 +214,7 @@ mod tests {
         assert_eq!(super::scope_namespace(None), "global");
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn scope_namespace_with_scope_returns_64_char_hex() {
         let scope = shardline_protocol::RepositoryScope::new(
@@ -226,6 +229,7 @@ mod tests {
         assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn object_key_valid() {
         let key = super::object_key("valid/path").unwrap();

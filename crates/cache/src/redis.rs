@@ -352,6 +352,7 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::unwrap_used)]
     #[tokio::test]
     async fn redis_cache_ready_succeeds_when_live_url_is_available() {
         let Some(redis_url) = env_var("STEXS_REDIS_CACHE_TEST_URL").ok() else {
@@ -616,6 +617,7 @@ mod tests {
 
     // ── Clone ────────────────────────────────────────────────────────────
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn redis_cache_clone_produces_independent_cache() {
         let ttl = NonZeroU64::new(60).unwrap();
@@ -631,12 +633,14 @@ mod tests {
 
     // ── RedisReconstructionCache::new edge cases ─────────────────────────
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn redis_cache_new_with_redis_scheme() {
         let ttl = NonZeroU64::new(60).unwrap();
         assert!(RedisReconstructionCache::new("redis://localhost", ttl).is_ok());
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn redis_cache_new_with_unix_scheme() {
         let ttl = NonZeroU64::new(60).unwrap();

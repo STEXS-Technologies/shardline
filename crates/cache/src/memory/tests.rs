@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::match_wild_err_arm
+)]
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicU64, Ordering},
@@ -61,6 +70,7 @@ async fn memory_cache_expires_entries_after_ttl() {
 
 // ── TTL expiry (wall-clock) ───────────────────────────────────────────
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn memory_cache_expires_entries_after_ttl_wall_clock() {
     let cache = MemoryReconstructionCache::new(
@@ -82,6 +92,7 @@ async fn memory_cache_expires_entries_after_ttl_wall_clock() {
 
 // ── Eviction with max_entries = 1 ─────────────────────────────────────
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn memory_cache_evicts_oldest_when_at_capacity_one() {
     let cache = MemoryReconstructionCache::new(
@@ -142,6 +153,7 @@ async fn memory_cache_concurrent_get_or_load_deduplicates() {
 
 // ── Loader failure cleanup ────────────────────────────────────────────
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn memory_cache_loader_failure_cleans_up_pending() {
     let cache = MemoryReconstructionCache::new(
@@ -316,6 +328,7 @@ async fn memory_cache_get_times_out_when_loader_hangs() {
 
 // ── get_or_load: cache hit (fast path) ────────────────────────────────
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn get_or_load_cache_hit_fast_path() {
     let cache = MemoryReconstructionCache::new(
@@ -1104,6 +1117,7 @@ async fn get_or_load_recheck_after_write_lock_finds_entry() {
 // condition correctly distinguishes existing-key updates (no eviction)
 // from new-key inserts (eviction).
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn put_new_key_evicts_when_full_existing_key_update_does_not() {
     let cache = MemoryReconstructionCache::new(
@@ -1275,23 +1289,23 @@ async fn concurrent_put_and_get_loading_entry_stress() {
 
         // Concurrent put + get on the same key
         for _ in 0..3 {
-            let c = std::sync::Arc::clone(&cache);
-            let k = key.clone();
+            let c_put = std::sync::Arc::clone(&cache);
+            let k_put = key.clone();
             handles.push(tokio::spawn(async move {
-                let _ = c.put(&k, b"data").await;
+                let _ = c_put.put(&k_put, b"data").await;
             }));
 
-            let c = std::sync::Arc::clone(&cache);
-            let k = key.clone();
+            let c_get = std::sync::Arc::clone(&cache);
+            let k_get = key.clone();
             handles.push(tokio::spawn(async move {
-                let result = c.get(&k).await;
+                let result = c_get.get(&k_get).await;
                 assert!(result.is_ok(), "get should not error under stress");
             }));
 
-            let c = std::sync::Arc::clone(&cache);
-            let k = key.clone();
+            let c_del = std::sync::Arc::clone(&cache);
+            let k_del = key.clone();
             handles.push(tokio::spawn(async move {
-                let _ = c.delete(&k).await;
+                let _ = c_del.delete(&k_del).await;
             }));
         }
     }
@@ -1353,17 +1367,17 @@ async fn get_phantom_loading_recheck_with_contention() {
         }
 
         // put() calls to create write-lock contention
-        let c = std::sync::Arc::clone(&cache);
-        let k = key.clone();
+        let c_put2 = std::sync::Arc::clone(&cache);
+        let k_put2 = key.clone();
         handles.push(tokio::spawn(async move {
-            let _ = c.put(&k, b"data").await;
+            let _ = c_put2.put(&k_put2, b"data").await;
         }));
 
         // delete() calls for more write-lock contention
-        let c = std::sync::Arc::clone(&cache);
-        let k = key.clone();
+        let c_del2 = std::sync::Arc::clone(&cache);
+        let k_del2 = key.clone();
         handles.push(tokio::spawn(async move {
-            let _ = c.delete(&k).await;
+            let _ = c_del2.delete(&k_del2).await;
         }));
     }
 
@@ -1395,10 +1409,10 @@ async fn get_phantom_loading_removes_expired_entry() {
         let key = ReconstructionCacheKey::latest(&format!("phantom-exp-{i}"), None);
 
         // Seed: put with 1s TTL
-        let c = std::sync::Arc::clone(&cache);
-        let k = key.clone();
+        let c_seed = std::sync::Arc::clone(&cache);
+        let k_seed = key.clone();
         handles.push(tokio::spawn(async move {
-            let _ = c.put(&k, b"seed").await;
+            let _ = c_seed.put(&k_seed, b"seed").await;
         }));
 
         // Fast-failing loader
@@ -1419,24 +1433,24 @@ async fn get_phantom_loading_removes_expired_entry() {
 
         // get() calls
         for _ in 0..3 {
-            let c = std::sync::Arc::clone(&cache);
-            let k = key.clone();
+            let c_get2 = std::sync::Arc::clone(&cache);
+            let k_get2 = key.clone();
             handles.push(tokio::spawn(async move {
-                let result = c.get(&k).await;
+                let result = c_get2.get(&k_get2).await;
                 assert!(result.is_ok(), "get() should not error");
             }));
         }
 
         // Additional write-lock contention via put/delete
-        let c = std::sync::Arc::clone(&cache);
-        let k = key.clone();
+        let c_put3 = std::sync::Arc::clone(&cache);
+        let k_put3 = key.clone();
         handles.push(tokio::spawn(async move {
-            let _ = c.put(&k, b"noise").await;
+            let _ = c_put3.put(&k_put3, b"noise").await;
         }));
-        let c = std::sync::Arc::clone(&cache);
-        let k = key.clone();
+        let c_del3 = std::sync::Arc::clone(&cache);
+        let k_del3 = key.clone();
         handles.push(tokio::spawn(async move {
-            let _ = c.delete(&k).await;
+            let _ = c_del3.delete(&k_del3).await;
         }));
     }
 

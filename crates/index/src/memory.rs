@@ -1031,6 +1031,7 @@ struct MemoryRecordEntry {
 
 #[cfg(test)]
 mod tests {
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use, clippy::unwrap_err_used)]
     use std::{fmt::Debug, time::Duration};
 
     use serde_json::from_slice;
@@ -1040,7 +1041,7 @@ mod tests {
     use super::{MemoryIndexStore, MemoryRecordStore};
     use crate::{
         DedupeShardMapping, DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord,
-        IndexStore, LifecycleStore, LocalIndexStore, MemoryIndexStoreError, MemoryRecordStoreError,
+        LifecycleStore, LocalIndexStore, MemoryIndexStoreError, MemoryRecordStoreError,
         ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
         RecordMutation, RecordTraversal, RepositoryRecordScope, RetentionHold, StoredObjectId,
         WebhookDelivery, XorbId,

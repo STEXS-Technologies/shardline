@@ -365,6 +365,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn serialize_to_buf(info: &MDBShardInfo) -> Vec<u8> {
         let mut buf = Vec::new();
         info.header.serialize(&mut buf).unwrap();

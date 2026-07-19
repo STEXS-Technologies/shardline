@@ -1281,9 +1281,9 @@ pub(crate) fn invalid_record_metadata_path_error() -> LocalIndexStoreError {
 
 #[cfg(test)]
 mod tests {
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use, clippy::unwrap_err_used)]
     use super::*;
     use rusqlite::Connection;
-    use std::os::unix::ffi::OsStrExt;
 
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 

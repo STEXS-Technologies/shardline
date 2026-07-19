@@ -3,9 +3,6 @@ use std::{
     path::Path,
 };
 
-#[cfg(unix)]
-#[allow(unused_imports)]
-use std::os::unix::fs::OpenOptionsExt;
 #[cfg(not(unix))]
 use tokio::fs;
 

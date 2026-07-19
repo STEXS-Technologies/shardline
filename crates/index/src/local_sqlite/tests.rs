@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::let_underscore_must_use, clippy::shadow_unrelated)]
+
 use std::{error::Error, fs, path::Path, slice::from_ref};
 
 use rusqlite::{Connection, config::DbConfig, params};
@@ -15,7 +17,7 @@ use super::{
 };
 use crate::{
     DedupeShardMapping, DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord,
-    IndexStore, LifecycleStore, MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState,
+    LifecycleStore, MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState,
     QuarantineCandidate, ReconstructionStore, ReconstructionTerm, RecordMutation, RecordStore,
     RecordTraversal, RetentionHold, WebhookDelivery, XorbId, parse_xet_hash_hex,
     test_invariant_error::LocalSqliteInvariantError, xet_hash_hex_string,

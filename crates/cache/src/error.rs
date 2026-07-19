@@ -29,6 +29,7 @@ mod tests {
 
     use super::*;
 
+    #[allow(clippy::unwrap_used, clippy::shadow_unrelated)]
     #[test]
     fn error_source_returns_inner_error() {
         // EmptyRedisUrl has no source
@@ -99,6 +100,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn display_numeric_conversion() {
         let int_err = i64::try_from(u64::MAX).unwrap_err();
@@ -116,6 +118,7 @@ mod tests {
         assert!(matches!(err, ReconstructionCacheError::Redis(_)));
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn from_try_from_int_error() {
         let int_err = i64::try_from(u64::MAX).unwrap_err();

@@ -24,16 +24,17 @@ pub(crate) use types::{
     IngestBenchScenario, TimedConcurrentIngestUpload,
 };
 
-#[allow(unused_imports)]
+// Re-exports used by sibling submodules (e2e, ingest, concurrent).
 pub(crate) use runner::{
-    allocate_bench_run_root, available_parallelism_u64, build_iteration_repository_scopes,
-    capture_process_cpu_micros, checked_add_u32, checked_add_u64, checked_average_u64,
-    checked_mul_u64, duration_micros, host_utilization_per_mille, inventory_scope,
-    iteration_namespace, measured_iteration_count, namespaced_file_id, ratio_per_mille,
-    scaling_per_mille, throughput_bytes_per_second,
+    available_parallelism_u64, build_iteration_repository_scopes, capture_process_cpu_micros,
+    checked_add_u64, duration_micros, host_utilization_per_mille, iteration_namespace,
+    namespaced_file_id, ratio_per_mille,
 };
-#[allow(unused_imports)]
-pub(crate) use sparse::{
-    build_base_asset, build_concurrent_ingest_upload_cases, build_concurrent_upload_cases,
-    build_cross_repository_assets, build_mutation_range, build_sparse_update,
+// Re-exports used only in test code.
+#[cfg(test)]
+pub(crate) use runner::{
+    checked_add_u32, checked_average_u64, checked_mul_u64, inventory_scope,
+    measured_iteration_count, scaling_per_mille, throughput_bytes_per_second,
 };
+#[cfg(test)]
+pub(crate) use sparse::{build_base_asset, build_concurrent_upload_cases, build_sparse_update};

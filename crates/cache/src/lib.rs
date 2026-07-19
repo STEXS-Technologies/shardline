@@ -1,18 +1,5 @@
 #![deny(unsafe_code)]
 #![allow(clippy::missing_panics_doc, clippy::missing_const_for_fn)]
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::shadow_unrelated,
-        clippy::let_underscore_must_use,
-        clippy::format_push_string,
-        clippy::panic,
-        clippy::match_wild_err_arm
-    )
-)]
 
 //! Reconstruction-cache contracts and adapters for Shardline.
 //!

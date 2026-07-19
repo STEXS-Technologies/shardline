@@ -16,7 +16,6 @@ use crate::metadata_shard::{
     },
     file_structs::{
         FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt, FileVerificationEntry,
-        MDB_FILE_FLAG_METADATA_EXT_MASK, MDB_FILE_FLAG_VERIFICATION_MASK,
         MDB_FILE_FLAG_WITH_METADATA_EXT, MDB_FILE_FLAG_WITH_VERIFICATION, MDBFileInfo,
         MDBFileInfoView,
     },
@@ -34,10 +33,7 @@ use crate::xorb_object::{
     },
     xorb_format_test_utils::{ChunkSize, build_raw_xorb, build_xorb_object},
     xorb_object_format::{
-        SerializedXorbObject, XORB_OBJECT_FORMAT_BOUNDARIES_VERSION,
-        XORB_OBJECT_FORMAT_HASHES_VERSION, XORB_OBJECT_FORMAT_IDENT,
-        XORB_OBJECT_FORMAT_IDENT_BOUNDARIES, XORB_OBJECT_FORMAT_IDENT_HASHES,
-        XORB_OBJECT_FORMAT_VERSION, XORB_OBJECT_FORMAT_VERSION_V0, XorbObject, XorbObjectInfoV0,
+        SerializedXorbObject, XorbObject, XorbObjectInfoV0,
         XorbObjectInfoV1, reconstruct_xorb_with_footer,
     },
 };
@@ -553,7 +549,7 @@ fn compression_scheme_from_static_str() {
 
 #[test]
 fn compression_scheme_decompress_from_reader_roundtrips() {
-    use std::io::{Cursor, Read, Write};
+    use std::io::{Cursor};
     let data = b"reader-based decompression test data for verification";
     for scheme in &[
         CompressionScheme::None,
@@ -572,7 +568,7 @@ fn compression_scheme_decompress_from_reader_roundtrips() {
 
 #[test]
 fn compression_scheme_decompress_from_reader_auto_errors_v2() {
-    use std::io::{Cursor, Write};
+    use std::io::Cursor;
     let mut reader = Cursor::new(b"some data");
     let mut writer = Vec::new();
     let result = CompressionScheme::Auto.decompress_from_reader(&mut reader, &mut writer);
@@ -1029,8 +1025,6 @@ fn serialized_xorb_object_from_components_roundtrip() {
 #[test]
 fn reconstruct_xorb_with_footer_roundtrip() {
     let data = b"hello world for reconstruction!";
-    let mut writer = Cursor::new(Vec::<u8>::new());
-
     // Build a chunk with None compression for simplicity
     let mut chunk_writer = Cursor::new(Vec::<u8>::new());
     serialize_chunk(data, &mut chunk_writer, CompressionScheme::None).unwrap();
@@ -2153,6 +2147,7 @@ fn mdb_file_info_view_bytes() {
 }
 
 #[test]
+#[allow(non_snake_case)]
 fn mdb_file_info_view_fromMDBFileInfoView_into_mdb_file_info() {
     let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, false);
     let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u64, 0u64, 50u64);
@@ -2778,7 +2773,6 @@ fn deserialize_chunks_to_writer_multiple_chunks() {
 fn deserialize_chunk_rejects_uncompressed_length_mismatch() {
     // Manually construct a chunk with None compression header that lies
     // about the uncompressed length.
-    use crate::xorb_object::xorb_chunk_format::XORB_CHUNK_HEADER_LENGTH;
     let data = b"real data";
     let mut buf = Vec::new();
     // Write header with wrong uncompressed_length
@@ -3231,7 +3225,7 @@ fn hashed_write_into_inner() {
 #[test]
 fn hashed_write_empty_input() {
     use crate::merklehash::HashedWrite;
-    let mut writer = HashedWrite::new(Vec::new());
+    let writer = HashedWrite::new(Vec::new());
     let hash = writer.hash();
     let expected = compute_data_hash(b"");
     assert_eq!(hash, expected);
@@ -3367,7 +3361,7 @@ fn xorb_hash_exact_two_chunks_triggers_next_merge_cut_len_eq_2() {
 fn xorb_hash_mod_condition_at_various_positions_exercises_next_merge_cut() {
     // Test mod condition hits at different positions (index 2, 3, 4, etc.)
     for mod_pos in 2..=5 {
-        let mut chunks: Vec<(MerkleHash, u64)> = (0..6)
+        let chunks: Vec<(MerkleHash, u64)> = (0..6)
             .map(|i| {
                 // Make position `mod_pos` have hash[3] % 4 == 0
                 let h = if i == mod_pos {
@@ -3599,7 +3593,7 @@ fn xorb_object_validate_xorb_object_chunk_hash_mismatch() {
     // Build a valid xorb with one chunk
     let (obj, chunk_data, _, _) =
         build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::None).unwrap();
-    let chunk_len = chunk_data.len();
+    let _chunk_len = chunk_data.len();
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_offset = buf.len();
@@ -3627,7 +3621,7 @@ fn xorb_object_validate_xorb_object_boundary_mismatch() {
     // Build a valid xorb with 1 chunk via build_xorb_object + serialization
     let (obj, chunk_data, _, _) =
         build_xorb_object(1, ChunkSize::Fixed(100), CompressionScheme::None).unwrap();
-    let chunk_data_len = chunk_data.len();
+    let _chunk_data_len = chunk_data.len();
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_offset = buf.len();
@@ -3861,7 +3855,7 @@ fn try_read_chunk_header_partial_read_triggers_read_exact_fallback() {
 
 #[test]
 fn mdb_shard_info_load_from_reader_bad_header() {
-    let mut buf = vec![0u8; 48]; // all zeros, wrong magic
+    let buf = vec![0u8; 48]; // all zeros, wrong magic
     let mut cursor = Cursor::new(buf);
     let result = MDBShardInfo::load_from_reader(&mut cursor);
     assert!(result.is_err());

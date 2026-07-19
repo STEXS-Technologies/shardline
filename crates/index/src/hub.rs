@@ -1020,6 +1020,7 @@ where
 
 #[cfg(test)]
 mod tests {
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use, clippy::unwrap_err_used)]
     use std::collections::HashMap;
 
     use super::*;
@@ -1296,7 +1297,7 @@ mod tests {
             message: &str,
         ) -> Result<HubRevision, Self::Error> {
             let ref_name = canonical_ref_name(ref_name);
-            let mut repos = self.repos.lock().unwrap();
+            let repos = self.repos.lock().unwrap();
             if !repos.contains_key(repo_id) {
                 return Err("repo not found".into());
             }

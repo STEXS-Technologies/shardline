@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn xorb_hash_mod_at_various_positions() {
         for mod_pos in 2..=5 {
-            let mut chunks: Vec<(MerkleHash, u64)> = (0..6)
+            let chunks: Vec<(MerkleHash, u64)> = (0..6)
                 .map(|i| {
                     let h = if i == mod_pos {
                         MerkleHash::from([0u64, 0, 0, 4]) // 4 % 4 == 0

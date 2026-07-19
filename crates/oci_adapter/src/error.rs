@@ -140,6 +140,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn json_error_display_message() {
         let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
@@ -149,6 +150,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn numeric_conversion_error_display_message() {
         let err: TryFromIntError = u8::try_from(-1i32).unwrap_err();
@@ -212,6 +214,7 @@ mod tests {
         assert_eq!(err.to_string(), "object storage prefix validation failed");
     }
 
+    #[allow(clippy::unwrap_used)]
     #[test]
     fn blocking_task_error_display_message() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -225,6 +228,7 @@ mod tests {
         });
     }
 
+    #[allow(clippy::unwrap_used, clippy::shadow_unrelated)]
     #[test]
     fn all_from_trait_conversions() {
         // Verify From<IoError>
@@ -248,6 +252,7 @@ mod tests {
         assert!(matches!(err, OciAdapterError::ObjectPrefix(_)));
     }
 
+    #[allow(clippy::unwrap_used, clippy::let_underscore_must_use)]
     #[test]
     fn error_variant_display_messages_all_variants() {
         // Test that every variant has a non-empty Display message

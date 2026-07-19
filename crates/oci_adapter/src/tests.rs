@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::ignored_unit_patterns
+)]
+
 use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 #[cfg(unix)]
@@ -381,6 +390,7 @@ async fn read_upload_session_returns_not_found_for_nonexistent() {
     assert!(matches!(result, Err(OciAdapterError::NotFound)));
 }
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn append_upload_bytes_extends_session() {
     let root = temp_root();
@@ -916,6 +926,7 @@ async fn read_session(root: &Path, session_id: &str) -> OciUploadSession {
     read_upload_session(root, session_id, ttl()).await.unwrap()
 }
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn s3_multipart_append_and_finalize() {
     let root = temp_root();
@@ -1076,6 +1087,7 @@ async fn s3_multipart_hash_mismatch_aborts() {
     }
 }
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn s3_multipart_concurrent_append_stress() {
     let root = temp_root();
@@ -2019,6 +2031,7 @@ async fn s3_ensure_started_upload_id_none_errors() {
     assert!(matches!(result, Err(OciAdapterError::NotFound)));
 }
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn s3_read_upload_tail_io_error() {
     // read_upload_tail non-NotFound IO error → line 1145
@@ -2049,6 +2062,7 @@ async fn s3_read_upload_tail_io_error() {
     );
 }
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn s3_write_upload_tail_empty_removes_file() {
     // write_upload_tail with empty bytes removes existing tail file → line 1158 (Ok branch)
@@ -2542,6 +2556,7 @@ async fn purge_expired_read_error_deletes_with_permission_denied() {
 
 // ── purge_expired_upload_sessions — isolated expired + fresh ──────────────
 
+#[allow(clippy::shadow_unrelated)]
 #[tokio::test]
 async fn purge_expired_upload_sessions_removes_expired_and_keeps_fresh_sequentially() {
     let root = temp_root();
