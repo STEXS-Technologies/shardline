@@ -427,10 +427,12 @@ mod tests {
 
     #[test]
     fn footer_serialize_roundtrip() {
-        let mut f = MDBShardFileFooter::default();
-        f.file_info_offset = 100;
-        f.xorb_info_offset = 200;
-        f.stored_bytes = 1024;
+        let f = MDBShardFileFooter {
+            file_info_offset: 100,
+            xorb_info_offset: 200,
+            stored_bytes: 1024,
+            ..Default::default()
+        };
         let mut buf = Vec::new();
         f.serialize(&mut buf).unwrap();
         assert_eq!(buf.len(), size_of::<MDBShardFileFooter>());
@@ -481,7 +483,7 @@ mod tests {
         assert_eq!(info.num_xorb_entries(), 1);
         assert_eq!(info.total_num_chunks(), 1);
         assert_eq!(info.stored_bytes(), 100);
-        assert_eq!(info.materialized_bytes(), 100 + 0);
+        assert_eq!(info.materialized_bytes(), 100);
     }
 
     #[test]

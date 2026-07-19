@@ -478,7 +478,7 @@ mod tests {
         struct FailReader;
         impl std::io::Read for FailReader {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "read fail"))
+                Err(std::io::Error::other("read fail"))
             }
         }
         let mut r = FailReader;
