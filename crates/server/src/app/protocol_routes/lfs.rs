@@ -21,7 +21,8 @@ use shardline_storage::DeleteOutcome;
 
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    ServerError, lfs_object_key, upload_ingest::{read_body_to_bytes, RequestBodyReader},
+    ServerError, lfs_object_key, metrics,
+    upload_ingest::{read_body_to_bytes, RequestBodyReader},
 };
 
 use super::{AppState, MAX_LFS_BATCH_OBJECTS, authorize, direct_object_response, scope_from_auth};
@@ -272,7 +273,7 @@ pub(crate) async fn lfs_put_object(
         .put_sha256_addressed_object_stream_if_absent(&object_key, &oid, body)
         .await?;
     let elapsed = start.elapsed().as_secs_f64();
-    crate::metrics::record_upload("lfs", content_length, elapsed, true);
+    metrics::record_upload("lfs", content_length, elapsed, true);
     Ok(StatusCode::OK.into_response())
 }
 
@@ -393,7 +394,7 @@ pub(crate) async fn lfs_patch_object(
     let object_key_for_closure = object_key.clone();
 
     let elapsed = start.elapsed().as_secs_f64();
-    crate::metrics::record_upload("lfs", content_length, elapsed, true);
+    metrics::record_upload("lfs", content_length, elapsed, true);
 
     tokio::task::spawn_blocking(move || {
         let lock_arc = acquire_lfs_patch_lock(&oid_for_closure);

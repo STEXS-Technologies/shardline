@@ -6,8 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::error::HubApiError;
-use crate::models::*;
+use crate::{error::HubApiError, models::*};
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
 

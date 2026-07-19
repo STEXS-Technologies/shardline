@@ -8,8 +8,7 @@ use std::{
 
 use shardline_protocol::ShardlineHash;
 
-use crate::local_fs::hard_link_file_if_absent;
-use crate::{ObjectIntegrity, PutOutcome};
+use crate::{local_fs::hard_link_file_if_absent, ObjectIntegrity, PutOutcome};
 
 use super::metadata::{ensure_parent_directories_are_not_symlinked, ensure_regular_file_metadata};
 use super::store::LocalObjectStoreError;

@@ -4,8 +4,7 @@ use axum::{
     extract::{Path, Query, State},
 };
 
-use crate::error::HubApiError;
-use crate::models::*;
+use crate::{error::HubApiError, models::*};
 use shardline_index::hub::HubFileEntry;
 use shardline_protocol::TokenScope;
 

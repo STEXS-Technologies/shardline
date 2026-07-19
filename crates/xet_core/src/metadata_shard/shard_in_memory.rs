@@ -5,8 +5,7 @@ use std::sync::Arc;
 use super::file_structs::*;
 use super::shard_format::MDBShardInfo;
 use super::xorb_structs::*;
-use crate::error::Result;
-use crate::merklehash::MerkleHash;
+use crate::{error::Result, merklehash::MerkleHash};
 
 #[derive(Clone, Default, Debug)]
 pub struct MDBInMemoryShard {

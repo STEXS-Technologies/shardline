@@ -4,8 +4,7 @@ use axum::{
     extract::{Path, State},
 };
 
-use crate::error::HubApiError;
-use crate::models::TokenExchangeResponse;
+use crate::{error::HubApiError, models::TokenExchangeResponse};
 use shardline_protocol::TokenScope;
 
 use super::HubState;

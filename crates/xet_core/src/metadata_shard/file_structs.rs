@@ -6,8 +6,7 @@ use serde::Serialize;
 
 use super::shard_file::MDB_FILE_INFO_ENTRY_SIZE;
 use super::xorb_structs::{XorbChunkSequenceEntry, XorbChunkSequenceHeader};
-use crate::merklehash::MerkleHash;
-use crate::utils::serialization_utils::*;
+use crate::{merklehash::MerkleHash, utils::serialization_utils::*};
 
 pub const MDB_DEFAULT_FILE_FLAG: u32 = 0;
 pub const MDB_FILE_FLAG_WITH_VERIFICATION: u32 = 1 << 31;

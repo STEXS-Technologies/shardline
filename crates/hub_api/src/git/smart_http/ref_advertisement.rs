@@ -9,8 +9,7 @@ use serde::Deserialize;
 use std::fmt::Write;
 
 use super::super::pktline::{self, FLUSH};
-use crate::error::HubApiError;
-use crate::routes::HubState;
+use crate::{error::HubApiError, routes::HubState};
 
 /// Query parameters for `GET /info/refs`.
 #[derive(Debug, Deserialize)]

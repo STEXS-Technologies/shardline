@@ -10,10 +10,7 @@ use super::xorb_chunk_format::{
     deserialize_chunk, deserialize_chunk_header, serialize_chunk, write_chunk_header,
 };
 use super::{CompressionScheme, XorbChunkHeader};
-use crate::error::{CoreError, Validate};
-use crate::merklehash::compute_data_hash;
-use crate::merklehash::MerkleHash;
-use crate::utils::serialization_utils::*;
+use crate::{error::{CoreError, Validate}, merklehash::{compute_data_hash, MerkleHash}, utils::serialization_utils::*};
 
 pub type XorbObjectIdent = [u8; 7];
 pub(crate) const XORB_OBJECT_FORMAT_IDENT: XorbObjectIdent =

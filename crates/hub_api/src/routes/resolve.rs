@@ -4,8 +4,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 
-use crate::error::HubApiError;
-use crate::resolve;
+use crate::{error::HubApiError, resolve};
 use shardline_protocol::TokenScope;
 
 use super::{HubState, authorize};

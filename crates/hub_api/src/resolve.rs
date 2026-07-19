@@ -1,5 +1,4 @@
-use crate::error::HubApiError;
-use crate::routes::HubState;
+use crate::{error::HubApiError, routes::HubState};
 
 /// Maximum inline file size (1 MiB).
 const MAX_INLINE_SIZE: u64 = 1_048_576;

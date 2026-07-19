@@ -12,8 +12,7 @@ use super::super::pack::{
 };
 use super::super::pktline::{self, FLUSH};
 use super::ref_advertisement::{GitRef, authorize_read, collect_refs, resolve_repo_id};
-use crate::error::HubApiError;
-use crate::routes::HubState;
+use crate::{error::HubApiError, routes::HubState};
 use shardline_index::hub::HubFileEntry;
 
 // ---- Upload-pack: POST /{type}/{ns}/{repo}/git-upload-pack ----
