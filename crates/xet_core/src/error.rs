@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn from_io() {
-        let e: CoreError = std::io::Error::new(std::io::ErrorKind::Other, "test").into();
+        let e: CoreError = std::io::Error::other("test").into();
         assert!(matches!(e, CoreError::Io(_)));
     }
 
@@ -234,8 +234,7 @@ mod tests {
 
     #[test]
     fn validate_io_err() {
-        let r: std::result::Result<u32, CoreError> = Err(CoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        let r: std::result::Result<u32, CoreError> = Err(CoreError::Io(std::io::Error::other(
             "eek",
         )));
         assert!(r.ok_for_format_error().is_err());

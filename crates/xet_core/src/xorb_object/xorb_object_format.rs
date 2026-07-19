@@ -780,27 +780,30 @@ mod tests {
     use crate::xorb_object::xorb_chunk_format::serialize_chunk;
 
     fn make_v1_info(num_chunks: u64, hash_data: &[u8]) -> XorbObjectInfoV1 {
-        let mut info = XorbObjectInfoV1::default();
-        info.xorb_hash = compute_data_hash(hash_data);
-        info.num_chunks = num_chunks;
-        info.chunk_hashes = (0..num_chunks)
-            .map(|i| compute_data_hash(&[i as u8]))
-            .collect();
-        info.chunk_boundary_offsets = (0..num_chunks).map(|i| (i + 1) * 100).collect();
-        info.unpacked_chunk_offsets = (0..num_chunks).map(|i| (i + 1) * 50).collect();
+        let mut info = XorbObjectInfoV1 {
+            xorb_hash: compute_data_hash(hash_data),
+            num_chunks,
+            chunk_hashes: (0..num_chunks)
+                .map(|i| compute_data_hash(&[i as u8]))
+                .collect(),
+            chunk_boundary_offsets: (0..num_chunks).map(|i| (i + 1) * 100).collect(),
+            unpacked_chunk_offsets: (0..num_chunks).map(|i| (i + 1) * 50).collect(),
+            ..Default::default()
+        };
         info.fill_in_boundary_offsets();
         info
     }
 
     fn make_v0_info(num_chunks: u32, hash_data: &[u8]) -> XorbObjectInfoV0 {
-        let mut info = XorbObjectInfoV0::default();
-        info.xorb_hash = compute_data_hash(hash_data);
-        info.num_chunks = num_chunks;
-        info.chunk_boundary_offsets = (0..num_chunks).map(|i| (i + 1) * 100).collect();
-        info.chunk_hashes = (0..num_chunks)
-            .map(|i| compute_data_hash(&[i as u8]))
-            .collect();
-        info
+        XorbObjectInfoV0 {
+            xorb_hash: compute_data_hash(hash_data),
+            num_chunks,
+            chunk_boundary_offsets: (0..num_chunks).map(|i| (i + 1) * 100).collect(),
+            chunk_hashes: (0..num_chunks)
+                .map(|i| compute_data_hash(&[i as u8]))
+                .collect(),
+            ..Default::default()
+        }
     }
 
     // ======= XorbObjectInfoV0 =======
@@ -828,32 +831,31 @@ mod tests {
         assert_eq!(info2.chunk_boundary_offsets, info.chunk_boundary_offsets);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn v0_deserialize_invalid_ident() {
         let mut buf = vec![0u8; 100];
         buf[..7].copy_from_slice(b"INVALID");
-        #[allow(deprecated)]
         assert!(XorbObjectInfoV0::deserialize(&mut Cursor::new(buf)).is_err());
     }
 
+    #[allow(deprecated)]
     #[test]
     fn v0_deserialize_invalid_version() {
         let mut buf = vec![0u8; 100];
         buf[..7].copy_from_slice(b"XETBLOB");
         buf[7] = 99;
-        #[allow(deprecated)]
         assert!(XorbObjectInfoV0::deserialize(&mut Cursor::new(buf)).is_err());
     }
 
+    #[allow(deprecated)]
     #[test]
     fn v0_deserialize_v0_direct() {
         let info = make_v0_info(3, b"v0dir");
         let mut buf = Vec::new();
-        #[allow(deprecated)]
         info.serialize(&mut buf).unwrap();
         // Skip ident+version (8 bytes)
         let mut r = Cursor::new(&buf[8..]);
-        #[allow(deprecated)]
         let (info2, _) = XorbObjectInfoV0::deserialize_v0(&mut r).unwrap();
         assert_eq!(info2.num_chunks, 3);
         assert_eq!(info2.chunk_hashes.len(), 3);
@@ -1223,12 +1225,14 @@ mod tests {
     fn validate_xorb_object_missing_chunk_hash_errors() {
         // Build a corrupt xorb by manually constructing the buffer
         // where chunk_hashes has fewer entries than num_chunks
-        let mut info = XorbObjectInfoV1::default();
-        info.xorb_hash = compute_data_hash(b"test");
-        info.num_chunks = 2;
-        info.chunk_hashes = vec![compute_data_hash(b"c1")]; // only 1 hash but num_chunks=2
-        info.chunk_boundary_offsets = vec![50, 100];
-        info.unpacked_chunk_offsets = vec![25, 50];
+        let mut info = XorbObjectInfoV1 {
+            xorb_hash: compute_data_hash(b"test"),
+            num_chunks: 2,
+            chunk_hashes: vec![compute_data_hash(b"c1")], // only 1 hash but num_chunks=2
+            chunk_boundary_offsets: vec![50, 100],
+            unpacked_chunk_offsets: vec![25, 50],
+            ..Default::default()
+        };
         info.fill_in_boundary_offsets();
 
         // Serialization will fail due to mismatch

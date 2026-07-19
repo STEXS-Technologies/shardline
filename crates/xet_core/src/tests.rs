@@ -1668,10 +1668,12 @@ fn mdb_shard_file_footer_default() {
 
 #[test]
 fn mdb_shard_file_footer_serialize_roundtrip() {
-    let mut footer = MDBShardFileFooter::default();
-    footer.file_info_offset = 100;
-    footer.xorb_info_offset = 200;
-    footer.stored_bytes = 1024;
+    let footer = MDBShardFileFooter {
+        file_info_offset: 100,
+        xorb_info_offset: 200,
+        stored_bytes: 1024,
+        ..Default::default()
+    };
 
     let mut buf = Vec::new();
     footer.serialize(&mut buf).unwrap();
@@ -1964,7 +1966,7 @@ fn core_error_partial_eq_by_discriminant() {
 
 #[test]
 fn core_error_from_io_error() {
-    let io_err = std::io::Error::new(std::io::ErrorKind::Other, "oops");
+    let io_err = std::io::Error::other("oops");
     let err: CoreError = io_err.into();
     assert!(matches!(err, CoreError::Io(_)));
 }
@@ -2400,9 +2402,11 @@ proptest! {
         version in 0u64..100,
         footer_size in 0u64..10_000,
     ) {
-        let mut header = MDBShardFileHeader::default();
-        header.version = version;
-        header.footer_size = footer_size;
+        let header = MDBShardFileHeader {
+            version,
+            footer_size,
+            ..Default::default()
+        };
         let mut buf = Vec::new();
         header.serialize(&mut buf).unwrap();
         let deserialized = MDBShardFileHeader::deserialize(&mut Cursor::new(&buf)).unwrap();
@@ -2428,29 +2432,32 @@ proptest! {
         stored_bytes in 0u64..1_000_000_000u64,
         footer_offset in 0u64..1_000_000_000u64,
     ) {
-        let mut footer = MDBShardFileFooter::default();
-        footer.file_info_offset = file_info_offset;
-        footer.xorb_info_offset = xorb_info_offset;
-        footer.file_lookup_offset = file_lookup_offset;
-        footer.file_lookup_num_entry = file_lookup_num_entry;
-        footer.xorb_lookup_offset = xorb_lookup_offset;
-        footer.xorb_lookup_num_entry = xorb_lookup_num_entry;
-        footer.chunk_lookup_offset = chunk_lookup_offset;
-        footer.chunk_lookup_num_entry = chunk_lookup_num_entry;
-        footer.chunk_hash_hmac_key = HMACKey::from(chunk_hash_hmac_key);
-        footer.shard_creation_timestamp = shard_creation_timestamp;
-        footer.shard_key_expiry = shard_key_expiry;
-        footer._buffer = buffer;
-        footer.stored_bytes_on_disk = stored_bytes_on_disk;
-        footer.materialized_bytes = materialized_bytes;
-        footer.stored_bytes = stored_bytes;
-        footer.footer_offset = footer_offset;
+        let footer = MDBShardFileFooter {
+            file_info_offset,
+            xorb_info_offset,
+            file_lookup_offset,
+            file_lookup_num_entry,
+            xorb_lookup_offset,
+            xorb_lookup_num_entry,
+            chunk_lookup_offset,
+            chunk_lookup_num_entry,
+            chunk_hash_hmac_key: HMACKey::from(chunk_hash_hmac_key),
+            shard_creation_timestamp,
+            shard_key_expiry,
+            _buffer: buffer,
+            stored_bytes_on_disk,
+            materialized_bytes,
+            stored_bytes,
+            footer_offset,
+            ..Default::default()
+        };
         let mut buf = Vec::new();
         footer.serialize(&mut buf).unwrap();
         let deserialized = MDBShardFileFooter::deserialize(&mut Cursor::new(&buf)).unwrap();
         prop_assert_eq!(&footer, &deserialized);
     }
 
+    #[allow(deprecated, clippy::field_reassign_with_default)]
     #[test]
     fn xorb_object_info_v0_roundtrip(
         xorb_hash in prop::array::uniform4(0u64..u64::MAX),
@@ -4219,8 +4226,7 @@ fn hashed_write_multiple_writes() {
 
 #[test]
 fn validate_ok_for_format_error_io_passthrough() {
-    let result: Result<u32, CoreError> = Err(CoreError::Io(std::io::Error::new(
-        std::io::ErrorKind::Other,
+    let result: Result<u32, CoreError> = Err(CoreError::Io(std::io::Error::other(
         "io error",
     )));
     let err = result.ok_for_format_error().unwrap_err();
@@ -4374,7 +4380,7 @@ struct ErrorReader;
 
 impl std::io::Read for ErrorReader {
     fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "read error"))
+        Err(std::io::Error::other("read error"))
     }
 }
 

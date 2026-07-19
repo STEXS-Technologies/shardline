@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn entry_is_global_dedup_eligible_false() {
         let h = compute_data_hash(b"non_eligible");
-        if h[3].to_le() % 1024 != 0 {
+        if !h[3].to_le().is_multiple_of(1024) {
             let e = XorbChunkSequenceEntry::new(h, 100, 0);
             assert!(!e.is_global_dedup_eligible());
         }
