@@ -359,7 +359,17 @@ mod tests {
         parse_oci_registry_token_scopes, scope_allows_oci_exchange, single_bounded_query_value,
         verify_oci_registry_bootstrap_credentials,
     };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::num::NonZeroUsize;
+
+    use crate::app::ProtocolMetrics;
+    use crate::backend::ServerBackend;
+    use crate::reconstruction_cache::ReconstructionCacheService;
+    use crate::server_role::ServerRole;
+    use crate::AppState;
+    use crate::ServerConfig;
     use crate::ServerError;
+    use crate::TransferLimiter;
 
     fn signing_key() -> Vec<u8> {
         vec![b'k'; 32]
@@ -777,14 +787,10 @@ mod tests {
 
     // ── oci_registry_token handler tests ────────────────────────────────────
 
-    use crate::AppState;
-
     async fn build_state_with_auth() -> Arc<AppState> {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().to_path_buf();
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        let config = crate::config::ServerConfig::new(
+        let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             "http://127.0.0.1:8080".to_owned(),
             root,
@@ -792,23 +798,23 @@ mod tests {
         )
         .with_token_signing_key(signing_key())
         .expect("signing key set");
-        let backend = crate::backend::ServerBackend::from_config(&config)
+        let backend = ServerBackend::from_config(&config)
             .await
             .expect("backend");
         Arc::new(AppState {
             config,
-            role: crate::server_role::ServerRole::All,
+            role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            reconstruction_cache: ReconstructionCacheService::disabled(
             ),
-            transfer_limiter: crate::TransferLimiter::new(
+            transfer_limiter: TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            protocol_metrics: crate::app::ProtocolMetrics::default(),
+            protocol_metrics: ProtocolMetrics::default(),
         })
     }
 
@@ -932,9 +938,7 @@ mod tests {
         // Exhaust the semaphore to trigger the rate-limit error path (lines 40-46).
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().to_path_buf();
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        let config = crate::config::ServerConfig::new(
+        let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             "http://127.0.0.1:8080".to_owned(),
             root,
@@ -942,24 +946,24 @@ mod tests {
         )
         .with_token_signing_key(signing_key())
         .expect("signing key set");
-        let backend = crate::backend::ServerBackend::from_config(&config)
+        let backend = ServerBackend::from_config(&config)
             .await
             .expect("backend");
         // Create a semaphore with 0 permits so try_acquire_owned always fails
         let state = Arc::new(AppState {
             config,
-            role: crate::server_role::ServerRole::All,
+            role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            reconstruction_cache: ReconstructionCacheService::disabled(
             ),
-            transfer_limiter: crate::TransferLimiter::new(
+            transfer_limiter: TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(0)),
-            protocol_metrics: crate::app::ProtocolMetrics::default(),
+            protocol_metrics: ProtocolMetrics::default(),
         });
         let headers = HeaderMap::new();
         let uri: Uri = "/v2/token".parse().unwrap();
@@ -997,31 +1001,29 @@ mod tests {
         // We need a state with no signing key configured.
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().to_path_buf();
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-        let config = crate::config::ServerConfig::new(
+        let config = ServerConfig::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             "http://127.0.0.1:8080".to_owned(),
             root,
             NonZeroUsize::new(4096).unwrap(),
         );
-        let backend = crate::backend::ServerBackend::from_config(&config)
+        let backend = ServerBackend::from_config(&config)
             .await
             .expect("backend");
         let state = Arc::new(AppState {
             config,
-            role: crate::server_role::ServerRole::All,
+            role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
+            reconstruction_cache: ReconstructionCacheService::disabled(
             ),
-            transfer_limiter: crate::TransferLimiter::new(
+            transfer_limiter: TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            protocol_metrics: crate::app::ProtocolMetrics::default(),
+            protocol_metrics: ProtocolMetrics::default(),
         });
         let headers = HeaderMap::new();
         let uri: Uri = "/v2/token".parse().unwrap();
@@ -1088,7 +1090,7 @@ mod tests {
     fn parse_scope_non_repository_resource_type_errors() {
         assert!(matches!(
             parse_oci_registry_token_scope(Some("notrepository:team/assets:pull")),
-            Err(crate::ServerError::InvalidManifestReference)
+            Err(ServerError::InvalidManifestReference)
         ));
     }
 
@@ -1096,7 +1098,7 @@ mod tests {
     fn parse_scope_missing_actions_errors() {
         assert!(matches!(
             parse_oci_registry_token_scope(Some("repository:team/assets")),
-            Err(crate::ServerError::InvalidManifestReference)
+            Err(ServerError::InvalidManifestReference)
         ));
     }
 
@@ -1138,7 +1140,7 @@ mod tests {
     fn parse_actions_empty_errors() {
         assert!(matches!(
             parse_oci_registry_actions(""),
-            Err(crate::ServerError::InvalidManifestReference)
+            Err(ServerError::InvalidManifestReference)
         ));
     }
 
@@ -1146,7 +1148,7 @@ mod tests {
     fn parse_actions_invalid_errors() {
         assert!(matches!(
             parse_oci_registry_actions("invalid"),
-            Err(crate::ServerError::InvalidManifestReference)
+            Err(ServerError::InvalidManifestReference)
         ));
     }
 
@@ -1194,7 +1196,7 @@ mod tests {
         ];
         assert!(matches!(
             parse_oci_registry_token_scopes(&scopes),
-            Err(crate::ServerError::InvalidManifestReference)
+            Err(ServerError::InvalidManifestReference)
         ));
     }
 

@@ -228,6 +228,8 @@ mod tests {
     use super::super::PostgresBackend;
     use super::*;
     use crate::object_store::ServerObjectStore;
+    use crate::protocol_support::shared_sha256_object_key;
+    use crate::upload_ingest::RequestBodyReader;
 
     const TEST_PG_URL: &str = "postgres://localhost:5432/test";
 
@@ -321,7 +323,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"sha256 addressed content".to_vec();
         let digest_hex = hex::encode(sha2::Sha256::digest(&data));
-        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = shared_sha256_object_key(&digest_hex).unwrap();
         let user_key = make_object_key("user-named-blob");
 
         // Store with canonical key — first insert
@@ -350,7 +352,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"file content for sha256 addressing";
         let digest_hex = hex::encode(sha2::Sha256::digest(data));
-        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = shared_sha256_object_key(&digest_hex).unwrap();
         let integrity = ObjectIntegrity::new(
             shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
             data.len() as u64,
@@ -376,7 +378,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"file content for sha256 addressing";
         let digest_hex = hex::encode(sha2::Sha256::digest(data));
-        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = shared_sha256_object_key(&digest_hex).unwrap();
         let integrity = ObjectIntegrity::new(
             shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
             data.len() as u64,
@@ -482,7 +484,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"content for user-key test";
         let digest_hex = hex::encode(sha2::Sha256::digest(data));
-        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = shared_sha256_object_key(&digest_hex).unwrap();
         // Use a user key that differs from the canonical key.
         let user_key = make_object_key("user-named-file-key");
         let integrity = ObjectIntegrity::new(
@@ -607,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn upload_file_stream_rejects_invalid_file_id() {
         let (backend, _root) = make_backend().await;
-        let body = crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from(
+        let body = RequestBodyReader::from_bytes(axum::body::Bytes::from(
             b"content".to_vec(),
         ));
         let result = backend
@@ -619,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn upload_file_stream_rejects_empty_file_id() {
         let (backend, _root) = make_backend().await;
-        let body = crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from(
+        let body = RequestBodyReader::from_bytes(axum::body::Bytes::from(
             b"content".to_vec(),
         ));
         let result = backend.upload_file_stream("", body, None, None).await;
@@ -631,7 +633,7 @@ mod tests {
     #[tokio::test]
     async fn upload_shard_stream_rejects_empty_body() {
         let (backend, _root) = make_backend().await;
-        let body = crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::new());
+        let body = RequestBodyReader::from_bytes(axum::body::Bytes::new());
         let limits = crate::ShardMetadataLimits::new(
             std::num::NonZeroUsize::new(100).unwrap(),
             std::num::NonZeroUsize::new(100).unwrap(),
@@ -650,7 +652,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"canonical equals user key".to_vec();
         let digest_hex = hex::encode(sha2::Sha256::digest(&data));
-        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = shared_sha256_object_key(&digest_hex).unwrap();
 
         // Passing the same key as both canonical and user → the early return
         // on line 106 ('if canonical_key == *object_key') is exercised.
@@ -667,7 +669,7 @@ mod tests {
         let (backend, _root) = make_backend().await;
         let data = b"file canonical equals user key";
         let digest_hex = hex::encode(sha2::Sha256::digest(data));
-        let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
+        let canonical_key = shared_sha256_object_key(&digest_hex).unwrap();
         let integrity = ObjectIntegrity::new(
             shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
             data.len() as u64,
