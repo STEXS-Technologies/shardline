@@ -11,7 +11,7 @@
 )]
 
 use sha2::{Digest, Sha256};
-use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope};
 use shardline_server::{ObjectStorageAdapter, ServerConfig, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_storage::S3ObjectStoreConfig;
@@ -59,7 +59,11 @@ fn s3_config(key_prefix: &str) -> S3ObjectStoreConfig {
 
     S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
-        .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
         .with_key_prefix(raw.key_prefix.as_deref())
         .with_allow_http(raw.allow_http)
 }

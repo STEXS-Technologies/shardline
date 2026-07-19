@@ -1,3 +1,4 @@
+use shardline_protocol::SecretString;
 use std::sync::Arc;
 
 pub use super::hub_local_sqlite::ensure_hub_tables;
@@ -126,7 +127,7 @@ pub struct HubWebhook {
     pub repo_id: String,
     pub url: String,
     pub events: Vec<String>,
-    pub secret: Option<String>,
+    pub secret: Option<SecretString>,
     pub active: bool,
     pub created_at_unix_seconds: u64,
 }
@@ -1472,7 +1473,7 @@ mod tests {
                 repo_id: repo_id.to_owned(),
                 url: url.to_owned(),
                 events: events.to_vec(),
-                secret: secret.map(ToOwned::to_owned),
+                secret: secret.map(SecretString::from_secret),
                 active: true,
                 created_at_unix_seconds: 300,
             };
@@ -1988,11 +1989,11 @@ mod tests {
             repo_id: "repo".to_owned(),
             url: "https://hook.example.com".to_owned(),
             events: vec!["push".to_owned()],
-            secret: Some("s3kr3t".to_owned()),
+            secret: Some(SecretString::from_secret("s3kr3t")),
             active: true,
             created_at_unix_seconds: 500,
         };
-        assert_eq!(wh.secret.as_deref(), Some("s3kr3t"));
+        assert_eq!(wh.secret.as_ref().map(SecretString::expose_secret), Some("s3kr3t"));
         assert!(wh.active);
     }
 }

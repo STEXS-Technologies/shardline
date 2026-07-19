@@ -18,7 +18,7 @@ use std::{
 use thiserror::Error;
 
 #[cfg(any(target_os = "linux", test))]
-use shardline_storage::local_path::resolve_platform_symlinks;
+use shardline_storage::resolve_platform_symlinks;
 
 #[cfg(not(target_os = "linux"))]
 use crate::local_output::remove_output_file_if_present;

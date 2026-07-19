@@ -138,6 +138,32 @@ pub(crate) fn write_gitea_provider_config(root: &Path) -> Result<PathBuf, Box<dy
     Ok(path)
 }
 
+pub(crate) fn write_codeberg_provider_config(root: &Path) -> Result<PathBuf, Box<dyn StdError>> {
+    let path = root.join("providers-codeberg.json");
+    let bytes = to_vec(&json!({
+        "providers": [
+            {
+                "kind": "codeberg",
+                "integration_subject": "codeberg-app",
+                "webhook_secret": "secret",
+                "repositories": [
+                    {
+                        "owner": "team",
+                        "name": "assets",
+                        "visibility": "private",
+                        "default_revision": "main",
+                        "clone_url": "https://codeberg.example/team/assets.git",
+                        "read_subjects": ["codeberg-user-1"],
+                        "write_subjects": ["codeberg-user-1"]
+                    }
+                ]
+            }
+        ]
+    }))?;
+    write_file(&path, bytes)?;
+    Ok(path)
+}
+
 pub(crate) fn write_generic_provider_config(root: &Path) -> Result<PathBuf, Box<dyn StdError>> {
     let path = root.join("providers-generic.json");
     let bytes = to_vec(&json!({
@@ -276,6 +302,16 @@ pub(crate) fn github_webhook_signature(body: &[u8]) -> Option<String> {
         "sha256={}",
         hex::encode(mac.finalize().into_bytes())
     ))
+}
+
+pub(crate) fn codeberg_webhook_signature(body: &[u8]) -> Option<String> {
+    let mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret");
+    assert!(mac.is_ok());
+    let Ok(mut mac) = mac else {
+        return None;
+    };
+    mac.update(body);
+    Some(hex::encode(mac.finalize().into_bytes()))
 }
 
 pub(crate) fn gitea_webhook_signature(body: &[u8]) -> Option<String> {

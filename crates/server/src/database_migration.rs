@@ -1,4 +1,5 @@
 use sqlx::{Error as SqlxError, PgPool, Row, postgres::PgPoolOptions, query, raw_sql};
+use shardline_protocol::SecretString;
 use thiserror::Error;
 
 /// One Shardline schema migration.
@@ -34,7 +35,7 @@ pub enum DatabaseMigrationCommand {
 /// Database-migration runtime options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseMigrationOptions {
-    database_url: String,
+    database_url: SecretString,
     command: DatabaseMigrationCommand,
 }
 
@@ -43,7 +44,7 @@ impl DatabaseMigrationOptions {
     #[must_use]
     pub const fn new(database_url: String, command: DatabaseMigrationCommand) -> Self {
         Self {
-            database_url,
+            database_url: SecretString::new(database_url),
             command,
         }
     }
@@ -51,7 +52,7 @@ impl DatabaseMigrationOptions {
     /// Returns the Postgres connection URL.
     #[must_use]
     pub fn database_url(&self) -> &str {
-        &self.database_url
+        self.database_url.expose_secret()
     }
 
     /// Returns the selected command.

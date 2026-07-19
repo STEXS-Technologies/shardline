@@ -277,12 +277,13 @@ fn repo_response_from_hub_space() {
 #[test]
 fn webhook_response_from_hub_basic() {
     use shardline_index::hub::HubWebhook;
+    use shardline_protocol::SecretString;
     let hook = HubWebhook {
         id: "wh_123".to_owned(),
         repo_id: "org/repo".to_owned(),
         url: "https://example.com/hook".to_owned(),
         events: vec!["push".to_owned()],
-        secret: Some("s3cret".to_owned()),
+        secret: Some(SecretString::from_secret("s3cret")),
         active: true,
         created_at_unix_seconds: 42,
     };

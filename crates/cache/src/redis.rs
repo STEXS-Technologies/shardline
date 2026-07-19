@@ -1,6 +1,7 @@
 use std::{fmt, num::NonZeroU64};
 
 use redis::AsyncCommands;
+use shardline_protocol::SecretBytes;
 
 use crate::{
     AsyncReconstructionCache, ReconstructionCacheError, ReconstructionCacheFuture,
@@ -15,15 +16,15 @@ const RECONSTRUCTION_CACHE_PREFIX: &str = "shardline:reconstruction:v1";
 /// a client certificate and key together when the Redis server requires mTLS.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RedisTlsConfig {
-    root_cert: Option<Vec<u8>>,
-    client_cert: Option<Vec<u8>>,
-    client_key: Option<Vec<u8>>,
+    root_cert: Option<SecretBytes>,
+    client_cert: Option<SecretBytes>,
+    client_key: Option<SecretBytes>,
 }
 
 impl RedisTlsConfig {
     /// Creates TLS configuration with an optional PEM-encoded root certificate.
     #[must_use]
-    pub const fn new(root_cert: Option<Vec<u8>>) -> Self {
+    pub fn new(root_cert: Option<SecretBytes>) -> Self {
         Self {
             root_cert,
             client_cert: None,
@@ -33,7 +34,7 @@ impl RedisTlsConfig {
 
     /// Adds a PEM-encoded client certificate and private key for mTLS.
     #[must_use]
-    pub fn with_client_identity(mut self, client_cert: Vec<u8>, client_key: Vec<u8>) -> Self {
+    pub fn with_client_identity(mut self, client_cert: SecretBytes, client_key: SecretBytes) -> Self {
         self.client_cert = Some(client_cert);
         self.client_key = Some(client_key);
         self
@@ -49,8 +50,8 @@ impl RedisTlsConfig {
         let client_tls = match (self.client_cert, self.client_key) {
             (None, None) => None,
             (Some(client_cert), Some(client_key)) => Some(redis::ClientTlsConfig {
-                client_cert,
-                client_key,
+                client_cert: client_cert.expose_secret().to_vec(),
+                client_key: client_key.expose_secret().to_vec(),
             }),
             (Some(_), None) | (None, Some(_)) => {
                 return Err(ReconstructionCacheError::IncompleteRedisTlsClientIdentity);
@@ -59,7 +60,7 @@ impl RedisTlsConfig {
 
         Ok(redis::TlsCertificates {
             client_tls,
-            root_cert: self.root_cert,
+            root_cert: self.root_cert.map(|c| c.expose_secret().to_vec()),
         })
     }
 }
@@ -68,9 +69,9 @@ impl fmt::Debug for RedisTlsConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RedisTlsConfig")
-            .field("root_cert", &self.root_cert.as_ref().map(|_cert| "***"))
-            .field("client_cert", &self.client_cert.as_ref().map(|_cert| "***"))
-            .field("client_key", &self.client_key.as_ref().map(|_key| "***"))
+            .field("root_cert", &self.root_cert)
+            .field("client_cert", &self.client_cert)
+            .field("client_key", &self.client_key)
             .finish()
     }
 }
@@ -249,7 +250,7 @@ mod tests {
 
     use super::{RECONSTRUCTION_CACHE_PREFIX, RedisReconstructionCache, RedisTlsConfig};
     use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
-    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretBytes};
 
     #[test]
     fn redis_cache_debug_redacts_connection_url() {
@@ -281,8 +282,11 @@ mod tests {
 
     #[test]
     fn redis_tls_config_debug_redacts_certificate_material() {
-        let tls = RedisTlsConfig::new(Some(b"root-secret".to_vec()))
-            .with_client_identity(b"client-secret".to_vec(), b"key-secret".to_vec());
+        let tls = RedisTlsConfig::new(Some(SecretBytes::from_slice(b"root-secret")))
+            .with_client_identity(
+                SecretBytes::from_slice(b"client-secret"),
+                SecretBytes::from_slice(b"key-secret"),
+            );
 
         let rendered = format!("{tls:?}");
 
@@ -296,7 +300,7 @@ mod tests {
     fn redis_tls_client_identity_must_include_certificate_and_key() {
         let tls = RedisTlsConfig {
             root_cert: None,
-            client_cert: Some(b"certificate".to_vec()),
+            client_cert: Some(SecretBytes::from_slice(b"certificate")),
             client_key: None,
         };
         let result =

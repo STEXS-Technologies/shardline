@@ -44,18 +44,17 @@ impl S3ObjectStoreConfig {
 
     /// Adds static access-key credentials.
     ///
-    /// Note: the `String` values passed in are not zeroized; callers should
-    /// independently clear their source buffers if they contain secret data.
+    /// The credentials are stored in zeroizing [`SecretString`] wrappers.
     #[must_use]
     pub fn with_credentials(
         mut self,
-        access_key_id: Option<String>,
-        secret_access_key: Option<String>,
-        session_token: Option<String>,
+        access_key_id: Option<SecretString>,
+        secret_access_key: Option<SecretString>,
+        session_token: Option<SecretString>,
     ) -> Self {
-        self.access_key_id = access_key_id.map(SecretString::new);
-        self.secret_access_key = secret_access_key.map(SecretString::new);
-        self.session_token = session_token.map(SecretString::new);
+        self.access_key_id = access_key_id;
+        self.secret_access_key = secret_access_key;
+        self.session_token = session_token;
         self
     }
 

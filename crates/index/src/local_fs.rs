@@ -9,7 +9,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use shardline_storage::anchored_fs::{
+use shardline_storage::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared,
     open_anchored_target as open_anchored_target_shared, open_new_file as open_new_file_shared,

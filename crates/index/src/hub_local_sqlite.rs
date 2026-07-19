@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rusqlite::{Connection, params};
-use shardline_protocol::unix_now_seconds_lossy;
+use shardline_protocol::{unix_now_seconds_lossy, SecretString};
 
 use crate::{
     hub::{
@@ -568,7 +568,7 @@ impl HubStore for LocalIndexStore {
             repo_id: repo_id.to_owned(),
             url: url.to_owned(),
             events: events.to_vec(),
-            secret: secret.map(ToOwned::to_owned),
+            secret: secret.map(SecretString::from_secret),
             active: true,
             created_at_unix_seconds: now,
         })
@@ -588,7 +588,7 @@ impl HubStore for LocalIndexStore {
                 repo_id: row.get(1)?,
                 url: row.get(2)?,
                 events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                secret: row.get(4)?,
+                secret: row.get::<_, Option<String>>(4)?.map(SecretString::new),
                 active: active != 0,
                 created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?)
                     .map_err(|e| sqlite_store_error(&e))?,
@@ -629,7 +629,7 @@ impl HubStore for LocalIndexStore {
                 repo_id: row.get(1)?,
                 url: row.get(2)?,
                 events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                secret: row.get(4)?,
+                secret: row.get::<_, Option<String>>(4)?.map(SecretString::new),
                 active: active != 0,
                 created_at_unix_seconds: i64_to_u64(row.get::<_, i64>(6)?)
                     .map_err(|e| sqlite_store_error(&e))?,
@@ -1684,7 +1684,10 @@ mod tests {
         assert_eq!(wh.repo_id, "org/model");
         assert_eq!(wh.url, "https://example.com/hook");
         assert_eq!(wh.events, vec!["push", "tag"]);
-        assert_eq!(wh.secret.as_deref(), Some("s3cret"));
+        assert_eq!(
+            wh.secret.as_ref().map(SecretString::expose_secret),
+            Some("s3cret")
+        );
         assert!(wh.active);
 
         // List webhooks — one entry
@@ -1781,7 +1784,10 @@ mod tests {
         assert_eq!(wh.repo_id, "org/model");
         assert_eq!(wh.url, "https://example.com/hook");
         assert_eq!(wh.events, vec!["push"]);
-        assert_eq!(wh.secret.as_deref(), Some("secret123"));
+        assert_eq!(
+            wh.secret.as_ref().map(SecretString::expose_secret),
+            Some("secret123")
+        );
         assert!(wh.active);
         assert!(!wh.id.is_empty());
     }

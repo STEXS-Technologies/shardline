@@ -9,7 +9,7 @@ use std::{
 };
 
 use shardline_cache::RedisTlsConfig;
-use shardline_protocol::{parse_bool, SecretBytes};
+use shardline_protocol::{parse_bool, SecretBytes, SecretString};
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::{
@@ -41,7 +41,7 @@ pub(super) fn load_redis_tls_config_from_env() -> Result<Option<RedisTlsConfig>,
 
 fn optional_redis_tls_material_file(
     env_name: &'static str,
-) -> Result<Option<Vec<u8>>, ServerConfigError> {
+) -> Result<Option<SecretBytes>, ServerConfigError> {
     let Ok(path) = var(env_name) else {
         return Ok(None);
     };
@@ -64,7 +64,7 @@ fn optional_redis_tls_material_file(
             maximum_bytes: MAX_REDIS_TLS_MATERIAL_BYTES,
         },
     )?;
-    Ok(Some(bytes.expose_secret().to_vec()))
+    Ok(Some(bytes))
 }
 
 pub(super) fn configure_provider_runtime_from_paths(
@@ -143,7 +143,7 @@ pub(super) fn load_s3_object_store_config_from_env()
 fn optional_s3_secret_env_or_file(
     env_name: &'static str,
     file_env_name: &'static str,
-) -> Result<Option<String>, ServerConfigError> {
+) -> Result<Option<SecretString>, ServerConfigError> {
     optional_s3_secret_from_sources(
         env_name,
         var(env_name).ok(),
@@ -157,13 +157,13 @@ pub(super) fn optional_s3_secret_from_sources(
     direct: Option<String>,
     file_env_name: &'static str,
     file: Option<String>,
-) -> Result<Option<String>, ServerConfigError> {
+) -> Result<Option<SecretString>, ServerConfigError> {
     match (direct, file) {
         (Some(_direct), Some(_file)) => Err(ServerConfigError::S3CredentialSourceConflict {
             env: env_name,
             file_env: file_env_name,
         }),
-        (Some(value), None) => Ok(Some(value)),
+        (Some(value), None) => Ok(Some(SecretString::new(value))),
         (None, Some(path)) => {
             let bytes = read_secret_file_bytes(
                 Path::new(&path),
@@ -183,11 +183,12 @@ pub(super) fn optional_s3_secret_from_sources(
                     observed_bytes,
                 },
             )?;
-            String::from_utf8(bytes.expose_secret().to_vec()).map(Some).map_err(|_error| {
+            let s = std::str::from_utf8(bytes.expose_secret()).map_err(|_error| {
                 ServerConfigError::S3CredentialUtf8 {
                     name: file_env_name,
                 }
-            })
+            })?;
+            Ok(Some(SecretString::from_secret(s)))
         }
         (None, None) => Ok(None),
     }
@@ -208,7 +209,7 @@ pub(super) fn configure_s3_object_store_config<LoadCredentials>(
 ) -> Result<S3ObjectStoreConfig, ServerConfigError>
 where
     LoadCredentials:
-        FnOnce() -> Result<(Option<String>, Option<String>, Option<String>), ServerConfigError>,
+        FnOnce() -> Result<(Option<SecretString>, Option<SecretString>, Option<SecretString>), ServerConfigError>,
 {
     let bucket = bucket?;
     let PendingS3ObjectStoreConfig {
@@ -323,7 +324,7 @@ mod tests {
         ensure_secret_size_within_limit, load_redis_tls_config_from_env, open_secret_file,
         read_secret_file_bytes,
     };
-    use shardline_protocol::parse_bool;
+    use shardline_protocol::{parse_bool, SecretString};
     use std::io::Write;
     use std::path::Path;
 
@@ -600,6 +601,7 @@ mod tests {
     #[test]
     fn optional_s3_secret_from_direct_value() {
         use super::optional_s3_secret_from_sources;
+        use shardline_protocol::SecretString;
         let result = optional_s3_secret_from_sources(
             "TEST_ENV",
             Some("direct-value".to_owned()),
@@ -607,7 +609,10 @@ mod tests {
             None,
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some("direct-value".to_owned()));
+        assert_eq!(
+            result.unwrap().as_ref().map(SecretString::expose_secret),
+            Some("direct-value")
+        );
     }
 
     #[test]
@@ -671,9 +676,9 @@ mod tests {
 
         let result = configure_s3_object_store_config(bucket, inputs, || {
             Ok((
-                Some("AKID".to_owned()),
-                Some("secret".to_owned()),
-                Some("token".to_owned()),
+                Some(SecretString::from_secret("AKID")),
+                Some(SecretString::from_secret("secret")),
+                Some(SecretString::from_secret("token")),
             ))
         });
         assert!(result.is_ok());
@@ -872,7 +877,10 @@ mod tests {
             Some(tmp.path().display().to_string()),
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some("file-secret-value".to_owned()));
+        assert_eq!(
+            result.unwrap().as_ref().map(SecretString::expose_secret),
+            Some("file-secret-value")
+        );
     }
 
     #[test]
@@ -1123,7 +1131,10 @@ mod tests {
             "SHARDLINE_TEST_S3_SECRET_DIRECT_FILE",
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some("my-secret".to_owned()));
+        assert_eq!(
+            result.unwrap().as_ref().map(SecretString::expose_secret),
+            Some("my-secret")
+        );
         // SAFETY: cleanup
         remove_env_var("SHARDLINE_TEST_S3_SECRET_DIRECT");
     }

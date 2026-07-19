@@ -12,6 +12,7 @@ use std::{
     },
 };
 
+use shardline_protocol::SecretString;
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::{
@@ -686,7 +687,11 @@ fn s3_config_rejects_missing_bucket_before_loading_credentials() {
         },
         move || {
             credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-            Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+            Ok((
+                Some(SecretString::from_secret("access")),
+                Some(SecretString::from_secret("secret")),
+                None,
+            ))
         },
     );
 
@@ -713,7 +718,11 @@ fn s3_config_rejects_invalid_allow_http_before_loading_credentials() {
         },
         move || {
             credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-            Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+            Ok((
+                Some(SecretString::from_secret("access")),
+                Some(SecretString::from_secret("secret")),
+                None,
+            ))
         },
     );
 
@@ -742,7 +751,11 @@ fn s3_config_rejects_invalid_virtual_hosted_style_before_loading_credentials() {
         },
         move || {
             credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-            Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+            Ok((
+                Some(SecretString::from_secret("access")),
+                Some(SecretString::from_secret("secret")),
+                None,
+            ))
         },
     );
 
@@ -1319,7 +1332,10 @@ fn optional_s3_secret_returns_direct_value() {
     );
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Some("direct-value".to_owned()));
+    assert_eq!(
+        result.unwrap().as_ref().map(SecretString::expose_secret),
+        Some("direct-value")
+    );
 }
 
 #[test]
@@ -1340,7 +1356,10 @@ fn optional_s3_secret_returns_file_value() {
     );
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Some("file-secret-value".to_owned()));
+    assert_eq!(
+        result.unwrap().as_ref().map(SecretString::expose_secret),
+        Some("file-secret-value")
+    );
 }
 
 #[test]

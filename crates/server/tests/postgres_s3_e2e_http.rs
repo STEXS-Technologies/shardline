@@ -10,7 +10,7 @@
 )]
 
 use sha2::{Digest, Sha256};
-use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope};
 use shardline_server::{ObjectStorageAdapter, ServerConfig, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_storage::S3ObjectStoreConfig;
@@ -78,7 +78,11 @@ fn s3_config(key_prefix: &str) -> S3ObjectStoreConfig {
 
     S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
-        .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
         .with_key_prefix(raw.key_prefix.as_deref())
         .with_allow_http(raw.allow_http)
 }
@@ -199,20 +203,36 @@ impl TestServerBuilder {
         let tmp = TempDir::new().unwrap();
         let config_path = tmp.path().join("providers.json");
         let provider_config = serde_json::json!({
-            "providers": [{
-                "kind": "generic",
-                "integration_subject": "test-app",
-                "webhook_secret": "test-secret",
-                "repositories": [{
-                    "owner": "test",
-                    "name": "test",
-                    "visibility": "private",
-                    "default_revision": "main",
-                    "clone_url": "https://example.com/test/test.git",
-                    "read_subjects": ["test-user"],
-                    "write_subjects": ["test-user"]
-                }]
-            }]
+            "providers": [
+                {
+                    "kind": "generic",
+                    "integration_subject": "test-app",
+                    "webhook_secret": "test-secret",
+                    "repositories": [{
+                        "owner": "test",
+                        "name": "test",
+                        "visibility": "private",
+                        "default_revision": "main",
+                        "clone_url": "https://example.com/test/test.git",
+                        "read_subjects": ["test-user"],
+                        "write_subjects": ["test-user"]
+                    }]
+                },
+                {
+                    "kind": "codeberg",
+                    "integration_subject": "codeberg-app",
+                    "webhook_secret": "codeberg-secret",
+                    "repositories": [{
+                        "owner": "codeberg-team",
+                        "name": "codeberg-repo",
+                        "visibility": "private",
+                        "default_revision": "main",
+                        "clone_url": "https://codeberg.example/codeberg-team/codeberg-repo.git",
+                        "read_subjects": ["codeberg-user"],
+                        "write_subjects": ["codeberg-user"]
+                    }]
+                }
+            ]
         });
         std::fs::write(&config_path, serde_json::to_vec(&provider_config).unwrap()).unwrap();
         self.provider_config = Some((tmp, config_path));
@@ -1384,6 +1404,38 @@ async fn test_pgs3_provider_xet_write_token() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert!(!json["accessToken"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pgs3_codeberg_webhook_push() {
+    let mut builder =
+        TestServerBuilder::new(&[ServerFrontend::Xet, ServerFrontend::Oci]).with_provider();
+    let server = builder.start().await;
+    let client = reqwest::Client::new();
+
+    // Compute HMAC-SHA256 signature for codeberg webhook
+    let body = br#"{"ref":"refs/heads/main","repository":{"full_name":"codeberg-team/codeberg-repo"}}"#;
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"codeberg-secret").unwrap();
+    mac.update(&body[..]);
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    let resp = client
+        .post(server.url("/v1/providers/codeberg/webhooks"))
+        .header("x-codeberg-event", "push")
+        .header("x-codeberg-delivery", "delivery-pgs3-1")
+        .header("x-codeberg-signature", &signature)
+        .body(body.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["provider"], "codeberg");
+    assert_eq!(json["event_kind"], "revision_pushed");
+    assert_eq!(json["owner"], "codeberg-team");
+    assert_eq!(json["repo"], "codeberg-repo");
+    assert_eq!(json["delivery_id"], "delivery-pgs3-1");
 }
 
 // ===========================================================================

@@ -13,7 +13,7 @@ const LOCAL_DIRECTORY_MODE: u32 = 0o700;
 const LOCAL_FILE_MODE: u32 = 0o600;
 
 #[cfg(unix)]
-use shardline_storage::anchored_fs::{
+use shardline_storage::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared, fd_child_path,
     open_directory_chain as open_directory_chain_shared, open_new_file as open_new_file_shared,

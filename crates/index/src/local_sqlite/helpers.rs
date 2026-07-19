@@ -22,7 +22,7 @@ use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
     ensure_directory_path_components_are_not_symlinked as ensure_directory_path_components_are_not_symlinked_shared,
-    local_path::resolve_platform_symlinks,
+    resolve_platform_symlinks,
 };
 
 use super::{
