@@ -288,14 +288,14 @@ pub trait HubStore: Send + Sync {
         url: &str,
         events: &[String],
         secret: Option<&str>,
-    ) -> Result<crate::hub::HubWebhook, Self::Error>;
+    ) -> Result<HubWebhook, Self::Error>;
 
     /// Lists all webhooks for a repository.
     ///
     /// # Errors
     ///
     /// Returns an error when the storage backend operation fails.
-    fn list_webhooks(&self, repo_id: &str) -> Result<Vec<crate::hub::HubWebhook>, Self::Error>;
+    fn list_webhooks(&self, repo_id: &str) -> Result<Vec<HubWebhook>, Self::Error>;
 
     /// Deletes a repository and all associated data (revisions, file entries, webhooks).
     ///
@@ -320,7 +320,7 @@ pub trait HubStore: Send + Sync {
         &self,
         repo_id: &str,
         event: &str,
-    ) -> Result<Vec<crate::hub::HubWebhook>, Self::Error>;
+    ) -> Result<Vec<HubWebhook>, Self::Error>;
 }
 
 /// A type-erased wrapper that boxes errors for use as `dyn HubStore`.
@@ -596,7 +596,7 @@ impl<T: HubStore> ErasedHubStore for T {
         &self,
         repo_id: &str,
         event: &str,
-    ) -> Result<Vec<crate::hub::HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<HubWebhook>, Box<dyn std::error::Error + Send + Sync>> {
         T::webhooks_for_event(self, repo_id, event)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
