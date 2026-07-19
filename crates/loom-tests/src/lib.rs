@@ -8,6 +8,8 @@
 
 #![cfg(loom)]
 
+mod object_store;
+
 use loom::sync::{Arc, Condvar, Mutex, RwLock};
 use loom::thread;
 use std::sync::atomic::AtomicUsize;
