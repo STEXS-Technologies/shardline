@@ -1120,12 +1120,12 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_unchanged_mapping() {
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1133,9 +1133,9 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_unchanged_mapping() {
         .unwrap();
     shard
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
@@ -1209,12 +1209,12 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1222,9 +1222,9 @@ async fn rebuild_dedupe_shard_mappings_with_valid_shard_rebuilds_changed_mapping
         .unwrap();
     shard
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
@@ -1319,12 +1319,12 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_keeps_smaller_
     let mut shard1 = MDBInMemoryShard::default();
     shard1
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1332,9 +1332,9 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_keeps_smaller_
         .unwrap();
     shard1
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
@@ -1347,12 +1347,12 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_keeps_smaller_
     let mut shard2 = MDBInMemoryShard::default();
     shard2
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1360,9 +1360,9 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_keeps_smaller_
         .unwrap();
     shard2
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
@@ -1453,12 +1453,12 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_
     let mut shard_big = MDBInMemoryShard::default();
     shard_big
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1466,9 +1466,9 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_
         .unwrap();
     shard_big
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
@@ -1480,12 +1480,12 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_
     let mut shard_small = MDBInMemoryShard::default();
     shard_small
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1493,9 +1493,9 @@ async fn rebuild_dedupe_shard_mappings_two_shards_same_chunk_hash_replaces_with_
         .unwrap();
     shard_small
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
@@ -1604,12 +1604,12 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
     // File record #1
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data1.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data1.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1619,12 +1619,12 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
     // File record #2
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val2, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_hash,
-                chunk_data2.len() as u32,
-                1_u32,
-                1_u32,
+                chunk_data2.len() as u64,
+                1_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1641,13 +1641,13 @@ async fn rebuild_dedupe_shard_mappings_too_many_shard_terms_propagates_error() {
         .add_xorb_block(MDBXorbInfo {
             metadata: XorbChunkSequenceHeader::new(
                 xorb_hash,
-                2_u32,
-                (chunk_data1.len() + chunk_data2.len()) as u32,
+                2_u64,
+                (chunk_data1.len() + chunk_data2.len()) as u64,
             ),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash1, chunk_data1.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash1, chunk_data1.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
-                XorbChunkSequenceEntry::new(chunk_hash2, chunk_data2.len() as u32, 1_u32)
+                XorbChunkSequenceEntry::new(chunk_hash2, chunk_data2.len() as u64, 1_u64)
                     .with_global_dedup_flag(true),
             ],
         })

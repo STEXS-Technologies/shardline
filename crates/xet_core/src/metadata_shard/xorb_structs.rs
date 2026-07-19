@@ -14,16 +14,16 @@ pub const MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG: u32 = 1 << 31;
 pub struct XorbChunkSequenceHeader {
     pub xorb_hash: MerkleHash,
     pub xorb_flags: u32,
-    pub num_entries: u32,
-    pub num_bytes_in_xorb: u32,
-    pub num_bytes_on_disk: u32,
+    pub num_entries: u64,
+    pub num_bytes_in_xorb: u64,
+    pub num_bytes_on_disk: u64,
 }
 
 impl XorbChunkSequenceHeader {
     pub fn new(
         xorb_hash: MerkleHash,
-        num_entries: u32,
-        num_bytes_in_xorb: u32,
+        num_entries: u64,
+        num_bytes_in_xorb: u64,
     ) -> Self {
         Self {
             xorb_hash,
@@ -52,15 +52,15 @@ impl XorbChunkSequenceHeader {
             let writer = &mut writer_cur;
             write_hash(writer, &self.xorb_hash)?;
             write_u32(writer, self.xorb_flags)?;
-            write_u32(writer, self.num_entries)?;
-            write_u32(writer, self.num_bytes_in_xorb)?;
-            write_u32(writer, self.num_bytes_on_disk)?;
+            write_u64(writer, self.num_entries)?;
+            write_u64(writer, self.num_bytes_in_xorb)?;
+            write_u64(writer, self.num_bytes_on_disk)?;
         }
         writer.write_all(&buf[..])?;
         Ok(size_of::<Self>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
         let mut v = [0u8; size_of::<Self>()];
         reader.read_exact(&mut v[..])?;
         let mut reader_curs = Cursor::new(&v);
@@ -68,9 +68,9 @@ impl XorbChunkSequenceHeader {
         Ok(Self {
             xorb_hash: read_hash(reader)?,
             xorb_flags: read_u32(reader)?,
-            num_entries: read_u32(reader)?,
-            num_bytes_in_xorb: read_u32(reader)?,
-            num_bytes_on_disk: read_u32(reader)?,
+            num_entries: read_u64(reader)?,
+            num_bytes_in_xorb: read_u64(reader)?,
+            num_bytes_on_disk: read_u64(reader)?,
         })
     }
 }
@@ -78,17 +78,17 @@ impl XorbChunkSequenceHeader {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XorbChunkSequenceEntry {
     pub chunk_hash: MerkleHash,
-    pub chunk_byte_range_start: u32,
-    pub unpacked_segment_bytes: u32,
+    pub chunk_byte_range_start: u64,
+    pub unpacked_segment_bytes: u64,
     pub flags: u32,
-    pub _unused: u32,
+    pub _unused: u64,
 }
 
 impl XorbChunkSequenceEntry {
     pub fn new(
         chunk_hash: MerkleHash,
-        unpacked_segment_bytes: u32,
-        chunk_byte_range_start: u32,
+        unpacked_segment_bytes: u64,
+        chunk_byte_range_start: u64,
     ) -> Self {
         Self {
             chunk_hash,
@@ -124,26 +124,26 @@ impl XorbChunkSequenceEntry {
             let mut writer_cur = Cursor::new(&mut buf[..]);
             let writer = &mut writer_cur;
             write_hash(writer, &self.chunk_hash)?;
-            write_u32(writer, self.chunk_byte_range_start)?;
-            write_u32(writer, self.unpacked_segment_bytes)?;
+            write_u64(writer, self.chunk_byte_range_start)?;
+            write_u64(writer, self.unpacked_segment_bytes)?;
             write_u32(writer, self.flags)?;
-            write_u32(writer, self._unused)?;
+            write_u64(writer, self._unused)?;
         }
         writer.write_all(&buf[..])?;
         Ok(size_of::<XorbChunkSequenceEntry>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
         let mut v = [0u8; size_of::<Self>()];
         reader.read_exact(&mut v[..])?;
         let mut reader_curs = Cursor::new(&v);
         let reader = &mut reader_curs;
         Ok(Self {
             chunk_hash: read_hash(reader)?,
-            chunk_byte_range_start: read_u32(reader)?,
-            unpacked_segment_bytes: read_u32(reader)?,
+            chunk_byte_range_start: read_u64(reader)?,
+            unpacked_segment_bytes: read_u64(reader)?,
             flags: read_u32(reader)?,
-            _unused: read_u32(reader)?,
+            _unused: read_u64(reader)?,
         })
     }
 }
@@ -160,14 +160,14 @@ impl MDBXorbInfo {
             + self.chunks.len() * size_of::<XorbChunkSequenceEntry>()) as u64
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R) -> Result<Option<Self>, std::io::Error> {
-        let metadata = XorbChunkSequenceHeader::deserialize(reader)?;
+    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Option<Self>, std::io::Error> {
+        let metadata = XorbChunkSequenceHeader::deserialize(reader, version)?;
         if metadata.is_bookend() {
             return Ok(None);
         }
         let mut chunks = Vec::with_capacity(metadata.num_entries as usize);
         for _ in 0..metadata.num_entries {
-            chunks.push(XorbChunkSequenceEntry::deserialize(reader)?);
+            chunks.push(XorbChunkSequenceEntry::deserialize(reader, version)?);
         }
         Ok(Some(Self { metadata, chunks }))
     }
@@ -181,7 +181,7 @@ impl MDBXorbInfo {
         Ok(n_out_bytes)
     }
 
-    pub fn chunks_and_boundaries(&self) -> Vec<(MerkleHash, u32)> {
+    pub fn chunks_and_boundaries(&self) -> Vec<(MerkleHash, u64)> {
         self.chunks
             .iter()
             .map(|entry| {
@@ -203,7 +203,7 @@ pub struct MDBXorbInfoView {
 impl MDBXorbInfoView {
     pub fn new(data: Bytes) -> std::io::Result<Self> {
         let mut reader = Cursor::new(&data);
-        let header = XorbChunkSequenceHeader::deserialize(&mut reader)?;
+        let header = XorbChunkSequenceHeader::deserialize(&mut reader, 3)?;
         Self::from_data_and_header(header, data)
     }
 
@@ -236,10 +236,13 @@ impl MDBXorbInfoView {
     }
 
     pub fn chunk(&self, idx: usize) -> XorbChunkSequenceEntry {
-        XorbChunkSequenceEntry::deserialize(&mut Cursor::new(
-            &self.data[(size_of::<XorbChunkSequenceHeader>()
-                + idx * size_of::<XorbChunkSequenceEntry>())..],
-        ))
+        XorbChunkSequenceEntry::deserialize(
+            &mut Cursor::new(
+                &self.data[(size_of::<XorbChunkSequenceHeader>()
+                    + idx * size_of::<XorbChunkSequenceEntry>())..],
+            ),
+            3,
+        )
         .expect("bookkeeping error on data bounds")
     }
 
@@ -259,14 +262,14 @@ impl From<&MDBXorbInfoView> for MDBXorbInfo {
     fn from(view: &MDBXorbInfoView) -> Self {
         let chunks: Vec<XorbChunkSequenceEntry> =
             (0..view.num_entries()).map(|i| view.chunk(i)).collect();
-        let total_bytes = chunks
+        let total_bytes: u64 = chunks
             .last()
             .map(|c| c.chunk_byte_range_start + c.unpacked_segment_bytes)
             .unwrap_or(0);
         MDBXorbInfo {
             metadata: XorbChunkSequenceHeader::new(
                 view.xorb_hash(),
-                chunks.len() as u32,
+                chunks.len() as u64,
                 total_bytes,
             ),
             chunks,
@@ -283,11 +286,11 @@ mod tests {
     use super::*;
     use crate::merklehash::compute_data_hash;
 
-    fn make_header(num_entries: u32, bytes: u32) -> XorbChunkSequenceHeader {
+    fn make_header(num_entries: u64, bytes: u64) -> XorbChunkSequenceHeader {
         XorbChunkSequenceHeader::new(compute_data_hash(b"xorb"), num_entries, bytes)
     }
 
-    fn make_entry(unpacked: u32, start: u32) -> XorbChunkSequenceEntry {
+    fn make_entry(unpacked: u64, start: u64) -> XorbChunkSequenceEntry {
         XorbChunkSequenceEntry::new(compute_data_hash(b"chunk"), unpacked, start)
     }
 
@@ -327,7 +330,7 @@ mod tests {
         let mut buf = Vec::new();
         h.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
-        let h2 = XorbChunkSequenceHeader::deserialize(&mut r).unwrap();
+        let h2 = XorbChunkSequenceHeader::deserialize(&mut r, 3).unwrap();
         assert_eq!(h.xorb_hash, h2.xorb_hash);
         assert_eq!(h.num_entries, h2.num_entries);
         assert_eq!(h.num_bytes_in_xorb, h2.num_bytes_in_xorb);
@@ -391,7 +394,7 @@ mod tests {
         let mut buf = Vec::new();
         e.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
-        let e2 = XorbChunkSequenceEntry::deserialize(&mut r).unwrap();
+        let e2 = XorbChunkSequenceEntry::deserialize(&mut r, 3).unwrap();
         assert_eq!(e.chunk_hash, e2.chunk_hash);
         assert_eq!(e.unpacked_segment_bytes, e2.unpacked_segment_bytes);
         assert_eq!(e.chunk_byte_range_start, e2.chunk_byte_range_start);
@@ -413,7 +416,7 @@ mod tests {
             metadata: make_header(2, 200),
             chunks: vec![make_entry(100, 0), make_entry(100, 100)],
         };
-        assert_eq!(info.num_bytes(), (48 + 2 * 48) as u64);
+        assert_eq!(info.num_bytes(), (64 + 2 * 64) as u64);
     }
 
     #[test]
@@ -422,7 +425,7 @@ mod tests {
             metadata: make_header(0, 0),
             chunks: vec![],
         };
-        assert_eq!(info.num_bytes(), 48);
+        assert_eq!(info.num_bytes(), 64);
     }
 
     #[test]
@@ -434,7 +437,7 @@ mod tests {
         let mut buf = Vec::new();
         info.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
-        let info2 = MDBXorbInfo::deserialize(&mut r).unwrap().unwrap();
+        let info2 = MDBXorbInfo::deserialize(&mut r, 3).unwrap().unwrap();
         assert_eq!(info.metadata.xorb_hash, info2.metadata.xorb_hash);
         assert_eq!(info.chunks.len(), info2.chunks.len());
         assert_eq!(info.chunks[0].chunk_hash, info2.chunks[0].chunk_hash);
@@ -446,7 +449,7 @@ mod tests {
         let mut buf = Vec::new();
         bookend.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
-        assert!(MDBXorbInfo::deserialize(&mut r).unwrap().is_none());
+        assert!(MDBXorbInfo::deserialize(&mut r, 3).unwrap().is_none());
     }
 
     #[test]
@@ -455,7 +458,7 @@ mod tests {
         let mut buf = Vec::new();
         h.serialize(&mut buf).unwrap();
         let mut r = Cursor::new(&buf);
-        let info = MDBXorbInfo::deserialize(&mut r).unwrap().unwrap();
+        let info = MDBXorbInfo::deserialize(&mut r, 3).unwrap().unwrap();
         assert!(info.chunks.is_empty());
     }
 

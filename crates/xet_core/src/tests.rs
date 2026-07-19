@@ -1051,7 +1051,7 @@ fn reconstruct_xorb_with_footer_roundtrip() {
 #[test]
 fn file_data_sequence_header_new() {
     let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 3u32, false, false);
+    let header = FileDataSequenceHeader::new(hash, 3u64, false, false);
     assert_eq!(header.file_hash, hash);
     assert_eq!(header.num_entries, 3);
     assert_eq!(header.file_flags, 0);
@@ -1060,7 +1060,7 @@ fn file_data_sequence_header_new() {
 #[test]
 fn file_data_sequence_header_new_with_verification() {
     let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 1u32, true, false);
+    let header = FileDataSequenceHeader::new(hash, 1u64, true, false);
     assert!(header.contains_verification());
     assert!(!header.contains_metadata_ext());
 }
@@ -1068,7 +1068,7 @@ fn file_data_sequence_header_new_with_verification() {
 #[test]
 fn file_data_sequence_header_new_with_metadata_ext() {
     let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 1u32, false, true);
+    let header = FileDataSequenceHeader::new(hash, 1u64, false, true);
     assert!(!header.contains_verification());
     assert!(header.contains_metadata_ext());
 }
@@ -1076,7 +1076,7 @@ fn file_data_sequence_header_new_with_metadata_ext() {
 #[test]
 fn file_data_sequence_header_new_with_both() {
     let hash = compute_data_hash(b"file");
-    let header = FileDataSequenceHeader::new(hash, 2u32, true, true);
+    let header = FileDataSequenceHeader::new(hash, 2u64, true, true);
     assert!(header.contains_verification());
     assert!(header.contains_metadata_ext());
 }
@@ -1089,18 +1089,18 @@ fn file_data_sequence_header_bookend() {
 
 #[test]
 fn file_data_sequence_header_not_bookend() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u64, false, false);
     assert!(!header.is_bookend());
 }
 
 #[test]
 fn file_data_sequence_header_serialize_roundtrip() {
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 5u32, true, false);
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 5u64, true, false);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = FileDataSequenceHeader::deserialize(&mut cursor).unwrap();
+    let deserialized = FileDataSequenceHeader::deserialize(&mut cursor, 3).unwrap();
     assert_eq!(header.file_hash, deserialized.file_hash);
     assert_eq!(header.num_entries, deserialized.num_entries);
     assert_eq!(header.file_flags, deserialized.file_flags);
@@ -1108,25 +1108,25 @@ fn file_data_sequence_header_serialize_roundtrip() {
 
 #[test]
 fn file_data_sequence_header_num_info_entry_following_no_flags() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, false, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, false, false);
     assert_eq!(header.num_info_entry_following(), 3);
 }
 
 #[test]
 fn file_data_sequence_header_num_info_entry_following_verification() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, true, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, true, false);
     assert_eq!(header.num_info_entry_following(), 6); // 3*2 + 0
 }
 
 #[test]
 fn file_data_sequence_header_num_info_entry_following_metadata_ext() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, false, true);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, false, true);
     assert_eq!(header.num_info_entry_following(), 4); // 3 + 1
 }
 
 #[test]
 fn file_data_sequence_header_num_info_entry_following_both() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u32, true, true);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 3u64, true, true);
     assert_eq!(header.num_info_entry_following(), 7); // 3*2 + 1
 }
 
@@ -1144,7 +1144,7 @@ fn file_data_sequence_header_default() {
 #[test]
 fn file_data_sequence_entry_new() {
     let hash = compute_data_hash(b"segment");
-    let entry = FileDataSequenceEntry::new(hash, 1024u32, 0u32, 512u32);
+    let entry = FileDataSequenceEntry::new(hash, 1024u64, 0u64, 512u64);
     assert_eq!(entry.xorb_hash, hash);
     assert_eq!(entry.unpacked_segment_bytes, 1024);
     assert_eq!(entry.chunk_index_start, 0);
@@ -1153,24 +1153,24 @@ fn file_data_sequence_entry_new() {
 
 #[test]
 fn file_data_sequence_entry_serialize_roundtrip() {
-    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 200u32, 10u32, 20u32);
+    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 200u64, 10u64, 20u64);
     let mut buf = Vec::new();
     entry.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = FileDataSequenceEntry::deserialize(&mut cursor).unwrap();
+    let deserialized = FileDataSequenceEntry::deserialize(&mut cursor, 3).unwrap();
     assert_eq!(entry, deserialized);
 }
 
 #[test]
 fn file_data_sequence_entry_from_xorb_entries() {
     let hash = compute_data_hash(b"xorb");
-    let metadata = XorbChunkSequenceHeader::new(hash, 2u32, 200u32);
+    let metadata = XorbChunkSequenceHeader::new(hash, 2u64, 200u64);
     let chunks = vec![
-        XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u32, 0u32),
-        XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 100u32, 100u32),
+        XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u64, 0u64),
+        XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 100u64, 100u64),
     ];
-    let entry = FileDataSequenceEntry::from_xorb_entries(&metadata, &chunks, 0u32, 2u32);
+    let entry = FileDataSequenceEntry::from_xorb_entries(&metadata, &chunks, 0u64, 2u64);
     assert_eq!(entry.xorb_hash, hash);
     assert_eq!(entry.unpacked_segment_bytes, 200);
     assert_eq!(entry.chunk_index_start, 0);
@@ -1179,8 +1179,8 @@ fn file_data_sequence_entry_from_xorb_entries() {
 
 #[test]
 fn file_data_sequence_entry_from_xorb_entries_empty() {
-    let metadata = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u32, 0u32);
-    let entry = FileDataSequenceEntry::from_xorb_entries(&metadata, &[], 0u32, 0u32);
+    let metadata = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u64, 0u64);
+    let entry = FileDataSequenceEntry::from_xorb_entries(&metadata, &[], 0u64, 0u64);
     assert_eq!(entry, FileDataSequenceEntry::default());
 }
 
@@ -1202,7 +1202,7 @@ fn file_verification_entry_serialize_roundtrip() {
     entry.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = FileVerificationEntry::deserialize(&mut cursor).unwrap();
+    let deserialized = FileVerificationEntry::deserialize(&mut cursor, 3).unwrap();
     assert_eq!(entry.range_hash, deserialized.range_hash);
 }
 
@@ -1224,7 +1224,7 @@ fn file_metadata_ext_serialize_roundtrip() {
     ext.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = FileMetadataExt::deserialize(&mut cursor).unwrap();
+    let deserialized = FileMetadataExt::deserialize(&mut cursor, 3).unwrap();
     assert_eq!(ext.sha256, deserialized.sha256);
 }
 
@@ -1234,10 +1234,10 @@ fn file_metadata_ext_serialize_roundtrip() {
 
 #[test]
 fn mdb_file_info_num_bytes() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u32, false, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u64, false, false);
     let segments = vec![
-        FileDataSequenceEntry::new(MerkleHash::default(), 100u32, 0u32, 50u32),
-        FileDataSequenceEntry::new(MerkleHash::default(), 200u32, 50u32, 100u32),
+        FileDataSequenceEntry::new(MerkleHash::default(), 100u64, 0u64, 50u64),
+        FileDataSequenceEntry::new(MerkleHash::default(), 200u64, 50u64, 100u64),
     ];
     let info = MDBFileInfo {
         metadata: header,
@@ -1251,10 +1251,10 @@ fn mdb_file_info_num_bytes() {
 
 #[test]
 fn mdb_file_info_file_size() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u32, false, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u64, false, false);
     let segments = vec![
-        FileDataSequenceEntry::new(MerkleHash::default(), 100u32, 0u32, 50u32),
-        FileDataSequenceEntry::new(MerkleHash::default(), 200u32, 50u32, 100u32),
+        FileDataSequenceEntry::new(MerkleHash::default(), 100u64, 0u64, 50u64),
+        FileDataSequenceEntry::new(MerkleHash::default(), 200u64, 50u64, 100u64),
     ];
     let info = MDBFileInfo {
         metadata: header,
@@ -1268,10 +1268,10 @@ fn mdb_file_info_file_size() {
 #[test]
 fn mdb_file_info_serialize_roundtrip_no_flags() {
     let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u64, false, false),
         segments: vec![
-            FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32),
-            FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32),
+            FileDataSequenceEntry::new(MerkleHash::default(), 50u64, 0u64, 25u64),
+            FileDataSequenceEntry::new(MerkleHash::default(), 75u64, 25u64, 50u64),
         ],
         verification: vec![],
         metadata_ext: None,
@@ -1281,7 +1281,7 @@ fn mdb_file_info_serialize_roundtrip_no_flags() {
     info.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = MDBFileInfo::deserialize(&mut cursor).unwrap().unwrap();
+    let deserialized = MDBFileInfo::deserialize(&mut cursor, 3).unwrap().unwrap();
     assert_eq!(info.metadata.file_hash, deserialized.metadata.file_hash);
     assert_eq!(info.segments.len(), deserialized.segments.len());
     assert_eq!(
@@ -1293,12 +1293,10 @@ fn mdb_file_info_serialize_roundtrip_no_flags() {
 #[test]
 fn mdb_file_info_serialize_with_verification() {
     let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, true, false),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            50u32,
-            0u32,
-            25u32,
+            50u64, 0u64, 25u64,
         )],
         verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
         metadata_ext: None,
@@ -1308,7 +1306,7 @@ fn mdb_file_info_serialize_with_verification() {
     info.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = MDBFileInfo::deserialize(&mut cursor).unwrap().unwrap();
+    let deserialized = MDBFileInfo::deserialize(&mut cursor, 3).unwrap().unwrap();
     assert!(deserialized.contains_verification());
     assert_eq!(deserialized.verification.len(), 1);
 }
@@ -1316,12 +1314,10 @@ fn mdb_file_info_serialize_with_verification() {
 #[test]
 fn mdb_file_info_serialize_with_metadata_ext() {
     let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, true),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, true),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            50u32,
-            0u32,
-            25u32,
+            50u64, 0u64, 25u64,
         )],
         verification: vec![],
         metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
@@ -1331,7 +1327,7 @@ fn mdb_file_info_serialize_with_metadata_ext() {
     info.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = MDBFileInfo::deserialize(&mut cursor).unwrap().unwrap();
+    let deserialized = MDBFileInfo::deserialize(&mut cursor, 3).unwrap().unwrap();
     assert!(deserialized.contains_metadata_ext());
     assert!(deserialized.metadata_ext.is_some());
 }
@@ -1343,7 +1339,7 @@ fn mdb_file_info_deserialize_bookend_returns_none() {
     bookend.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let result = MDBFileInfo::deserialize(&mut cursor).unwrap();
+    let result = MDBFileInfo::deserialize(&mut cursor, 3).unwrap();
     assert!(result.is_none());
 }
 
@@ -1363,24 +1359,24 @@ fn mdb_file_info_default() {
 #[test]
 fn mdb_xorb_info_new() {
     let hash = compute_data_hash(b"xorb");
-    let metadata = XorbChunkSequenceHeader::new(hash, 1u32, 100u32);
+    let metadata = XorbChunkSequenceHeader::new(hash, 1u64, 100u64);
     let chunks = vec![XorbChunkSequenceEntry::new(
         compute_data_hash(b"c"),
-        100u32,
-        0u32,
+        100u64,
+        0u64,
     )];
     let info = MDBXorbInfo { metadata, chunks };
-    assert_eq!(info.num_bytes(), 48 + 48); // header + 1 entry
+    assert_eq!(info.num_bytes(), 64 + 64); // header + 1 entry
 }
 
 #[test]
 fn mdb_xorb_info_serialize_roundtrip() {
     let hash = compute_data_hash(b"xorb");
-    let metadata = XorbChunkSequenceHeader::new(hash, 1u32, 200u32);
+    let metadata = XorbChunkSequenceHeader::new(hash, 1u64, 200u64);
     let chunks = vec![XorbChunkSequenceEntry::new(
         compute_data_hash(b"c"),
-        200u32,
-        0u32,
+        200u64,
+        0u64,
     )];
     let info = MDBXorbInfo { metadata, chunks };
 
@@ -1388,7 +1384,7 @@ fn mdb_xorb_info_serialize_roundtrip() {
     info.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = MDBXorbInfo::deserialize(&mut cursor).unwrap().unwrap();
+    let deserialized = MDBXorbInfo::deserialize(&mut cursor, 3).unwrap().unwrap();
     assert_eq!(info.metadata.xorb_hash, deserialized.metadata.xorb_hash);
     assert_eq!(info.chunks.len(), deserialized.chunks.len());
     assert_eq!(info.chunks[0].chunk_hash, deserialized.chunks[0].chunk_hash);
@@ -1401,17 +1397,17 @@ fn mdb_xorb_info_deserialize_bookend() {
     bookend.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let result = MDBXorbInfo::deserialize(&mut cursor).unwrap();
+    let result = MDBXorbInfo::deserialize(&mut cursor, 3).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
 fn mdb_xorb_info_chunks_and_boundaries() {
     let hash = compute_data_hash(b"xorb");
-    let metadata = XorbChunkSequenceHeader::new(hash, 2u32, 300u32);
+    let metadata = XorbChunkSequenceHeader::new(hash, 2u64, 300u64);
     let chunks = vec![
-        XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u32, 0u32),
-        XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 200u32, 100u32),
+        XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u64, 0u64),
+        XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 200u64, 100u64),
     ];
     let info = MDBXorbInfo { metadata, chunks };
     let boundaries = info.chunks_and_boundaries();
@@ -1434,7 +1430,7 @@ fn mdb_xorb_info_default() {
 #[test]
 fn xorb_chunk_sequence_header_new() {
     let hash = compute_data_hash(b"xorb");
-    let header = XorbChunkSequenceHeader::new(hash, 3u32, 500u32);
+    let header = XorbChunkSequenceHeader::new(hash, 3u64, 500u64);
     assert_eq!(header.xorb_hash, hash);
     assert_eq!(header.num_entries, 3);
     assert_eq!(header.num_bytes_in_xorb, 500);
@@ -1449,18 +1445,18 @@ fn xorb_chunk_sequence_header_bookend() {
 
 #[test]
 fn xorb_chunk_sequence_header_not_bookend() {
-    let header = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u32, 0u32);
+    let header = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u64, 0u64);
     assert!(!header.is_bookend());
 }
 
 #[test]
 fn xorb_chunk_sequence_header_serialize_roundtrip() {
-    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"h"), 2u32, 300u32);
+    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"h"), 2u64, 300u64);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = XorbChunkSequenceHeader::deserialize(&mut cursor).unwrap();
+    let deserialized = XorbChunkSequenceHeader::deserialize(&mut cursor, 3).unwrap();
     assert_eq!(header, deserialized);
 }
 
@@ -1471,7 +1467,7 @@ fn xorb_chunk_sequence_header_serialize_roundtrip() {
 #[test]
 fn xorb_chunk_sequence_entry_new() {
     let hash = compute_data_hash(b"chunk");
-    let entry = XorbChunkSequenceEntry::new(hash, 512u32, 100u32);
+    let entry = XorbChunkSequenceEntry::new(hash, 512u64, 100u64);
     assert_eq!(entry.chunk_hash, hash);
     assert_eq!(entry.unpacked_segment_bytes, 512);
     assert_eq!(entry.chunk_byte_range_start, 100);
@@ -1481,7 +1477,7 @@ fn xorb_chunk_sequence_entry_new() {
 
 #[test]
 fn xorb_chunk_sequence_entry_with_global_dedup_flag() {
-    let entry = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u32, 0u32);
+    let entry = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u64, 0u64);
     let flagged = entry.with_global_dedup_flag(true);
     assert_ne!(flagged.flags, 0);
 
@@ -1491,7 +1487,7 @@ fn xorb_chunk_sequence_entry_with_global_dedup_flag() {
 
 #[test]
 fn xorb_chunk_sequence_entry_is_global_dedup_eligible() {
-    let entry = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u32, 0u32);
+    let entry = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u64, 0u64);
     // default hash (all zeros) has modulus 0, so it IS eligible
     assert!(entry.is_global_dedup_eligible());
 
@@ -1504,12 +1500,12 @@ fn xorb_chunk_sequence_entry_is_global_dedup_eligible() {
 
 #[test]
 fn xorb_chunk_sequence_entry_serialize_roundtrip() {
-    let entry = XorbChunkSequenceEntry::new(compute_data_hash(b"e"), 256u32, 64u32);
+    let entry = XorbChunkSequenceEntry::new(compute_data_hash(b"e"), 256u64, 64u64);
     let mut buf = Vec::new();
     entry.serialize(&mut buf).unwrap();
 
     let mut cursor = Cursor::new(buf);
-    let deserialized = XorbChunkSequenceEntry::deserialize(&mut cursor).unwrap();
+    let deserialized = XorbChunkSequenceEntry::deserialize(&mut cursor, 3).unwrap();
     assert_eq!(entry, deserialized);
 }
 
@@ -1520,8 +1516,8 @@ fn xorb_chunk_sequence_entry_serialize_roundtrip() {
 #[test]
 fn mdb_xorb_info_view_from_bytes() {
     let hash = compute_data_hash(b"view");
-    let metadata = XorbChunkSequenceHeader::new(hash, 1u32, 100u32);
-    let chunk = XorbChunkSequenceEntry::new(compute_data_hash(b"c"), 100u32, 0u32);
+    let metadata = XorbChunkSequenceHeader::new(hash, 1u64, 100u64);
+    let chunk = XorbChunkSequenceEntry::new(compute_data_hash(b"c"), 100u64, 0u64);
 
     let mut buf = Vec::new();
     metadata.serialize(&mut buf).unwrap();
@@ -1537,9 +1533,9 @@ fn mdb_xorb_info_view_from_bytes() {
 
 #[test]
 fn mdb_xorb_info_view_byte_size() {
-    let metadata = XorbChunkSequenceHeader::new(MerkleHash::default(), 2u32, 200u32);
-    let chunk1 = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u32, 0u32);
-    let chunk2 = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u32, 100u32);
+    let metadata = XorbChunkSequenceHeader::new(MerkleHash::default(), 2u64, 200u64);
+    let chunk1 = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u64, 0u64);
+    let chunk2 = XorbChunkSequenceEntry::new(MerkleHash::default(), 100u64, 100u64);
 
     let mut buf = Vec::new();
     metadata.serialize(&mut buf).unwrap();
@@ -1557,8 +1553,8 @@ fn mdb_xorb_info_view_byte_size() {
 #[test]
 fn mdb_xorb_info_view_serialize_roundtrip() {
     let hash = compute_data_hash(b"ser");
-    let metadata = XorbChunkSequenceHeader::new(hash, 1u32, 50u32);
-    let chunk = XorbChunkSequenceEntry::new(compute_data_hash(b"c"), 50u32, 0u32);
+    let metadata = XorbChunkSequenceHeader::new(hash, 1u64, 50u64);
+    let chunk = XorbChunkSequenceEntry::new(compute_data_hash(b"c"), 50u64, 0u64);
 
     let mut buf = Vec::new();
     metadata.serialize(&mut buf).unwrap();
@@ -1572,7 +1568,7 @@ fn mdb_xorb_info_view_serialize_roundtrip() {
 
 #[test]
 fn mdb_xorb_info_view_from_data_too_small() {
-    let metadata = XorbChunkSequenceHeader::new(MerkleHash::default(), 2u32, 100u32);
+    let metadata = XorbChunkSequenceHeader::new(MerkleHash::default(), 2u64, 100u64);
     let mut buf = Vec::new();
     metadata.serialize(&mut buf).unwrap();
     // Intentionally too small - no room for 2 chunks
@@ -1583,12 +1579,12 @@ fn mdb_xorb_info_view_from_data_too_small() {
 
 #[test]
 fn mdb_xorb_info_view_header_accessor() {
-    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"test-hash"), 3u32, 300u32);
+    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"test-hash"), 3u64, 300u64);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
-    let e1 = XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u32, 0u32);
-    let e2 = XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 100u32, 100u32);
-    let e3 = XorbChunkSequenceEntry::new(compute_data_hash(b"c3"), 100u32, 200u32);
+    let e1 = XorbChunkSequenceEntry::new(compute_data_hash(b"c1"), 100u64, 0u64);
+    let e2 = XorbChunkSequenceEntry::new(compute_data_hash(b"c2"), 100u64, 100u64);
+    let e3 = XorbChunkSequenceEntry::new(compute_data_hash(b"c3"), 100u64, 200u64);
     e1.serialize(&mut buf).unwrap();
     e2.serialize(&mut buf).unwrap();
     e3.serialize(&mut buf).unwrap();
@@ -1599,11 +1595,11 @@ fn mdb_xorb_info_view_header_accessor() {
 
 #[test]
 fn mdb_xorb_info_view_into_mdb_xorb_info() {
-    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"convert"), 2u32, 150u32);
+    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"convert"), 2u64, 150u64);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
-    let e1 = XorbChunkSequenceEntry::new(compute_data_hash(b"x1"), 50u32, 0u32);
-    let e2 = XorbChunkSequenceEntry::new(compute_data_hash(b"x2"), 100u32, 50u32);
+    let e1 = XorbChunkSequenceEntry::new(compute_data_hash(b"x1"), 50u64, 0u64);
+    let e2 = XorbChunkSequenceEntry::new(compute_data_hash(b"x2"), 100u64, 50u64);
     e1.serialize(&mut buf).unwrap();
     e2.serialize(&mut buf).unwrap();
     let view = MDBXorbInfoView::new(bytes::Bytes::from(buf)).unwrap();
@@ -1616,7 +1612,7 @@ fn mdb_xorb_info_view_into_mdb_xorb_info() {
 
 #[test]
 fn mdb_xorb_info_view_into_mdb_xorb_info_empty() {
-    let header = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u32, 0u32);
+    let header = XorbChunkSequenceHeader::new(MerkleHash::default(), 0u64, 0u64);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
     let view = MDBXorbInfoView::new(bytes::Bytes::from(buf)).unwrap();
@@ -1632,7 +1628,7 @@ fn mdb_xorb_info_view_into_mdb_xorb_info_empty() {
 #[test]
 fn mdb_shard_file_header_default() {
     let header = MDBShardFileHeader::default();
-    assert_eq!(header.version, 2);
+    assert_eq!(header.version, 3);
     assert!(header.footer_size > 0);
 }
 
@@ -1666,7 +1662,7 @@ fn mdb_shard_file_header_deserialize_wrong_magic() {
 #[test]
 fn mdb_shard_file_footer_default() {
     let footer = MDBShardFileFooter::default();
-    assert_eq!(footer.version, 1);
+    assert_eq!(footer.version, 2);
     assert_eq!(footer.shard_key_expiry, u64::MAX);
 }
 
@@ -1725,19 +1721,19 @@ fn mdb_shard_info_default() {
 fn mdb_shard_info_counts() {
     let mut info = MDBShardInfo::default();
     info.file_infos.push(MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false),
+        metadata: FileDataSequenceHeader::new(MerkleHash::default(), 0u64, false, false),
         segments: vec![],
         verification: vec![],
         metadata_ext: None,
     });
     info.file_infos.push(MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false),
+        metadata: FileDataSequenceHeader::new(MerkleHash::default(), 0u64, false, false),
         segments: vec![],
         verification: vec![],
         metadata_ext: None,
     });
     info.xorb_infos.push(MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(MerkleHash::default(), 0u32, 100u32),
+        metadata: XorbChunkSequenceHeader::new(MerkleHash::default(), 0u64, 100u64),
         chunks: vec![],
     });
 
@@ -1753,12 +1749,10 @@ fn mdb_shard_info_materialized_bytes() {
         header: MDBShardFileHeader::default(),
         footer: MDBShardFileFooter::default(),
         file_infos: vec![MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(MerkleHash::default(), 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(MerkleHash::default(), 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 MerkleHash::default(),
-                500u32,
-                0u32,
-                0u32,
+                500u64, 0u64, 0u64,
             )],
             verification: vec![],
             metadata_ext: None,
@@ -1785,12 +1779,10 @@ fn mdb_in_memory_shard_default() {
 fn mdb_in_memory_shard_add_file_reconstruction_info() {
     let mut shard = crate::metadata_shard::shard_in_memory::MDBInMemoryShard::default();
     let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, false),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            100u32,
-            0u32,
-            0u32,
+            100u64, 0u64, 0u64,
         )],
         verification: vec![],
         metadata_ext: None,
@@ -1804,11 +1796,11 @@ fn mdb_in_memory_shard_add_file_reconstruction_info() {
 fn mdb_in_memory_shard_add_xorb_block() {
     let mut shard = crate::metadata_shard::shard_in_memory::MDBInMemoryShard::default();
     let xorb = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 200u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u64, 200u64),
         chunks: vec![XorbChunkSequenceEntry::new(
-            MerkleHash::default(),
-            200u32,
-            0u32,
+        MerkleHash::default(),
+        200u64,
+        0u64,
         )],
     };
     shard.add_xorb_block(xorb).unwrap();
@@ -1820,7 +1812,7 @@ fn mdb_in_memory_shard_add_xorb_block() {
 fn mdb_in_memory_shard_to_bytes_roundtrip() {
     let mut shard = crate::metadata_shard::shard_in_memory::MDBInMemoryShard::default();
     let xorb = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 0u32, 0u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 0u64, 0u64),
         chunks: vec![],
     };
     shard.add_xorb_block(xorb).unwrap();
@@ -2119,8 +2111,8 @@ fn build_xorb_object_and_serialize() {
 
 #[test]
 fn mdb_file_info_view_basic() {
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false);
-    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, false);
+    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u64, 0u64, 50u64);
 
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
@@ -2138,7 +2130,7 @@ fn mdb_file_info_view_basic() {
 
 #[test]
 fn mdb_file_info_view_from_data_too_small() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u32, false, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 2u64, false, false);
     assert!(
         crate::metadata_shard::file_structs::MDBFileInfoView::from_data_and_header(
             header,
@@ -2150,7 +2142,7 @@ fn mdb_file_info_view_from_data_too_small() {
 
 #[test]
 fn mdb_file_info_view_bytes() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u64, false, false);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
     let view =
@@ -2160,8 +2152,8 @@ fn mdb_file_info_view_bytes() {
 
 #[test]
 fn mdb_file_info_view_fromMDBFileInfoView_into_mdb_file_info() {
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false);
-    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, false);
+    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u64, 0u64, 50u64);
 
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
@@ -2321,7 +2313,7 @@ proptest! {
     #[test]
     fn file_data_sequence_header_roundtrip(
         file_hash in prop::array::uniform4(0u64..u64::MAX),
-        num_entries in 0u32..100,
+        num_entries in 0u64..100,
         flags in 0u32..=MDB_FILE_FLAG_WITH_VERIFICATION | MDB_FILE_FLAG_WITH_METADATA_EXT,
     ) {
         let header = FileDataSequenceHeader {
@@ -2329,19 +2321,20 @@ proptest! {
             file_flags: flags,
             num_entries,
             _unused: 0,
+            _pad: 0,
         };
         let mut buf = Vec::new();
         header.serialize(&mut buf).unwrap();
-        let deserialized = FileDataSequenceHeader::deserialize(&mut Cursor::new(&buf)).unwrap();
+        let deserialized = FileDataSequenceHeader::deserialize(&mut Cursor::new(&buf), 3).unwrap();
         prop_assert_eq!(&header, &deserialized);
     }
 
     #[test]
     fn file_data_sequence_entry_roundtrip(
         hash in prop::array::uniform4(0u64..u64::MAX),
-        unpacked in 0u32..1_000_000,
-        start in 0u32..1_000_000,
-        end in 0u32..1_000_000,
+        unpacked in 0u64..1_000_000,
+        start in 0u64..1_000_000,
+        end in 0u64..1_000_000,
     ) {
         let entry = FileDataSequenceEntry {
             xorb_hash: DataHash::from(hash),
@@ -2352,16 +2345,16 @@ proptest! {
         };
         let mut buf = Vec::new();
         entry.serialize(&mut buf).unwrap();
-        let deserialized = FileDataSequenceEntry::deserialize(&mut Cursor::new(&buf)).unwrap();
+        let deserialized = FileDataSequenceEntry::deserialize(&mut Cursor::new(&buf), 3).unwrap();
         prop_assert_eq!(&entry, &deserialized);
     }
 
     #[test]
     fn xorb_chunk_sequence_header_roundtrip(
         hash in prop::array::uniform4(0u64..u64::MAX),
-        num_entries in 0u32..100,
-        bytes_in_xorb in 0u32..10_000_000,
-        bytes_on_disk in 0u32..10_000_000,
+        num_entries in 0u64..100,
+        bytes_in_xorb in 0u64..10_000_000,
+        bytes_on_disk in 0u64..10_000_000,
     ) {
         let header = XorbChunkSequenceHeader {
             xorb_hash: DataHash::from(hash),
@@ -2372,15 +2365,15 @@ proptest! {
         };
         let mut buf = Vec::new();
         header.serialize(&mut buf).unwrap();
-        let deserialized = XorbChunkSequenceHeader::deserialize(&mut Cursor::new(&buf)).unwrap();
+        let deserialized = XorbChunkSequenceHeader::deserialize(&mut Cursor::new(&buf), 3).unwrap();
         prop_assert_eq!(&header, &deserialized);
     }
 
     #[test]
     fn xorb_chunk_sequence_entry_roundtrip(
         hash in prop::array::uniform4(0u64..u64::MAX),
-        byte_range_start in 0u32..10_000_000,
-        unpacked in 0u32..10_000_000,
+        byte_range_start in 0u64..10_000_000,
+        unpacked in 0u64..10_000_000,
         flags in 0u32..=u32::MAX,
     ) {
         let entry = XorbChunkSequenceEntry {
@@ -2392,7 +2385,7 @@ proptest! {
         };
         let mut buf = Vec::new();
         entry.serialize(&mut buf).unwrap();
-        let deserialized = XorbChunkSequenceEntry::deserialize(&mut Cursor::new(&buf)).unwrap();
+        let deserialized = XorbChunkSequenceEntry::deserialize(&mut Cursor::new(&buf), 3).unwrap();
         prop_assert_eq!(&entry, &deserialized);
     }
 }
@@ -2921,25 +2914,23 @@ fn mdb_shard_info_read_all_file_info_sections_empty() {
     bookend.serialize(&mut buf).unwrap();
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
-    let files = info.read_all_file_info_sections(&mut cursor).unwrap();
+    let files = info.read_all_file_info_sections(&mut cursor, 3).unwrap();
     assert!(files.is_empty());
 }
 
 #[test]
 fn mdb_shard_info_read_all_file_info_sections_multiple() {
     let file1 = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u64, false, false),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            100u32,
-            0u32,
-            50u32,
+            100u64, 0u64, 50u64,
         )],
         verification: vec![],
         metadata_ext: None,
     };
     let file2 = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f2"), 0u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f2"), 0u64, false, false),
         segments: vec![],
         verification: vec![],
         metadata_ext: None,
@@ -2953,7 +2944,7 @@ fn mdb_shard_info_read_all_file_info_sections_multiple() {
 
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
-    let files = info.read_all_file_info_sections(&mut cursor).unwrap();
+    let files = info.read_all_file_info_sections(&mut cursor, 3).unwrap();
     assert_eq!(files.len(), 2);
     assert_eq!(files[0].segments[0].unpacked_segment_bytes, 100);
 }
@@ -2965,22 +2956,22 @@ fn mdb_shard_info_read_all_xorb_blocks_full_empty() {
     bookend.serialize(&mut buf).unwrap();
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
-    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor).unwrap();
+    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor, 3).unwrap();
     assert!(xorb_infos.is_empty());
 }
 
 #[test]
 fn mdb_shard_info_read_all_xorb_blocks_full_multiple() {
     let xorb1 = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x1"), 1u32, 100u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x1"), 1u64, 100u64),
         chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c1"),
-            100u32,
-            0u32,
+        compute_data_hash(b"c1"),
+        100u64,
+        0u64,
         )],
     };
     let xorb2 = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x2"), 0u32, 0u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x2"), 0u64, 0u64),
         chunks: vec![],
     };
     let mut buf = Vec::new();
@@ -2992,7 +2983,7 @@ fn mdb_shard_info_read_all_xorb_blocks_full_multiple() {
 
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
-    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor).unwrap();
+    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor, 3).unwrap();
     assert_eq!(xorb_infos.len(), 2);
     assert_eq!(xorb_infos[0].chunks.len(), 1);
 }
@@ -3004,12 +2995,10 @@ fn mdb_shard_info_read_all_xorb_blocks_full_multiple() {
 #[test]
 fn mdb_shard_info_read_all_file_info_sections_breaks_on_partial_error() {
     let file1 = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u64, false, false),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            100u32,
-            0u32,
-            50u32,
+            100u64, 0u64, 50u64,
         )],
         verification: vec![],
         metadata_ext: None,
@@ -3021,7 +3010,7 @@ fn mdb_shard_info_read_all_file_info_sections_breaks_on_partial_error() {
 
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
-    let files = info.read_all_file_info_sections(&mut cursor).unwrap();
+    let files = info.read_all_file_info_sections(&mut cursor, 3).unwrap();
     assert_eq!(files.len(), 1, "should return the first valid file info");
     assert_eq!(files[0].segments[0].unpacked_segment_bytes, 100);
 }
@@ -3029,11 +3018,11 @@ fn mdb_shard_info_read_all_file_info_sections_breaks_on_partial_error() {
 #[test]
 fn mdb_shard_info_read_all_xorb_blocks_full_breaks_on_partial_error() {
     let xorb1 = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x1"), 1u32, 100u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x1"), 1u64, 100u64),
         chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c1"),
-            100u32,
-            0u32,
+        compute_data_hash(b"c1"),
+        100u64,
+        0u64,
         )],
     };
     let mut buf = Vec::new();
@@ -3043,7 +3032,7 @@ fn mdb_shard_info_read_all_xorb_blocks_full_breaks_on_partial_error() {
 
     let info = MDBShardInfo::default();
     let mut cursor = std::io::Cursor::new(buf);
-    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor).unwrap();
+    let xorb_infos = info.read_all_xorb_blocks_full(&mut cursor, 3).unwrap();
     assert_eq!(
         xorb_infos.len(),
         1,
@@ -3061,8 +3050,8 @@ fn mdb_file_info_view_file_flags_and_contains() {
     // For a header with both flags and num_entries=1:
     // n_structs = 1 (header) + 1 (segments) + 1 (verification) + 1 (metadata_ext) = 4
     use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, true);
-    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, true, true);
+    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u64, 0u64, 50u64);
     let ver = FileVerificationEntry::new(compute_data_hash(b"v"));
     let met = FileMetadataExt::new(compute_data_hash(b"m"));
 
@@ -3081,7 +3070,7 @@ fn mdb_file_info_view_file_flags_and_contains() {
     assert!(view.contains_metadata_ext());
 
     // Test without any flags
-    let header2 = FileDataSequenceHeader::new(compute_data_hash(b"g"), 0u32, false, false);
+    let header2 = FileDataSequenceHeader::new(compute_data_hash(b"g"), 0u64, false, false);
     let mut buf2 = Vec::new();
     header2.serialize(&mut buf2).unwrap();
     let view2 = MDBFileInfoView::new(bytes::Bytes::from(buf2)).unwrap();
@@ -3091,9 +3080,9 @@ fn mdb_file_info_view_file_flags_and_contains() {
 
 #[test]
 fn mdb_file_info_view_byte_size_with_verification() {
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, true, false);
-    let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32);
-    let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32);
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u64, true, false);
+    let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50u64, 0u64, 25u64);
+    let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75u64, 25u64, 50u64);
     let v1 = FileVerificationEntry::new(compute_data_hash(b"v1"));
     let v2 = FileVerificationEntry::new(compute_data_hash(b"v2"));
 
@@ -3284,9 +3273,9 @@ fn try_read_chunk_header_empty_reader_returns_none() {
 #[test]
 fn mdb_file_info_view_header_accessor() {
     use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"hdr-test"), 2u32, true, false);
-    let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32);
-    let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32);
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"hdr-test"), 2u64, true, false);
+    let e1 = FileDataSequenceEntry::new(MerkleHash::default(), 50u64, 0u64, 25u64);
+    let e2 = FileDataSequenceEntry::new(MerkleHash::default(), 75u64, 25u64, 50u64);
     let v1 = FileVerificationEntry::new(compute_data_hash(b"v1"));
     let v2 = FileVerificationEntry::new(compute_data_hash(b"v2"));
 
@@ -3312,8 +3301,8 @@ fn mdb_file_info_view_header_accessor() {
 #[test]
 fn mdb_file_info_view_into_with_verification() {
     use crate::metadata_shard::shard_format::MDB_FILE_INFO_ENTRY_SIZE;
-    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, true, false);
-    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u32, 0u32, 50u32);
+    let header = FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, true, false);
+    let entry = FileDataSequenceEntry::new(compute_data_hash(b"e"), 100u64, 0u64, 50u64);
     let ver = FileVerificationEntry::new(compute_data_hash(b"v"));
 
     let mut buf = Vec::new();
@@ -3892,19 +3881,17 @@ fn mdb_shard_info_load_from_reader_file_info_break_on_error_with_data() {
     let mut buf = Vec::new();
     MDBShardFileHeader::default().serialize(&mut buf).unwrap();
     let file = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f1"), 1u64, false, false),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            100u32,
-            0u32,
-            0u32,
+            100u64, 0u64, 0u64,
         )],
         verification: vec![],
         metadata_ext: None,
     };
     file.serialize(&mut buf).unwrap();
     let file2 = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f2"), 0u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f2"), 0u64, false, false),
         segments: vec![],
         verification: vec![],
         metadata_ext: None,
@@ -3944,11 +3931,11 @@ fn mdb_shard_info_load_from_reader_xorb_info_error_when_non_empty() {
         .unwrap();
     // Valid xorb info
     let xorb = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 100u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u64, 100u64),
         chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c"),
-            100u32,
-            0u32,
+        compute_data_hash(b"c"),
+        100u64,
+        0u64,
         )],
     };
     xorb.serialize(&mut buf).unwrap();
@@ -3967,12 +3954,10 @@ fn mdb_shard_info_load_from_reader_full_roundtrip() {
     MDBShardFileHeader::default().serialize(&mut buf).unwrap();
 
     let file = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, false),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            100u32,
-            0u32,
-            50u32,
+            100u64, 0u64, 50u64,
         )],
         verification: vec![],
         metadata_ext: None,
@@ -3983,11 +3968,11 @@ fn mdb_shard_info_load_from_reader_full_roundtrip() {
         .unwrap();
 
     let xorb = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u32, 100u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 1u64, 100u64),
         chunks: vec![XorbChunkSequenceEntry::new(
-            compute_data_hash(b"c"),
-            100u32,
-            0u32,
+        compute_data_hash(b"c"),
+        100u64,
+        0u64,
         )],
     };
     xorb.serialize(&mut buf).unwrap();
@@ -4013,12 +3998,12 @@ fn mdb_shard_info_load_from_reader_full_roundtrip() {
 fn mdb_shard_info_serialize_from_roundtrip() {
     let mut shard = crate::metadata_shard::shard_in_memory::MDBInMemoryShard::default();
     let xorb = MDBXorbInfo {
-        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 0u32, 0u32),
+        metadata: XorbChunkSequenceHeader::new(compute_data_hash(b"x"), 0u64, 0u64),
         chunks: vec![],
     };
     shard.add_xorb_block(xorb).unwrap();
     let file = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 0u32, false, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 0u64, false, false),
         segments: vec![],
         verification: vec![],
         metadata_ext: None,
@@ -4036,11 +4021,11 @@ fn mdb_shard_info_serialize_from_roundtrip() {
 
 #[test]
 fn mdb_xorb_info_deserialize_empty_chunks() {
-    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"empty"), 0u32, 0u32);
+    let header = XorbChunkSequenceHeader::new(compute_data_hash(b"empty"), 0u64, 0u64);
     let mut buf = Vec::new();
     header.serialize(&mut buf).unwrap();
     let mut cursor = Cursor::new(&buf);
-    let result = MDBXorbInfo::deserialize(&mut cursor).unwrap();
+    let result = MDBXorbInfo::deserialize(&mut cursor, 3).unwrap();
     assert!(result.is_some());
     let info = result.unwrap();
     assert_eq!(info.chunks.len(), 0);
@@ -4051,7 +4036,7 @@ fn mdb_xorb_info_deserialize_empty_chunks() {
 fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_clear_hash_mod_nonzero() {
     // Create entry with flag cleared and hash where [3] % 1024 != 0
     let h = DataHash::from([0, 0, 0, 5]); // 5 % 1024 != 0
-    let entry = XorbChunkSequenceEntry::new(h, 100u32, 0u32);
+    let entry = XorbChunkSequenceEntry::new(h, 100u64, 0u64);
     let entry = entry.with_global_dedup_flag(false);
     assert!(!entry.is_global_dedup_eligible());
 }
@@ -4060,7 +4045,7 @@ fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_clear_hash_mod_nonzer
 fn xorb_chunk_sequence_entry_is_global_dedup_eligible_flag_set_overrides_hash() {
     // Entry with flag set but hash where [3] % 1024 != 0 → still eligible
     let h = DataHash::from([0, 0, 0, 5]); // 5 % 1024 != 0
-    let entry = XorbChunkSequenceEntry::new(h, 100u32, 0u32);
+    let entry = XorbChunkSequenceEntry::new(h, 100u64, 0u64);
     let entry = entry.with_global_dedup_flag(true);
     assert!(entry.is_global_dedup_eligible());
 }
@@ -4149,10 +4134,10 @@ fn raw_xorb_data_xorb_info_chunks_and_boundaries_empty() {
 #[test]
 fn mdb_file_info_num_bytes_with_verification() {
     let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, true, false),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u64, true, false),
         segments: vec![
-            FileDataSequenceEntry::new(MerkleHash::default(), 50u32, 0u32, 25u32),
-            FileDataSequenceEntry::new(MerkleHash::default(), 75u32, 25u32, 50u32),
+            FileDataSequenceEntry::new(MerkleHash::default(), 50u64, 0u64, 25u64),
+            FileDataSequenceEntry::new(MerkleHash::default(), 75u64, 25u64, 50u64),
         ],
         verification: vec![
             FileVerificationEntry::new(compute_data_hash(b"v1")),
@@ -4168,12 +4153,10 @@ fn mdb_file_info_num_bytes_with_verification() {
 #[test]
 fn mdb_file_info_num_bytes_with_metadata_ext() {
     let info = MDBFileInfo {
-        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u32, false, true),
+        metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1u64, false, true),
         segments: vec![FileDataSequenceEntry::new(
             MerkleHash::default(),
-            100u32,
-            0u32,
-            50u32,
+            100u64, 0u64, 50u64,
         )],
         verification: vec![],
         metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
@@ -4188,7 +4171,7 @@ fn mdb_file_info_num_bytes_with_metadata_ext() {
 
 #[test]
 fn file_data_sequence_header_num_info_entry_following_zero_entries() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, true, true);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u64, true, true);
     assert_eq!(header.num_info_entry_following(), 1);
 }
 
@@ -4198,7 +4181,7 @@ fn file_data_sequence_header_num_info_entry_following_zero_entries() {
 
 #[test]
 fn file_data_sequence_header_contains_neither() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u32, false, false);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 0u64, false, false);
     assert!(!header.contains_verification());
     assert!(!header.contains_metadata_ext());
 }
@@ -4209,7 +4192,7 @@ fn file_data_sequence_header_contains_neither() {
 
 #[test]
 fn mdb_file_info_view_from_data_too_small_with_flags() {
-    let header = FileDataSequenceHeader::new(MerkleHash::default(), 1u32, true, true);
+    let header = FileDataSequenceHeader::new(MerkleHash::default(), 1u64, true, true);
     let result = MDBFileInfoView::from_data_and_header(header, bytes::Bytes::from(vec![0u8; 10]));
     assert!(result.is_err());
 }

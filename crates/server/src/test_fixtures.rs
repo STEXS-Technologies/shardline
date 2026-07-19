@@ -66,13 +66,13 @@ pub fn single_file_shard(parts: &[(&[u8], &str)]) -> (Bytes, String) {
             .add_xorb_block(MDBXorbInfo {
                 metadata: XorbChunkSequenceHeader::new(
                     xorb_hash,
-                    1_u32,
-                    u32::try_from(bytes.len()).unwrap_or(0),
+                    1_u64,
+                    u64::try_from(bytes.len()).unwrap_or(0),
                 ),
                 chunks: vec![XorbChunkSequenceEntry::new(
                     chunk_hash,
-                    u32::try_from(bytes.len()).unwrap_or(0),
-                    0_u32,
+                    u64::try_from(bytes.len()).unwrap_or(0),
+                    0_u64,
                 )],
             })
             .ok();
@@ -82,9 +82,9 @@ pub fn single_file_shard(parts: &[(&[u8], &str)]) -> (Bytes, String) {
         }
         file_segments.push(FileDataSequenceEntry::new(
             xorb_hash,
-            u32::try_from(bytes.len()).unwrap_or(0),
-            0_u32,
-            1_u32,
+            u64::try_from(bytes.len()).unwrap_or(0),
+            0_u64,
+            1_u64,
         ));
         file_chunks.push((chunk_hash, u64::try_from(bytes.len()).unwrap_or(0)));
     }
@@ -92,7 +92,7 @@ pub fn single_file_shard(parts: &[(&[u8], &str)]) -> (Bytes, String) {
     let file_hash = file_hash(&file_chunks);
     let add_file = shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash, u32::try_from(file_segments.len()).unwrap_or(0), false, false),
+            metadata: FileDataSequenceHeader::new(file_hash, u64::try_from(file_segments.len()).unwrap_or(0), false, false),
             segments: file_segments,
             verification: Vec::new(),
             metadata_ext: None,

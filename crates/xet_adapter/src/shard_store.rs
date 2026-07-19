@@ -136,9 +136,9 @@ pub fn retained_shard_chunk_hashes(
     limits: ShardMetadataLimits,
 ) -> Result<Vec<String>, XetAdapterError> {
     let mut shard_reader = Cursor::new(shard_bytes);
-    MDBShardFileHeader::deserialize(&mut shard_reader)
+    let header = MDBShardFileHeader::deserialize(&mut shard_reader)
         .map_err(|error| invalid_serialized_shard(&error))?;
-    read_bounded_shard_sections(&mut shard_reader, limits)
+    read_bounded_shard_sections(&mut shard_reader, limits, header.version)
         .map(|bounded_shard| bounded_shard.dedupe_chunk_hashes)
 }
 
@@ -156,9 +156,10 @@ fn parse_shard_records(
     limits: ShardMetadataLimits,
 ) -> Result<NormalizedShardUpload, XetAdapterError> {
     let mut shard_reader = Cursor::new(uploaded_shard);
-    MDBShardFileHeader::deserialize(&mut shard_reader)
+    let header = MDBShardFileHeader::deserialize(&mut shard_reader)
         .map_err(|error| invalid_serialized_shard(&error))?;
-    let bounded_shard = read_bounded_shard_sections(&mut shard_reader, limits)?;
+    let version = header.version;
+    let bounded_shard = read_bounded_shard_sections(&mut shard_reader, limits, version)?;
     let mut in_memory_shard = MDBInMemoryShard::default();
     validate_referenced_xorb_count(&bounded_shard.file_infos, limits.max_xorbs().get())?;
 
@@ -198,14 +199,15 @@ struct BoundedShardSections {
 fn read_bounded_shard_sections<R: Read>(
     reader: &mut R,
     limits: ShardMetadataLimits,
+    version: u64,
 ) -> Result<BoundedShardSections, XetAdapterError> {
     let mut file_infos = Vec::new();
     let mut file_start_entries = HashMap::<MerkleHash, HashSet<usize>>::new();
-    read_bounded_file_sections(reader, &mut file_infos, &mut file_start_entries, limits)?;
+    read_bounded_file_sections(reader, &mut file_infos, &mut file_start_entries, limits, version)?;
 
     let mut xorb_infos = Vec::new();
     let dedupe_chunk_hashes =
-        read_bounded_xorb_sections(reader, &file_start_entries, &mut xorb_infos, limits)?;
+        read_bounded_xorb_sections(reader, &file_start_entries, &mut xorb_infos, limits, version)?;
 
     Ok(BoundedShardSections {
         file_infos,
@@ -219,11 +221,12 @@ fn read_bounded_file_sections<R: Read>(
     file_infos: &mut Vec<MDBFileInfo>,
     file_start_entries: &mut HashMap<MerkleHash, HashSet<usize>>,
     limits: ShardMetadataLimits,
+    version: u64,
 ) -> Result<(), XetAdapterError> {
     let mut reconstruction_terms = 0_usize;
 
     loop {
-        let header = FileDataSequenceHeader::deserialize(reader)
+        let header = FileDataSequenceHeader::deserialize(reader, version)
             .map_err(|error| invalid_serialized_shard(&error))?;
         if header.is_bookend() {
             return Ok(());
@@ -263,12 +266,13 @@ fn read_bounded_xorb_sections<R: Read>(
     file_start_entries: &HashMap<MerkleHash, HashSet<usize>>,
     xorb_infos: &mut Vec<MDBXorbInfo>,
     limits: ShardMetadataLimits,
+    version: u64,
 ) -> Result<Vec<String>, XetAdapterError> {
     let mut xorb_chunks = 0_usize;
     let mut dedupe_chunk_hashes = BTreeSet::new();
 
     loop {
-        let header = XorbChunkSequenceHeader::deserialize(reader)
+        let header = XorbChunkSequenceHeader::deserialize(reader, version)
             .map_err(|error| invalid_serialized_shard(&error))?;
         if header.is_bookend() {
             return Ok(dedupe_chunk_hashes.into_iter().collect());
@@ -476,15 +480,15 @@ fn build_file_records_from_infos(
                         InvalidSerializedShardError::XorbMetadataCacheInsertionFailed,
                     ))?
             };
-            let packed_start = xorb_info.packed_start(range_start)?;
-            let packed_end = xorb_info.packed_end(range_end)?;
+            let packed_start = xorb_info.packed_start(range_start as u32)?;
+            let packed_end = xorb_info.packed_end(range_end as u32)?;
             let length = u64::from(segment.unpacked_segment_bytes);
             chunks.push(FileChunkRecord {
                 hash,
                 offset,
                 length,
-                range_start,
-                range_end,
+                range_start: range_start as u32,
+                range_end: range_end as u32,
                 packed_start,
                 packed_end,
             });
@@ -737,10 +741,10 @@ mod tests {
         let file_hash = file_hash(&[(first_chunk_hash, 1_u64), (second_chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 2u32, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 2u64, false, false),
                 segments: vec![
-                    FileDataSequenceEntry::new(first_xorb_hash, 1_u32, 0_u32, 1_u32),
-                    FileDataSequenceEntry::new(second_xorb_hash, 1_u32, 0_u32, 1_u32),
+                    FileDataSequenceEntry::new(first_xorb_hash, 1_u64, 0_u64, 1_u64),
+                    FileDataSequenceEntry::new(second_xorb_hash, 1_u64, 0_u64, 1_u64),
                 ],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -763,14 +767,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -814,17 +818,17 @@ mod tests {
         let file_chunks = vec![(chunk_hash, 1_u64); term_count];
         let file_hash = file_hash(&file_chunks);
         let file_segments =
-            vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32); term_count];
+            vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64); term_count];
         serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, file_segments.len() as u32, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, file_segments.len() as u64, false, false),
                 segments: file_segments,
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         )
     }
@@ -837,21 +841,21 @@ mod tests {
         for chunk_index in 0..chunk_count {
             chunks.push(XorbChunkSequenceEntry::new(
                 chunk_hash,
-                1_u32,
-                u32::try_from(chunk_index).unwrap_or(0),
+                1_u64,
+                u64::try_from(chunk_index).unwrap_or(0),
             ));
         }
 
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, chunks.len() as u32, chunks.len() as u32),
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, chunks.len() as u64, chunks.len() as u64),
                 chunks,
             }],
         )
@@ -955,7 +959,7 @@ mod tests {
         let seg_count = 3usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u32,
+            seg_count as u64,
             false,
             false,
         );
@@ -968,7 +972,7 @@ mod tests {
         let seg_count = 3usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u32,
+            seg_count as u64,
             true,
             false,
         );
@@ -981,7 +985,7 @@ mod tests {
         let seg_count = 3usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u32,
+            seg_count as u64,
             false,
             true,
         );
@@ -994,7 +998,7 @@ mod tests {
         let seg_count = 2usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count as u32,
+            seg_count as u64,
             true,
             true,
         );
@@ -1142,19 +1146,17 @@ mod tests {
         let file_hash_bytes = compute_data_hash(b"file");
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash_bytes, 1u32, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash_bytes, 1u64, false, false),
                 segments: vec![FileDataSequenceEntry::new(
                     xorb_hash_bytes,
-                    1_u32,
-                    0_u32,
-                    1_u32,
+                    1_u64, 0_u64, 1_u64,
                 )],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash_bytes, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash_bytes, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -1210,14 +1212,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -1273,14 +1275,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -1324,14 +1326,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -1365,14 +1367,14 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -1456,14 +1458,14 @@ mod tests {
         // Create file info with verification=true, metadata_ext=false
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, true, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, true, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64)],
                 verification: vec![FileVerificationEntry::new(MerkleHash::default())],
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u32, 1_u32),
-                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32)],
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 1_u64, 1_u64),
+                chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64)],
             }],
         );
 
@@ -1487,19 +1489,19 @@ mod tests {
         let xorb_hash = xorb_hash(&[(chunk_a, 8_u64), (chunk_b, 8_u64)]);
 
         let chunks = vec![
-            XorbChunkSequenceEntry::new(chunk_a, 8_u32, 0_u32),
-            XorbChunkSequenceEntry::new(chunk_b, 8_u32, 8_u32).with_global_dedup_flag(true),
+            XorbChunkSequenceEntry::new(chunk_a, 8_u64, 0_u64),
+            XorbChunkSequenceEntry::new(chunk_b, 8_u64, 8_u64).with_global_dedup_flag(true),
         ];
 
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(combined_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 16_u32, 0_u32, 2_u32)],
+                metadata: FileDataSequenceHeader::new(combined_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 16_u64, 0_u64, 2_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 2_u32, 16_u32),
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 2_u64, 16_u64),
                 chunks,
             }],
         );
@@ -1771,16 +1773,16 @@ mod tests {
         // Use a file that starts at chunk index 1, so chunk 0 is not a file start
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 1_u32, 2_u32)],
+                metadata: FileDataSequenceHeader::new(file_hash, 1u64, false, false),
+                segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 1_u64, 2_u64)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, 2_u32, 2_u32),
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, 2_u64, 2_u64),
                 chunks: vec![
-                    XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 0_u32),
-                    XorbChunkSequenceEntry::new(chunk_hash, 1_u32, 1_u32),
+                    XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 0_u64),
+                    XorbChunkSequenceEntry::new(chunk_hash, 1_u64, 1_u64),
                 ],
             }],
         );

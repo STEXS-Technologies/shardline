@@ -52,13 +52,13 @@ impl MDBInMemoryShard {
             acc + file
                 .segments
                 .iter()
-                .fold(0u64, |acc, entry| acc + entry.unpacked_segment_bytes as u64)
+                .fold(0u64, |acc, entry| acc + entry.unpacked_segment_bytes)
         })
     }
 
     pub fn stored_bytes(&self) -> u64 {
         self.xorb_content.iter().fold(0u64, |acc, (_, xorb)| {
-            acc + xorb.metadata.num_bytes_in_xorb as u64
+            acc + xorb.metadata.num_bytes_in_xorb
         })
     }
 
@@ -80,7 +80,7 @@ mod tests {
         MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader,
     };
 
-    fn make_file_info(num_entries: u32, unpacked: u32) -> MDBFileInfo {
+    fn make_file_info(num_entries: u64, unpacked: u64) -> MDBFileInfo {
         let entries = (0..num_entries)
             .map(|i| {
                 FileDataSequenceEntry::new(
@@ -104,7 +104,7 @@ mod tests {
         }
     }
 
-    fn make_xorb_info(num_chunks: u32, bytes_per_chunk: u32) -> MDBXorbInfo {
+    fn make_xorb_info(num_chunks: u64, bytes_per_chunk: u64) -> MDBXorbInfo {
         let entries = (0..num_chunks)
             .map(|i| {
                 XorbChunkSequenceEntry::new(
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(shard.stored_bytes(), 200);
     }
 
-    fn make_xorb_info_v2(hash_data: &[u8], num_chunks: u32, bytes_per_chunk: u32) -> MDBXorbInfo {
+    fn make_xorb_info_v2(hash_data: &[u8], num_chunks: u64, bytes_per_chunk: u64) -> MDBXorbInfo {
         let entries = (0..num_chunks)
             .map(|i| {
                 XorbChunkSequenceEntry::new(
@@ -230,7 +230,7 @@ mod tests {
     fn add_file_with_zero_entries() {
         let mut shard = MDBInMemoryShard::default();
         let info = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 0u32, false, false),
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 0u64, false, false),
             segments: vec![],
             verification: vec![],
             metadata_ext: None,
@@ -244,10 +244,10 @@ mod tests {
     fn materialized_bytes_with_multiple_segments() {
         let mut shard = MDBInMemoryShard::default();
         let info = MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u32, false, false),
+            metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 2u64, false, false),
             segments: vec![
-                FileDataSequenceEntry::new(compute_data_hash(b"x1"), 100u32, 0u32, 50u32),
-                FileDataSequenceEntry::new(compute_data_hash(b"x2"), 200u32, 50u32, 100u32),
+                FileDataSequenceEntry::new(compute_data_hash(b"x1"), 100u64, 0u64, 50u64),
+                FileDataSequenceEntry::new(compute_data_hash(b"x2"), 200u64, 50u64, 100u64),
             ],
             verification: vec![],
             metadata_ext: None,

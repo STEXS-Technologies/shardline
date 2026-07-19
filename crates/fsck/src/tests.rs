@@ -1323,12 +1323,12 @@ async fn run_fsck_with_invalid_dedupe_shard_mapping_detected() {
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_val,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1336,9 +1336,9 @@ async fn run_fsck_with_invalid_dedupe_shard_mapping_detected() {
         .unwrap();
     shard
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
@@ -1422,12 +1422,12 @@ async fn run_fsck_with_dedupe_shard_added_to_reachability() {
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u64, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_val,
-                chunk_data.len() as u32,
-                0_u32,
-                1_u32,
+                chunk_data.len() as u64,
+                0_u64,
+                1_u64,
             )],
             verification: Vec::new(),
             metadata_ext: None,
@@ -1435,9 +1435,9 @@ async fn run_fsck_with_dedupe_shard_added_to_reachability() {
         .unwrap();
     shard
         .add_xorb_block(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u32, chunk_data.len() as u32),
+            metadata: XorbChunkSequenceHeader::new(xorb_val, 1_u64, chunk_data.len() as u64),
             chunks: vec![
-                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u32, 0_u32)
+                XorbChunkSequenceEntry::new(chunk_hash, chunk_data.len() as u64, 0_u64)
                     .with_global_dedup_flag(true),
             ],
         })
