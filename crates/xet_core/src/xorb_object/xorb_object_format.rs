@@ -63,7 +63,6 @@ impl Default for XorbObjectInfoV0 {
     }
 }
 
-#[allow(deprecated)]
 impl XorbObjectInfoV0 {
     #[deprecated]
     pub fn serialize<W: Write>(&self, writer: &mut W) -> Result<usize, CoreError> {
