@@ -25,8 +25,8 @@ fn make_record(chunk_count: usize) -> FileRecord {
             hash,
             offset,
             length,
-            range_start: i as u32,
-            range_end: i as u32 + 1,
+            range_start: i as u64,
+            range_end: i as u64 + 1,
             packed_start: offset,
             packed_end: offset + length,
         });

@@ -445,7 +445,7 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         normalize_serialized_xorb(expected_xorb_hash, &serialized.serialized_data)?;
     let mut reader = Cursor::new(normalized_xorb.as_slice());
     let validated = validate_serialized_xorb(&mut reader, expected_xorb_hash)?;
-    let range_end = u32::try_from(validated.chunks().len())?;
+    let range_end = u64::try_from(validated.chunks().len())?;
     let mut chunk_hashes = std::collections::HashSet::new();
     try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded_chunk| {
         chunk_hashes.insert(xet_hash_hex_string(decoded_chunk.descriptor().hash()));

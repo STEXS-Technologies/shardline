@@ -78,7 +78,7 @@ fn build_xorb_with_content(
         let chunk_hash = compute_data_hash(&chunk);
         original_chunks.push(chunk.clone());
         all_data.extend_from_slice(&chunk);
-        let boundary = u32::try_from((i + 1) * chunk_size).expect("boundary fits in u32");
+        let boundary = u64::try_from((i + 1) * chunk_size).expect("boundary fits in u64");
         boundaries.push((chunk_hash, boundary));
         chunk_specs.push((
             chunk_hash,

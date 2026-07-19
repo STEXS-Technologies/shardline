@@ -1562,11 +1562,11 @@ async fn scan_record_tree_latest_native_xet_valid_xorb_clean() {
 
     // Serialize the xorb
     let packed_data: Vec<u8> = chunk_data.iter().flat_map(|d| d.clone()).collect();
-    let mut offset = 0u32;
+    let mut offset = 0u64;
     let raw_chunk_boundaries: Vec<_> = chunk_data
         .iter()
         .map(|d| {
-            offset += d.len() as u32;
+            offset += d.len() as u64;
             offset
         })
         .collect();
@@ -1617,7 +1617,7 @@ async fn scan_record_tree_latest_native_xet_valid_xorb_clean() {
     }
 
     // Create a record with chunk_size=0 (native Xet term)
-    let num_chunks = chunk_data.len() as u32;
+    let num_chunks = chunk_data.len() as u64;
     let chunks = vec![shardline_index::FileChunkRecord {
         hash: xorb_hash_hex,
         offset: 0,
@@ -1718,7 +1718,7 @@ async fn scan_record_tree_latest_native_xet_range_exceeds_chunks() {
     let serialized = serialized_xorb_object_from_components(
         &xorb_merkle_hash,
         chunk_data.clone(),
-        vec![(chunk_hash, chunk_data.len() as u32)],
+        vec![(chunk_hash, chunk_data.len() as u64)],
         CompressionScheme::None,
     )
     .unwrap();
@@ -1822,7 +1822,7 @@ async fn scan_record_tree_latest_native_xet_missing_inner_chunk() {
     let serialized = serialized_xorb_object_from_components(
         &xorb_merkle_hash,
         chunk_data.clone(),
-        vec![(chunk_hash, chunk_data.len() as u32)],
+        vec![(chunk_hash, chunk_data.len() as u64)],
         CompressionScheme::None,
     )
     .unwrap();
@@ -2077,7 +2077,7 @@ async fn scan_record_tree_latest_native_xet_with_inner_chunks_tracks_reachabilit
     let serialized = serialized_xorb_object_from_components(
         &xorb_merkle_hash,
         chunk_data.to_vec(),
-        vec![(chunk_hash, chunk_data.len() as u32)],
+        vec![(chunk_hash, chunk_data.len() as u64)],
         CompressionScheme::None,
     )
     .unwrap();

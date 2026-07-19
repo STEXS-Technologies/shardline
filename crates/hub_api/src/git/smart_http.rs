@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use thiserror::Error;
 
 use super::pack::{
     GitObject, ObjectType, PackError, apply_delta, create_commit_object, empty_pack, generate_pack,
@@ -23,6 +24,89 @@ use crate::routes::HubState;
 use shardline_index::hub::{HubFileEntry, canonical_ref_name};
 use shardline_protocol::TokenScope;
 use std::collections::HashMap;
+
+/// Error type for Git Smart HTTP operations.
+///
+/// Covers errors from pack parsing, tree walking, commit parsing, and
+/// store interactions during clone/fetch and push operations.
+#[derive(Debug, Error)]
+pub enum SmartHttpError {
+    // ---- store_push_objects errors ----
+    #[error("invalid commit SHA hex: {0}")]
+    InvalidCommitShaHex(String),
+    #[error("commit SHA must be 20 bytes")]
+    CommitShaMustBe20Bytes,
+    #[error("commit not found in pack: {0}")]
+    CommitNotFoundInPack(String),
+    #[error("expected commit object for new SHA")]
+    ExpectedCommitObject,
+    #[error("invalid tree SHA: {0}")]
+    InvalidTreeSha(String),
+    #[error("tree SHA must be 20 bytes")]
+    TreeShaMustBe20Bytes,
+    #[error("failed to store files: {0}")]
+    StoreFiles(String),
+    #[error("failed to store LFS object: {0}")]
+    StoreLfsObject(String),
+    #[error("{0}")]
+    NonFastForward(String),
+    #[error("failed to create revision: {0}")]
+    CreateRevision(String),
+    #[error("failed to delete ref: {0}")]
+    DeleteRef(String),
+    #[error("cannot delete a ref that does not exist")]
+    CannotDeleteNonExistentRef,
+
+    // ---- parse_commit_object errors ----
+    #[error("invalid commit encoding: {0}")]
+    CommitEncoding(String),
+    #[error("commit missing tree header")]
+    CommitMissingTree,
+
+    // ---- walk_git_tree_inner errors ----
+    #[error("tree nesting exceeds maximum depth")]
+    TreeDepthExceeded,
+    #[error("tree object not found: {0}")]
+    TreeObjectNotFound(String),
+    #[error("expected tree object, got {0:?}")]
+    ExpectedTreeObject(ObjectType),
+    #[error("tree position out of bounds")]
+    TreePositionOutOfBounds,
+    #[error("invalid tree entry: missing space after mode")]
+    TreeMissingSpaceAfterMode,
+    #[error("invalid tree entry: mode range out of bounds")]
+    TreeModeRangeOutOfBounds,
+    #[error("invalid mode encoding: {0}")]
+    TreeModeEncoding(String),
+    #[error("tree arithmetic overflow")]
+    TreeArithmeticOverflow,
+    #[error("name position out of bounds")]
+    TreeNamePositionOutOfBounds,
+    #[error("invalid tree entry: missing null after name")]
+    TreeMissingNullAfterName,
+    #[error("invalid tree entry: name range out of bounds")]
+    TreeNameRangeOutOfBounds,
+    #[error("invalid name encoding: {0}")]
+    TreeNameEncoding(String),
+    #[error("invalid tree entry: truncated SHA")]
+    TreeTruncatedSha,
+    #[error("invalid tree entry: SHA range out of bounds")]
+    TreeShaRangeOutOfBounds,
+    #[error("tree depth overflow")]
+    TreeDepthOverflow,
+    #[error("blob object not found: {0}")]
+    BlobObjectNotFound(String),
+    #[error("expected blob object for file, got {0:?}")]
+    ExpectedBlobObject(ObjectType),
+    #[error("invalid LFS pointer encoding: {0}")]
+    LfsPointerEncoding(String),
+    #[error("LFS pointer missing oid field")]
+    LfsPointerMissingOid,
+    #[error("LFS pointer missing size field")]
+    LfsPointerMissingSize,
+    #[error("invalid LFS size: {0}")]
+    LfsPointerSize(String),
+}
 
 /// Query parameters for `GET /info/refs`.
 #[derive(Debug, Deserialize)]
@@ -284,7 +368,7 @@ pub async fn receive_pack(
         };
         match result {
             Ok(()) => results.push((refname.clone(), true, None)),
-            Err(e) => results.push((refname.clone(), false, Some(e))),
+            Err(e) => results.push((refname.clone(), false, Some(e.to_string()))),
         }
     }
 
@@ -935,7 +1019,7 @@ async fn store_push_objects(
     new_sha: &str,
     ref_name: &str,
     objects: &[GitObject],
-) -> Result<(), String> {
+) -> Result<(), SmartHttpError> {
     // Build SHA → object index.
     let mut sha_to_obj: HashMap<[u8; 20], &GitObject> = HashMap::new();
     for obj in objects {
@@ -944,17 +1028,18 @@ async fn store_push_objects(
     }
 
     // Find the commit object for new_sha.
-    let new_sha_bytes = hex::decode(new_sha).map_err(|e| format!("invalid commit SHA hex: {e}"))?;
+    let new_sha_bytes =
+        hex::decode(new_sha).map_err(|e| SmartHttpError::InvalidCommitShaHex(e.to_string()))?;
     let new_sha_arr: [u8; 20] = new_sha_bytes
         .try_into()
-        .map_err(|_err| "commit SHA must be 20 bytes".to_owned())?;
+        .map_err(|_err| SmartHttpError::CommitShaMustBe20Bytes)?;
 
     let commit_obj = sha_to_obj
         .get(&new_sha_arr)
-        .ok_or_else(|| format!("commit not found in pack: {new_sha}"))?;
+        .ok_or_else(|| SmartHttpError::CommitNotFoundInPack(new_sha.to_owned()))?;
 
     if commit_obj.object_type != ObjectType::Commit {
-        return Err("expected commit object for new SHA".to_owned());
+        return Err(SmartHttpError::ExpectedCommitObject);
     }
 
     // Parse commit to extract tree, parent, and message.
@@ -962,10 +1047,10 @@ async fn store_push_objects(
 
     // Walk the tree to collect file entries.
     let tree_sha_bytes =
-        hex::decode(&tree_sha_hex).map_err(|e| format!("invalid tree SHA: {e}"))?;
+        hex::decode(&tree_sha_hex).map_err(|e| SmartHttpError::InvalidTreeSha(e.to_string()))?;
     let tree_sha_arr: [u8; 20] = tree_sha_bytes
         .try_into()
-        .map_err(|_err| "tree SHA must be 20 bytes".to_owned())?;
+        .map_err(|_err| SmartHttpError::TreeShaMustBe20Bytes)?;
 
     let files = walk_git_tree(&tree_sha_arr, &sha_to_obj, "")?;
 
@@ -973,7 +1058,7 @@ async fn store_push_objects(
     state
         .store
         .store_files(new_sha, &files)
-        .map_err(|e| format!("failed to store files: {e}"))?;
+        .map_err(|e| SmartHttpError::StoreFiles(e.to_string()))?;
 
     // Store LFS objects that were included in the pack.
     // LFS pointer blobs only contain metadata; the actual file content is
@@ -990,7 +1075,7 @@ async fn store_push_objects(
                 state
                     .store
                     .put_lfs_object(&file.sha, &blob_obj.data)
-                    .map_err(|e| format!("failed to store LFS object: {e}"))?;
+                    .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
             }
         }
     }
@@ -1003,12 +1088,12 @@ async fn store_push_objects(
         // old_sha doesn't match the current ref value, reject the push.
         match state.store.resolve_revision(repo_id, ref_name) {
             Ok(Some(current)) if current != old_sha => {
-                return Err(format!(
+                return Err(SmartHttpError::NonFastForward(format!(
                     "non-fast-forward (current: {current}, expected: {old_sha})"
-                ));
+                )));
             }
             Ok(None) if old_sha != "0000000000000000000000000000000000000000" => {
-                return Err("non-fast-forward".to_owned());
+                return Err(SmartHttpError::NonFastForward("non-fast-forward".to_owned()));
             }
             _ => {}
         }
@@ -1019,7 +1104,7 @@ async fn store_push_objects(
     state
         .store
         .create_revision(repo_id, parent, new_sha, ref_name, &message)
-        .map_err(|e| format!("failed to create revision: {e}"))?;
+        .map_err(|e| SmartHttpError::CreateRevision(e.to_string()))?;
 
     Ok(())
 }
@@ -1029,22 +1114,25 @@ fn delete_push_ref(
     repo_id: &str,
     old_sha: &str,
     ref_name: &str,
-) -> Result<(), String> {
+) -> Result<(), SmartHttpError> {
     if old_sha == "0000000000000000000000000000000000000000" {
-        return Err("cannot delete a ref that does not exist".to_owned());
+        return Err(SmartHttpError::CannotDeleteNonExistentRef);
     }
     state
         .store
         .delete_ref(repo_id, canonical_ref_name(ref_name), old_sha)
-        .map_err(|e| format!("failed to delete ref: {e}"))
+        .map_err(|e| SmartHttpError::DeleteRef(e.to_string()))
 }
 
 /// Parses a raw Git commit object and extracts tree SHA, parent SHA, and message.
 ///
 /// Format: `"tree <sha>\nparent <sha>\nauthor ...\ncommitter ...\n\n<message>"`
 #[doc(hidden)]
-pub fn parse_commit_object(data: &[u8]) -> Result<(String, Option<String>, String), String> {
-    let text = std::str::from_utf8(data).map_err(|e| format!("invalid commit encoding: {e}"))?;
+pub fn parse_commit_object(
+    data: &[u8],
+) -> Result<(String, Option<String>, String), SmartHttpError> {
+    let text =
+        std::str::from_utf8(data).map_err(|e| SmartHttpError::CommitEncoding(e.to_string()))?;
 
     let mut tree_sha = None;
     let mut parent_sha = None;
@@ -1063,7 +1151,7 @@ pub fn parse_commit_object(data: &[u8]) -> Result<(String, Option<String>, Strin
         }
     }
 
-    let tree = tree_sha.ok_or("commit missing tree header")?;
+    let tree = tree_sha.ok_or(SmartHttpError::CommitMissingTree)?;
     Ok((tree, parent_sha, message.to_owned()))
 }
 
@@ -1079,7 +1167,7 @@ pub fn walk_git_tree(
     tree_sha: &[u8; 20],
     objects: &HashMap<[u8; 20], &GitObject>,
     prefix: &str,
-) -> Result<Vec<HubFileEntry>, String> {
+) -> Result<Vec<HubFileEntry>, SmartHttpError> {
     walk_git_tree_inner(tree_sha, objects, prefix, 0)
 }
 
@@ -1088,20 +1176,17 @@ fn walk_git_tree_inner(
     objects: &HashMap<[u8; 20], &GitObject>,
     prefix: &str,
     depth: usize,
-) -> Result<Vec<HubFileEntry>, String> {
+) -> Result<Vec<HubFileEntry>, SmartHttpError> {
     if depth > MAX_TREE_DEPTH {
-        return Err("tree nesting exceeds maximum depth".to_owned());
+        return Err(SmartHttpError::TreeDepthExceeded);
     }
 
-    let tree_obj = objects
-        .get(tree_sha)
-        .ok_or_else(|| format!("tree object not found: {}", hex::encode(tree_sha)))?;
+    let tree_obj = objects.get(tree_sha).ok_or_else(|| {
+        SmartHttpError::TreeObjectNotFound(hex::encode(tree_sha))
+    })?;
 
     if tree_obj.object_type != ObjectType::Tree {
-        return Err(format!(
-            "expected tree object, got {:?}",
-            tree_obj.object_type
-        ));
+        return Err(SmartHttpError::ExpectedTreeObject(tree_obj.object_type));
     }
 
     let mut entries = Vec::new();
@@ -1113,67 +1198,67 @@ fn walk_git_tree_inner(
         // SAFETY: While loop ensures pos < data.len(), so data.get(pos..) is Some.
         // .position() scans from pos for the first space byte. If found, space_pos
         // is relative to pos, so pos + space_pos < data.len().
-        let tail = data.get(pos..).ok_or("tree position out of bounds")?;
+        let tail = data.get(pos..).ok_or(SmartHttpError::TreePositionOutOfBounds)?;
         let space_pos = tail
             .iter()
             .position(|&b| b == b' ')
-            .ok_or("invalid tree entry: missing space after mode")?;
+            .ok_or(SmartHttpError::TreeMissingSpaceAfterMode)?;
         // SAFETY: space_pos found within data[pos..], so it fits within bounds.
         // Using .and_then chaining avoids the addition expression entirely.
         let mode_slice = data
             .get(pos..)
             .and_then(|s| s.get(..space_pos))
-            .ok_or("invalid tree entry: mode range out of bounds")?;
-        let mode_str =
-            std::str::from_utf8(mode_slice).map_err(|e| format!("invalid mode encoding: {e}"))?;
+            .ok_or(SmartHttpError::TreeModeRangeOutOfBounds)?;
+        let mode_str = std::str::from_utf8(mode_slice)
+            .map_err(|e| SmartHttpError::TreeModeEncoding(e.to_string()))?;
 
         // Parse name (until null byte).
         // SAFETY: pos + space_pos < data.len() (proven above), so name_start <= data.len()
         let name_start = pos
             .checked_add(space_pos)
             .and_then(|p| p.checked_add(1))
-            .ok_or("tree arithmetic overflow")?;
+            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
         // SAFETY: name_start <= data.len() so the slice is valid (empty if equal)
         let name_tail = data
             .get(name_start..)
-            .ok_or("name position out of bounds")?;
+            .ok_or(SmartHttpError::TreeNamePositionOutOfBounds)?;
         let null_pos = name_tail
             .iter()
             .position(|&b| b == 0)
-            .ok_or("invalid tree entry: missing null after name")?;
+            .ok_or(SmartHttpError::TreeMissingNullAfterName)?;
         // SAFETY: null_pos found within data[name_start..], so it fits within bounds.
         let name_slice = data
             .get(name_start..)
             .and_then(|s| s.get(..null_pos))
-            .ok_or("invalid tree entry: name range out of bounds")?;
-        let name =
-            std::str::from_utf8(name_slice).map_err(|e| format!("invalid name encoding: {e}"))?;
+            .ok_or(SmartHttpError::TreeNameRangeOutOfBounds)?;
+        let name = std::str::from_utf8(name_slice)
+            .map_err(|e| SmartHttpError::TreeNameEncoding(e.to_string()))?;
 
         // Parse SHA (20 bytes after null).
         // SAFETY: name_start + null_pos < data.len() (proven above), so sha_start <= data.len()
         let sha_start = name_start
             .checked_add(null_pos)
             .and_then(|p| p.checked_add(1))
-            .ok_or("tree arithmetic overflow")?;
+            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
         // SAFETY: sha_start + 20 <= data.len() checked below with checked_add
         let sha_end = sha_start
             .checked_add(20)
-            .ok_or("tree arithmetic overflow")?;
+            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
         if sha_end > data.len() {
-            return Err("invalid tree entry: truncated SHA".to_owned());
+            return Err(SmartHttpError::TreeTruncatedSha);
         }
         let mut entry_sha = [0u8; 20];
         // SAFETY: sha_start + 20 <= data.len() checked above
         let sha_slice = data
             .get(sha_start..)
             .and_then(|s| s.get(..20))
-            .ok_or("invalid tree entry: SHA range out of bounds")?;
+            .ok_or(SmartHttpError::TreeShaRangeOutOfBounds)?;
         entry_sha.copy_from_slice(sha_slice);
 
         // SAFETY: sha_start + 20 <= data.len() (checked above) so next pos is valid or == len
         pos = sha_start
             .checked_add(20)
-            .ok_or("tree arithmetic overflow")?;
+            .ok_or(SmartHttpError::TreeArithmeticOverflow)?;
 
         let full_path = if prefix.is_empty() {
             name.to_owned()
@@ -1183,20 +1268,17 @@ fn walk_git_tree_inner(
 
         if mode_str == "40000" {
             // Directory — recurse into subtree.
-            let next_depth = depth.checked_add(1).ok_or("tree depth overflow")?;
+            let next_depth = depth.checked_add(1).ok_or(SmartHttpError::TreeDepthOverflow)?;
             let mut sub_entries = walk_git_tree_inner(&entry_sha, objects, &full_path, next_depth)?;
             entries.append(&mut sub_entries);
         } else if mode_str == "100644" || mode_str == "100755" {
             // Regular file.
-            let blob_obj = objects
-                .get(&entry_sha)
-                .ok_or_else(|| format!("blob object not found: {}", hex::encode(entry_sha)))?;
+            let blob_obj = objects.get(&entry_sha).ok_or_else(|| {
+                SmartHttpError::BlobObjectNotFound(hex::encode(entry_sha))
+            })?;
 
             if blob_obj.object_type != ObjectType::Blob {
-                return Err(format!(
-                    "expected blob object for file, got {:?}",
-                    blob_obj.object_type
-                ));
+                return Err(SmartHttpError::ExpectedBlobObject(blob_obj.object_type));
             }
 
             // Check if this is an LFS pointer.
@@ -1205,14 +1287,14 @@ fn walk_git_tree_inner(
                 .starts_with(b"version https://git-lfs.github.com/spec/v1")
             {
                 let text = std::str::from_utf8(&blob_obj.data)
-                    .map_err(|e| format!("invalid LFS pointer encoding: {e}"))?;
-                let oid =
-                    parse_lfs_pointer_field(text, "oid").ok_or("LFS pointer missing oid field")?;
+                    .map_err(|e| SmartHttpError::LfsPointerEncoding(e.to_string()))?;
+                let oid = parse_lfs_pointer_field(text, "oid")
+                    .ok_or(SmartHttpError::LfsPointerMissingOid)?;
                 let size_str = parse_lfs_pointer_field(text, "size")
-                    .ok_or("LFS pointer missing size field")?;
+                    .ok_or(SmartHttpError::LfsPointerMissingSize)?;
                 let size: u64 = size_str
-                    .parse()
-                    .map_err(|e| format!("invalid LFS size: {e}"))?;
+                    .parse::<u64>()
+                    .map_err(|e: std::num::ParseIntError| SmartHttpError::LfsPointerSize(e.to_string()))?;
 
                 entries.push(HubFileEntry {
                     path: full_path,
@@ -1515,7 +1597,7 @@ mod tests {
                       Some message\n";
         let result = parse_commit_object(data);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing tree"));
+        assert!(result.unwrap_err().to_string().contains("missing tree"));
     }
 
     // --- apply_delta tests ---
@@ -1705,7 +1787,7 @@ mod tests {
             "should fail at depth 129 (exceeds MAX_TREE_DEPTH)"
         );
         assert!(
-            result.unwrap_err().contains("exceeds maximum depth"),
+            result.unwrap_err().to_string().contains("exceeds maximum depth"),
             "error message should mention depth"
         );
     }
@@ -2396,7 +2478,7 @@ mod tests {
         let data = b"\xff\xfe\x00";
         let result = parse_commit_object(data);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid commit encoding"));
+        assert!(result.unwrap_err().to_string().contains("invalid commit encoding"));
     }
 
     // --- walk_git_tree with invalid/non-standard entries ---
@@ -2450,7 +2532,7 @@ mod tests {
 
         let result = walk_git_tree(&tree_sha, &objects, "");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("expected tree object"));
+        assert!(result.unwrap_err().to_string().contains("expected tree object"));
     }
 
     // --- build_gitattributes_blob with multiple LFS files ---

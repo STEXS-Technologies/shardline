@@ -32,7 +32,7 @@ pub fn single_chunk_xorb(bytes: &[u8]) -> (Bytes, String) {
     let serialized = serialized_xorb_object_from_components(
         &xorb_hash,
         bytes.to_vec(),
-        vec![(chunk_hash, u32::try_from(bytes.len()).unwrap_or(0))],
+        vec![(chunk_hash, u64::try_from(bytes.len()).unwrap_or(0))],
         CompressionScheme::None,
     )
     .ok();

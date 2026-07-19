@@ -77,10 +77,10 @@ pub struct FileChunkRecord {
     pub length: u64,
     /// Start member index inside the referenced protocol object.
     #[serde(default)]
-    pub range_start: u32,
+    pub range_start: u64,
     /// End-exclusive member index inside the referenced protocol object.
     #[serde(default = "default_range_end")]
-    pub range_end: u32,
+    pub range_end: u64,
     /// Inclusive start byte for the serialized protocol object range that covers this term.
     #[serde(default)]
     pub packed_start: u64,
@@ -89,7 +89,7 @@ pub struct FileChunkRecord {
     pub packed_end: u64,
 }
 
-const fn default_range_end() -> u32 {
+const fn default_range_end() -> u64 {
     1
 }
 

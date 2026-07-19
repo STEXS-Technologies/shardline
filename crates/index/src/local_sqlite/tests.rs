@@ -1034,7 +1034,7 @@ fn sample_state_machine_provider_states() -> Vec<ProviderRepositoryState> {
     ]
 }
 
-type CanonicalChunk = (String, u64, u64, u32, u32, u64, u64);
+type CanonicalChunk = (String, u64, u64, u64, u64, u64, u64);
 type CanonicalRecord = (
     Option<String>,
     String,

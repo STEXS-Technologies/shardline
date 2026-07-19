@@ -487,8 +487,8 @@ fn build_file_records_from_infos(
                 hash,
                 offset,
                 length,
-                range_start: range_start as u32,
-                range_end: range_end as u32,
+                range_start,
+                range_end,
                 packed_start,
                 packed_end,
             });

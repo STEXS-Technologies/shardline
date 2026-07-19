@@ -34,7 +34,7 @@ fn xorb_roundtrip_none_compression() {
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_len = obj.info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    buf.extend_from_slice(&(info_len as u64).to_le_bytes());
 
     // Deserialize the xorb object
     let mut cursor = Cursor::new(&buf);
@@ -74,7 +74,7 @@ fn xorb_roundtrip_lz4_compression() {
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_len = obj.info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    buf.extend_from_slice(&(info_len as u64).to_le_bytes());
 
     let mut cursor = Cursor::new(&buf);
     let deserialized = XorbObject::deserialize(&mut cursor).unwrap();
@@ -109,7 +109,7 @@ fn xorb_roundtrip_bg4_lz4_compression() {
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_len = obj.info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    buf.extend_from_slice(&(info_len as u64).to_le_bytes());
 
     let mut cursor = Cursor::new(&buf);
     let deserialized = XorbObject::deserialize(&mut cursor).unwrap();
@@ -133,7 +133,7 @@ fn xorb_roundtrip_single_chunk() {
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_len = obj.info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    buf.extend_from_slice(&(info_len as u64).to_le_bytes());
 
     let mut cursor = Cursor::new(&buf);
     let deserialized = XorbObject::deserialize(&mut cursor).unwrap();
@@ -161,7 +161,7 @@ fn xorb_roundtrip_many_chunks() {
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_len = obj.info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    buf.extend_from_slice(&(info_len as u64).to_le_bytes());
 
     let mut cursor = Cursor::new(&buf);
     let deserialized = XorbObject::deserialize(&mut cursor).unwrap();
@@ -184,7 +184,7 @@ fn xorb_roundtrip_zero_chunks() {
     let info = XorbObjectInfoV1::default();
     let mut buf = Vec::new();
     let n = info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(n as u32).to_le_bytes());
+    buf.extend_from_slice(&(n as u64).to_le_bytes());
 
     let mut cursor = Cursor::new(&buf);
     let deserialized = XorbObject::deserialize(&mut cursor).unwrap();
@@ -309,7 +309,7 @@ fn xorb_corrupted_chunk_data_rejected() {
         buf[25] ^= 0xFF;
     }
     let info_len = obj.info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    buf.extend_from_slice(&(info_len as u64).to_le_bytes());
 
     let mut cursor = Cursor::new(&buf);
     let result = XorbObject::validate_xorb_object(&mut cursor, &obj.info.xorb_hash).unwrap();
@@ -326,7 +326,7 @@ fn xorb_wrong_hash_rejected() {
     let mut buf = Vec::new();
     buf.extend_from_slice(&chunk_data);
     let info_len = obj.info.serialize(&mut buf).unwrap();
-    buf.extend_from_slice(&(info_len as u32).to_le_bytes());
+    buf.extend_from_slice(&(info_len as u64).to_le_bytes());
 
     let wrong_hash = shardline_xet_core::merklehash::compute_data_hash(b"wrong");
     let mut cursor = Cursor::new(&buf);
