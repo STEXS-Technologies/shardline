@@ -44,7 +44,7 @@ impl Clone for JwksProvider {
 
 impl Drop for JwksProvider {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::Release);
         if let Some(handle) = self.background_handle.get() {
             handle.abort();
         }
@@ -149,7 +149,7 @@ impl JwksProvider {
                 tokio::select! {
                     () = tokio::time::sleep(interval) => {}
                     () = futures_util::future::poll_fn(|_| {
-                        if shutdown.load(Ordering::Relaxed) {
+                        if shutdown.load(Ordering::Acquire) {
                             std::task::Poll::Ready(())
                         } else {
                             std::task::Poll::Pending

@@ -25,6 +25,15 @@ pub struct OidcProvider {
     client: Client,
     issuer: String,
     audience: Option<String>,
+    /// Cached JWKS keys, protected by a `std::sync::Mutex`.
+    ///
+    /// # Why `std::sync::Mutex` and not `tokio::sync::Mutex`?
+    ///
+    /// All critical sections on `cached_keys` are extremely short — a single
+    /// pointer swap (write) or a bounded read.  The lock is **never** held across
+    /// an `.await` point, so a standard mutex is appropriate here and avoids the
+    /// allocation and cancellation overhead of a tokio mutex.  See the tokio docs
+    /// on synchronous mutexes in async code for details.
     cached_keys: Arc<Mutex<Option<CachedJwks>>>,
     jwks_url: String,
     _background_handle: Arc<std::sync::OnceLock<tokio::task::JoinHandle<()>>>,
@@ -157,12 +166,16 @@ impl OidcProvider {
         let handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(JWKS_REFRESH_INTERVAL).await;
-                if shutdown.load(Ordering::Relaxed) {
+                if shutdown.load(Ordering::Acquire) {
                     return;
                 }
                 match provider.client.get(&provider.jwks_url).send().await {
                     Ok(response) => match response.json::<JwksResponse>().await {
                         Ok(jwks) => {
+                            // SAFETY: `std::sync::Mutex::lock()` is acceptable here
+                            // because the critical section is a single pointer swap
+                            // with no `.await` points inside the guard scope.  The
+                            // guard is dropped immediately when this block ends.
                             if let Ok(mut guard) = provider.cached_keys.lock() {
                                 *guard = Some(CachedJwks {
                                     keys: Arc::new(jwks.keys),
@@ -182,6 +195,9 @@ impl OidcProvider {
     }
 
     fn get_cached_keys(&self) -> Option<Arc<Vec<Jwk>>> {
+        // `std::sync::Mutex::lock()` is safe here — this function is called from
+        // synchronous contexts only (the `AuthProvider` trait is sync), and the
+        // guard is dropped before any possible `.await` point.
         let guard = self.cached_keys.lock().ok()?;
         let cached = guard.as_ref()?;
         // The background refresh task keeps keys fresh, but we always check
@@ -298,7 +314,7 @@ impl OidcProvider {
 
 impl Drop for OidcProvider {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::Release);
         if let Some(handle) = self._background_handle.get() {
             handle.abort();
         }

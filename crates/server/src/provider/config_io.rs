@@ -432,11 +432,17 @@ mod tests {
         // Open the directory itself as a "file" to simulate read errors.
         let mut file = match std::fs::File::open(&file_path) {
             Ok(f) => f,
-            Err(_) => return, // skip if can't open directory
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to scan provider config directory");
+                return;
+            }
         };
         let meta_len = match file.metadata() {
             Ok(m) => m.len(),
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to get file metadata while scanning provider config");
+                return;
+            }
         };
 
         // On some filesystems, directory length is reported as 0.

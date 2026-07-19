@@ -69,10 +69,28 @@ pub(crate) async fn deliver_webhook_events(
             return;
         };
         let url_for_log = sanitize_log_url(&url);
+        // Spawn a delivery task and a separate monitoring task that holds the
+        // semaphore permit and logs panics. If the delivery task panics, tokio
+        // catches it and the JoinHandle returns Err, which we log here.
+        let delivery_handle = tokio::spawn(async move {
+            deliver_one_webhook(
+                &client,
+                &url,
+                &body,
+                secret.as_ref().map(SecretString::expose_secret),
+            )
+            .await
+        });
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = deliver_one_webhook(&client, &url, &body, secret.as_ref().map(SecretString::expose_secret)).await {
-                tracing::warn!("webhook delivery to {url_for_log} failed: {e}");
+            match delivery_handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!("webhook delivery to {url_for_log} failed: {e}");
+                }
+                Err(panic) => {
+                    tracing::error!("webhook delivery to {url_for_log} panicked: {panic:?}");
+                }
             }
         });
     }

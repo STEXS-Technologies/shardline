@@ -452,8 +452,9 @@ mod tests {
     async fn apply_repository_deleted_empty_repo_returns_zero_counts() {
         let record_store = MemoryRecordStore::new();
         let index_store = MemoryIndexStore::new();
+        let tempdir = tempfile::tempdir().unwrap();
         let object_store = shardline_server_core::ServerObjectStore::local(
-            tempfile::tempdir().unwrap().path().join("chunks"),
+            tempdir.path().join("chunks"),
         )
         .unwrap();
         let event = RepositoryWebhookEvent::new(
