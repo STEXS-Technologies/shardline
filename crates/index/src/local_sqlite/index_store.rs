@@ -6,7 +6,7 @@ use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, u64_to_i64};
 use crate::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
-    StoredObjectId, WebhookDelivery, xet_hash_hex_string,
+    StoredObjectId, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
 
 impl ReconstructionStore for LocalIndexStore {
@@ -37,7 +37,7 @@ impl ReconstructionStore for LocalIndexStore {
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut file_ids = Vec::new();
         for row in rows {
-            let hash = crate::parse_xet_hash_hex(&row?)?;
+            let hash = parse_xet_hash_hex(&row?)?;
             file_ids.push(FileId::new(hash));
         }
         Ok(file_ids)
