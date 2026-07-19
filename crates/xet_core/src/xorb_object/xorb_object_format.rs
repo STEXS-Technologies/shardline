@@ -717,7 +717,12 @@ pub fn reconstruct_xorb_with_footer(
     raw_data: &[u8],
 ) -> Result<(XorbObject, MerkleHash), CoreError> {
     let mut reader = Cursor::new(raw_data);
-    let mut chunk_hash_and_size: Vec<(MerkleHash, u64)> = Vec::new();
+    let estimated_chunks = raw_data
+        .len()
+        .checked_div(TARGET_CHUNK_SIZE.load(Ordering::Relaxed) as usize)
+        .unwrap_or(0);
+    let mut chunk_hash_and_size: Vec<(MerkleHash, u64)> =
+        Vec::with_capacity(estimated_chunks.max(16));
     let mut info = XorbObjectInfoV1::default();
 
     while (reader.position() as usize) < raw_data.len() {

@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use std::fmt::Write;
 use thiserror::Error;
 
 use super::pack::{
@@ -186,22 +187,43 @@ pub async fn info_refs(
     };
 
     let mut body = String::new();
-    body.push_str(&pktline::encode_line(&format!("# service={service}\n"))?);
+    let mut line_buf = String::with_capacity(128);
+    body.push_str(&pktline::encode_line({
+        line_buf.clear();
+        writeln!(line_buf, "# service={service}").ok();
+        &line_buf
+    })?);
     body.push_str(FLUSH);
     if let Some(first) = refs.first() {
-        body.push_str(&pktline::encode_line(&format!(
-            "{} {} capabilities^{{}}\x00{capabilities}\n",
-            first.sha1, first.name
-        ))?);
+        body.push_str(&pktline::encode_line({
+            line_buf.clear();
+            writeln!(
+                line_buf,
+                "{} {} capabilities^{{}}\x00{capabilities}",
+                first.sha1, first.name
+            )
+            .ok();
+            &line_buf
+        })?);
         // SAFETY: refs has at least one element (first is Some), so skip(1)
         // is safe and yields an empty iterator when refs.len() == 1.
         for r in refs.iter().skip(1) {
-            body.push_str(&pktline::encode_line(&format!("{} {}\n", r.sha1, r.name))?);
+            body.push_str(&pktline::encode_line({
+                line_buf.clear();
+                writeln!(line_buf, "{} {}", r.sha1, r.name).ok();
+                &line_buf
+            })?);
         }
     } else {
-        body.push_str(&pktline::encode_line(&format!(
-            "0000000000000000000000000000000000000000 capabilities^{{}}\x00{capabilities}\n",
-        ))?);
+        body.push_str(&pktline::encode_line({
+            line_buf.clear();
+            writeln!(
+                line_buf,
+                "0000000000000000000000000000000000000000 capabilities^{{}}\x00{capabilities}",
+            )
+            .ok();
+            &line_buf
+        })?);
     }
     body.push_str(FLUSH);
 

@@ -192,24 +192,14 @@ impl MDBShardInfo {
         let header = MDBShardFileHeader::default();
         header.serialize(writer)?;
 
-        let mut file_infos = Vec::new();
-        for (_, file_info) in shard.file_content.iter() {
-            file_infos.push(file_info.clone());
-        }
-
-        let mut xorb_infos = Vec::new();
-        for (_, xorb_info) in shard.xorb_content.iter() {
-            xorb_infos.push(xorb_info.as_ref().clone());
-        }
-
         let mut footer = MDBShardFileFooter::default();
 
-        for file_info in &file_infos {
+        for (_, file_info) in shard.file_content.iter() {
             file_info.serialize(writer)?;
         }
         FileDataSequenceHeader::bookend().serialize(writer)?;
 
-        for xorb_info in &xorb_infos {
+        for (_, xorb_info) in shard.xorb_content.iter() {
             xorb_info.serialize(writer)?;
         }
         XorbChunkSequenceHeader::bookend().serialize(writer)?;
