@@ -250,11 +250,9 @@ pub fn validate_serialized_xorb<R: Read + Seek>(
         return Err(XorbInvalidFormatError::StructuralValidationFailed.into());
     };
     let total_length = reader.seek(SeekFrom::End(0))?;
-    let packed_content_length = u64::from(
-        validated
-            .get_contents_length()
-            .map_err(|error| map_core_error(&error))?,
-    );
+    let packed_content_length = validated
+        .get_contents_length()
+        .map_err(|error| map_core_error(&error))?;
     let num_chunks = usize::try_from(validated.info.num_chunks)?;
     if validated.info.chunk_hashes.len() != num_chunks
         || validated.info.chunk_boundary_offsets.len() != num_chunks
@@ -380,20 +378,16 @@ fn validated_chunk_footer_at(
     validated: &XorbObject,
     index: usize,
 ) -> Result<(u64, u64, ShardlineHash), XorbParseError> {
-    let packed_end = u64::from(
-        *validated
-            .info
-            .chunk_boundary_offsets
-            .get(index)
-            .ok_or(XorbInvalidFormatError::MetadataSectionLengthMismatch)?,
-    );
-    let unpacked_end = u64::from(
-        *validated
-            .info
-            .unpacked_chunk_offsets
-            .get(index)
-            .ok_or(XorbInvalidFormatError::MetadataSectionLengthMismatch)?,
-    );
+    let packed_end = *validated
+        .info
+        .chunk_boundary_offsets
+        .get(index)
+        .ok_or(XorbInvalidFormatError::MetadataSectionLengthMismatch)?;
+    let unpacked_end = *validated
+        .info
+        .unpacked_chunk_offsets
+        .get(index)
+        .ok_or(XorbInvalidFormatError::MetadataSectionLengthMismatch)?;
     let hash = merkle_hash_to_shardline_hash(*validated.info.chunk_hashes.get(index).ok_or_else(
         || XorbParseError::from(XorbInvalidFormatError::MetadataSectionLengthMismatch),
     )?)?;
@@ -563,10 +557,10 @@ mod tests {
             &xorb_hash,
             combined,
             vec![
-                (first_hash, u32::try_from(first_len).unwrap_or(0)),
+                (first_hash, u64::try_from(first_len).unwrap_or(0)),
                 (
                     second_hash,
-                    u32::try_from(first_len + second_len).unwrap_or(0),
+                    u64::try_from(first_len + second_len).unwrap_or(0),
                 ),
             ],
             CompressionScheme::LZ4,
@@ -616,7 +610,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             data.clone(),
-            vec![(chunk_hash, u32::try_from(data.len()).unwrap_or(0))],
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap_or(0))],
             CompressionScheme::None,
         );
 
@@ -639,7 +633,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             data.clone(),
-            vec![(chunk_hash, u32::try_from(data.len()).unwrap_or(0))],
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap_or(0))],
             CompressionScheme::None,
         );
 
@@ -871,10 +865,10 @@ mod tests {
             &xorb_hash,
             combined,
             vec![
-                (first_hash, u32::try_from(first_len).unwrap_or(0)),
+                (first_hash, u64::try_from(first_len).unwrap_or(0)),
                 (
                     second_hash,
-                    u32::try_from(first_len + second_len).unwrap_or(0),
+                    u64::try_from(first_len + second_len).unwrap_or(0),
                 ),
             ],
             CompressionScheme::LZ4,
@@ -1014,10 +1008,10 @@ mod tests {
             &xorb_hash,
             combined,
             vec![
-                (first_hash, u32::try_from(first_len).unwrap_or(0)),
+                (first_hash, u64::try_from(first_len).unwrap_or(0)),
                 (
                     second_hash,
-                    u32::try_from(first_len + second_len).unwrap_or(0),
+                    u64::try_from(first_len + second_len).unwrap_or(0),
                 ),
             ],
             CompressionScheme::LZ4,
@@ -1139,7 +1133,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             data.clone(),
-            vec![(chunk_hash, u32::try_from(data.len()).unwrap())],
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap())],
             CompressionScheme::None,
         )
         .unwrap();
@@ -1238,7 +1232,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             data.clone(),
-            vec![(chunk_hash, u32::try_from(data.len()).unwrap())],
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap())],
             CompressionScheme::None,
         );
         assert!(serialized.is_ok());
@@ -1334,7 +1328,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             data.clone(),
-            vec![(chunk_hash, u32::try_from(data.len()).unwrap())],
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap())],
             CompressionScheme::LZ4,
         )
         .unwrap();
@@ -1355,7 +1349,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             data.clone(),
-            vec![(chunk_hash, u32::try_from(data.len()).unwrap())],
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap())],
             CompressionScheme::None,
         )
         .unwrap();
@@ -1498,7 +1492,7 @@ mod tests {
             // we put "wrong data")
             wrong_data,
             // Hashes in footer point to "valid data" hash
-            vec![(chunk_hash, u32::try_from(data.len()).unwrap())],
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap())],
             CompressionScheme::None,
         );
         // serialized_xorb_object_from_components uses the hashes to compute
@@ -1812,7 +1806,7 @@ mod tests {
         let serialized = serialized_xorb_object_from_components(
             &xorb_hash,
             data,
-            vec![(chunk_hash, b"seek check".len() as u32)],
+            vec![(chunk_hash, b"seek check".len() as u64)],
             CompressionScheme::None,
         )
         .unwrap();
@@ -1984,8 +1978,8 @@ mod tests {
         let payload: Vec<u8> = chunks_data.iter().flatten().copied().collect();
         let boundaries: Vec<_> = hashes
             .iter()
-            .scan(0u32, |acc, h| {
-                *acc += chunks_data[hashes.iter().position(|x| x == h).unwrap()].len() as u32;
+            .scan(0u64, |acc, h| {
+                *acc += chunks_data[hashes.iter().position(|x| x == h).unwrap()].len() as u64;
                 Some((*h, *acc))
             })
             .collect();

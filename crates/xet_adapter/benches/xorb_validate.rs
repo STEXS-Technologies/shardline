@@ -36,7 +36,7 @@ fn build_xorb(num_chunks: usize, chunk_size: usize) -> (Vec<u8>, ShardlineHash) 
         let chunk: Vec<u8> = (0..chunk_size).map(|j| ((i + j) & 0xFF) as u8).collect();
         let chunk_hash = compute_data_hash(&chunk);
         data.extend_from_slice(&chunk);
-        let boundary = u32::try_from((i + 1) * chunk_size).expect("boundary fits in u32");
+        let boundary = u64::try_from((i + 1) * chunk_size).expect("boundary fits in u64");
         hashes_and_boundaries.push((chunk_hash, boundary));
         chunk_hashes_and_sizes.push((
             chunk_hash,

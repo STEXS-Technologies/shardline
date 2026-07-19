@@ -111,9 +111,9 @@ pub enum FsckIssueDetail {
     #[error("xorb range {range_start}..{range_end} exceeded {chunk_count} chunks")]
     XorbRangeExceededChunkCount {
         /// Requested range start.
-        range_start: u32,
+        range_start: u64,
         /// Requested range end.
-        range_end: u32,
+        range_end: u64,
         /// Available chunk count.
         chunk_count: usize,
     },

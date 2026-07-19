@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconstructionChunkRange {
     /// First chunk index included by this range.
-    pub start: u32,
+    pub start: u64,
     /// End-exclusive chunk index.
-    pub end: u32,
+    pub end: u64,
 }
 
 /// Inclusive byte range for a ranged fetch URL.

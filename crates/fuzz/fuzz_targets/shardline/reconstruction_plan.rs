@@ -7,7 +7,7 @@ use shardline_server::fuzz_reconstruction_response_summary;
 
 const MAX_CHUNKS: usize = 64;
 
-type RawChunk = ([u8; 32], u64, u64, u32, u32, u64, u64);
+type RawChunk = ([u8; 32], u64, u64, u64, u64, u64, u64);
 
 fuzz_target!(|data: (u64, Vec<RawChunk>)| {
     let (total_bytes, raw_chunks) = data;
@@ -58,7 +58,11 @@ fuzz_target!(|data: (u64, Vec<RawChunk>)| {
         assert!(chunk.range_end > chunk.range_start);
         assert!(chunk.packed_end > chunk.packed_start);
         assert!(parse_xet_hash_hex(&chunk.hash).is_ok());
-        assert!(ChunkRange::new(chunk.range_start, chunk.range_end).is_ok());
+        assert!(ChunkRange::new(
+            chunk.range_start as u32,
+            chunk.range_end as u32,
+        )
+        .is_ok());
         let next_expected_offset = expected_offset.checked_add(chunk.length);
         assert!(next_expected_offset.is_some());
         let Some(next_expected_offset) = next_expected_offset else {
