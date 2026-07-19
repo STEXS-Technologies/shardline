@@ -289,6 +289,8 @@ mod tests {
 
     #[test]
     fn collect_deleted_no_duplicate_identity_keys() {
+        let tempdir1 = tempfile::tempdir().unwrap();
+        let tempdir2 = tempfile::tempdir().unwrap();
         let record = test_record();
         let mut seen = HashSet::new();
         let mut file_versions = 0u64;
@@ -298,7 +300,7 @@ mod tests {
         // First call should succeed
         let result = super::collect_deleted_repository_record_references(
             &shardline_server_core::ServerObjectStore::local(
-                tempfile::tempdir().unwrap().path().join("chunks"),
+                tempdir1.path().join("chunks"),
             )
             .unwrap(),
             &record,
@@ -314,7 +316,7 @@ mod tests {
         // Second call with same identity should be no-op
         let result = super::collect_deleted_repository_record_references(
             &shardline_server_core::ServerObjectStore::local(
-                tempfile::tempdir().unwrap().path().join("chunks"),
+                tempdir2.path().join("chunks"),
             )
             .unwrap(),
             &record,

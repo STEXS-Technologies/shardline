@@ -102,7 +102,10 @@ pub(crate) async fn lfs_batch(
     for object in request.objects {
         let object_key = match lfs_object_key(&object.oid, scope) {
             Ok(k) => k,
-            Err(_) => return Ok(lfs_validation_response("invalid oid")),
+            Err(e) => {
+                tracing::debug!(error = %e, "LFS OID parsing failed");
+                return Ok(lfs_validation_response("invalid oid"));
+            }
         };
         let object_length = state.backend.object_length(&object_key).await;
         match request.operation.as_str() {
@@ -187,7 +190,10 @@ pub(crate) async fn lfs_get_object(
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
         Ok(k) => k,
-        Err(_) => return Ok(lfs_validation_response("invalid oid")),
+        Err(e) => {
+            tracing::debug!(error = %e, "LFS OID parsing failed");
+            return Ok(lfs_validation_response("invalid oid"));
+        }
     };
     direct_object_response(
         &state,
@@ -209,7 +215,10 @@ pub(crate) async fn lfs_head_object(
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
         Ok(k) => k,
-        Err(_) => return Ok(lfs_validation_response("invalid oid")),
+        Err(e) => {
+            tracing::debug!(error = %e, "LFS OID parsing failed");
+            return Ok(lfs_validation_response("invalid oid"));
+        }
     };
     let total_length = state.backend.object_length(&object_key).await?;
     Ok((
@@ -247,7 +256,10 @@ pub(crate) async fn lfs_put_object(
 
     let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
         Ok(k) => k,
-        Err(_) => return Ok(lfs_validation_response("invalid oid")),
+        Err(e) => {
+            tracing::debug!(error = %e, "LFS OID parsing failed");
+            return Ok(lfs_validation_response("invalid oid"));
+        }
     };
     let content_length = headers
         .get(CONTENT_LENGTH)
@@ -274,7 +286,10 @@ pub(crate) async fn lfs_delete_object(
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
         Ok(k) => k,
-        Err(_) => return Ok(lfs_validation_response("invalid oid")),
+        Err(e) => {
+            tracing::debug!(error = %e, "LFS OID parsing failed");
+            return Ok(lfs_validation_response("invalid oid"));
+        }
     };
     match state.backend.delete_object_if_present(&object_key).await? {
         DeleteOutcome::Deleted => Ok(StatusCode::ACCEPTED.into_response()),
@@ -297,7 +312,10 @@ pub(crate) async fn lfs_patch_object(
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
         Ok(k) => k,
-        Err(_) => return Ok(lfs_validation_response("invalid oid")),
+        Err(e) => {
+            tracing::debug!(error = %e, "LFS OID parsing failed");
+            return Ok(lfs_validation_response("invalid oid"));
+        }
     };
 
     // Validate Content-Range header is present.
@@ -430,7 +448,10 @@ pub(crate) async fn lfs_verify_object(
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
         Ok(k) => k,
-        Err(_) => return Ok(lfs_validation_response("invalid oid")),
+        Err(e) => {
+            tracing::debug!(error = %e, "LFS OID parsing failed");
+            return Ok(lfs_validation_response("invalid oid"));
+        }
     };
 
     // Check object existence and size before reading.

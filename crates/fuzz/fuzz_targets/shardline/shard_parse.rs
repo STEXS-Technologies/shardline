@@ -89,7 +89,7 @@ fn summarize_shard(data: &[u8]) -> Result<ShardSummary, String> {
         }
         let file_size = file.file_size();
         let summed = file.segments.iter().try_fold(0_u64, |total, segment| {
-            total.checked_add(u64::from(segment.unpacked_segment_bytes))
+            total.checked_add(segment.unpacked_segment_bytes)
         });
         if summed != Some(file_size) {
             return Err("file segment lengths disagreed with file size".to_owned());

@@ -352,8 +352,10 @@ pub(crate) async fn start_server(
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
-    let server =
-        tokio::spawn(async move { shardline_server::serve_with_listener(config, listener).await });
+    let server = tokio::spawn(async move {
+        let _storage = storage; // keep tempdir alive for server lifetime
+        shardline_server::serve_with_listener(config, listener).await
+    });
     wait_for_health(&base_url).await?;
     Ok((base_url, server))
 }

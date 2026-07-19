@@ -480,9 +480,9 @@ fn build_file_records_from_infos(
                         InvalidSerializedShardError::XorbMetadataCacheInsertionFailed,
                     ))?
             };
-            let packed_start = xorb_info.packed_start(range_start as u32)?;
-            let packed_end = xorb_info.packed_end(range_end as u32)?;
-            let length = u64::from(segment.unpacked_segment_bytes);
+            let packed_start = xorb_info.packed_start(range_start)?;
+            let packed_end = xorb_info.packed_end(range_end)?;
+            let length = segment.unpacked_segment_bytes;
             chunks.push(FileChunkRecord {
                 hash,
                 offset,
@@ -573,7 +573,7 @@ struct XorbRangeInfo {
 }
 
 impl XorbRangeInfo {
-    fn packed_start(&self, range_start: u32) -> Result<u64, XetAdapterError> {
+    fn packed_start(&self, range_start: u64) -> Result<u64, XetAdapterError> {
         let range_start = usize::try_from(range_start)?;
         if range_start == 0 {
             return Ok(0);
@@ -593,7 +593,7 @@ impl XorbRangeInfo {
             })
     }
 
-    fn packed_end(&self, range_end: u32) -> Result<u64, XetAdapterError> {
+    fn packed_end(&self, range_end: u64) -> Result<u64, XetAdapterError> {
         let range_end = usize::try_from(range_end)?;
         self.packed_chunk_ends
             .get(range_end.saturating_sub(1))
