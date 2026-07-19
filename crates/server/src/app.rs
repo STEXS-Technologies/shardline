@@ -39,7 +39,9 @@ use crate::{
     backend::ServerBackend,
     config::AuthProviderKind,
     config::ServerConfigError,
+    jwks_provider::JwksProvider,
     metrics::MetricsLayer,
+    oidc_provider::OidcProvider,
     provider::ProviderTokenService,
     reconstruction_cache::ReconstructionCacheService,
     server_frontend::ServerFrontend,
@@ -561,7 +563,7 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let issuer = config.auth_oidc_issuer().ok_or_else(|| {
                 ServerError::Config(ServerConfigError::InvalidAuthProvider)
             })?;
-            let provider = crate::oidc_provider::OidcProvider::new(issuer, None)
+            let provider = OidcProvider::new(issuer, None)
                 .await
                 .map_err(|_e| {
                     ServerError::Config(ServerConfigError::InvalidAuthProvider)
@@ -573,7 +575,7 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
                 ServerError::Config(ServerConfigError::InvalidAuthProvider)
             })?;
             let issuer = config.auth_jwks_issuer().unwrap_or("jwks");
-            let provider = crate::jwks_provider::JwksProvider::new(jwks_url, issuer)
+            let provider = JwksProvider::new(jwks_url, issuer)
                 .await
                 .map_err(|_e| {
                     ServerError::Config(ServerConfigError::InvalidAuthProvider)

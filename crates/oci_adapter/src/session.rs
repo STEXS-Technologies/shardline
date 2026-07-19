@@ -18,10 +18,11 @@ use tokio::task::spawn_blocking;
 use crate::{
     OciAdapterError,
     fs::{
-        acquire_upload_session_file_lock, map_not_found, persist_upload_session,
-        read_upload_file_async, unix_now_seconds_checked, upload_body_path, upload_dir,
-        upload_file_exists_async, upload_file_len_async, upload_metadata_path,
-        upload_session_lock_path, upload_tail_path, write_upload_metadata,
+        acquire_upload_session_file_lock, append_file_anchored, delete_file_anchored,
+        map_not_found, open_anchored_file, persist_upload_session, read_upload_file_async,
+        unix_now_seconds_checked, upload_body_path, upload_dir, upload_file_exists_async,
+        upload_file_len_async, upload_metadata_path, upload_session_lock_path, upload_tail_path,
+        write_upload_metadata,
     },
     key::validate_repository,
     protocol_support::{
@@ -162,7 +163,7 @@ async fn append_upload_bytes_impl(
 ) -> Result<u64, OciAdapterError> {
     let root = root.to_path_buf();
     let bytes = bytes.to_vec();
-    spawn_blocking(move || crate::fs::append_file_anchored(&root, &path, &bytes))
+    spawn_blocking(move || append_file_anchored(&root, &path, &bytes))
         .await
         .map_err(OciAdapterError::BlockingTask)?
         .map_err(map_not_found)
@@ -230,7 +231,7 @@ async fn upload_body_integrity_impl(
 ) -> Result<(String, ObjectIntegrity), OciAdapterError> {
     let root = root.to_path_buf();
     spawn_blocking(move || {
-        let mut file = crate::fs::open_anchored_file(&root, &path)?;
+        let mut file = open_anchored_file(&root, &path)?;
         let mut sha256 = Sha256::new();
         let mut blake3 = Blake3Hasher::new();
         let mut buffer = [0_u8; 256 * 1024];
@@ -327,7 +328,7 @@ pub async fn delete_upload_session(root: &Path, session_id: &str) -> Result<(), 
 async fn delete_upload_file(root: &Path, path: &Path) -> std::io::Result<()> {
     let root = root.to_path_buf();
     let path = path.to_path_buf();
-    spawn_blocking(move || crate::fs::delete_file_anchored(&root, &path))
+    spawn_blocking(move || delete_file_anchored(&root, &path))
         .await
         .map_err(std::io::Error::other)?
 }

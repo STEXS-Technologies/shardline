@@ -8,11 +8,15 @@ use tokio::task;
 use super::LocalBackend;
 use crate::{
     ServerError, ShardMetadataLimits,
+    chunk_store::chunk_object_key,
     model::UploadFileResponse,
     object_store::{read_full_object, reconstruct_file_record_bytes},
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{FileUploadIngestor, read_body_to_bytes, RequestBodyReader},
     validation::validate_identifier,
-    xet_adapter::{FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response},
+    xet_adapter::{
+        FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response,
+        register_uploaded_shard_bytes,
+    },
 };
 
 impl LocalBackend {
@@ -53,7 +57,7 @@ impl LocalBackend {
         validate_identifier(file_id)?;
 
         let object_store = self.object_store();
-        let mut ingestor = crate::upload_ingest::FileUploadIngestor::new_with_parallelism(
+        let mut ingestor = FileUploadIngestor::new_with_parallelism(
             self.chunk_size,
             expected_sha256.is_some(),
             self.upload_max_in_flight_chunks,
@@ -84,10 +88,10 @@ impl LocalBackend {
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
-        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
+        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        crate::xet_adapter::register_uploaded_shard_bytes(
+        register_uploaded_shard_bytes(
             &object_store,
             &uploaded_body,
             repository_scope,
@@ -191,7 +195,7 @@ impl LocalBackend {
     /// Returns [`ServerError`] when the hash is invalid or the chunk is missing.
     pub async fn read_chunk(&self, hash_hex: &str) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
-        let object_key = crate::chunk_store::chunk_object_key(hash_hex)?;
+        let object_key = chunk_object_key(hash_hex)?;
         let metadata = object_store.metadata(&object_key)?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
@@ -235,7 +239,7 @@ impl LocalBackend {
     /// Returns [`ServerError`] when the hash is invalid or the chunk is missing.
     pub async fn chunk_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
         let object_store = self.object_store();
-        let object_key = crate::chunk_store::chunk_object_key(hash_hex)?;
+        let object_key = chunk_object_key(hash_hex)?;
         let metadata = object_store.metadata(&object_key)?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);

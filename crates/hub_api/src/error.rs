@@ -6,6 +6,8 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::git::{pack::PackError, pktline::PktLineError};
+
 /// Hub API error type.
 #[derive(Debug, Error)]
 pub enum HubApiError {
@@ -59,11 +61,11 @@ pub enum HubApiError {
 
     /// Pkt-line encoding error.
     #[error("protocol error: {0}")]
-    PktLine(#[from] crate::git::pktline::PktLineError),
+    PktLine(#[from] PktLineError),
 
     /// Pack file generation error.
     #[error("pack error: {0}")]
-    Pack(#[from] crate::git::pack::PackError),
+    Pack(#[from] PackError),
 }
 
 impl IntoResponse for HubApiError {

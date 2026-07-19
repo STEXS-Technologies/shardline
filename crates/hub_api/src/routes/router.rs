@@ -4,6 +4,7 @@ use axum::{
 };
 
 use super::HubState;
+use crate::git::{info_refs, receive_pack, upload_pack};
 
 /// Builds the Hub API router with [`HubState`] as the shared state.
 ///
@@ -73,15 +74,15 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
         .route("/lfs/objects/{oid}", put(super::lfs_upload))
         .route("/lfs/objects/{oid}", get(super::lfs_download))
         // Git Smart HTTP endpoints
-        .route("/{type}/{ns}/{repo}/info/refs", get(crate::git::info_refs))
+        .route("/{type}/{ns}/{repo}/info/refs", get(info_refs))
         .route("/{type}/{ns}/{repo}/HEAD", get(super::git_head))
         .route(
             "/{type}/{ns}/{repo}/git-upload-pack",
-            post(crate::git::upload_pack),
+            post(upload_pack),
         )
         .route(
             "/{type}/{ns}/{repo}/git-receive-pack",
-            post(crate::git::receive_pack),
+            post(receive_pack),
         )
         // Dataset viewer endpoints
         .route(

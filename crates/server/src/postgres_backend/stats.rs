@@ -5,6 +5,7 @@ use crate::{
     ServerError,
     chunk_store::chunk_hash_from_chunk_object_key_if_present,
     model::ServerStatsResponse,
+    object_store::visit_object_prefix,
     overflow::{checked_add, checked_increment},
 };
 
@@ -19,7 +20,7 @@ impl super::PostgresBackend {
         let prefix = ObjectPrefix::parse("").map_err(|_error| ServerError::InvalidContentHash)?;
         let mut chunks = 0_u64;
         let mut chunk_bytes = 0_u64;
-        crate::object_store::visit_object_prefix(&object_store, &prefix, |metadata| {
+        visit_object_prefix(&object_store, &prefix, |metadata| {
             let is_chunk = chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
             if is_chunk {
                 chunks = checked_increment(chunks)?;

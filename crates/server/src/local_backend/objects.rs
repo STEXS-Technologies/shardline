@@ -8,7 +8,7 @@ use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
-    object_store::read_full_object,
+    object_store::{read_full_object, visit_object_prefix},
     protocol_support::shared_sha256_object_key,
 };
 
@@ -152,7 +152,7 @@ impl LocalBackend {
         Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
     {
         tokio::task::block_in_place(|| {
-            crate::object_store::visit_object_prefix(&self.object_store(), prefix, visitor)
+            visit_object_prefix(&self.object_store(), prefix, visitor)
         })
     }
 

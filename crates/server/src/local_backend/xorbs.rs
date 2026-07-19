@@ -6,7 +6,7 @@ use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{read_body_to_bytes, RequestBodyReader},
     xet_adapter::{
         XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes, xorb_object_key,
     },
@@ -39,7 +39,7 @@ impl LocalBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
+        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let object_store = self.object_store();
         store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
             .map_err(ServerError::from)

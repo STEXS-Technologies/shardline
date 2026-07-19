@@ -4,7 +4,8 @@ use axum::{Router, routing};
 use tokio::sync::Semaphore;
 
 use crate::{
-    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter, app::ProtocolMetrics,
+    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter,
+    app::protocol_routes::oci_dispatch, app::ProtocolMetrics,
     reconstruction_cache::ReconstructionCacheService, server_role::ServerRole,
 };
 
@@ -69,7 +70,7 @@ pub(crate) fn oci_test_router(state: &Arc<AppState>) -> Router {
     Router::new()
         .route(
             "/v2/{*path}",
-            routing::any(crate::app::protocol_routes::oci_dispatch),
+            routing::any(oci_dispatch),
         )
         .with_state(Arc::clone(state))
 }

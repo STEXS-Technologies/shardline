@@ -11,7 +11,11 @@ use shardline_storage::{
 };
 use tokio::task::spawn_blocking;
 
-use crate::{OciAdapterError, types::{OCI_UPLOAD_DIR, OciFileLock}};
+use crate::{
+    OciAdapterError,
+    protocol_support,
+    types::{OCI_UPLOAD_DIR, OciFileLock, OciUploadSession},
+};
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -64,7 +68,7 @@ pub(crate) async fn write_upload_metadata(
     session_id: &str,
     bytes: Vec<u8>,
 ) -> Result<(), OciAdapterError> {
-    crate::protocol_support::validate_upload_session_id(session_id)?;
+    protocol_support::validate_upload_session_id(session_id)?;
     let root = root.to_path_buf();
     let path = upload_metadata_path(&root, session_id);
     spawn_blocking(move || write_file_atomically(&root, &path, &bytes))
@@ -76,7 +80,7 @@ pub(crate) async fn write_upload_metadata(
 pub(crate) async fn persist_upload_session(
     root: &Path,
     session_id: &str,
-    session: &crate::types::OciUploadSession,
+    session: &OciUploadSession,
 ) -> Result<(), OciAdapterError> {
     let bytes = serde_json::to_vec(session)?;
     write_upload_metadata(root, session_id, bytes).await

@@ -1,6 +1,8 @@
 use shardline_server_core::InvalidSerializedShardError;
 use thiserror::Error;
 
+use crate::report::IndexRebuildReport;
+
 /// One index-rebuild issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexRebuildIssue {
@@ -115,7 +117,7 @@ impl IndexRebuildIssueKind {
 }
 
 /// Backward-compatible local index-rebuild report alias.
-pub type LocalIndexRebuildReport = crate::report::IndexRebuildReport;
+pub type LocalIndexRebuildReport = IndexRebuildReport;
 
 /// Backward-compatible local index-rebuild issue alias.
 pub type LocalIndexRebuildIssue = IndexRebuildIssue;

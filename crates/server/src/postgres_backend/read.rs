@@ -11,7 +11,7 @@ use crate::{
     chunk_store::chunk_object_key,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
     error::IndexError,
-    object_store::{read_full_object, reconstruct_file_record_bytes},
+    object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
     record_store::parse_stored_file_record_bytes,
     validation::{ensure_directory, validate_content_hash, validate_identifier},
     xet_adapter::{
@@ -196,7 +196,7 @@ impl super::PostgresBackend {
     where
         Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
     {
-        crate::object_store::visit_object_prefix(&self.object_store(), prefix, visitor)
+        visit_object_prefix(&self.object_store(), prefix, visitor)
     }
 
     pub(crate) fn list_object_flat_namespace_page(
