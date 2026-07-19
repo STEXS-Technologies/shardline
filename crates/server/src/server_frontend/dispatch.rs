@@ -82,6 +82,7 @@ pub(crate) fn append_referenced_term_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ServerObjectStore;
     use crate::xet_adapter::xorb_object_key;
 
     // -----------------------------------------------------------------------
@@ -189,7 +190,7 @@ mod tests {
         let hash = "ef".repeat(32);
         let key = ObjectKey::parse(&format!("xorbs/default/{h}/{h}", h = &hash[..2])).unwrap();
         // Use a blackhole store (never returns metadata)
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let frontends = vec![
             ServerFrontend::Lfs,
             ServerFrontend::Oci,
@@ -209,7 +210,7 @@ mod tests {
     #[test]
     fn visit_protocol_object_member_chunks_with_empty_frontends_returns_ok() {
         let key = ObjectKey::parse("some/object").unwrap();
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let frontends: Vec<ServerFrontend> = Vec::new();
         let mut visited = false;
         let result = visit_protocol_object_member_chunks(&frontends, &store, &key, |_hash| {
@@ -225,7 +226,7 @@ mod tests {
         // Xet frontend with a non-xorb key → owns_protocol_object returns false
         // → falls through without visiting.
         let key = ObjectKey::parse("shards/ab/some.shard").unwrap();
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let frontends = vec![ServerFrontend::Xet];
         let mut visited = false;
         let result = visit_protocol_object_member_chunks(&frontends, &store, &key, |_hash| {
@@ -243,7 +244,7 @@ mod tests {
     #[test]
     fn append_referenced_term_bytes_with_non_xet_frontends_returns_error() {
         use shardline_index::FileChunkRecord;
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let term = FileChunkRecord {
             hash: "ab".repeat(32),
             offset: 0,
@@ -262,7 +263,7 @@ mod tests {
     #[test]
     fn append_referenced_term_bytes_with_empty_frontends_returns_error() {
         use shardline_index::FileChunkRecord;
-        let store = crate::object_store::ServerObjectStore::blackhole();
+        let store = ServerObjectStore::blackhole();
         let term = FileChunkRecord {
             hash: "ab".repeat(32),
             offset: 0,

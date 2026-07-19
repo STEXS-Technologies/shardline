@@ -156,7 +156,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::FileVersionQuery;
-    use crate::{ServerConfig, ServerFrontend, ServerRole, app::AppState};
+    use crate::{
+        ProtocolMetrics, ReconstructionCacheService, ServerBackend, ServerConfig, ServerFrontend,
+        ServerRole, TransferLimiter, app::AppState,
+    };
 
     #[test]
     fn file_version_query_debug_format() {
@@ -240,11 +243,11 @@ mod tests {
         .with_server_frontends([ServerFrontend::Xet])
         .expect("server frontends");
 
-        let backend = crate::ServerBackend::from_config(&config)
+        let backend = ServerBackend::from_config(&config)
             .await
             .expect("backend from config");
 
-        let transfer_limiter = crate::TransferLimiter::new(chunk_size, chunk_size);
+        let transfer_limiter = TransferLimiter::new(chunk_size, chunk_size);
 
         let state = Arc::new(AppState {
             config,
@@ -252,10 +255,10 @@ mod tests {
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
+            reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter,
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            protocol_metrics: crate::ProtocolMetrics::default(),
+            protocol_metrics: ProtocolMetrics::default(),
         });
 
         (state, tmp)

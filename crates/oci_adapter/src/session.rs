@@ -15,19 +15,21 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::task::spawn_blocking;
 
-use crate::OciAdapterError;
-use crate::fs::{
-    acquire_upload_session_file_lock, map_not_found, persist_upload_session,
-    read_upload_file_async, unix_now_seconds_checked, upload_body_path, upload_dir,
-    upload_file_exists_async, upload_file_len_async, upload_metadata_path,
-    upload_session_lock_path, upload_tail_path, write_upload_metadata,
+use crate::{
+    OciAdapterError,
+    fs::{
+        acquire_upload_session_file_lock, map_not_found, persist_upload_session,
+        read_upload_file_async, unix_now_seconds_checked, upload_body_path, upload_dir,
+        upload_file_exists_async, upload_file_len_async, upload_metadata_path,
+        upload_session_lock_path, upload_tail_path, write_upload_metadata,
+    },
+    key::validate_repository,
+    protocol_support::{
+        scope_namespace, validate_oci_repository_scope, validate_upload_session_id,
+    },
+    traits::OciBackend,
+    types::{OCI_UPLOAD_SESSION_LOCK, OciUploadSession, OciUploadSessionLock},
 };
-use crate::key::validate_repository;
-use crate::protocol_support::{
-    scope_namespace, validate_oci_repository_scope, validate_upload_session_id,
-};
-use crate::traits::OciBackend;
-use crate::types::{OCI_UPLOAD_SESSION_LOCK, OciUploadSession, OciUploadSessionLock};
 
 #[must_use]
 pub fn new_upload_session_id() -> String {

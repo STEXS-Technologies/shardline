@@ -373,9 +373,10 @@ mod provider_tests {
         MAX_PROVIDER_BASIC_AUTH_HEADER_BYTES, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
     };
     use crate::{
-        ServerBackend, ServerConfig, ServerError,
+        ServerBackend, ServerConfig, ServerError, ServerFrontend, ServerRole,
         app::ProtocolMetrics,
         config::AuthProviderKind,
+        model::{ProviderTokenIssueRequest, ProviderTokenIssueResponse},
         provider::ProviderServiceError,
         provider_events::{ProviderWebhookOutcome, ProviderWebhookOutcomeKind},
         reconstruction_cache::ReconstructionCacheService,
@@ -1047,12 +1048,12 @@ mod provider_tests {
             chunk_size,
         )
         .with_auth_provider(AuthProviderKind::Local)
-        .with_server_frontends(vec![crate::ServerFrontend::Xet])
+        .with_server_frontends(vec![ServerFrontend::Xet])
         .unwrap();
         let backend = ServerBackend::from_config(&config).await.unwrap();
         AppState {
             config,
-            role: crate::ServerRole::All,
+            role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: None,
@@ -1076,7 +1077,6 @@ mod provider_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn issue_provider_token_response_disabled_returns_error() {
-        use crate::model::ProviderTokenIssueRequest;
         let state = state_without_provider_tokens().await;
         let headers = HeaderMap::new();
         let request = ProviderTokenIssueRequest {
@@ -1099,7 +1099,6 @@ mod provider_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_provider_repository_state_with_store_no_existing() {
-        use crate::model::ProviderTokenIssueResponse;
         use shardline_protocol::SecretString;
         // When there is no existing state, reconcile is a no-op (returns Ok).
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1121,7 +1120,6 @@ mod provider_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_provider_repository_state_with_store_matching_noop() {
-        use crate::model::ProviderTokenIssueResponse;
         use shardline_protocol::{RepositoryProvider, SecretString};
         // When existing == reconciled the function returns early (no-op).
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1172,7 +1170,6 @@ mod provider_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconcile_provider_repository_state_with_store_different_upserts() {
-        use crate::model::ProviderTokenIssueResponse;
         use shardline_protocol::{RepositoryProvider, SecretString};
         // When existing != reconciled, the function upserts the new state.
         let tmp = tempfile::TempDir::new().unwrap();

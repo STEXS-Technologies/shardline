@@ -151,6 +151,10 @@ mod tests {
     use axum::http::HeaderMap;
 
     use super::XetTokenQuery;
+    use crate::{
+        ProtocolMetrics, ReconstructionCacheService, ServerBackend, ServerConfig, ServerRole,
+        TransferLimiter, app::AppState,
+    };
 
     #[test]
     fn xet_token_query_debug_format() {
@@ -210,29 +214,28 @@ mod tests {
         // Build a minimal AppState with provider_tokens = None
         let temp = tempfile::tempdir().unwrap();
         let chunk_size = std::num::NonZeroUsize::new(4096).unwrap();
-        let config = crate::config::ServerConfig::new(
+        let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:8080".to_owned(),
             temp.path().to_path_buf(),
             chunk_size,
         );
-        let backend = crate::backend::ServerBackend::from_config(&config)
+        let backend = ServerBackend::from_config(&config)
             .await
             .unwrap();
-        let state = Arc::new(crate::AppState {
+        let state = Arc::new(AppState {
             config,
-            role: crate::server_role::ServerRole::All,
+            role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
-            ),
-            transfer_limiter: crate::TransferLimiter::new(
+            reconstruction_cache: ReconstructionCacheService::disabled(),
+            transfer_limiter: TransferLimiter::new(
                 std::num::NonZeroUsize::new(4096).unwrap(),
                 std::num::NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            protocol_metrics: crate::app::ProtocolMetrics::default(),
+            protocol_metrics: ProtocolMetrics::default(),
         });
 
         let result = super::handle_provider_webhook(
@@ -258,13 +261,13 @@ mod tests {
     async fn handle_webhook_unknown_provider_returns_error() {
         let temp = tempfile::tempdir().unwrap();
         let chunk_size = std::num::NonZeroUsize::new(4096).unwrap();
-        let config = crate::config::ServerConfig::new(
+        let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:8080".to_owned(),
             temp.path().to_path_buf(),
             chunk_size,
         );
-        let backend = crate::backend::ServerBackend::from_config(&config)
+        let backend = ServerBackend::from_config(&config)
             .await
             .unwrap();
 
@@ -282,20 +285,19 @@ mod tests {
         )
         .expect("failed to create ProviderTokenService from empty config");
 
-        let state = Arc::new(crate::AppState {
+        let state = Arc::new(AppState {
             config,
-            role: crate::server_role::ServerRole::All,
+            role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: Some(service),
-            reconstruction_cache: crate::reconstruction_cache::ReconstructionCacheService::disabled(
-            ),
-            transfer_limiter: crate::TransferLimiter::new(
+            reconstruction_cache: ReconstructionCacheService::disabled(),
+            transfer_limiter: TransferLimiter::new(
                 std::num::NonZeroUsize::new(4096).unwrap(),
                 std::num::NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
-            protocol_metrics: crate::app::ProtocolMetrics::default(),
+            protocol_metrics: ProtocolMetrics::default(),
         });
 
         let result = super::handle_provider_webhook(

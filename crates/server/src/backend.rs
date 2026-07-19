@@ -17,8 +17,8 @@ use std::sync::{
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::{
-    LocalBackend, ObjectStorageAdapter, PostgresBackend, ServerConfig, ServerError,
-    ShardMetadataLimits,
+    LocalBackend, ObjectStorageAdapter, ObjectStoreError, PostgresBackend, ServerConfig,
+    ServerError, ShardMetadataLimits,
     download_stream::ServerByteStream,
     model::{ServerStatsResponse, UploadFileResponse},
     object_store::{ServerObjectStore, object_store_from_config},
@@ -587,7 +587,6 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
 }
 
 fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterError {
-    use crate::error::ObjectStoreError;
     use shardline_oci_adapter::OciAdapterError;
     match error {
         ServerError::Io(e) => OciAdapterError::Io(e),
@@ -1650,7 +1649,6 @@ mod tests {
 
     #[test]
     fn server_error_to_oci_maps_s3_object_store_error() {
-        use crate::error::ObjectStoreError;
         let err = ServerError::ObjectStore(ObjectStoreError::S3(
             shardline_storage::S3ObjectStoreError::EmptyBucket,
         ));
