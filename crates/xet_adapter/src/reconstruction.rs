@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use shardline_index::FileRecord;
 use shardline_protocol::ByteRange;
@@ -51,6 +51,7 @@ pub fn build_reconstruction_response(
     let mut first_term = true;
     let mut terms = Vec::with_capacity(record.chunks.len());
     let mut fetch_info = BTreeMap::new();
+    let mut dedup: HashSet<ReconstructionFetchInfo> = HashSet::new();
     for chunk in &record.chunks {
         let Some(chunk_end_inclusive) = chunk
             .offset
@@ -97,7 +98,8 @@ pub fn build_reconstruction_response(
         let fetch_entries = fetch_info
             .entry(chunk.hash.clone())
             .or_insert_with(Vec::new);
-        if !fetch_entries.iter().any(|entry| entry == &fetch_entry) {
+        // Use a global dedup set to avoid O(n²) scans per hash group
+        if dedup.insert(fetch_entry.clone()) {
             fetch_entries.push(fetch_entry);
         }
     }
