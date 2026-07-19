@@ -8,7 +8,6 @@ use crate::OciAdapterError;
 /// Backend operations required by the OCI adapter.
 ///
 /// Implemented by the server crate for its `ServerBackend` enum.
-#[allow(async_fn_in_trait)]
 pub trait OciBackend: Send + Sync {
     /// Creates a resumable S3 upload, returning an upload ID if S3 is available.
     ///
