@@ -5,6 +5,7 @@ use std::{fs::read, num::NonZeroU64};
 use shardline_cache::{
     AsyncReconstructionCache, ReconstructionCacheKey, RedisReconstructionCache, RedisTlsConfig,
 };
+use shardline_protocol::SecretBytes;
 use shardline_test_support::DockerLocalStack;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -21,7 +22,8 @@ async fn redis_cache_roundtrips_over_tls_with_mutual_authentication() {
     let root_cert = read(stack.redis_tls_ca_cert_path().unwrap()).unwrap();
     let client_cert = read(stack.redis_tls_client_cert_path().unwrap()).unwrap();
     let client_key = read(stack.redis_tls_client_key_path().unwrap()).unwrap();
-    let tls = RedisTlsConfig::new(Some(root_cert)).with_client_identity(client_cert, client_key);
+    let tls = RedisTlsConfig::new(Some(SecretBytes::new(root_cert)))
+        .with_client_identity(SecretBytes::new(client_cert), SecretBytes::new(client_key));
     let cache =
         RedisReconstructionCache::new_with_tls(&redis_url, NonZeroU64::new(3600).unwrap(), tls)
             .unwrap();

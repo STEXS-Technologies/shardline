@@ -5,7 +5,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[cfg(unix)]
-    use shardline_storage::anchored_fs::{
+    use shardline_storage::{
         AnchoredPathOptions, open_anchored_target as open_anchored_target_shared,
         write_anchored_temporary_file as write_anchored_temporary_file_shared,
     };
@@ -24,7 +24,7 @@ mod tests {
 
     #[cfg(unix)]
     fn write_file_atomically(root: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        use shardline_storage::anchored_fs::remove_if_present;
+        use shardline_storage::remove_if_present;
 
         let anchored = open_anchored_target_shared(root, path, anchored_path_options(), || {
             io::Error::new(

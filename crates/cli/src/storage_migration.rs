@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use shardline_protocol::parse_bool;
+use shardline_protocol::{parse_bool, SecretString};
 use shardline_server::{
     ObjectStorageAdapter, ServerConfigError, ServerError, StorageMigrationEndpoint,
     StorageMigrationOptions, StorageMigrationReport,
@@ -232,7 +232,7 @@ fn build_s3_config<LoadCredentials>(
 ) -> Result<S3ObjectStoreConfig, StorageMigrationRuntimeError>
 where
     LoadCredentials: FnOnce() -> Result<
-        (Option<String>, Option<String>, Option<String>),
+        (Option<SecretString>, Option<SecretString>, Option<SecretString>),
         StorageMigrationRuntimeError,
     >,
 {
@@ -268,7 +268,7 @@ fn env_value(prefix: &str, name: &str) -> Option<String> {
 fn optional_s3_secret_env_or_file(
     prefix: &str,
     name: &str,
-) -> Result<Option<String>, StorageMigrationRuntimeError> {
+) -> Result<Option<SecretString>, StorageMigrationRuntimeError> {
     let env_name = env_key(prefix, name);
     let file_name = format!("{name}_FILE");
     let file_env_name = env_key(prefix, &file_name);
@@ -286,7 +286,7 @@ fn optional_s3_secret_from_sources(
     direct: Option<String>,
     file_env_name: String,
     file: Option<String>,
-) -> Result<Option<String>, StorageMigrationRuntimeError> {
+) -> Result<Option<SecretString>, StorageMigrationRuntimeError> {
     match (direct, file) {
         (Some(_direct), Some(_file)) => {
             Err(StorageMigrationRuntimeError::S3CredentialSourceConflict {
@@ -294,8 +294,10 @@ fn optional_s3_secret_from_sources(
                 file_env: file_env_name,
             })
         }
-        (Some(value), None) => Ok(Some(value)),
-        (None, Some(path)) => read_s3_credential_file(Path::new(&path), file_env_name).map(Some),
+        (Some(value), None) => Ok(Some(SecretString::new(value))),
+        (None, Some(path)) => {
+            read_s3_credential_file(Path::new(&path), file_env_name).map(Some)
+        }
         (None, None) => Ok(None),
     }
 }
@@ -303,7 +305,7 @@ fn optional_s3_secret_from_sources(
 fn read_s3_credential_file(
     path: &Path,
     name: String,
-) -> Result<String, StorageMigrationRuntimeError> {
+) -> Result<SecretString, StorageMigrationRuntimeError> {
     let mut file = open_s3_credential_file(path).map_err(|source| {
         StorageMigrationRuntimeError::S3CredentialFile {
             name: name.clone(),
@@ -326,8 +328,9 @@ fn read_s3_credential_file(
         u64::try_from(bytes.len()).unwrap_or(u64::MAX),
     )?;
 
-    String::from_utf8(bytes)
-        .map_err(|_error| StorageMigrationRuntimeError::S3CredentialUtf8 { name })
+    let s = String::from_utf8(bytes)
+        .map_err(|_error| StorageMigrationRuntimeError::S3CredentialUtf8 { name })?;
+    Ok(SecretString::new(s))
 }
 
 #[cfg(unix)]
@@ -496,7 +499,7 @@ mod tests {
         PendingS3Config, StorageMigrationRuntimeError, build_s3_config, local_endpoint,
         optional_s3_secret_from_sources, read_s3_credential_file,
     };
-    use shardline_protocol::parse_bool;
+use shardline_protocol::{parse_bool, SecretString};
 
     fn set_before_s3_credential_read_hook_for_tests(
         path: PathBuf,
@@ -586,7 +589,11 @@ mod tests {
             },
             move || {
                 credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-                Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+                Ok((
+                    Some(SecretString::from_secret("access")),
+                    Some(SecretString::from_secret("secret")),
+                    None,
+                ))
             },
         );
 
@@ -616,7 +623,11 @@ mod tests {
             },
             move || {
                 credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-                Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+                Ok((
+                    Some(SecretString::from_secret("access")),
+                    Some(SecretString::from_secret("secret")),
+                    None,
+                ))
             },
         );
 
@@ -1010,7 +1021,10 @@ mod tests {
             "TEST_VAR_FILE".to_owned(),
             None,
         );
-        assert_eq!(result.unwrap(), Some("direct-value".to_owned()));
+        assert_eq!(
+            result.unwrap().as_ref().map(SecretString::expose_secret),
+            Some("direct-value")
+        );
     }
 
     #[test]
@@ -1096,22 +1110,28 @@ mod tests {
         let result = read_s3_credential_file(&path, "ACCESS_KEY_ID_FILE".to_owned());
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "my-access-key");
+        assert_eq!(result.unwrap().expose_secret(), "my-access-key");
     }
 
     #[test]
     fn build_s3_config_with_all_options_constructs_config() {
-        let configured = build_s3_config(
-            Ok("my-bucket".to_owned()),
-            PendingS3Config {
-                region: "eu-west-1".to_owned(),
-                endpoint: Some("https://s3.custom.com".to_owned()),
-                key_prefix: Some("prefix/".to_owned()),
-                allow_http: Ok(Some(true)),
-                virtual_hosted_style_request: Ok(Some(true)),
-            },
-            || Ok((Some("ak".to_owned()), Some("sk".to_owned()), None)),
-        );
+    let configured = build_s3_config(
+        Ok("my-bucket".to_owned()),
+        PendingS3Config {
+            region: "eu-west-1".to_owned(),
+            endpoint: Some("https://s3.custom.com".to_owned()),
+            key_prefix: Some("prefix/".to_owned()),
+            allow_http: Ok(Some(true)),
+            virtual_hosted_style_request: Ok(Some(true)),
+        },
+        || {
+            Ok((
+                Some(SecretString::from_secret("ak")),
+                Some(SecretString::from_secret("sk")),
+                None,
+            ))
+        },
+    );
 
         assert!(configured.is_ok());
         // Debug output should not leak credentials
@@ -1190,7 +1210,10 @@ mod tests {
             "TEST_VAR_FILE".to_owned(),
             Some(path.display().to_string()),
         );
-        assert_eq!(result.unwrap(), Some("file-secret".to_owned()));
+        assert_eq!(
+            result.unwrap().as_ref().map(SecretString::expose_secret),
+            Some("file-secret")
+        );
     }
 
     #[test]

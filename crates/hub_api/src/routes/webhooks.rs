@@ -12,7 +12,7 @@ use crate::error::HubApiError;
 use crate::models::*;
 // HubRepoType used in the webhook_create handler for repo lookup
 // (used implicitly via state.store methods)
-use shardline_protocol::TokenScope;
+use shardline_protocol::{SecretString, TokenScope};
 
 use super::{HubState, authorize};
 
@@ -71,7 +71,7 @@ pub(crate) async fn deliver_webhook_events(
         let url_for_log = sanitize_log_url(&url);
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = deliver_one_webhook(&client, &url, &body, secret.as_deref()).await {
+            if let Err(e) = deliver_one_webhook(&client, &url, &body, secret.as_ref().map(SecretString::expose_secret)).await {
                 tracing::warn!("webhook delivery to {url_for_log} failed: {e}");
             }
         });
@@ -288,7 +288,7 @@ pub(crate) async fn webhook_create(
             &name,
             &request.url,
             &request.events,
-            request.secret.as_deref(),
+            request.secret.as_ref().map(SecretString::expose_secret),
         )
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
     Ok((

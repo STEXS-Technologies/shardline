@@ -5,7 +5,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use shardline_storage::anchored_fs::{
+use shardline_storage::{
     AnchoredPathOptions, ensure_parent_path_matches_anchor, open_anchored_target,
     remove_if_present, write_anchored_temporary_file,
 };

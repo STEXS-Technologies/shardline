@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use futures_util::StreamExt;
+use shardline_protocol::SecretString;
 use shardline_storage::{
     ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore,
     S3ObjectStoreConfig,
@@ -16,7 +17,11 @@ fn s3_config_with_bucket(
     Some(
         S3ObjectStoreConfig::new(bucket, raw.region)
             .with_endpoint(raw.endpoint)
-            .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+            .with_credentials(
+                raw.access_key.map(SecretString::new),
+                raw.secret_key.map(SecretString::new),
+                raw.session_token.map(SecretString::new),
+            )
             .with_allow_http(raw.allow_http),
     )
 }
@@ -26,7 +31,11 @@ fn s3_config(stack: &DockerLocalStack, key_prefix: Option<&str>) -> Option<S3Obj
     Some(
         S3ObjectStoreConfig::new(raw.bucket, raw.region)
             .with_endpoint(raw.endpoint)
-            .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+            .with_credentials(
+                raw.access_key.map(SecretString::new),
+                raw.secret_key.map(SecretString::new),
+                raw.session_token.map(SecretString::new),
+            )
             .with_allow_http(raw.allow_http),
     )
 }

@@ -4,7 +4,7 @@ use object_store::{
     GetOptions, ObjectStore as ExternalObjectStore, ObjectStoreExt, memory::InMemory,
     path::Path as ObjectStorePath,
 };
-use shardline_protocol::{ByteRange, ShardlineHash};
+use shardline_protocol::{ByteRange, SecretString, ShardlineHash};
 
 use super::{
     S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError, chunk_hash, is_temp_upload_key,
@@ -30,7 +30,7 @@ fn s3_location_applies_key_prefix() {
         S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
             .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
             .with_allow_http(true)
-            .with_credentials(Some("access".to_owned()), Some("secret".to_owned()), None)
+            .with_credentials(Some(SecretString::from_secret("access")), Some(SecretString::from_secret("secret")), None)
             .with_key_prefix(Some("tenant-a")),
     );
     assert!(store.is_ok());
@@ -87,9 +87,9 @@ fn s3_store_debug_redacts_credentials() {
             .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
             .with_allow_http(true)
             .with_credentials(
-                Some("access-key".to_owned()),
-                Some("secret-key".to_owned()),
-                Some("session-token".to_owned()),
+                Some(SecretString::from_secret("access-key")),
+                Some(SecretString::from_secret("secret-key")),
+                Some(SecretString::from_secret("session-token")),
             )
             .with_key_prefix(Some("tenant-a")),
     );
@@ -231,9 +231,9 @@ fn s3_error_display_and_debug_are_implemented() {
 #[test]
 fn s3_store_with_full_credentials_accepts_custom_session_token() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        Some("key".to_owned()),
-        Some("secret".to_owned()),
-        Some("token".to_owned()),
+        Some(SecretString::from_secret("key")),
+        Some(SecretString::from_secret("secret")),
+        Some(SecretString::from_secret("token")),
     );
     // Full credentials (key + secret + session token) should build successfully
     // without needing any external endpoint.
@@ -412,9 +412,9 @@ fn s3_config_bucket_accessor_no_prefix() {
 #[test]
 fn s3_config_debug_redacts_credentials() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        Some("access-key-123".to_owned()),
-        Some("secret-key-456".to_owned()),
-        Some("session-token-789".to_owned()),
+        Some(SecretString::from_secret("access-key-123")),
+        Some(SecretString::from_secret("secret-key-456")),
+        Some(SecretString::from_secret("session-token-789")),
     );
     let rendered = format!("{config:?}");
     assert!(!rendered.contains("access-key-123"));
@@ -901,7 +901,7 @@ fn streaming_large_copy_rejects_empty_region_config() {
 #[test]
 fn s3_store_rejects_incomplete_credentials_key_without_secret() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        Some("key".to_owned()),
+        Some(SecretString::from_secret("key")),
         None,
         None,
     );
@@ -916,7 +916,7 @@ fn s3_store_rejects_incomplete_credentials_key_without_secret() {
 fn s3_store_rejects_incomplete_credentials_secret_without_key() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
         None,
-        Some("secret".to_owned()),
+        Some(SecretString::from_secret("secret")),
         None,
     );
     let store = S3ObjectStore::new(config);
@@ -941,7 +941,7 @@ mod minio_tests {
         DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix,
         ObjectStore as ObjectStoreTrait, PutOutcome,
     };
-    use shardline_protocol::ByteRange;
+    use shardline_protocol::{ByteRange, SecretString};
 
     /// Shared MinIO init guard: only starts containers once across all tests.
     static MINIO_INIT: AtomicBool = AtomicBool::new(false);
@@ -970,7 +970,11 @@ mod minio_tests {
         let config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
             .with_endpoint(raw.endpoint)
             .with_allow_http(raw.allow_http)
-            .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+            .with_credentials(
+                raw.access_key.map(SecretString::new),
+                raw.secret_key.map(SecretString::new),
+                raw.session_token.map(SecretString::new),
+            )
             .with_key_prefix(raw.key_prefix.as_deref());
         S3ObjectStore::new(config).unwrap()
     }
@@ -1422,7 +1426,7 @@ fn s3_config_clone_and_eq() {
 fn s3_config_with_credentials_only_key() {
     // Only access_key_id without secret_access_key should fail
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
-        Some("key".to_owned()),
+        Some(SecretString::from_secret("key")),
         None,
         None,
     );
@@ -1437,7 +1441,7 @@ fn s3_config_with_credentials_only_key() {
 fn s3_config_with_credentials_only_secret() {
     let config = S3ObjectStoreConfig::new("b".to_owned(), "r".to_owned()).with_credentials(
         None,
-        Some("secret".to_owned()),
+        Some(SecretString::from_secret("secret")),
         None,
     );
     let store = S3ObjectStore::new(config);

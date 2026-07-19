@@ -13,6 +13,7 @@
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use sha2::{Digest, Sha256};
+use shardline_protocol::SecretString;
 use shardline_server::{
     BenchmarkBackend, ObjectStorageAdapter, ObjectStoreError, ServerBackend, ServerConfig,
     ServerError, shared_sha256_object_key,
@@ -64,7 +65,11 @@ fn s3_config(key_prefix: &str) -> S3ObjectStoreConfig {
 
     S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
-        .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
         .with_key_prefix(raw.key_prefix.as_deref())
         .with_allow_http(raw.allow_http)
 }
@@ -165,7 +170,11 @@ async fn test_s3_object_store_recovers_after_minio_restart() {
         .expect("MinIO should be configured");
     let config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
-        .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
         .with_key_prefix(raw.key_prefix.as_deref())
         .with_allow_http(raw.allow_http);
     // Construct outside Tokio so the adapter retains a runtime when used from
@@ -209,9 +218,9 @@ async fn test_s3_object_store_recovers_after_minio_restart() {
     let recovered_config = S3ObjectStoreConfig::new(recovered_raw.bucket, recovered_raw.region)
         .with_endpoint(recovered_raw.endpoint)
         .with_credentials(
-            recovered_raw.access_key,
-            recovered_raw.secret_key,
-            recovered_raw.session_token,
+            recovered_raw.access_key.map(SecretString::new),
+            recovered_raw.secret_key.map(SecretString::new),
+            recovered_raw.session_token.map(SecretString::new),
         )
         .with_key_prefix(recovered_raw.key_prefix.as_deref())
         .with_allow_http(recovered_raw.allow_http);
@@ -956,9 +965,9 @@ async fn test_s3_benchmark_missing_credentials_fails_on_operation() {
     let bad_config = S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
         .with_credentials(
-            Some("WRONG".to_owned()),
-            Some("CREDENTIALS".to_owned()),
-            raw.session_token,
+            Some(SecretString::from_secret("WRONG")),
+            Some(SecretString::from_secret("CREDENTIALS")),
+            raw.session_token.map(SecretString::new),
         )
         .with_allow_http(raw.allow_http);
 

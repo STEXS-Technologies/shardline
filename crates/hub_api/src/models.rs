@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use shardline_protocol::SecretString;
 
 /// Repository type (model, dataset, space).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,7 +565,7 @@ pub struct WebhookCreateRequest {
     pub events: Vec<String>,
     /// Optional secret for HMAC signature verification.
     #[serde(default)]
-    pub secret: Option<String>,
+    pub secret: Option<SecretString>,
 }
 
 fn default_webhook_events() -> Vec<String> {

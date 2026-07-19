@@ -1,6 +1,8 @@
 use futures_util::TryStreamExt;
 use sqlx::Row;
 
+use shardline_protocol::SecretString;
+
 use crate::{
     hub::{
         HubFileEntry, HubRef, HubRepo, HubRepoType, HubRevision, HubStore, HubWebhook,
@@ -627,7 +629,7 @@ impl HubStore for PostgresIndexStore {
         let repo_id = repo_id.to_owned();
         let url = url.to_owned();
         let events_str = events.join(",");
-        let secret = secret.map(ToOwned::to_owned);
+        let secret = secret.map(SecretString::from_secret);
         let events_vec = events.to_vec();
 
         block_on_async(async {
@@ -639,7 +641,7 @@ impl HubStore for PostgresIndexStore {
             .bind(&repo_id)
             .bind(&url)
             .bind(&events_str)
-            .bind(secret.as_deref())
+            .bind(secret.as_ref().map(SecretString::as_ref))
             .fetch_one(&pool)
             .await?;
 
@@ -648,7 +650,7 @@ impl HubStore for PostgresIndexStore {
                 repo_id: row.try_get("repo_id")?,
                 url: row.try_get("url")?,
                 events: events_vec,
-                secret: row.try_get("secret")?,
+                secret: row.try_get::<Option<String>, _>("secret")?.map(SecretString::new),
                 active: row.try_get::<bool, _>("active")?,
                 created_at_unix_seconds: i64_to_u64(
                     row.try_get::<i64, _>("created_at_unix_seconds")?,
@@ -677,7 +679,7 @@ impl HubStore for PostgresIndexStore {
                     repo_id: row.try_get("repo_id")?,
                     url: row.try_get("url")?,
                     events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                    secret: row.try_get("secret")?,
+                    secret: row.try_get::<Option<String>, _>("secret")?.map(SecretString::new),
                     active: row.try_get::<bool, _>("active")?,
                     created_at_unix_seconds: i64_to_u64(
                         row.try_get::<i64, _>("created_at_unix_seconds")?,
@@ -730,7 +732,7 @@ impl HubStore for PostgresIndexStore {
                     repo_id: row.try_get("repo_id")?,
                     url: row.try_get("url")?,
                     events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                    secret: row.try_get("secret")?,
+                    secret: row.try_get::<Option<String>, _>("secret")?.map(SecretString::new),
                     active: row.try_get::<bool, _>("active")?,
                     created_at_unix_seconds: i64_to_u64(
                         row.try_get::<i64, _>("created_at_unix_seconds")?,

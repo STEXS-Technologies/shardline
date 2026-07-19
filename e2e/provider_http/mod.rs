@@ -1,3 +1,4 @@
+mod codeberg;
 mod generic;
 mod gitea;
 mod github;
