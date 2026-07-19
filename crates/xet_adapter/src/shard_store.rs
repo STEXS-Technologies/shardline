@@ -737,7 +737,7 @@ mod tests {
         let file_hash = file_hash(&[(first_chunk_hash, 1_u64), (second_chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 2_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 2u32, false, false),
                 segments: vec![
                     FileDataSequenceEntry::new(first_xorb_hash, 1_u32, 0_u32, 1_u32),
                     FileDataSequenceEntry::new(second_xorb_hash, 1_u32, 0_u32, 1_u32),
@@ -763,7 +763,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -817,7 +817,7 @@ mod tests {
             vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32); term_count];
         serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, file_segments.len(), false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, file_segments.len() as u32, false, false),
                 segments: file_segments,
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -845,13 +845,13 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, chunks.len(), chunks.len()),
+                metadata: XorbChunkSequenceHeader::new(xorb_hash, chunks.len() as u32, chunks.len() as u32),
                 chunks,
             }],
         )
@@ -952,10 +952,10 @@ mod tests {
 
     #[test]
     fn file_section_followed_entries_without_verification_or_metadata() {
-        let seg_count = 3_usize;
+        let seg_count = 3usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count,
+            seg_count as u32,
             false,
             false,
         );
@@ -965,10 +965,10 @@ mod tests {
 
     #[test]
     fn file_section_followed_entries_with_verification() {
-        let seg_count = 3_usize;
+        let seg_count = 3usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count,
+            seg_count as u32,
             true,
             false,
         );
@@ -978,10 +978,10 @@ mod tests {
 
     #[test]
     fn file_section_followed_entries_with_metadata_ext() {
-        let seg_count = 3_usize;
+        let seg_count = 3usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count,
+            seg_count as u32,
             false,
             true,
         );
@@ -991,10 +991,10 @@ mod tests {
 
     #[test]
     fn file_section_followed_entries_with_both() {
-        let seg_count = 2_usize;
+        let seg_count = 2usize;
         let header = FileDataSequenceHeader::new(
             shardline_xet_core::merklehash::compute_data_hash(b"h"),
-            seg_count,
+            seg_count as u32,
             true,
             true,
         );
@@ -1142,7 +1142,7 @@ mod tests {
         let file_hash_bytes = compute_data_hash(b"file");
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash_bytes, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash_bytes, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(
                     xorb_hash_bytes,
                     1_u32,
@@ -1210,7 +1210,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -1273,7 +1273,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -1324,7 +1324,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -1365,7 +1365,7 @@ mod tests {
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -1456,7 +1456,7 @@ mod tests {
         // Create file info with verification=true, metadata_ext=false
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, true, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, true, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 0_u32, 1_u32)],
                 verification: vec![FileVerificationEntry::new(MerkleHash::default())],
                 metadata_ext: None,
@@ -1493,7 +1493,7 @@ mod tests {
 
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(combined_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(combined_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 16_u32, 0_u32, 2_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -1771,7 +1771,7 @@ mod tests {
         // Use a file that starts at chunk index 1, so chunk 0 is not a file start
         let shard = serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, 1_usize, false, false),
+                metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
                 segments: vec![FileDataSequenceEntry::new(xorb_hash, 1_u32, 1_u32, 2_u32)],
                 verification: Vec::new(),
                 metadata_ext: None,

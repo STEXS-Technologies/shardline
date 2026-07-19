@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use std::io::{Cursor, Read, Write};
 use std::mem::size_of;
 
@@ -28,15 +27,12 @@ pub struct FileDataSequenceHeader {
 }
 
 impl FileDataSequenceHeader {
-    pub fn new<I: TryInto<u32>>(
+    pub fn new(
         file_hash: MerkleHash,
-        num_entries: I,
+        num_entries: u32,
         contains_verification: bool,
         contains_metadata_ext: bool,
-    ) -> Self
-    where
-        <I as TryInto<u32>>::Error: Debug,
-    {
+    ) -> Self {
         let verification_flag = if contains_verification {
             MDB_FILE_FLAG_WITH_VERIFICATION
         } else {
@@ -51,7 +47,7 @@ impl FileDataSequenceHeader {
         Self {
             file_hash,
             file_flags,
-            num_entries: num_entries.try_into().unwrap(),
+            num_entries,
             #[cfg(test)]
             _unused: 126846135456846514u64,
             #[cfg(not(test))]
@@ -126,33 +122,27 @@ pub struct FileDataSequenceEntry {
 }
 
 impl FileDataSequenceEntry {
-    pub fn new<I1: TryInto<u32>>(
+    pub fn new(
         xorb_hash: MerkleHash,
-        unpacked_segment_bytes: I1,
-        chunk_index_start: I1,
-        chunk_index_end: I1,
-    ) -> Self
-    where
-        <I1 as TryInto<u32>>::Error: Debug,
-    {
+        unpacked_segment_bytes: u32,
+        chunk_index_start: u32,
+        chunk_index_end: u32,
+    ) -> Self {
         Self {
             xorb_hash,
             xorb_flags: MDB_DEFAULT_FILE_FLAG,
-            unpacked_segment_bytes: unpacked_segment_bytes.try_into().unwrap(),
-            chunk_index_start: chunk_index_start.try_into().unwrap(),
-            chunk_index_end: chunk_index_end.try_into().unwrap(),
+            unpacked_segment_bytes,
+            chunk_index_start,
+            chunk_index_end,
         }
     }
 
-    pub fn from_xorb_entries<I1: TryInto<u32>>(
+    pub fn from_xorb_entries(
         metadata: &XorbChunkSequenceHeader,
         chunks: &[XorbChunkSequenceEntry],
-        chunk_index_start: I1,
-        chunk_index_end: I1,
-    ) -> Self
-    where
-        <I1 as TryInto<u32>>::Error: Debug,
-    {
+        chunk_index_start: u32,
+        chunk_index_end: u32,
+    ) -> Self {
         if chunks.is_empty() {
             return Self::default();
         }
@@ -160,8 +150,8 @@ impl FileDataSequenceEntry {
             xorb_hash: metadata.xorb_hash,
             xorb_flags: metadata.xorb_flags,
             unpacked_segment_bytes: chunks.iter().map(|sb| sb.unpacked_segment_bytes).sum(),
-            chunk_index_start: chunk_index_start.try_into().unwrap(),
-            chunk_index_end: chunk_index_end.try_into().unwrap(),
+            chunk_index_start,
+            chunk_index_end,
         }
     }
 
@@ -452,7 +442,7 @@ impl From<&MDBFileInfoView> for MDBFileInfo {
         MDBFileInfo {
             metadata: FileDataSequenceHeader::new(
                 view.file_hash(),
-                segments.len(),
+                segments.len() as u32,
                 view.contains_verification(),
                 view.contains_metadata_ext(),
             ),

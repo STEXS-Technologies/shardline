@@ -1323,7 +1323,7 @@ async fn run_fsck_with_invalid_dedupe_shard_mapping_detected() {
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_val,
                 chunk_data.len() as u32,
@@ -1422,7 +1422,7 @@ async fn run_fsck_with_dedupe_shard_added_to_reachability() {
     let mut shard = MDBInMemoryShard::default();
     shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash_val, 1_usize, false, false),
+            metadata: FileDataSequenceHeader::new(file_hash_val, 1u32, false, false),
             segments: vec![FileDataSequenceEntry::new(
                 xorb_val,
                 chunk_data.len() as u32,
