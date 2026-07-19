@@ -1,5 +1,4 @@
 #![deny(unsafe_code)]
-#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 
 //! Metadata index contracts and adapters for Shardline.
 //!

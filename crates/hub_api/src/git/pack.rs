@@ -3,8 +3,7 @@
 //! Implements the Git pack format for serving pack files during
 //! `git clone` and `git fetch` operations. This is a minimal
 //! implementation that generates non-delta packs.
-// Clippy allows
-#![allow(clippy::shadow_unrelated)]
+
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -269,12 +268,12 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
     let mut pos = 0;
 
     // Parse source size (varint, MSB-first, 7 bits per byte)
-    let (source_size, new_pos) = parse_delta_varint(delta, pos)?;
-    pos = new_pos;
+    let (source_size, after_source) = parse_delta_varint(delta, pos)?;
+    pos = after_source;
 
     // Parse target size (varint)
-    let (target_size, new_pos) = parse_delta_varint(delta, pos)?;
-    pos = new_pos;
+    let (target_size, after_target) = parse_delta_varint(delta, pos)?;
+    pos = after_target;
 
     if source_size != base.len() {
         return Err(PackError::InvalidDelta);

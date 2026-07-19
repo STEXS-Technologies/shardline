@@ -24,7 +24,7 @@ pub struct RedisTlsConfig {
 impl RedisTlsConfig {
     /// Creates TLS configuration with an optional PEM-encoded root certificate.
     #[must_use]
-    pub fn new(root_cert: Option<SecretBytes>) -> Self {
+    pub const fn new(root_cert: Option<SecretBytes>) -> Self {
         Self {
             root_cert,
             client_cert: None,
@@ -40,7 +40,7 @@ impl RedisTlsConfig {
         self
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.root_cert.is_none() && self.client_cert.is_none() && self.client_key.is_none()
     }
 

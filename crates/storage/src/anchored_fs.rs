@@ -340,7 +340,6 @@ pub fn fd_child_path(directory: &File, child: &OsStr) -> PathBuf {
 ///
 /// Returns an error when either name contains a null byte or the rename fails.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::io::AsRawFd;
@@ -403,7 +402,6 @@ pub fn rename_at(parent: &File, old_name: &OsStr, new_name: &OsStr) -> io::Resul
 ///
 /// Returns an error when the name contains a null byte or the removal fails.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 pub fn remove_at(parent: &File, name: &OsStr) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::io::AsRawFd;
@@ -449,7 +447,6 @@ pub fn remove_if_present(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 fn macos_fd_real_path(fd: std::os::unix::io::RawFd) -> PathBuf {
     let mut buf = [0i8; 1024];
     // SAFETY: fcntl(2) with F_GETPATH writes a NUL-terminated path into buf.

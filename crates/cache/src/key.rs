@@ -25,7 +25,7 @@ impl RepositoryScopeCacheKey {
 
     /// Returns the repository provider.
     #[must_use]
-    pub fn provider(&self) -> &str {
+    pub const fn provider(&self) -> &str {
         self.provider
     }
 
