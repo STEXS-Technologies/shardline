@@ -73,7 +73,7 @@ impl DedupeStore for LocalIndexStore {
         chunk_hash: &ShardlineHash,
     ) -> Result<Option<DedupeShardMapping>, Self::Error> {
         let connection = self.open_connection()?;
-        connection
+        let result: Result<Option<DedupeShardMapping>, _> = connection
             .query_row(
                 "SELECT chunk_hash, shard_object_key
                  FROM shardline_dedupe_shards
@@ -82,7 +82,10 @@ impl DedupeStore for LocalIndexStore {
                 super::helpers::dedupe_shard_mapping_from_row,
             )
             .optional()
-            .map_err(LocalIndexStoreError::from)
+            .map_err(LocalIndexStoreError::from);
+        let hit = result.as_ref().is_ok_and(|r| r.is_some());
+        shardline_metrics::record_xet_dedupe_shard_query(hit);
+        result
     }
 
     fn list_dedupe_shard_mappings(&self) -> Result<Vec<DedupeShardMapping>, Self::Error> {

@@ -101,6 +101,7 @@ async fn oci_dispatch_parsed(
                 &digest_hex,
                 auth.as_ref().map(scope_from_auth),
             )?;
+            shardline_metrics::metrics().protocol.record_oci_download();
             direct_object_response(
                 state,
                 &headers,

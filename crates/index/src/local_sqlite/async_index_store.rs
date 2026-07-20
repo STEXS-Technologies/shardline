@@ -104,11 +104,14 @@ impl AsyncIndexStore for LocalIndexStore {
         let store = self.clone();
         let chunk_hash = *chunk_hash;
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            let result: Result<Option<DedupeShardMapping>, _> = tokio::task::spawn_blocking(move || {
                 DedupeStore::dedupe_shard_mapping(&store, &chunk_hash)
             })
             .await
-            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
+            .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?;
+            let hit = result.as_ref().is_ok_and(|r| r.is_some());
+            shardline_metrics::record_xet_dedupe_shard_query(hit);
+            result
         })
     }
 

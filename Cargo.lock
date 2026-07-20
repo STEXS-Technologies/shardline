@@ -3358,6 +3358,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "shardline-metrics",
  "shardline-protocol",
  "shardline-storage",
  "shardline-test-support",
