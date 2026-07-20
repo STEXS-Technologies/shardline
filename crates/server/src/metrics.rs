@@ -145,9 +145,11 @@ pub fn record_xet_xorb_download(bytes: u64) {
 }
 
 pub fn record_xet_reconstruction_request() {
-    shardline_metrics::metrics()
-        .xet
-        .record_reconstruction(true, std::time::Duration::from_secs(0), 0);
+    shardline_metrics::metrics().xet.record_reconstruction(
+        true,
+        std::time::Duration::from_secs(0),
+        0,
+    );
 }
 
 pub fn record_dedup_saves(bytes: u64) {

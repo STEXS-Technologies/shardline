@@ -14,15 +14,17 @@ use serde_json::json;
 use shardline_protocol::TokenScope;
 
 use crate::{
-    HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse, metrics,
+    HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
     app::{
-        AppState, authorize, scope_from_auth,
+        AppState, authorize,
         reconstruction_helpers::{
             byte_range_stream_response, full_byte_stream_response,
             parse_required_xorb_transfer_range,
         },
+        scope_from_auth,
     },
     auth::authorize_static_bearer_token,
+    metrics,
     model::ReadyResponse,
     upload_ingest::RequestBodyReader,
     xet_adapter::{validate_hash_path, validate_xorb_transfer_namespace},
@@ -109,7 +111,10 @@ pub(super) async fn upload_xorb(
     let xorb_length = body_bytes.len() as u64;
     let response = state
         .backend
-        .upload_xorb_stream(&hash, RequestBodyReader::from_bytes(bytes::Bytes::from(body_bytes)))
+        .upload_xorb_stream(
+            &hash,
+            RequestBodyReader::from_bytes(bytes::Bytes::from(body_bytes)),
+        )
         .await?;
     if response.was_inserted {
         metrics::record_xorb_stored(xorb_length);

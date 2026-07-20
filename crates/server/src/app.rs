@@ -279,6 +279,9 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 /// IO error.
 #[tracing::instrument(skip(config), fields(bind_addr = %config.bind_addr()))]
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
+    shardline_metrics::metrics()
+        .system
+        .set_uptime(shardline_protocol::unix_now_seconds_lossy() as i64);
     let listener = TcpListener::bind(config.bind_addr()).await?;
     tracing::info!("listening on {}", config.bind_addr());
     serve_with_listener(config, listener).await
@@ -378,7 +381,10 @@ fn register_xet_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
                 "/v1/xorbs/default/{hash}",
                 head(head_xorb).post(upload_xorb),
             )
-            .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer).put(write_xorb_transfer));
+            .route(
+                XORB_TRANSFER_ROUTE,
+                get(read_xorb_transfer).put(write_xorb_transfer),
+            );
     }
     app
 }

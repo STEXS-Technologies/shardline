@@ -424,13 +424,19 @@ mod tests {
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let data = b"dedup-metric-test-content!";
 
-        let before = shardline_metrics::metrics().storage.dedup_saves_bytes_total.get();
+        let before = shardline_metrics::metrics()
+            .storage
+            .dedup_saves_bytes_total
+            .get();
 
         // First insert — should be stored as new
         let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(data));
         let outcome1 = put_if_absent_chunk_buffer(&store, chunk1).await.unwrap();
         assert!(outcome1.inserted);
-        let after_first = shardline_metrics::metrics().storage.dedup_saves_bytes_total.get();
+        let after_first = shardline_metrics::metrics()
+            .storage
+            .dedup_saves_bytes_total
+            .get();
         assert_eq!(
             after_first, before,
             "dedup_saves should not increase on first insert"
@@ -440,7 +446,10 @@ mod tests {
         let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(data));
         let outcome2 = put_if_absent_chunk_buffer(&store, chunk2).await.unwrap();
         assert!(!outcome2.inserted);
-        let after_dedup = shardline_metrics::metrics().storage.dedup_saves_bytes_total.get();
+        let after_dedup = shardline_metrics::metrics()
+            .storage
+            .dedup_saves_bytes_total
+            .get();
         assert!(
             after_dedup >= after_first + outcome2.chunk_length,
             "dedup_saves_bytes_total should increase by chunk_length ({}) on dedup (before: {after_first}, after: {after_dedup})",

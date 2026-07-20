@@ -134,7 +134,10 @@ pub(super) async fn handle_provider_webhook(
     let Some(event) = event else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
+    let start = std::time::Instant::now();
     let outcome = apply_provider_webhook(&state.config, &event).await?;
+    let elapsed = start.elapsed().as_secs_f64();
+    crate::metrics::record_webhook_event(&provider, "", elapsed);
     Ok((
         StatusCode::ACCEPTED,
         Json(provider_webhook_response(outcome)),
