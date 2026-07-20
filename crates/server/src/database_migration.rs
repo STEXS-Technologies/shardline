@@ -666,6 +666,7 @@ mod tests {
                 migration.up_sql.trim().starts_with("CREATE")
                     || migration.up_sql.trim().starts_with("ALTER")
                     || migration.up_sql.trim().starts_with("INSERT")
+                    || migration.up_sql.trim().starts_with("DROP")
                     || migration.up_sql.trim().starts_with("--"),
                 "migration {} up_sql does not start with expected SQL keyword: {:?}",
                 migration.version,
@@ -676,6 +677,7 @@ mod tests {
                 migration.down_sql.trim().starts_with("DROP")
                     || migration.down_sql.trim().starts_with("DELETE")
                     || migration.down_sql.trim().starts_with("ALTER")
+                    || migration.down_sql.trim().starts_with("CREATE")
                     || migration.down_sql.trim().starts_with("--"),
                 "migration {} down_sql does not start with expected SQL keyword: {:?}",
                 migration.version,

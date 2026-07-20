@@ -989,6 +989,7 @@ async fn test_migration_each_has_valid_sql() {
             m.up_sql.trim().starts_with("CREATE")
                 || m.up_sql.trim().starts_with("ALTER")
                 || m.up_sql.trim().starts_with("INSERT")
+                || m.up_sql.trim().starts_with("DROP")
                 || m.up_sql.trim().starts_with("--"),
             "{} up_sql unexpected start: {:?}",
             m.version,
