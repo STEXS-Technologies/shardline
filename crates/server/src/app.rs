@@ -51,7 +51,7 @@ use crate::{
 };
 use operational::{
     head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready, stats, upload_shard,
-    upload_xorb,
+    upload_xorb, write_xorb_transfer,
 };
 use protocol_routes::{
     bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
@@ -378,7 +378,7 @@ fn register_xet_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
                 "/v1/xorbs/default/{hash}",
                 head(head_xorb).post(upload_xorb),
             )
-            .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer));
+            .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer).put(write_xorb_transfer));
     }
     app
 }

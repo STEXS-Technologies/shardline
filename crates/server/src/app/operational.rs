@@ -163,6 +163,24 @@ pub(super) async fn read_xorb_transfer(
     ))
 }
 
+/// Writes a xorb to the CAS through the transfer endpoint.
+/// git-xet uses this endpoint to upload chunk-grouped data directly
+/// to the content-addressed storage layer after receiving the CAS URL
+/// and access token from the LFS batch response.
+#[tracing::instrument(skip(state, headers, body), fields(hash = %hash))]
+pub(super) async fn write_xorb_transfer(
+    State(state): State<Arc<AppState>>,
+    Path((prefix, hash)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<XorbUploadResponse>, ServerError> {
+    authorize(&state, &headers, TokenScope::Write)?;
+    validate_xorb_transfer_namespace(&prefix)?;
+    validate_hash_path(&hash)?;
+    let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    Ok(Json(state.backend.upload_xorb_stream(&hash, body).await?))
+}
+
 #[tracing::instrument(skip(state, headers, body))]
 pub(super) async fn upload_shard(
     State(state): State<Arc<AppState>>,
