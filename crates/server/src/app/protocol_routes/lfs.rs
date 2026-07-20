@@ -86,10 +86,18 @@ pub(crate) async fn lfs_batch(
     }
 
     let scope = auth.as_ref().map(scope_from_auth);
-    let transfer = if request.transfers.is_empty()
+
+    // Determine the transfer adapter. Prefer "xet" when the client supports it
+    // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
+    let use_xet = request.transfers.iter().any(|t| t == "xet")
+        && state.auth.is_some()
+        && auth.is_some();
+    let transfer = if use_xet {
+        "xet"
+    } else if request.transfers.is_empty()
         || request.transfers.iter().any(|transfer| transfer == "basic")
     {
-        "basic".to_owned()
+        "basic"
     } else {
         return Ok((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -98,6 +106,29 @@ pub(crate) async fn lfs_batch(
         )
             .into_response());
     };
+
+    // Mint a CAS token when using xet transfer. The existing claims are
+    // re-signed so git-xet receives a scoped token for the CAS layer.
+    let cas_token = if use_xet {
+        auth.as_ref()
+            .and_then(|ctx| {
+                state
+                    .auth
+                    .as_ref()
+                    .and_then(|server_auth| server_auth.provider().mint_token(ctx.claims()).ok())
+            })
+    } else {
+        None
+    };
+    let cas_url = state.config.public_base_url().trim_end_matches('/').to_owned();
+    let xet_action_header = cas_token.as_ref().map(|token| {
+        json!({
+            "X-Xet-Cas-Url": &cas_url,
+            "X-Xet-Access-Token": token,
+            "X-Xet-Token-Expiration": "0"
+        })
+    });
+
     let mut objects = Vec::with_capacity(request.objects.len());
     for object in request.objects {
         let object_key = match lfs_object_key(&object.oid, scope) {
@@ -111,20 +142,31 @@ pub(crate) async fn lfs_batch(
         match request.operation.as_str() {
             "download" => match object_length {
                 Ok(length) => {
-                    let actions = json!({
-                        "download": {
-                            "href": format!(
-                                "{}/v1/lfs/objects/{}",
-                                state.config.public_base_url().trim_end_matches('/'),
-                                object.oid
-                            )
-                        }
-                    });
+                    let action = if let Some(ref header) = xet_action_header {
+                        json!({
+                            "download": {
+                                "href": format!(
+                                    "{}/v1/lfs/objects/{}",
+                                    cas_url, object.oid
+                                ),
+                                "header": header
+                            }
+                        })
+                    } else {
+                        json!({
+                            "download": {
+                                "href": format!(
+                                    "{}/v1/lfs/objects/{}",
+                                    cas_url, object.oid
+                                )
+                            }
+                        })
+                    };
                     objects.push(LfsObjectResponse {
                         oid: object.oid,
                         size: length,
                         authenticated: Some(auth.is_some()),
-                        actions: Some(actions),
+                        actions: Some(action),
                         error: None,
                     });
                 }
@@ -143,18 +185,29 @@ pub(crate) async fn lfs_batch(
             "upload" => {
                 let (size, actions) = match object_length {
                     Ok(length) => (length, None),
-                    Err(ServerError::NotFound) => (
-                        object.size,
-                        Some(json!({
-                            "upload": {
-                                "href": format!(
-                                    "{}/v1/lfs/objects/{}",
-                                    state.config.public_base_url().trim_end_matches('/'),
-                                    object.oid
-                                )
-                            }
-                        })),
-                    ),
+                    Err(ServerError::NotFound) => {
+                        let action = if let Some(ref header) = xet_action_header {
+                            json!({
+                                "upload": {
+                                    "href": format!(
+                                        "{}/v1/lfs/objects/{}",
+                                        cas_url, object.oid
+                                    ),
+                                    "header": header
+                                }
+                            })
+                        } else {
+                            json!({
+                                "upload": {
+                                    "href": format!(
+                                        "{}/v1/lfs/objects/{}",
+                                        cas_url, object.oid
+                                    )
+                                }
+                            })
+                        };
+                        (object.size, Some(action))
+                    }
                     Err(error) => return Err(error),
                 };
                 objects.push(LfsObjectResponse {
@@ -165,15 +218,15 @@ pub(crate) async fn lfs_batch(
                     error: None,
                 });
             }
-            _ => return Ok(lfs_validation_response("unsupported operation")),
+            // Operation was validated as "download" or "upload" above — this
+            // arm exists only for match exhaustiveness on &str.
+            _ => {}
         }
     }
-
     Ok((
-        StatusCode::OK,
         [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
         Json(LfsBatchResponse {
-            transfer,
+            transfer: transfer.to_owned(),
             objects,
             hash_algo: "sha256",
         }),
@@ -240,19 +293,10 @@ pub(crate) async fn lfs_put_object(
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
 
-    // Enforce Content-Type: application/octet-stream for LFS PUT.
-    let content_type = headers
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if content_type != "application/octet-stream" {
-        return Ok((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
-            Json(json!({ "message": "Content-Type must be application/octet-stream" })),
-        )
-            .into_response());
-    }
+    // The LFS specification does not require a specific Content-Type for
+    // object upload. The body content is verified by its SHA-256 digest
+    // regardless of Content-Type. Accept any Content-Type, including no
+    // Content-Type, to interoperate with git-lfs and other LFS clients.
 
     let object_key = match lfs_object_key(&oid, auth.as_ref().map(scope_from_auth)) {
         Ok(k) => k,
