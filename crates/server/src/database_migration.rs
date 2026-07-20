@@ -1,5 +1,5 @@
-use sqlx::{Error as SqlxError, PgPool, Row, postgres::PgPoolOptions, query, raw_sql};
 use shardline_protocol::SecretString;
+use sqlx::{Error as SqlxError, PgPool, Row, postgres::PgPoolOptions, query, raw_sql};
 use thiserror::Error;
 
 /// One Shardline schema migration.

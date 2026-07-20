@@ -9,7 +9,7 @@ use std::{
 };
 
 use shardline_cache::RedisTlsConfig;
-use shardline_protocol::{parse_bool, SecretBytes, SecretString};
+use shardline_protocol::{SecretBytes, SecretString, parse_bool};
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::{
@@ -208,8 +208,14 @@ pub(super) fn configure_s3_object_store_config<LoadCredentials>(
     load_credentials: LoadCredentials,
 ) -> Result<S3ObjectStoreConfig, ServerConfigError>
 where
-    LoadCredentials:
-        FnOnce() -> Result<(Option<SecretString>, Option<SecretString>, Option<SecretString>), ServerConfigError>,
+    LoadCredentials: FnOnce() -> Result<
+        (
+            Option<SecretString>,
+            Option<SecretString>,
+            Option<SecretString>,
+        ),
+        ServerConfigError,
+    >,
 {
     let bucket = bucket?;
     let PendingS3ObjectStoreConfig {
@@ -324,7 +330,7 @@ mod tests {
         ensure_secret_size_within_limit, load_redis_tls_config_from_env, open_secret_file,
         read_secret_file_bytes,
     };
-    use shardline_protocol::{parse_bool, SecretString};
+    use shardline_protocol::{SecretString, parse_bool};
     use std::io::Write;
     use std::path::Path;
 

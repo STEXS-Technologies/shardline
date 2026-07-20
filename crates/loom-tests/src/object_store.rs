@@ -150,7 +150,10 @@ fn concurrent_contains_and_delete() {
         // If delete succeeded, contains could be true or false (depends on ordering).
         // If delete returned NotFound, contains must be true (put happened before delete).
         if r2 == DeleteOutcome::NotFound {
-            assert!(r1, "if delete returned NotFound, contains must have been true");
+            assert!(
+                r1,
+                "if delete returned NotFound, contains must have been true"
+            );
         }
     });
 }

@@ -151,9 +151,7 @@ impl LocalBackend {
     where
         Visitor: FnMut(ObjectMetadata) -> Result<(), ServerError>,
     {
-        tokio::task::block_in_place(|| {
-            visit_object_prefix(&self.object_store(), prefix, visitor)
-        })
+        tokio::task::block_in_place(|| visit_object_prefix(&self.object_store(), prefix, visitor))
     }
 
     pub(crate) fn list_object_flat_namespace_page(

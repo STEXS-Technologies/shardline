@@ -906,7 +906,18 @@ where
 
 #[cfg(test)]
 mod tests {
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
     use std::collections::HashMap;
 
     use super::*;
@@ -1828,7 +1839,10 @@ mod tests {
             active: true,
             created_at_unix_seconds: 500,
         };
-        assert_eq!(wh.secret.as_ref().map(SecretString::expose_secret), Some("s3kr3t"));
+        assert_eq!(
+            wh.secret.as_ref().map(SecretString::expose_secret),
+            Some("s3kr3t")
+        );
         assert!(wh.active);
     }
 }

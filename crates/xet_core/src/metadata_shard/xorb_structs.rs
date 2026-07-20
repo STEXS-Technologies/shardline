@@ -19,11 +19,7 @@ pub struct XorbChunkSequenceHeader {
 }
 
 impl XorbChunkSequenceHeader {
-    pub fn new(
-        xorb_hash: MerkleHash,
-        num_entries: u64,
-        num_bytes_in_xorb: u64,
-    ) -> Self {
+    pub fn new(xorb_hash: MerkleHash, num_entries: u64, num_bytes_in_xorb: u64) -> Self {
         Self {
             xorb_hash,
             xorb_flags: MDB_DEFAULT_XORB_FLAG,
@@ -159,7 +155,10 @@ impl MDBXorbInfo {
             + self.chunks.len() * size_of::<XorbChunkSequenceEntry>()) as u64
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Option<Self>, std::io::Error> {
+    pub fn deserialize<R: Read>(
+        reader: &mut R,
+        version: u64,
+    ) -> Result<Option<Self>, std::io::Error> {
         let metadata = XorbChunkSequenceHeader::deserialize(reader, version)?;
         if metadata.is_bookend() {
             return Ok(None);

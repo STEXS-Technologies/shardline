@@ -7,7 +7,11 @@ use tracing;
 
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
-use crate::{commit::{self, CommitInstruction, ParsedCommit}, error::HubApiError, models::*};
+use crate::{
+    commit::{self, CommitInstruction, ParsedCommit},
+    error::HubApiError,
+    models::*,
+};
 use shardline_index::hub::HubFileEntry;
 use shardline_protocol::TokenScope;
 
@@ -125,13 +129,10 @@ pub(crate) async fn apply_commit(
         )));
     }
 
-    let existing_files: Vec<HubFileEntry> = state
-        .store
-        .get_files(parent_sha)
-        .map_err(|e| {
-            tracing::error!(error = %e, parent_sha, "get_files failed during commit");
-            HubApiError::CasError(e.to_string())
-        })?;
+    let existing_files: Vec<HubFileEntry> = state.store.get_files(parent_sha).map_err(|e| {
+        tracing::error!(error = %e, parent_sha, "get_files failed during commit");
+        HubApiError::CasError(e.to_string())
+    })?;
     let mut files: Vec<HubFileEntry> = existing_files;
     let mut file_hashes = Vec::new();
 
@@ -150,10 +151,14 @@ pub(crate) async fn apply_commit(
                     .map_err(|e| HubApiError::CasError(e.to_string()))?;
                 let body = ObjectBody::from_slice(content);
                 let integrity = ObjectIntegrity::new(
-                    shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
+                    shardline_protocol::ShardlineHash::from_bytes(
+                        *blake3::hash(content).as_bytes(),
+                    ),
                     size,
                 );
-                state.object_store.put_if_absent(&key, body, &integrity)
+                state
+                    .object_store
+                    .put_if_absent(&key, body, &integrity)
                     .map_err(|e| HubApiError::CasError(e.to_string()))?;
 
                 files.retain(|f| f.path != *path);
@@ -210,13 +215,10 @@ pub(crate) async fn apply_commit(
     //      background GC sweep if needed.
     //   3. Swapping the order (revision first, then files) requires a placeholder
     //      revision state and is more complex for marginal gain.
-    state
-        .store
-        .store_files(&commit_sha, &files)
-        .map_err(|e| {
-            tracing::error!(error = %e, commit_sha, "store_files failed");
-            HubApiError::CasError(e.to_string())
-        })?;
+    state.store.store_files(&commit_sha, &files).map_err(|e| {
+        tracing::error!(error = %e, commit_sha, "store_files failed");
+        HubApiError::CasError(e.to_string())
+    })?;
     state
         .store
         .create_revision(

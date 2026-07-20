@@ -9,9 +9,6 @@ ignore = [
     # Re-check when object_store bumps its quick-xml dependency past 0.40.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    # anyhow unsoundness in downcast_mut.
-    # Transitive via xet-client/xet-runtime. Shardline does not use the vulnerable path.
-    "RUSTSEC-2026-0190",
 ]
 
 [licenses]

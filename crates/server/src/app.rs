@@ -561,26 +561,22 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             Ok(Some(ServerAuth::from_provider(provider)))
         }
         AuthProviderKind::Oidc => {
-            let issuer = config.auth_oidc_issuer().ok_or_else(|| {
-                ServerError::Config(ServerConfigError::InvalidAuthProvider)
-            })?;
+            let issuer = config
+                .auth_oidc_issuer()
+                .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             let provider = OidcProvider::new(issuer, None)
                 .await
-                .map_err(|_e| {
-                    ServerError::Config(ServerConfigError::InvalidAuthProvider)
-                })?;
+                .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
         AuthProviderKind::Jwks => {
-            let jwks_url = config.auth_jwks_url().ok_or_else(|| {
-                ServerError::Config(ServerConfigError::InvalidAuthProvider)
-            })?;
+            let jwks_url = config
+                .auth_jwks_url()
+                .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             let issuer = config.auth_jwks_issuer().unwrap_or("jwks");
             let provider = JwksProvider::new(jwks_url, issuer)
                 .await
-                .map_err(|_e| {
-                    ServerError::Config(ServerConfigError::InvalidAuthProvider)
-                })?;
+                .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
     }

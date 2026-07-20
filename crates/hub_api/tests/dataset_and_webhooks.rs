@@ -100,10 +100,15 @@ async fn dataset_first_rows_returns_jsonl_data() {
     let key = ObjectKey::parse("lfs/sha_jsonl").unwrap();
     let body = ObjectBody::from_slice(jsonl_content.as_bytes());
     let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(jsonl_content.as_bytes()).as_bytes()),
+        shardline_protocol::ShardlineHash::from_bytes(
+            *blake3::hash(jsonl_content.as_bytes()).as_bytes(),
+        ),
         jsonl_content.len() as u64,
     );
-    state().object_store.put_if_absent(&key, body, &integrity).unwrap();
+    state()
+        .object_store
+        .put_if_absent(&key, body, &integrity)
+        .unwrap();
     store
         .create_revision("team/jsonl-dataset", None, "commit_jsonl", "main", "init")
         .unwrap();
@@ -150,10 +155,15 @@ async fn dataset_first_rows_returns_csv_data() {
     let key = ObjectKey::parse("lfs/sha_csv2").unwrap();
     let body = ObjectBody::from_slice(csv_content.as_bytes());
     let integrity = ObjectIntegrity::new(
-        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(csv_content.as_bytes()).as_bytes()),
+        shardline_protocol::ShardlineHash::from_bytes(
+            *blake3::hash(csv_content.as_bytes()).as_bytes(),
+        ),
         csv_content.len() as u64,
     );
-    state().object_store.put_if_absent(&key, body, &integrity).unwrap();
+    state()
+        .object_store
+        .put_if_absent(&key, body, &integrity)
+        .unwrap();
     store
         .create_revision("team/csv-dataset", None, "commit_csv", "main", "init")
         .unwrap();
@@ -206,7 +216,10 @@ async fn dataset_viewer_returns_paginated_rows() {
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&jsonl_bytes).as_bytes()),
         jsonl_bytes.len() as u64,
     );
-    state().object_store.put_if_absent(&key, body, &integrity).unwrap();
+    state()
+        .object_store
+        .put_if_absent(&key, body, &integrity)
+        .unwrap();
     store
         .create_revision("team/paginated", None, "commit_paginated", "main", "init")
         .unwrap();

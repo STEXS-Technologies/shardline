@@ -4,14 +4,26 @@ use std::mem::size_of;
 use super::file_structs::*;
 use super::shard_in_memory::MDBInMemoryShard;
 use super::xorb_structs::*;
-use crate::{error::{CoreError, Result}, merklehash::HMACKey, utils::serialization_utils::*};
+use crate::{
+    error::{CoreError, Result},
+    merklehash::HMACKey,
+    utils::serialization_utils::*,
+};
 
 pub const MDB_FILE_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u64>();
 
-static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceHeader>());
-static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceEntry>());
-static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileVerificationEntry>());
-static_assertions::const_assert!(size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileMetadataExt>());
+static_assertions::const_assert!(
+    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceHeader>()
+);
+static_assertions::const_assert!(
+    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileDataSequenceEntry>()
+);
+static_assertions::const_assert!(
+    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileVerificationEntry>()
+);
+static_assertions::const_assert!(
+    size_of::<[u64; 4]>() + 4 * size_of::<u64>() == size_of::<FileMetadataExt>()
+);
 
 const MDB_XORB_INFO_ENTRY_SIZE: usize = size_of::<[u64; 4]>() + 4 * size_of::<u64>();
 static_assertions::const_assert!(MDB_XORB_INFO_ENTRY_SIZE == size_of::<XorbChunkSequenceHeader>());
@@ -501,7 +513,9 @@ mod tests {
                     ),
                     segments: vec![FileDataSequenceEntry::new(
                         MerkleHash::default(),
-                        500u64, 0u64, 0u64,
+                        500u64,
+                        0u64,
+                        0u64,
                     )],
                     verification: vec![],
                     metadata_ext: None,
@@ -515,7 +529,9 @@ mod tests {
                     ),
                     segments: vec![FileDataSequenceEntry::new(
                         MerkleHash::default(),
-                        300u64, 0u64, 0u64,
+                        300u64,
+                        0u64,
+                        0u64,
                     )],
                     verification: vec![],
                     metadata_ext: None,
@@ -536,7 +552,8 @@ mod tests {
             .unwrap();
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3)
+            .unwrap();
         assert!(files.is_empty());
     }
 
@@ -552,7 +569,8 @@ mod tests {
             .unwrap();
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3)
+            .unwrap();
         assert_eq!(files.len(), 2);
     }
 
@@ -564,7 +582,8 @@ mod tests {
         buf.extend_from_slice(b"CORRUPTED");
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3)
+            .unwrap();
         assert_eq!(files.len(), 1);
     }
 
@@ -757,7 +776,8 @@ mod tests {
         buf.extend_from_slice(b"GARBAGE");
         let info = MDBShardInfo::default();
         let files = info
-            .read_all_file_info_sections(&mut Cursor::new(&buf), 3).unwrap();
+            .read_all_file_info_sections(&mut Cursor::new(&buf), 3)
+            .unwrap();
         assert_eq!(files.len(), 1);
     }
 

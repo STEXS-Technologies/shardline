@@ -16,8 +16,8 @@ use shardline_storage::DeleteOutcome;
 use crate::{
     ServerError,
     oci_adapter::{
-        oci_blob_key, oci_manifest_key, oci_manifest_location, oci_manifest_media_type_key,
-        oci_tag_key, parse_reference, OciReference,
+        OciReference, oci_blob_key, oci_manifest_key, oci_manifest_location,
+        oci_manifest_media_type_key, oci_tag_key, parse_reference,
     },
     protocol_support::parse_sha256_digest,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},

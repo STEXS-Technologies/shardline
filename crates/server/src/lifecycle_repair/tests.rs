@@ -537,12 +537,8 @@ fn collect_references_invalid_record_bytes_returns_error() {
     let store = ServerObjectStore::blackhole();
     let mut reachability = RepairReachability::default();
 
-    let result = collect_record_object_references(
-        &store,
-        &frontends,
-        b"not-valid-json",
-        &mut reachability,
-    );
+    let result =
+        collect_record_object_references(&store, &frontends, b"not-valid-json", &mut reachability);
     assert!(result.is_err());
     // scanned_records should not be incremented on error
     assert_eq!(reachability.scanned_records, 0);
@@ -763,8 +759,7 @@ fn make_test_stores() -> (
     let root = tempfile::tempdir().expect("temp dir");
     let index_store = LocalIndexStore::new(root.path().to_path_buf()).expect("index store");
     let record_store = LocalRecordStore::new(root.path().to_path_buf()).expect("record store");
-    let object_store =
-        ServerObjectStore::local(root.path().join("chunks")).expect("object store");
+    let object_store = ServerObjectStore::local(root.path().join("chunks")).expect("object store");
     (root, record_store, index_store, object_store)
 }
 
@@ -870,8 +865,7 @@ async fn repair_deletes_expired_retention_hold() {
 
     let key = ObjectKey::parse("test/retention-expired").unwrap();
     // release_after (500) <= now (1000) → DeleteExpired
-    let hold =
-        RetentionHold::new(key.clone(), "expired hold".to_owned(), 0, Some(500)).unwrap();
+    let hold = RetentionHold::new(key.clone(), "expired hold".to_owned(), 0, Some(500)).unwrap();
     index_store.upsert_retention_hold(&hold).unwrap();
 
     let report = run_lifecycle_repair_with_stores_at_time(
@@ -902,8 +896,7 @@ async fn repair_deletes_retention_hold_for_missing_object() {
 
     let key = ObjectKey::parse("test/retention-missing").unwrap();
     // Not expired (release > now), but object does not exist → DeleteMissing
-    let hold =
-        RetentionHold::new(key.clone(), "missing hold".to_owned(), 0, Some(2000)).unwrap();
+    let hold = RetentionHold::new(key.clone(), "missing hold".to_owned(), 0, Some(2000)).unwrap();
     index_store.upsert_retention_hold(&hold).unwrap();
 
     let report = run_lifecycle_repair_with_stores_at_time(
@@ -1109,8 +1102,7 @@ async fn repair_deletes_quarantine_for_held_object() {
     seed_object(&object_store, &key);
 
     // Active retention hold (not expired, object exists)
-    let hold =
-        RetentionHold::new(key.clone(), "active hold".to_owned(), 0, Some(2000)).unwrap();
+    let hold = RetentionHold::new(key.clone(), "active hold".to_owned(), 0, Some(2000)).unwrap();
     index_store.upsert_retention_hold(&hold).unwrap();
 
     // Quarantine candidate for the same key
@@ -1429,8 +1421,7 @@ async fn collect_referenced_object_keys_referenced_terms_layout() {
     assert_eq!(reachability.scanned_records, 1);
     // ReferencedObjectTerms should add a term object key, NOT a chunk key
     let term_key =
-        crate::server_frontend::referenced_term_object_key(&[ServerFrontend::Xet], &hash)
-            .unwrap();
+        crate::server_frontend::referenced_term_object_key(&[ServerFrontend::Xet], &hash).unwrap();
     assert!(
         reachability
             .referenced_object_keys
@@ -1450,22 +1441,19 @@ async fn repair_mixed_scenario_all_lifecycle_categories() {
 
     // 1. Retention hold — expired (will be deleted)
     let expired_key = ObjectKey::parse("test/retention-exp").unwrap();
-    let hold_expired =
-        RetentionHold::new(expired_key, "expired".to_owned(), 0, Some(500)).unwrap();
+    let hold_expired = RetentionHold::new(expired_key, "expired".to_owned(), 0, Some(500)).unwrap();
     index_store.upsert_retention_hold(&hold_expired).unwrap();
 
     // 2. Retention hold — active (will be kept)
     let active_key = ObjectKey::parse("test/retention-active").unwrap();
     seed_object(&object_store, &active_key);
-    let hold_active =
-        RetentionHold::new(active_key, "active".to_owned(), 0, Some(2000)).unwrap();
+    let hold_active = RetentionHold::new(active_key, "active".to_owned(), 0, Some(2000)).unwrap();
     index_store.upsert_retention_hold(&hold_active).unwrap();
 
     // 3. Retention hold — missing object (will be deleted)
     let missing_key = ObjectKey::parse("test/retention-missing").unwrap();
     let hold_missing =
-        RetentionHold::new(missing_key.clone(), "missing-obj".to_owned(), 0, Some(2000))
-            .unwrap();
+        RetentionHold::new(missing_key.clone(), "missing-obj".to_owned(), 0, Some(2000)).unwrap();
     index_store.upsert_retention_hold(&hold_missing).unwrap();
 
     // 4. Quarantine — missing object (will be deleted)

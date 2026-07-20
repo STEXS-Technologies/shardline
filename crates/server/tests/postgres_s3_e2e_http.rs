@@ -10,7 +10,9 @@
 )]
 
 use sha2::{Digest, Sha256};
-use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope};
+use shardline_protocol::{
+    RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope,
+};
 use shardline_server::{ObjectStorageAdapter, ServerConfig, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_storage::S3ObjectStoreConfig;
@@ -1414,7 +1416,8 @@ async fn test_pgs3_codeberg_webhook_push() {
     let client = reqwest::Client::new();
 
     // Compute HMAC-SHA256 signature for codeberg webhook
-    let body = br#"{"ref":"refs/heads/main","repository":{"full_name":"codeberg-team/codeberg-repo"}}"#;
+    let body =
+        br#"{"ref":"refs/heads/main","repository":{"full_name":"codeberg-team/codeberg-repo"}}"#;
     use hmac::Mac;
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"codeberg-secret").unwrap();
     mac.update(&body[..]);

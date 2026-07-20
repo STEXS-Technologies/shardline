@@ -56,9 +56,9 @@ impl MDBInMemoryShard {
     }
 
     pub fn stored_bytes(&self) -> u64 {
-        self.xorb_content.iter().fold(0u64, |acc, (_, xorb)| {
-            acc + xorb.metadata.num_bytes_in_xorb
-        })
+        self.xorb_content
+            .iter()
+            .fold(0u64, |acc, (_, xorb)| acc + xorb.metadata.num_bytes_in_xorb)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {

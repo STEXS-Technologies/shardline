@@ -164,8 +164,7 @@ impl LocalBackend {
         let mut chunks = 0_u64;
         let mut chunk_bytes = 0_u64;
         visit_object_prefix(&object_store, &prefix, |metadata| {
-            let is_chunk =
-                chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
+            let is_chunk = chunk_hash_from_chunk_object_key_if_present(metadata.key())?.is_some();
             if is_chunk {
                 chunks = checked_increment(chunks)?;
                 chunk_bytes = checked_add(chunk_bytes, metadata.length())?;
@@ -188,6 +187,11 @@ impl LocalBackend {
 
     pub(crate) fn object_store(&self) -> ServerObjectStore {
         self.object_store.clone()
+    }
+
+    /// Probes the SQLite metadata store for connectivity.
+    pub(crate) fn probe_metadata(&self) -> Result<(), String> {
+        self.index_store.probe()
     }
 
     pub(super) async fn read_record(

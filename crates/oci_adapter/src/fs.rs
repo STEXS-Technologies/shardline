@@ -12,8 +12,7 @@ use shardline_storage::{
 use tokio::task::spawn_blocking;
 
 use crate::{
-    OciAdapterError,
-    protocol_support,
+    OciAdapterError, protocol_support,
     types::{OCI_UPLOAD_DIR, OciFileLock, OciUploadSession},
 };
 

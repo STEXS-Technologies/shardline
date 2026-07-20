@@ -61,10 +61,7 @@ fn make_file_info(
     }
 }
 
-fn make_xorb_info(
-    xorb_hash_data: &[u8],
-    num_chunks: u64,
-    bytes_per_chunk: u64) -> MDBXorbInfo {
+fn make_xorb_info(xorb_hash_data: &[u8], num_chunks: u64, bytes_per_chunk: u64) -> MDBXorbInfo {
     let chunks: Vec<XorbChunkSequenceEntry> = (0..num_chunks)
         .map(|i| {
             XorbChunkSequenceEntry::new(

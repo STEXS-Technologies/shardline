@@ -242,7 +242,10 @@ fn registry_returns_valid_registry() {
     // Ensure METRICS lazy initialization by triggering a recording function.
     record_upload("test", 1);
     let gathered = registry().gather();
-    assert!(!gathered.is_empty(), "registry returned zero metric families");
+    assert!(
+        !gathered.is_empty(),
+        "registry returned zero metric families"
+    );
 }
 
 // ---------------------------------------------------------------------------

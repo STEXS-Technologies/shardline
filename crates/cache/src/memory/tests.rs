@@ -419,9 +419,7 @@ async fn get_or_load_concurrent_loader_failure_waiter_gets_none() {
             .get_or_load(&key_1, || {
                 Box::pin(async {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    Err::<Vec<u8>, ReconstructionCacheError>(
-                        ReconstructionCacheError::Operation,
-                    )
+                    Err::<Vec<u8>, ReconstructionCacheError>(ReconstructionCacheError::Operation)
                 })
             })
             .await
@@ -550,9 +548,7 @@ async fn get_loading_coalescing_loader_failure_returns_none() {
             .get_or_load(&key_loader, || {
                 Box::pin(async {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    Err::<Vec<u8>, ReconstructionCacheError>(
-                        ReconstructionCacheError::Operation,
-                    )
+                    Err::<Vec<u8>, ReconstructionCacheError>(ReconstructionCacheError::Operation)
                 })
             })
             .await
@@ -789,8 +785,7 @@ async fn memory_cache_concurrent_eviction_stress() {
         let cache = std::sync::Arc::clone(&cache);
         handles.push(tokio::spawn(async move {
             for i in 0..20 {
-                let key =
-                    ReconstructionCacheKey::latest(&format!("evict-key-{task_id}-{i}"), None);
+                let key = ReconstructionCacheKey::latest(&format!("evict-key-{task_id}-{i}"), None);
                 let payload = format!("evict-payload-{task_id}-{i}");
                 let _ = cache.put(&key, payload.as_bytes()).await;
                 // Also read back randomly

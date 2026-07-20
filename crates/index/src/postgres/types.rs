@@ -24,6 +24,24 @@ impl PostgresIndexStore {
     pub const fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    /// Probes the Postgres metadata store for connectivity at startup.
+    ///
+    /// Executes a `SELECT 1` query to verify the database is reachable and
+    /// accepting connections.
+    ///
+    /// Returns `Ok(())` when reachable, or `Err(message)` with the failure reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the database is unreachable or the query fails.
+    pub async fn probe(&self) -> Result<(), String> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(self.pool())
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("postgres metadata probe failed: {e}"))
+    }
 }
 
 /// Opaque Postgres file-record locator.
@@ -158,7 +176,18 @@ pub(crate) fn i64_to_u64(value: i64) -> Result<u64, PostgresMetadataStoreError> 
 
 #[cfg(test)]
 mod tests {
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
     use shardline_protocol::{HashParseError, RangeError};
     use shardline_storage::ObjectKeyError;
 
@@ -302,15 +331,13 @@ mod tests {
 
     #[test]
     fn postgres_metadata_store_error_display_quarantine_candidate() {
-        let err: PostgresMetadataStoreError =
-            QuarantineCandidateError::InvertedTimeline.into();
+        let err: PostgresMetadataStoreError = QuarantineCandidateError::InvertedTimeline.into();
         assert_eq!(err.to_string(), "stored quarantine candidate was invalid");
     }
 
     #[test]
     fn postgres_metadata_store_error_display_webhook_delivery() {
-        let err: PostgresMetadataStoreError =
-            WebhookDeliveryError::EmptyRepositoryOwner.into();
+        let err: PostgresMetadataStoreError = WebhookDeliveryError::EmptyRepositoryOwner.into();
         assert_eq!(err.to_string(), "stored webhook delivery was invalid");
     }
 

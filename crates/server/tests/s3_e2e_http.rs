@@ -11,7 +11,9 @@
 )]
 
 use sha2::{Digest, Sha256};
-use shardline_protocol::{RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope};
+use shardline_protocol::{
+    RepositoryProvider, RepositoryScope, SecretString, TokenClaims, TokenScope,
+};
 use shardline_server::{ObjectStorageAdapter, ServerConfig, ServerFrontend, ServerRole, app};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use shardline_storage::S3ObjectStoreConfig;

@@ -39,7 +39,7 @@ impl TokenScope {
 }
 
 /// Provider family encoded into a scoped token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryProvider {
     /// GitHub repository scope.
     GitHub,
@@ -64,6 +64,23 @@ impl RepositoryProvider {
             Self::Codeberg => "codeberg",
             Self::Generic => "generic",
         }
+    }
+}
+
+impl Serialize for RepositoryProvider {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RepositoryProvider {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        // Accept case-insensitive input for backward compatibility with any
+        // data serialized by the default derive (which used the Rust variant name).
+        s.to_ascii_lowercase()
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 

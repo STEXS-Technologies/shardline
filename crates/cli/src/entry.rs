@@ -9,14 +9,14 @@ use shardline_protocol::RepositoryScope;
 use shardline_server::serve;
 
 use crate::{
-    local_output::print_error_chain, local_path::resolve_root, report_output, BenchConfig,
-    BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
-    install_gc_schedule, load_runtime_server_config, mint_admin_token_from_sources,
-    print_hold_list_summary, print_hold_summary, render_completion, render_manpage,
-    run_backup_manifest, run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc,
-    run_health_check, run_hold_list, run_hold_release, run_hold_set, run_index_rebuild,
-    run_ingest_bench, run_lifecycle_repair, run_providerless_setup, run_repair,
-    run_storage_migration, uninstall_gc_schedule, write_output_bytes,
+    BenchConfig, BenchMode, CliCommand, GcScheduleInstallOptions, MINIMUM_GC_RETENTION_SECONDS,
+    install_gc_schedule, load_runtime_server_config, local_output::print_error_chain,
+    local_path::resolve_root, mint_admin_token_from_sources, print_hold_list_summary,
+    print_hold_summary, render_completion, render_manpage, report_output, run_backup_manifest,
+    run_bench, run_config_check_from_env, run_db_migration, run_fsck, run_gc, run_health_check,
+    run_hold_list, run_hold_release, run_hold_set, run_index_rebuild, run_ingest_bench,
+    run_lifecycle_repair, run_providerless_setup, run_repair, run_storage_migration,
+    uninstall_gc_schedule, write_output_bytes,
 };
 
 pub async fn run(args: impl Iterator<Item = OsString>) -> ExitCode {

@@ -211,7 +211,7 @@ pub struct ProviderWebhookResponse {
 mod tests {
     use std::collections::BTreeMap;
 
-use shardline_protocol::{RepositoryProvider, SecretString, TokenScope};
+    use shardline_protocol::{RepositoryProvider, SecretString, TokenScope};
 
     use super::*;
 

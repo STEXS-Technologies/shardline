@@ -6,17 +6,17 @@
     clippy::vec_init_then_push
 )]
 
-use super::*;
+use super::pack_parse::decompress_zlib;
+use super::receive_pack::{build_report_response, parse_receive_pack_request};
 use super::ref_advertisement::{
     GitRef, authorize_read, authorize_write, collect_refs, is_valid_refname, resolve_repo_id,
 };
+use super::tree_walk::parse_lfs_pointer_field;
 use super::upload_pack::{
     build_git_tree_objects, build_gitattributes_blob, build_inline_blob, build_lfs_pointer_blob,
     parse_haves, parse_wants,
 };
-use super::receive_pack::{build_report_response, parse_receive_pack_request};
-use super::pack_parse::decompress_zlib;
-use super::tree_walk::parse_lfs_pointer_field;
+use super::*;
 use crate::git::pack::{GitObject, ObjectType, PackError, apply_delta};
 use crate::git::pktline;
 use crate::routes::HubState;
@@ -416,7 +416,10 @@ fn walk_git_tree_exceeds_max_depth() {
         "should fail at depth 129 (exceeds MAX_TREE_DEPTH)"
     );
     assert!(
-        result.unwrap_err().to_string().contains("exceeds maximum depth"),
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum depth"),
         "error message should mention depth"
     );
 }
@@ -484,10 +487,8 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
 
     let store = LocalIndexStore::open(root);
     let boxed = BoxedHubStore::from_store(store);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        tmp.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(tmp.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store: boxed,
         object_store,
@@ -951,12 +952,8 @@ fn parse_pack_data_roundtrip_commit_and_tree() {
     let tree_entries = vec![(0o100644, "f.txt", &blob_sha)];
     let tree = crate::git::pack::create_tree_object(&tree_entries);
     let tree_sha = tree.sha1();
-    let commit = crate::git::pack::create_commit_object(
-        &tree_sha,
-        None,
-        "Test <test@test.com>",
-        "Initial",
-    );
+    let commit =
+        crate::git::pack::create_commit_object(&tree_sha, None, "Test <test@test.com>", "Initial");
     let pack = crate::git::pack::generate_pack(&[blob, tree, commit]).unwrap();
     let objects = parse_pack_data(&pack).unwrap();
     assert_eq!(objects.len(), 3);
@@ -1108,7 +1105,12 @@ fn parse_commit_object_not_utf8() {
     let data = b"\xff\xfe\x00";
     let result = parse_commit_object(data);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("invalid commit encoding"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid commit encoding")
+    );
 }
 
 // --- walk_git_tree with invalid/non-standard entries ---
@@ -1162,7 +1164,12 @@ fn walk_git_tree_wrong_object_type_errors() {
 
     let result = walk_git_tree(&tree_sha, &objects, "");
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("expected tree object"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("expected tree object")
+    );
 }
 
 // --- build_gitattributes_blob with multiple LFS files ---
@@ -1246,9 +1253,7 @@ fn parse_receive_pack_request_skips_non_utf8_and_finds_pack() {
 
 #[test]
 fn authorize_read_with_auth_rejects_missing_token() {
-    use shardline_protocol::{
-        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS,
-    };
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS};
     use shardline_server_core::{AuthError, AuthProvider};
 
     let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();
@@ -1392,9 +1397,7 @@ fn parse_pack_data_ofs_delta_two_objects() {
 
 #[test]
 fn authorize_write_with_auth_rejects_missing_token() {
-    use shardline_protocol::{
-        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS,
-    };
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope as TS};
     use shardline_server_core::{AuthError, AuthProvider};
 
     let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", None).unwrap();

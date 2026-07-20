@@ -2908,6 +2908,7 @@ dependencies = [
  "shardline-metrics",
  "shardline-protocol",
  "shardline-server-core",
+ "shardline-storage",
  "thiserror",
  "tokio",
  "tower-http",

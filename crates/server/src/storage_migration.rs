@@ -416,10 +416,7 @@ mod tests {
     fn validate_source_ok_for_non_content_addressed_key() {
         // A key that does not match any content-addressed pattern should pass
         let key = ObjectKey::parse("some/arbitrary/key.bin").unwrap();
-        let result = validate_source_object_matches_content_addressed_key(
-            &key,
-            b"any bytes",
-        );
+        let result = validate_source_object_matches_content_addressed_key(&key, b"any bytes");
         assert!(result.is_ok());
     }
 
@@ -438,10 +435,7 @@ mod tests {
         );
 
         // Call with wrong bytes (should trigger hash mismatch)
-        let result = validate_source_object_matches_content_addressed_key(
-            &key,
-            b"wrong-bytes",
-        );
+        let result = validate_source_object_matches_content_addressed_key(&key, b"wrong-bytes");
         assert!(result.is_err(), "expected err for hash mismatch, got ok");
         let err = result.unwrap_err();
         assert!(matches!(err, ServerError::ObjectStore(_)));
@@ -458,10 +452,7 @@ mod tests {
         let parsed = shard_hash_from_object_key_if_present(&key).unwrap();
         assert!(parsed.is_some(), "key should parse shard hash: {key_str}");
 
-        let result = validate_source_object_matches_content_addressed_key(
-            &key,
-            b"wrong-bytes",
-        );
+        let result = validate_source_object_matches_content_addressed_key(&key, b"wrong-bytes");
         assert!(
             result.is_err(),
             "expected err for shard hash mismatch, got ok"
@@ -560,14 +551,11 @@ mod tests {
         let destination = tempfile::tempdir().unwrap();
 
         let body = b"dry-run-payload";
-        let key = chunk_object_key_for_computed_hash(
-            chunk_hash(body),
-        )
-        .map(|(_hash, key)| key)
-        .unwrap();
+        let key = chunk_object_key_for_computed_hash(chunk_hash(body))
+            .map(|(_hash, key)| key)
+            .unwrap();
         let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
-        let integrity =
-            ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+        let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
         source_store
             .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
             .unwrap();
@@ -595,15 +583,12 @@ mod tests {
         let destination = tempfile::tempdir().unwrap();
 
         let body = b"prefix-test-data";
-        let key = chunk_object_key_for_computed_hash(
-            chunk_hash(body),
-        )
-        .map(|(_hash, key)| key)
-        .unwrap();
+        let key = chunk_object_key_for_computed_hash(chunk_hash(body))
+            .map(|(_hash, key)| key)
+            .unwrap();
 
         let source_store = ServerObjectStore::local(source.path().join("chunks")).unwrap();
-        let integrity =
-            ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
+        let integrity = ObjectIntegrity::new(chunk_hash(body), body.len() as u64);
         source_store
             .put_if_absent(&key, ObjectBody::from_slice(body), &integrity)
             .unwrap();
@@ -631,10 +616,8 @@ mod tests {
         assert!(parsed.is_some(), "key should parse xorb hash: {key_str}");
 
         // Call with bytes that are not a valid serialized xorb
-        let result = validate_source_object_matches_content_addressed_key(
-            &key,
-            b"not-a-valid-xorb",
-        );
+        let result =
+            validate_source_object_matches_content_addressed_key(&key, b"not-a-valid-xorb");
         assert!(
             result.is_err(),
             "expected err for invalid xorb bytes, got ok"
@@ -645,19 +628,13 @@ mod tests {
     fn validate_source_xorb_non_xorb_key_does_not_validate_as_xorb() {
         // A key without the xorb format should skip the xorb check
         let key = ObjectKey::parse("some/random/key.bin").unwrap();
-        let result = validate_source_object_matches_content_addressed_key(
-            &key,
-            b"any-data",
-        );
+        let result = validate_source_object_matches_content_addressed_key(&key, b"any-data");
         assert!(result.is_ok(), "non-xorb key should pass validation");
         // Also test that a valid xorb key pattern but with invalid xorb data fails
         let hash_hex = "bb".repeat(32);
         let key_str = format!("xorbs/default/{}/{}.xorb", &hash_hex[..2], hash_hex);
         let key = ObjectKey::parse(&key_str).unwrap();
-        let result = validate_source_object_matches_content_addressed_key(
-            &key,
-            b"\0\0\0\0",
-        );
+        let result = validate_source_object_matches_content_addressed_key(&key, b"\0\0\0\0");
         assert!(result.is_err(), "invalid xorb bytes should fail validation");
     }
 }

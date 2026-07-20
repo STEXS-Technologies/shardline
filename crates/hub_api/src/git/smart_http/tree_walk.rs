@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use super::error::SmartHttpError;
 use super::super::pack::{GitObject, ObjectType};
+use super::error::SmartHttpError;
 use shardline_index::hub::HubFileEntry;
 
 /// Maximum depth for recursive tree walking to prevent stack overflow from
@@ -67,9 +67,9 @@ fn walk_git_tree_inner(
         return Err(SmartHttpError::TreeDepthExceeded);
     }
 
-    let tree_obj = objects.get(tree_sha).ok_or_else(|| {
-        SmartHttpError::TreeObjectNotFound(hex::encode(tree_sha))
-    })?;
+    let tree_obj = objects
+        .get(tree_sha)
+        .ok_or_else(|| SmartHttpError::TreeObjectNotFound(hex::encode(tree_sha)))?;
 
     if tree_obj.object_type != ObjectType::Tree {
         return Err(SmartHttpError::ExpectedTreeObject(tree_obj.object_type));
@@ -84,7 +84,9 @@ fn walk_git_tree_inner(
         // SAFETY: While loop ensures pos < data.len(), so data.get(pos..) is Some.
         // .position() scans from pos for the first space byte. If found, space_pos
         // is relative to pos, so pos + space_pos < data.len().
-        let tail = data.get(pos..).ok_or(SmartHttpError::TreePositionOutOfBounds)?;
+        let tail = data
+            .get(pos..)
+            .ok_or(SmartHttpError::TreePositionOutOfBounds)?;
         let space_pos = tail
             .iter()
             .position(|&b| b == b' ')
@@ -154,14 +156,16 @@ fn walk_git_tree_inner(
 
         if mode_str == "40000" {
             // Directory — recurse into subtree.
-            let next_depth = depth.checked_add(1).ok_or(SmartHttpError::TreeDepthOverflow)?;
+            let next_depth = depth
+                .checked_add(1)
+                .ok_or(SmartHttpError::TreeDepthOverflow)?;
             let mut sub_entries = walk_git_tree_inner(&entry_sha, objects, &full_path, next_depth)?;
             entries.append(&mut sub_entries);
         } else if mode_str == "100644" || mode_str == "100755" {
             // Regular file.
-            let blob_obj = objects.get(&entry_sha).ok_or_else(|| {
-                SmartHttpError::BlobObjectNotFound(hex::encode(entry_sha))
-            })?;
+            let blob_obj = objects
+                .get(&entry_sha)
+                .ok_or_else(|| SmartHttpError::BlobObjectNotFound(hex::encode(entry_sha)))?;
 
             if blob_obj.object_type != ObjectType::Blob {
                 return Err(SmartHttpError::ExpectedBlobObject(blob_obj.object_type));
@@ -180,7 +184,9 @@ fn walk_git_tree_inner(
                     .ok_or(SmartHttpError::LfsPointerMissingSize)?;
                 let size: u64 = size_str
                     .parse::<u64>()
-                    .map_err(|e: std::num::ParseIntError| SmartHttpError::LfsPointerSize(e.to_string()))?;
+                    .map_err(|e: std::num::ParseIntError| {
+                        SmartHttpError::LfsPointerSize(e.to_string())
+                    })?;
 
                 entries.push(HubFileEntry {
                     path: full_path,

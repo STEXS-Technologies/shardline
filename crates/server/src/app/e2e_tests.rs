@@ -5382,7 +5382,7 @@ async fn provider_webhook_triggers_lifecycle_reconciliation() {
     // The webhook should be accepted and reconciliation run
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let json = body_json(response).await;
-    assert_eq!(json["provider"], "GitHub");
+    assert_eq!(json["provider"], "github");
     assert_eq!(json["owner"], "team");
     assert_eq!(json["repo"], "assets");
     assert_eq!(json["event_kind"], "repository_deleted");

@@ -221,7 +221,9 @@ async fn store_push_objects(
                 )));
             }
             Ok(None) if old_sha != "0000000000000000000000000000000000000000" => {
-                return Err(SmartHttpError::NonFastForward("non-fast-forward".to_owned()));
+                return Err(SmartHttpError::NonFastForward(
+                    "non-fast-forward".to_owned(),
+                ));
             }
             _ => {}
         }

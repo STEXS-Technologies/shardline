@@ -92,7 +92,12 @@ pub fn single_file_shard(parts: &[(&[u8], &str)]) -> (Bytes, String) {
     let file_hash = file_hash(&file_chunks);
     let add_file = shard
         .add_file_reconstruction_info(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash, u64::try_from(file_segments.len()).unwrap_or(0), false, false),
+            metadata: FileDataSequenceHeader::new(
+                file_hash,
+                u64::try_from(file_segments.len()).unwrap_or(0),
+                false,
+                false,
+            ),
             segments: file_segments,
             verification: Vec::new(),
             metadata_ext: None,

@@ -98,10 +98,9 @@ pub(crate) async fn dataset_first_rows(
             }));
         }
     };
-    let content = read_file_from_object_store(&state, &data_file.sha)
-        .ok_or_else(|| {
-            HubApiError::PathValidation("file content not available in store".to_owned())
-        })?;
+    let content = read_file_from_object_store(&state, &data_file.sha).ok_or_else(|| {
+        HubApiError::PathValidation("file content not available in store".to_owned())
+    })?;
     let limit = query.limit.min(1000);
     let rows = parse_rows_from_content(&content, &data_file.path, 0, limit)?;
     let columns = rows
@@ -143,10 +142,9 @@ pub(crate) async fn dataset_viewer(
     let data_file = find_dataset_file(&files, &query.config, &split).ok_or_else(|| {
         HubApiError::PathValidation("no data file found for config/split".to_owned())
     })?;
-    let content = read_file_from_object_store(&state, &data_file.sha)
-        .ok_or_else(|| {
-            HubApiError::PathValidation("file content not available in store".to_owned())
-        })?;
+    let content = read_file_from_object_store(&state, &data_file.sha).ok_or_else(|| {
+        HubApiError::PathValidation("file content not available in store".to_owned())
+    })?;
     let length = query.length.min(10000);
     let rows = parse_rows_from_content(&content, &data_file.path, query.offset, length)?;
     let columns = rows

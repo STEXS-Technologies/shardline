@@ -1,4 +1,3 @@
-
 #![cfg_attr(
     test,
     allow(

@@ -236,9 +236,8 @@ mod tests {
 
     #[test]
     fn validate_io_err() {
-        let r: std::result::Result<u32, CoreError> = Err(CoreError::Io(std::io::Error::other(
-            "eek",
-        )));
+        let r: std::result::Result<u32, CoreError> =
+            Err(CoreError::Io(std::io::Error::other("eek")));
         assert!(r.ok_for_format_error().is_err());
     }
 }
