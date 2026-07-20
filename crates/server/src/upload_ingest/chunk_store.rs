@@ -48,6 +48,13 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
     })
 }
 
+/// Records dedup savings when a chunk already exists in the store.
+fn record_dedup_on_already_exists(outcome: &PutOutcome, chunk_length: u64) {
+    if matches!(outcome, PutOutcome::AlreadyExists) {
+        crate::metrics::record_dedup_saves(chunk_length);
+    }
+}
+
 pub(super) async fn put_if_absent_chunk_buffer(
     object_store: &ServerObjectStore,
     chunk: ChunkBuffer,
@@ -57,6 +64,7 @@ pub(super) async fn put_if_absent_chunk_buffer(
         ChunkBuffer::Pooled(bytes) => {
             let (outcome, _bytes) =
                 put_if_absent_pooled_bytes(object_store, &request, bytes).await?;
+            record_dedup_on_already_exists(&outcome, request.chunk_length);
             Ok(StoredChunkOutcome {
                 hash_hex: request.hash_hex,
                 chunk_length: request.chunk_length,
@@ -65,6 +73,7 @@ pub(super) async fn put_if_absent_chunk_buffer(
         }
         ChunkBuffer::Shared(bytes) => {
             let outcome = put_if_absent_shared_bytes(object_store, &request, bytes).await?;
+            record_dedup_on_already_exists(&outcome, request.chunk_length);
             Ok(StoredChunkOutcome {
                 hash_hex: request.hash_hex,
                 chunk_length: request.chunk_length,
@@ -84,6 +93,7 @@ pub(super) async fn put_if_absent_pooled_chunk_buffer(
         ChunkBuffer::Shared(_bytes) => return Err(ServerError::Overflow),
     };
     let (outcome, bytes) = put_if_absent_pooled_bytes(object_store, &request, bytes).await?;
+    record_dedup_on_already_exists(&outcome, request.chunk_length);
     let reusable_buffer = bytes.try_into_mut().ok();
     Ok((
         StoredChunkOutcome {
