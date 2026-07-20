@@ -571,6 +571,8 @@ mod tests {
     };
     use serde_json::{Value, json};
     use sha2::Digest;
+    use shardline_protocol::TokenScope;
+    use shardline_server_core::AuthProvider;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -581,6 +583,9 @@ mod tests {
         lfs_patch_object, lfs_put_object, lfs_validation_response, lfs_verify_object,
         parse_content_range,
     };
+
+    /// Test signing key matching the one used in e2e tests.
+    const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 
     // ---------------------------------------------------------------------------
     // Test helpers
@@ -630,6 +635,53 @@ mod tests {
         });
 
         (state, tmp)
+    }
+
+    /// Builds a minimal [`AppState`] with an auth provider for xet transfer tests.
+    async fn build_test_state_with_auth() -> (Arc<AppState>, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "http://127.0.0.1:8080".to_owned(),
+            tmp.path().to_path_buf(),
+            chunk_size,
+        )
+        .with_server_frontends([ServerFrontend::Lfs])
+        .expect("server frontends");
+
+        let backend = crate::ServerBackend::from_config(&config)
+            .await
+            .expect("backend from config");
+
+        let transfer_limiter = crate::TransferLimiter::new(chunk_size, chunk_size);
+        let auth = crate::auth::ServerAuth::new(TEST_SIGNING_KEY).expect("ServerAuth");
+
+        let state = Arc::new(AppState {
+            config,
+            role: ServerRole::All,
+            backend,
+            auth: Some(auth),
+            provider_tokens: None,
+            reconstruction_cache: crate::ReconstructionCacheService::disabled(),
+            transfer_limiter,
+            oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            protocol_metrics: crate::ProtocolMetrics::default(),
+        });
+
+        (state, tmp)
+    }
+
+    /// Mints a test token for use with the auth-enabled test state.
+    fn mint_test_token(scope: TokenScope) -> String {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims};
+        use shardline_server_core::auth::LocalHmacProvider;
+
+        let provider = LocalHmacProvider::new(TEST_SIGNING_KEY).unwrap();
+        let repo = RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main"))
+            .unwrap();
+        let claims = TokenClaims::new("shardline", "test", scope, repo, u64::MAX).unwrap();
+        provider.mint_token(&claims).unwrap()
     }
 
     /// Registers only the LFS routes on a fresh [`Router`] and attaches state.
@@ -1013,6 +1065,227 @@ mod tests {
     }
 
     // =========================================================================
+    // lfs_batch xet transfer tests
+    // =========================================================================
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_xet_transfer_without_auth_falls_back_to_basic() {
+        // When no auth provider is configured, xet transfer is not available.
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+
+        let request = json!({
+            "operation": "download",
+            "transfers": ["xet", "basic"],
+            "objects": [{ "oid": test_oid_constant(), "size": 100 }]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        // Without auth, falls back to basic (no CAS token to return).
+        assert_eq!(parsed["transfer"], "basic");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_xet_transfer_without_auth_rejects_xet_only() {
+        // When no auth provider, "xet" alone is unsupported (no fallback).
+        let (state, _tmp) = build_test_state().await;
+        let app = lfs_router(state);
+
+        let request = json!({
+            "operation": "download",
+            "transfers": ["xet"],
+            "objects": [{ "oid": test_oid_constant(), "size": 100 }]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_xet_transfer_with_auth_returns_xet_upload_actions() {
+        let (state, _tmp) = build_test_state_with_auth().await;
+        let app = lfs_router(state);
+        let oid = test_oid_constant();
+        let token = mint_test_token(TokenScope::Write);
+
+        let request = json!({
+            "operation": "upload",
+            "transfers": ["xet", "basic"],
+            "objects": [{ "oid": oid, "size": 512 }]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+
+        // Must use xet transfer
+        assert_eq!(parsed["transfer"], "xet");
+
+        // Each object must have the CAS action headers
+        let obj = &parsed["objects"][0];
+        assert_eq!(obj["oid"], oid);
+        let upload = &obj["actions"]["upload"];
+        assert!(upload["href"].as_str().unwrap().contains(&oid));
+
+        let header = &upload["header"];
+        assert!(
+            header["X-Xet-Cas-Url"].as_str().unwrap().contains("http://127.0.0.1:8080"),
+            "CAS URL should point to the server"
+        );
+        assert!(
+            header["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+            "Access token should be present and non-empty"
+        );
+        assert!(
+            header["X-Xet-Token-Expiration"].as_str().is_some(),
+            "Token expiration should be present"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_xet_transfer_download_existing_object_includes_headers() {
+        let (state, _tmp) = build_test_state_with_auth().await;
+        let app = lfs_router(state);
+        let content = b"xet-download-test-content";
+        let oid = test_oid(content);
+        let token = mint_test_token(TokenScope::Write);
+
+        // Upload first (requires auth)
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/lfs/objects/{oid}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/octet-stream")
+                    .header("content-length", content.len().to_string())
+                    .body(Body::from(content.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+
+        // Batch download with xet transfer
+        let request = json!({
+            "operation": "download",
+            "transfers": ["xet", "basic"],
+            "objects": [{ "oid": oid, "size": content.len() as u64 }]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(parsed["transfer"], "xet");
+        let obj = &parsed["objects"][0];
+        let download = &obj["actions"]["download"];
+
+        let header = &download["header"];
+        assert!(
+            header["X-Xet-Cas-Url"].as_str().is_some_and(|u| !u.is_empty()),
+            "download actions should include X-Xet-Cas-Url"
+        );
+        assert!(
+            header["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+            "download actions should include X-Xet-Access-Token"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_xet_transfer_authenticated_with_read_token() {
+        let (state, _tmp) = build_test_state_with_auth().await;
+        let app = lfs_router(state);
+        let token = mint_test_token(TokenScope::Read);
+
+        let request = json!({
+            "operation": "download",
+            "transfers": ["xet", "basic"],
+            "objects": [{ "oid": test_oid_constant(), "size": 100 }]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lfs/objects/batch")
+                    .header("content-type", "application/vnd.git-lfs+json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+
+        // Read scope should still get xet transfer for downloads
+        assert_eq!(parsed["transfer"], "xet");
+    }
+
+    // =========================================================================
     // lfs_get_object tests
     // =========================================================================
 
@@ -1215,10 +1488,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_object_rejects_wrong_content_type() {
+    async fn put_object_accepts_wrong_content_type() {
+        // The Content-Type check was relaxed for git-lfs compatibility.
+        // Non-octet-stream Content-Types are accepted; the body is validated
+        // by its SHA-256 digest regardless of Content-Type.
         let (state, _tmp) = build_test_state().await;
         let app = lfs_router(state);
-        let oid = test_oid_constant();
+        let content = b"test-lfs-object";
+        let oid = test_oid(content);
 
         let response = app
             .oneshot(
@@ -1226,41 +1503,36 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/v1/lfs/objects/{oid}"))
                     .header("content-type", "text/plain")
-                    .body(Body::from(b"hello".to_vec()))
+                    .body(Body::from(content.to_vec()))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            parsed["message"],
-            "Content-Type must be application/octet-stream"
-        );
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_object_rejects_missing_content_type() {
+    async fn put_object_accepts_missing_content_type() {
+        // git-lfs does not always send Content-Type; the handler accepts
+        // requests without it.
         let (state, _tmp) = build_test_state().await;
         let app = lfs_router(state);
-        let oid = test_oid_constant();
+        let content = b"test-lfs-object";
+        let oid = test_oid(content);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/v1/lfs/objects/{oid}"))
-                    .body(Body::from(b"hello".to_vec()))
+                    .body(Body::from(content.to_vec()))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
