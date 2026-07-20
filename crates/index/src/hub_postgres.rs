@@ -472,17 +472,16 @@ impl HubStore for PostgresIndexStore {
             let mut tx = pool.begin().await?;
             for file in &files {
                 sqlx::query(
-                    "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
-                     VALUES ($1, $2, $3, $4, $5, $6)
+                    "INSERT INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
+                     VALUES ($1, $2, $3, $4, $5)
                      ON CONFLICT (commit_sha, path)
-                     DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs, inline_content = EXCLUDED.inline_content",
+                     DO UPDATE SET size = EXCLUDED.size, sha = EXCLUDED.sha, is_lfs = EXCLUDED.is_lfs",
                 )
                 .bind(&commit_sha)
                 .bind(&file.path)
                 .bind(u64_to_i64(file.size)?)
                 .bind(&file.sha)
                 .bind(file.is_lfs)
-                .bind(&file.inline_content)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -497,7 +496,7 @@ impl HubStore for PostgresIndexStore {
 
         block_on_async(async {
             let mut rows = sqlx::query(
-                "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
+                "SELECT path, size, sha, is_lfs FROM shardline_hub_file_entries
                  WHERE commit_sha = $1 ORDER BY path LIMIT 100000",
             )
             .bind(&commit_sha)
@@ -510,7 +509,6 @@ impl HubStore for PostgresIndexStore {
                     size: i64_to_u64(row.try_get::<i64, _>("size")?)?,
                     sha: row.try_get("sha")?,
                     is_lfs: row.try_get::<bool, _>("is_lfs")?,
-                    inline_content: row.try_get("inline_content")?,
                 });
             }
             Ok(entries)
@@ -931,14 +929,12 @@ mod tests {
                 size: 100,
                 sha: "sha_a".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "b.bin".into(),
                 size: 2048,
                 sha: "sha_b".into(),
                 is_lfs: true,
-                inline_content: None,
             },
         ];
 
@@ -1026,7 +1022,6 @@ mod tests {
             size: 42,
             sha: "sha_py".into(),
             is_lfs: false,
-            inline_content: None,
         }];
         let commit_sha = sha.unwrap();
         boxed.store_files(&commit_sha, &files).expect("store_files");

@@ -42,7 +42,7 @@ pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_re
                 size INTEGER NOT NULL CHECK (size >= 0),
                 sha TEXT NOT NULL,
                 is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
-                inline_content BLOB,
+
                 PRIMARY KEY (commit_sha, path)
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (

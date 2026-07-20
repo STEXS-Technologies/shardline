@@ -116,8 +116,6 @@ pub struct HubFileEntry {
     pub size: u64,
     pub sha: String,
     pub is_lfs: bool,
-    /// Inline file content (only set for non-LFS files ≤1 MiB).
-    pub inline_content: Option<Vec<u8>>,
 }
 
 /// A registered webhook for a Hub repository.
@@ -1567,7 +1565,6 @@ mod tests {
             size: 100,
             sha: "aaa".to_owned(),
             is_lfs: false,
-            inline_content: None,
         }];
 
         store.store_files("commit-sha-1", &files).unwrap();
@@ -1711,7 +1708,6 @@ mod tests {
             size: 10,
             sha: "f1".into(),
             is_lfs: false,
-            inline_content: None,
         }];
         store.store_files("c1", &files).unwrap();
         let loaded = store.get_files("c1").unwrap();
@@ -1815,11 +1811,10 @@ mod tests {
             size: 1024,
             sha: "filehash".to_owned(),
             is_lfs: true,
-            inline_content: Some(vec![1, 2, 3]),
         };
         assert_eq!(entry.path, "src/lib.rs");
         assert!(entry.is_lfs);
-        assert_eq!(entry.inline_content.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(entry.sha, "filehash");
     }
 
     #[test]
