@@ -22,7 +22,7 @@ use shardline_storage::DeleteOutcome;
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     ServerError, lfs_object_key, metrics,
-    upload_ingest::{read_body_to_bytes, RequestBodyReader},
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
 use super::{AppState, MAX_LFS_BATCH_OBJECTS, authorize, direct_object_response, scope_from_auth};

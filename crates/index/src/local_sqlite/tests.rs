@@ -1,4 +1,11 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::let_underscore_must_use, clippy::shadow_unrelated)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::let_underscore_must_use,
+    clippy::shadow_unrelated
+)]
 
 use std::{error::Error, fs, path::Path, slice::from_ref};
 

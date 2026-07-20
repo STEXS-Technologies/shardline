@@ -610,9 +610,7 @@ mod tests {
     #[tokio::test]
     async fn upload_file_stream_rejects_invalid_file_id() {
         let (backend, _root) = make_backend().await;
-        let body = RequestBodyReader::from_bytes(axum::body::Bytes::from(
-            b"content".to_vec(),
-        ));
+        let body = RequestBodyReader::from_bytes(axum::body::Bytes::from(b"content".to_vec()));
         let result = backend
             .upload_file_stream("../traverse", body, None, None)
             .await;
@@ -622,9 +620,7 @@ mod tests {
     #[tokio::test]
     async fn upload_file_stream_rejects_empty_file_id() {
         let (backend, _root) = make_backend().await;
-        let body = RequestBodyReader::from_bytes(axum::body::Bytes::from(
-            b"content".to_vec(),
-        ));
+        let body = RequestBodyReader::from_bytes(axum::body::Bytes::from(b"content".to_vec()));
         let result = backend.upload_file_stream("", body, None, None).await;
         assert!(matches!(result, Err(ServerError::InvalidFileId)));
     }

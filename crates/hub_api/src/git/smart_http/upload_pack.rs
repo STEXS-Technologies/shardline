@@ -7,9 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::super::pack::{
-    GitObject, create_commit_object, empty_pack, generate_pack,
-};
+use super::super::pack::{GitObject, create_commit_object, empty_pack, generate_pack};
 use super::super::pktline::{self, FLUSH};
 use super::ref_advertisement::{GitRef, authorize_read, collect_refs, resolve_repo_id};
 use crate::{error::HubApiError, routes::HubState};

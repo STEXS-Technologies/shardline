@@ -177,10 +177,7 @@ pub(crate) async fn lfs_download(
         .metadata(&key)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::NotFound)?;
-    let range_end = meta
-        .length()
-        .checked_sub(1)
-        .ok_or(HubApiError::NotFound)?;
+    let range_end = meta.length().checked_sub(1).ok_or(HubApiError::NotFound)?;
     let range = shardline_protocol::ByteRange::new(0, range_end)
         .map_err(|_range_err| HubApiError::NotFound)?;
     let data = state

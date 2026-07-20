@@ -268,6 +268,61 @@ impl ServerObjectStore {
         }
     }
 
+    /// Probes the storage backend for connectivity at startup.
+    ///
+    /// For local storage, verifies the root directory exists and is accessible.
+    /// For S3, issues a lightweight list request to confirm the endpoint and
+    /// bucket are reachable. Blackhole stores always succeed.
+    ///
+    /// Returns `Ok(())` when reachable, or `Err(message)` with the failure reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the storage root is inaccessible, the S3 endpoint/bucket
+    /// is unreachable, or the storage configuration is invalid.
+    pub fn probe(&self) -> Result<(), String> {
+        match self {
+            Self::Local(store) => {
+                let root = store.root();
+                if !root.exists() {
+                    return Err(format!(
+                        "local storage root directory does not exist: {}",
+                        root.display()
+                    ));
+                }
+                if !root.is_dir() {
+                    return Err(format!(
+                        "local storage root path is not a directory: {}",
+                        root.display()
+                    ));
+                }
+                // Verify write access by checking we can stat the directory
+                std::fs::metadata(root)
+                    .map(|m| {
+                        if !m.permissions().readonly() {
+                            Ok(())
+                        } else {
+                            Err(format!(
+                                "local storage root is read-only: {}",
+                                root.display()
+                            ))
+                        }
+                    })
+                    .map_err(|e| format!("local storage root inaccessible: {e}"))?
+            }
+            Self::S3(store) => {
+                // Attempt a lightweight list with an empty prefix to verify connectivity
+                let empty_prefix = ObjectPrefix::parse("")
+                    .map_err(|e| format!("failed to create probe prefix: {e}"))?;
+                store
+                    .list_prefix(&empty_prefix)
+                    .map_err(|e| format!("s3 storage probe failed: {e}"))?;
+                Ok(())
+            }
+            Self::Blackhole => Ok(()),
+        }
+    }
+
     /// Reads the full contents of an object from the store.
     ///
     /// # Errors

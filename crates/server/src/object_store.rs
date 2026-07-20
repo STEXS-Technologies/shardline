@@ -336,11 +336,11 @@ mod tests {
         reconstruct_file_record_bytes, reconstruct_local_file_bytes,
         set_before_local_object_read_hook, visit_object_prefix,
     };
-    use crate::chunk_store::chunk_object_key;
     use crate::ServerConfig;
+    use crate::ServerError;
+    use crate::chunk_store::chunk_object_key;
     use crate::error::ObjectStoreError;
     use crate::object_store::ServerObjectStore;
-    use crate::ServerError;
 
     #[test]
     fn local_object_read_rejects_growth_after_length_validation_without_retaining_growth_bytes() {
@@ -770,9 +770,7 @@ mod tests {
         let store = super::object_store_from_config(&config);
         assert!(matches!(
             store,
-            Err(ServerError::ObjectStore(
-                ObjectStoreError::MissingS3Config
-            ))
+            Err(ServerError::ObjectStore(ObjectStoreError::MissingS3Config))
         ));
     }
 
@@ -1141,8 +1139,7 @@ mod tests {
     #[test]
     fn server_object_store_error_io_converts() {
         let io_err = std::io::Error::other("disk error");
-        let err: ServerError =
-            shardline_server_core::ServerObjectStoreError::Io(io_err).into();
+        let err: ServerError = shardline_server_core::ServerObjectStoreError::Io(io_err).into();
         assert!(matches!(err, ServerError::Io(_)));
     }
 

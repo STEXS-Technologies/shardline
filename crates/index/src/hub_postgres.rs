@@ -591,7 +591,9 @@ impl HubStore for PostgresIndexStore {
                 repo_id: row.try_get("repo_id")?,
                 url: row.try_get("url")?,
                 events: events_vec,
-                secret: row.try_get::<Option<String>, _>("secret")?.map(SecretString::new),
+                secret: row
+                    .try_get::<Option<String>, _>("secret")?
+                    .map(SecretString::new),
                 active: row.try_get::<bool, _>("active")?,
                 created_at_unix_seconds: i64_to_u64(
                     row.try_get::<i64, _>("created_at_unix_seconds")?,
@@ -620,7 +622,9 @@ impl HubStore for PostgresIndexStore {
                     repo_id: row.try_get("repo_id")?,
                     url: row.try_get("url")?,
                     events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                    secret: row.try_get::<Option<String>, _>("secret")?.map(SecretString::new),
+                    secret: row
+                        .try_get::<Option<String>, _>("secret")?
+                        .map(SecretString::new),
                     active: row.try_get::<bool, _>("active")?,
                     created_at_unix_seconds: i64_to_u64(
                         row.try_get::<i64, _>("created_at_unix_seconds")?,
@@ -673,7 +677,9 @@ impl HubStore for PostgresIndexStore {
                     repo_id: row.try_get("repo_id")?,
                     url: row.try_get("url")?,
                     events: events_str.split(',').map(ToOwned::to_owned).collect(),
-                    secret: row.try_get::<Option<String>, _>("secret")?.map(SecretString::new),
+                    secret: row
+                        .try_get::<Option<String>, _>("secret")?
+                        .map(SecretString::new),
                     active: row.try_get::<bool, _>("active")?,
                     created_at_unix_seconds: i64_to_u64(
                         row.try_get::<i64, _>("created_at_unix_seconds")?,
@@ -687,7 +693,18 @@ impl HubStore for PostgresIndexStore {
 
 #[cfg(test)]
 mod tests {
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
     use super::*;
     use crate::hub::{BoxedHubStore, HubRepoType, HubStore};
     use sqlx::postgres::{PgPool, PgPoolOptions};

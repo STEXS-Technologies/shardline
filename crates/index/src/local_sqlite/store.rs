@@ -45,6 +45,26 @@ impl LocalIndexStore {
         &self.root
     }
 
+    /// Probes the SQLite metadata store for connectivity at startup.
+    ///
+    /// Opens a connection and executes a simple query to verify the database
+    /// file is accessible and the schema is valid.
+    ///
+    /// Returns `Ok(())` when reachable, or `Err(message)` with the failure reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the database file is inaccessible or the schema is invalid.
+    pub fn probe(&self) -> Result<(), String> {
+        let connection = self
+            .open_connection()
+            .map_err(|e| format!("sqlite metadata probe failed: {e}"))?;
+        connection
+            .execute_batch("SELECT 1")
+            .map_err(|e| format!("sqlite metadata probe query failed: {e}"))?;
+        Ok(())
+    }
+
     pub(crate) fn open_connection(&self) -> Result<Connection, LocalIndexStoreError> {
         helpers::initialize_local_metadata_root(&self.root)?;
         let database_path = self.database_path();

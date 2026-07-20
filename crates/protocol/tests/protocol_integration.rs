@@ -39,15 +39,26 @@ fn hash_from_bytes_hex_string_parse_hex_round_trip() {
 
     for raw in cases {
         let hash = ShardlineHash::from_bytes(raw);
-        assert_eq!(hash.as_bytes(), &raw, "from_bytes should preserve raw bytes");
+        assert_eq!(
+            hash.as_bytes(),
+            &raw,
+            "from_bytes should preserve raw bytes"
+        );
 
         let hex = hash.hex_string();
         assert_eq!(hex.len(), 64, "hex_string should be 64 chars");
-        assert!(hex.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        );
 
         let parsed = ShardlineHash::parse_hex(&hex);
         assert!(parsed.is_ok(), "parse_hex should succeed for valid hex");
-        assert_eq!(parsed.unwrap(), hash, "round-trip should produce equal hash");
+        assert_eq!(
+            parsed.unwrap(),
+            hash,
+            "round-trip should produce equal hash"
+        );
     }
 }
 
@@ -129,10 +140,7 @@ fn byte_range_new_valid() {
 
 #[test]
 fn byte_range_rejects_inverted() {
-    assert_eq!(
-        ByteRange::new(100, 99),
-        Err(RangeError::Inverted)
-    );
+    assert_eq!(ByteRange::new(100, 99), Err(RangeError::Inverted));
 }
 
 #[test]
@@ -172,18 +180,12 @@ fn chunk_range_new_valid() {
 
 #[test]
 fn chunk_range_rejects_empty() {
-    assert_eq!(
-        ChunkRange::new(5, 5),
-        Err(RangeError::Empty)
-    );
+    assert_eq!(ChunkRange::new(5, 5), Err(RangeError::Empty));
 }
 
 #[test]
 fn chunk_range_rejects_inverted() {
-    assert_eq!(
-        ChunkRange::new(10, 5),
-        Err(RangeError::Inverted)
-    );
+    assert_eq!(ChunkRange::new(10, 5), Err(RangeError::Inverted));
 }
 
 // ===========================================================================
@@ -199,7 +201,10 @@ const fn ranges_overlap(a: &ByteRange, b: &ByteRange) -> bool {
 fn overlapping_ranges_detected() {
     let a = ByteRange::new(10, 20).unwrap();
     let b = ByteRange::new(15, 25).unwrap();
-    assert!(ranges_overlap(&a, &b), "ranges [10,20] and [15,25] should overlap");
+    assert!(
+        ranges_overlap(&a, &b),
+        "ranges [10,20] and [15,25] should overlap"
+    );
     assert!(ranges_overlap(&b, &a), "overlap is symmetric");
 }
 
@@ -208,28 +213,40 @@ fn touching_ranges_overlap() {
     // [10, 20] and [20, 30] touch at byte 20.
     let a = ByteRange::new(10, 20).unwrap();
     let b = ByteRange::new(20, 30).unwrap();
-    assert!(ranges_overlap(&a, &b), "touching ranges [10,20] and [20,30] overlap at byte 20");
+    assert!(
+        ranges_overlap(&a, &b),
+        "touching ranges [10,20] and [20,30] overlap at byte 20"
+    );
 }
 
 #[test]
 fn disjoint_ranges_detected() {
     let a = ByteRange::new(10, 19).unwrap();
     let b = ByteRange::new(20, 30).unwrap();
-    assert!(!ranges_overlap(&a, &b), "disjoint ranges [10,19] and [20,30] should not overlap");
+    assert!(
+        !ranges_overlap(&a, &b),
+        "disjoint ranges [10,19] and [20,30] should not overlap"
+    );
 }
 
 #[test]
 fn nested_ranges_overlap() {
     let outer = ByteRange::new(0, 100).unwrap();
     let inner = ByteRange::new(25, 75).unwrap();
-    assert!(ranges_overlap(&outer, &inner), "nested ranges should overlap");
+    assert!(
+        ranges_overlap(&outer, &inner),
+        "nested ranges should overlap"
+    );
 }
 
 #[test]
 fn single_byte_overlap_edges() {
     let a = ByteRange::new(5, 5).unwrap();
     let b = ByteRange::new(5, 5).unwrap();
-    assert!(ranges_overlap(&a, &b), "identical single-byte ranges should overlap");
+    assert!(
+        ranges_overlap(&a, &b),
+        "identical single-byte ranges should overlap"
+    );
 }
 
 #[test]
@@ -401,8 +418,7 @@ fn token_sign_and_verify_full_round_trip() {
 #[test]
 fn token_verify_rejects_tampered_signature() {
     let signer = TokenSigner::new(b"integration-test-key-32-bytes-long!!").unwrap();
-    let repo =
-        RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", Some("main")).unwrap();
+    let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", Some("main")).unwrap();
     let claims = TokenClaims::new("iss", "sub", TokenScope::Read, repo, 2_000_000_000).unwrap();
     let token = signer.sign(&claims).unwrap();
 
@@ -418,8 +434,7 @@ fn token_verify_rejects_tampered_signature() {
 #[test]
 fn token_verify_rejects_expired_token() {
     let signer = TokenSigner::new(b"integration-test-key-32-bytes-long!!").unwrap();
-    let repo =
-        RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", Some("main")).unwrap();
+    let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", Some("main")).unwrap();
     let claims = TokenClaims::new("iss", "sub", TokenScope::Read, repo, 100).unwrap();
     let token = signer.sign(&claims).unwrap();
 
@@ -492,14 +507,16 @@ fn different_keys_produce_different_tokens() {
     let signer_a = TokenSigner::new(b"aaaaaaaa-key-aaaaaaaaaaaaaaaaa!!!!!").unwrap();
     let signer_b = TokenSigner::new(b"bbbbbbbb-key-bbbbbbbbbbbbbb!!!!!!!").unwrap();
 
-    let repo =
-        RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", Some("main")).unwrap();
+    let repo = RepositoryScope::new(RepositoryProvider::GitHub, "o", "r", Some("main")).unwrap();
     let claims = TokenClaims::new("iss", "sub", TokenScope::Read, repo, 2_000_000_000).unwrap();
 
     let token_a = signer_a.sign(&claims).unwrap();
     let token_b = signer_b.sign(&claims).unwrap();
 
-    assert_ne!(token_a, token_b, "different keys should produce different tokens");
+    assert_ne!(
+        token_a, token_b,
+        "different keys should produce different tokens"
+    );
 
     // Token A should not verify with signer B
     assert!(matches!(

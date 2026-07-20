@@ -1268,10 +1268,10 @@ mod tests {
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::EmptyIndexPostgresUrl)
-        ), "expected EmptyIndexPostgresUrl, got {result:?}");
+        assert!(
+            matches!(result, Err(super::ServerConfigError::EmptyIndexPostgresUrl)),
+            "expected EmptyIndexPostgresUrl, got {result:?}"
+        );
         // SAFETY: test-only env var cleanup under serial_test
         remove_env_var("SHARDLINE_INDEX_POSTGRES_URL");
         remove_env_var("SHARDLINE_ROOT_DIR");
@@ -1289,10 +1289,13 @@ mod tests {
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::MissingReconstructionCacheRedisUrl)
-        ), "expected MissingReconstructionCacheRedisUrl, got {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(super::ServerConfigError::MissingReconstructionCacheRedisUrl)
+            ),
+            "expected MissingReconstructionCacheRedisUrl, got {result:?}"
+        );
         // SAFETY: test-only env var cleanup under serial_test
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER");
         remove_env_var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL");
@@ -1326,15 +1329,21 @@ mod tests {
             "SHARDLINE_PROVIDER_API_KEY_FILE",
             api_key_file.path().to_str().unwrap(),
         );
-        set_env_var("SHARDLINE_TOKEN_SIGNING_KEY", "test-signing-key-32-bytes-long!!");
+        set_env_var(
+            "SHARDLINE_TOKEN_SIGNING_KEY",
+            "test-signing-key-32-bytes-long!!",
+        );
         set_env_var("SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS", "300");
         set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline_test");
         set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
         let result = super::load_server_config_from_env();
-        assert!(matches!(
-            result,
-            Err(super::ServerConfigError::EmptyProviderTokenIssuer)
-        ), "expected EmptyProviderTokenIssuer, got {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(super::ServerConfigError::EmptyProviderTokenIssuer)
+            ),
+            "expected EmptyProviderTokenIssuer, got {result:?}"
+        );
         // SAFETY: test-only env var cleanup under serial_test
         remove_env_var("SHARDLINE_PROVIDER_TOKEN_ISSUER");
         remove_env_var("SHARDLINE_PROVIDER_CONFIG_FILE");
@@ -1373,10 +1382,7 @@ mod tests {
         set_env_var("SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS", "5000");
         set_env_var("SHARDLINE_MAX_SHARD_XORB_CHUNKS", "5000");
         set_env_var("SHARDLINE_AUTH_PROVIDER", "oidc");
-        set_env_var(
-            "SHARDLINE_AUTH_OIDC_ISSUER",
-            "https://accounts.example.com",
-        );
+        set_env_var("SHARDLINE_AUTH_OIDC_ISSUER", "https://accounts.example.com");
         set_env_var(
             "SHARDLINE_TOKEN_SIGNING_KEY",
             "test-signing-key-32-bytes-long!!",
@@ -1390,15 +1396,21 @@ mod tests {
         assert_eq!(config.public_base_url(), "https://example.com:9090");
         assert_eq!(config.server_role(), crate::ServerRole::All);
         assert_eq!(config.server_frontends().len(), 3);
-        assert!(config
-            .server_frontends()
-            .contains(&crate::ServerFrontend::Xet));
-        assert!(config
-            .server_frontends()
-            .contains(&crate::ServerFrontend::Lfs));
-        assert!(config
-            .server_frontends()
-            .contains(&crate::ServerFrontend::Oci));
+        assert!(
+            config
+                .server_frontends()
+                .contains(&crate::ServerFrontend::Xet)
+        );
+        assert!(
+            config
+                .server_frontends()
+                .contains(&crate::ServerFrontend::Lfs)
+        );
+        assert!(
+            config
+                .server_frontends()
+                .contains(&crate::ServerFrontend::Oci)
+        );
         assert_eq!(
             config.root_dir(),
             std::path::Path::new("/tmp/shardline_e2e")

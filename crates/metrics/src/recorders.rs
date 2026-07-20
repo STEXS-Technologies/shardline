@@ -3,10 +3,9 @@ use std::sync::LazyLock;
 use prometheus::{Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 
 use crate::{
-    backend::StorageBackendMetrics, fsck::FsckMetrics, gc::GcMetrics,
-    protocol::ProtocolMetrics, provider::ProviderMetrics,
-    reconstruction::ReconstructionMetrics, storage::StorageMetrics, system::SystemMetrics,
-    transfer::TransferMetrics, xet::XetMetrics,
+    backend::StorageBackendMetrics, fsck::FsckMetrics, gc::GcMetrics, protocol::ProtocolMetrics,
+    provider::ProviderMetrics, reconstruction::ReconstructionMetrics, storage::StorageMetrics,
+    system::SystemMetrics, transfer::TransferMetrics, xet::XetMetrics,
 };
 
 // ── Infallible metric constructors ────────────────────────────────────────

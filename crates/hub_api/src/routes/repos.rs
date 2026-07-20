@@ -276,6 +276,23 @@ pub(crate) async fn repo_search(
     Ok(Json(response))
 }
 
+// ---- Validate YAML (requires Read) ----
+
+pub(crate) async fn validate_yaml(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(_body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, HubApiError> {
+    shardline_metrics::record_hub_api_request("validate_yaml", "POST", 200);
+    authorize(&state, &headers, TokenScope::Read)?;
+
+    let response = serde_json::json!({
+        "warnings": [],
+        "errors": []
+    });
+    Ok(Json(response))
+}
+
 // ---- Repo modelcard (requires Read) ----
 
 pub(crate) async fn repo_modelcard(
@@ -308,8 +325,7 @@ pub(crate) async fn repo_modelcard(
         ("Content-Type", "text/markdown; charset=utf-8"),
         ("X-Shardline-SHA", readme.sha.as_str()),
     ];
-    let content = read_file_from_object_store(&state, &readme.sha)
-        .ok_or(HubApiError::NotFound)?;
+    let content = read_file_from_object_store(&state, &readme.sha).ok_or(HubApiError::NotFound)?;
     Ok((resp_headers, content).into_response())
 }
 

@@ -11,7 +11,7 @@ use crate::{
     chunk_store::chunk_object_key,
     model::UploadFileResponse,
     object_store::{read_full_object, reconstruct_file_record_bytes},
-    upload_ingest::{FileUploadIngestor, read_body_to_bytes, RequestBodyReader},
+    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes},
     validation::validate_identifier,
     xet_adapter::{
         FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response,

@@ -34,7 +34,11 @@ impl RedisTlsConfig {
 
     /// Adds a PEM-encoded client certificate and private key for mTLS.
     #[must_use]
-    pub fn with_client_identity(mut self, client_cert: SecretBytes, client_key: SecretBytes) -> Self {
+    pub fn with_client_identity(
+        mut self,
+        client_cert: SecretBytes,
+        client_key: SecretBytes,
+    ) -> Self {
         self.client_cert = Some(client_cert);
         self.client_key = Some(client_key);
         self

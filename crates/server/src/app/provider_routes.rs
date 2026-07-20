@@ -60,7 +60,10 @@ pub(super) async fn git_lfs_authenticate(
         "X-Xet-Cas-Url".to_owned(),
         state.config.public_base_url().to_owned(),
     );
-    header.insert("X-Xet-Access-Token".to_owned(), issued.token.expose_secret().to_owned());
+    header.insert(
+        "X-Xet-Access-Token".to_owned(),
+        issued.token.expose_secret().to_owned(),
+    );
     header.insert(
         "X-Xet-Token-Expiration".to_owned(),
         issued.expires_at_unix_seconds.to_string(),
@@ -220,9 +223,7 @@ mod tests {
             temp.path().to_path_buf(),
             chunk_size,
         );
-        let backend = ServerBackend::from_config(&config)
-            .await
-            .unwrap();
+        let backend = ServerBackend::from_config(&config).await.unwrap();
         let state = Arc::new(AppState {
             config,
             role: ServerRole::All,
@@ -267,9 +268,7 @@ mod tests {
             temp.path().to_path_buf(),
             chunk_size,
         );
-        let backend = ServerBackend::from_config(&config)
-            .await
-            .unwrap();
+        let backend = ServerBackend::from_config(&config).await.unwrap();
 
         // Create a provider config file with an empty providers list
         let config_path = temp.path().join("providers.json");

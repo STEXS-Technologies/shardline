@@ -14,9 +14,7 @@ use crate::{
             classify_quarantine_repair_action, classify_retention_hold_repair_action,
             classify_webhook_delivery_repair_action,
         },
-        types::{
-            QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction,
-        },
+        types::{QuarantineRepairAction, RetentionHoldRepairAction, WebhookDeliveryRepairAction},
     },
     oci_adapter::{oci_blob_key, oci_manifest_key, parse_reference},
     protocol_support::{parse_sha256_digest, validate_oci_repository_name, validate_oci_tag},

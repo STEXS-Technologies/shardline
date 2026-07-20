@@ -58,11 +58,7 @@ fuzz_target!(|data: (u64, Vec<RawChunk>)| {
         assert!(chunk.range_end > chunk.range_start);
         assert!(chunk.packed_end > chunk.packed_start);
         assert!(parse_xet_hash_hex(&chunk.hash).is_ok());
-        assert!(ChunkRange::new(
-            chunk.range_start as u32,
-            chunk.range_end as u32,
-        )
-        .is_ok());
+        assert!(ChunkRange::new(chunk.range_start as u32, chunk.range_end as u32,).is_ok());
         let next_expected_offset = expected_offset.checked_add(chunk.length);
         assert!(next_expected_offset.is_some());
         let Some(next_expected_offset) = next_expected_offset else {

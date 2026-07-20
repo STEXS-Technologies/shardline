@@ -57,11 +57,32 @@ impl ServerBackend {
     /// Build a [`ServerBackend`] from a [`ServerConfig`] by resolving the object store
     /// and metadata backend (local or Postgres).
     ///
+    /// Probes both the storage and metadata backends at startup to verify
+    /// connectivity before accepting traffic.
+    ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when the object store or Postgres backend fails to initialise.
     pub async fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
         let object_store = object_store_from_config(config)?;
+
+        // Probe object storage — warn but don't fail (S3 may be slow to start)
+        match object_store.probe() {
+            Ok(()) => {
+                tracing::info!(
+                    backend = object_store.backend_name(),
+                    "startup probe: object storage OK"
+                );
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    backend = object_store.backend_name(),
+                    reason,
+                    "startup probe: object storage unreachable (will retry on first request)"
+                );
+            }
+        }
+
         if let Some(index_postgres_url) = config.index_postgres_url() {
             let backend =
                 PostgresBackend::new_with_object_store_and_upload_parallelism_with_frontends(
@@ -74,6 +95,17 @@ impl ServerBackend {
                     config.server_frontends(),
                 )
                 .await?;
+
+            // Probe Postgres metadata — fail startup if unreachable (metadata is critical)
+            backend.probe_metadata().await.map_err(|e| {
+                tracing::error!(reason = %e, "startup probe: postgres metadata FAILED");
+                ServerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    e,
+                ))
+            })?;
+            tracing::info!("startup probe: postgres metadata OK");
+
             return Ok(Self::Postgres(backend));
         }
 
@@ -86,6 +118,17 @@ impl ServerBackend {
             config.server_frontends(),
         )
         .await?;
+
+        // Probe SQLite metadata — fail startup if unreachable (metadata is critical)
+        backend.probe_metadata().map_err(|e| {
+            tracing::error!(reason = %e, "startup probe: sqlite metadata FAILED");
+            ServerError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                e,
+            ))
+        })?;
+        tracing::info!("startup probe: sqlite metadata OK");
+
         Ok(Self::Local(backend))
     }
 

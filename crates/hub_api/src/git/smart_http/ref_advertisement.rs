@@ -64,7 +64,10 @@ pub(super) fn is_valid_refname(refname: &str) -> bool {
 }
 
 /// Collects all refs from the HubStore for a given repo.
-pub(super) async fn collect_refs(state: &HubState, repo_id: &str) -> Result<Vec<GitRef>, HubApiError> {
+pub(super) async fn collect_refs(
+    state: &HubState,
+    repo_id: &str,
+) -> Result<Vec<GitRef>, HubApiError> {
     let store_refs = state.store.list_refs(repo_id).map_err(|e| {
         tracing::debug!("failed to list revisions for {repo_id}: {e}");
         HubApiError::RepoNotFound

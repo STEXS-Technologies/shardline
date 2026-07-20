@@ -2,9 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::super::pack::{
-    GitObject, ObjectType, PackError, apply_delta, parse_ofs_delta_offset,
-};
+use super::super::pack::{GitObject, ObjectType, PackError, apply_delta, parse_ofs_delta_offset};
 
 /// Maximum total decompressed size for all objects in a receive-pack (512 MB).
 /// Prevents zlib-bomb attacks that decompress to many GB of memory.

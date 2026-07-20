@@ -30,7 +30,11 @@ fn s3_location_applies_key_prefix() {
         S3ObjectStoreConfig::new("assets".to_owned(), "us-east-1".to_owned())
             .with_endpoint(Some("http://127.0.0.1:9000".to_owned()))
             .with_allow_http(true)
-            .with_credentials(Some(SecretString::from_secret("access")), Some(SecretString::from_secret("secret")), None)
+            .with_credentials(
+                Some(SecretString::from_secret("access")),
+                Some(SecretString::from_secret("secret")),
+                None,
+            )
             .with_key_prefix(Some("tenant-a")),
     );
     assert!(store.is_ok());

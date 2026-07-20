@@ -6,7 +6,7 @@ use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
-    upload_ingest::{read_body_to_bytes, RequestBodyReader},
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
     xet_adapter::{
         XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes, xorb_object_key,
     },

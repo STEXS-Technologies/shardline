@@ -304,10 +304,8 @@ mod tests {
         if !files.is_empty() {
             store.store_files("sha_resolve", files).unwrap();
         }
-        let object_store = shardline_server_core::ServerObjectStore::local(
-            ts.path().join("lfs"),
-        )
-        .expect("local object store");
+        let object_store = shardline_server_core::ServerObjectStore::local(ts.path().join("lfs"))
+            .expect("local object store");
 
         // Pre-load content into ObjectStore
         for (sha, data) in content {
@@ -317,7 +315,9 @@ mod tests {
                 shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
                 data.len() as u64,
             );
-            object_store.put_if_absent(&key, body, &integrity).expect("put content");
+            object_store
+                .put_if_absent(&key, body, &integrity)
+                .expect("put content");
         }
 
         let state = HubState {

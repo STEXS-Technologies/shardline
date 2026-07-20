@@ -10,11 +10,8 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use shardline_protocol::{TokenClaims, TokenScope, TokenSigner};
 
 use crate::{
-    ServerError,
-    auth::AuthContext,
-    clock::unix_now_seconds_checked,
-    model::OciRegistryTokenResponse,
-    oci_adapter::validate_repository,
+    ServerError, auth::AuthContext, clock::unix_now_seconds_checked,
+    model::OciRegistryTokenResponse, oci_adapter::validate_repository,
     protocol_support::validate_oci_repository_scope,
 };
 
@@ -88,10 +85,7 @@ pub(crate) async fn oci_registry_token(
         })?;
     let (requested_scope, requested_repository) = parse_oci_registry_token_scopes(&query.scopes)?;
     if let Some(repository) = requested_repository.as_deref() {
-        validate_oci_repository_scope(
-            repository,
-            Some(bootstrap_claims.repository()),
-        )?;
+        validate_oci_repository_scope(repository, Some(bootstrap_claims.repository()))?;
     }
     if !scope_allows_oci_exchange(bootstrap_claims.scope(), requested_scope) {
         return Err(ServerError::InsufficientScope);
@@ -369,14 +363,14 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::num::NonZeroUsize;
 
-    use crate::app::ProtocolMetrics;
-    use crate::backend::ServerBackend;
-    use crate::reconstruction_cache::ReconstructionCacheService;
-    use crate::server_role::ServerRole;
     use crate::AppState;
     use crate::ServerConfig;
     use crate::ServerError;
     use crate::TransferLimiter;
+    use crate::app::ProtocolMetrics;
+    use crate::backend::ServerBackend;
+    use crate::reconstruction_cache::ReconstructionCacheService;
+    use crate::server_role::ServerRole;
 
     fn signing_key() -> Vec<u8> {
         vec![b'k'; 32]
@@ -805,17 +799,14 @@ mod tests {
         )
         .with_token_signing_key(signing_key())
         .expect("signing key set");
-        let backend = ServerBackend::from_config(&config)
-            .await
-            .expect("backend");
+        let backend = ServerBackend::from_config(&config).await.expect("backend");
         Arc::new(AppState {
             config,
             role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: ReconstructionCacheService::disabled(
-            ),
+            reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
@@ -953,9 +944,7 @@ mod tests {
         )
         .with_token_signing_key(signing_key())
         .expect("signing key set");
-        let backend = ServerBackend::from_config(&config)
-            .await
-            .expect("backend");
+        let backend = ServerBackend::from_config(&config).await.expect("backend");
         // Create a semaphore with 0 permits so try_acquire_owned always fails
         let state = Arc::new(AppState {
             config,
@@ -963,8 +952,7 @@ mod tests {
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: ReconstructionCacheService::disabled(
-            ),
+            reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),
@@ -1014,17 +1002,14 @@ mod tests {
             root,
             NonZeroUsize::new(4096).unwrap(),
         );
-        let backend = ServerBackend::from_config(&config)
-            .await
-            .expect("backend");
+        let backend = ServerBackend::from_config(&config).await.expect("backend");
         let state = Arc::new(AppState {
             config,
             role: ServerRole::All,
             backend,
             auth: None,
             provider_tokens: None,
-            reconstruction_cache: ReconstructionCacheService::disabled(
-            ),
+            reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(
                 NonZeroUsize::new(4096).unwrap(),
                 NonZeroUsize::new(16).unwrap(),

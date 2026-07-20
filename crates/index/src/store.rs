@@ -4,9 +4,8 @@ use shardline_protocol::{RepositoryProvider, ShardlineHash};
 use shardline_storage::ObjectKey;
 
 use crate::{
-    hub::HubStore, record::RecordStore, DedupeShardMapping, FileId, FileReconstruction,
-    ProviderRepositoryState, QuarantineCandidate, RetentionHold, StoredObjectId, WebhookDelivery,
-    XorbId,
+    DedupeShardMapping, FileId, FileReconstruction, ProviderRepositoryState, QuarantineCandidate,
+    RetentionHold, StoredObjectId, WebhookDelivery, XorbId, hub::HubStore, record::RecordStore,
 };
 
 macro_rules! visit_items {

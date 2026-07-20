@@ -41,7 +41,11 @@ impl Fixture {
             S3ObjectStoreConfig::new(bucket, "us-east-1".to_owned())
                 .with_endpoint(Some(endpoint))
                 .with_allow_http(true)
-                .with_credentials(Some(SecretString::new(access_key)), Some(SecretString::new(secret_key)), None),
+                .with_credentials(
+                    Some(SecretString::new(access_key)),
+                    Some(SecretString::new(secret_key)),
+                    None,
+                ),
         )?;
         let run_prefix = format!(
             "bench-{}-{}",

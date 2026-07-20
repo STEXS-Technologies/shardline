@@ -10,7 +10,11 @@ use super::xorb_chunk_format::{
     deserialize_chunk, deserialize_chunk_header, serialize_chunk, write_chunk_header,
 };
 use super::{CompressionScheme, XorbChunkHeader};
-use crate::{error::{CoreError, Validate}, merklehash::{compute_data_hash, xorb_hash, MerkleHash}, utils::serialization_utils::*};
+use crate::{
+    error::{CoreError, Validate},
+    merklehash::{MerkleHash, compute_data_hash, xorb_hash},
+    utils::serialization_utils::*,
+};
 
 pub type XorbObjectIdent = [u8; 7];
 pub(crate) const XORB_OBJECT_FORMAT_IDENT: XorbObjectIdent =
@@ -428,7 +432,11 @@ impl XorbObjectInfoV1 {
             chunk_hashes: src.chunk_hashes,
             ident_boundary_section: XORB_OBJECT_FORMAT_IDENT_BOUNDARIES,
             boundaries_version: XORB_OBJECT_FORMAT_BOUNDARIES_VERSION_NO_UNPACKED_INFO,
-            chunk_boundary_offsets: src.chunk_boundary_offsets.into_iter().map(|o| o as u64).collect(),
+            chunk_boundary_offsets: src
+                .chunk_boundary_offsets
+                .into_iter()
+                .map(|o| o as u64)
+                .collect(),
             unpacked_chunk_offsets: Vec::new(),
             num_chunks: src.num_chunks as u64,
             hashes_section_offset_from_end: 0,
@@ -1429,9 +1437,7 @@ pub mod test_utils {
             let chunk_boundary = boundary.1;
             let chunk_raw_bytes = &data[raw_start_idx as usize..chunk_boundary as usize];
             let _chunk_written_bytes = serialize_chunk(chunk_raw_bytes, &mut writer, compression)?;
-            xorb.info
-                .chunk_boundary_offsets
-                .push(writer.position());
+            xorb.info.chunk_boundary_offsets.push(writer.position());
             raw_start_idx = chunk_boundary;
         }
 

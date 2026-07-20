@@ -119,6 +119,11 @@ impl PostgresBackend {
     pub(crate) fn object_store(&self) -> ServerObjectStore {
         self.object_store.clone()
     }
+
+    /// Probes the Postgres metadata store for connectivity.
+    pub(crate) async fn probe_metadata(&self) -> Result<(), String> {
+        self.index_store.probe().await
+    }
 }
 
 #[cfg(test)]

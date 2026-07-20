@@ -299,10 +299,8 @@ mod tests {
 
         // First call should succeed
         let result = super::collect_deleted_repository_record_references(
-            &shardline_server_core::ServerObjectStore::local(
-                tempdir1.path().join("chunks"),
-            )
-            .unwrap(),
+            &shardline_server_core::ServerObjectStore::local(tempdir1.path().join("chunks"))
+                .unwrap(),
             &record,
             &mut seen,
             &mut file_versions,
@@ -315,10 +313,8 @@ mod tests {
 
         // Second call with same identity should be no-op
         let result = super::collect_deleted_repository_record_references(
-            &shardline_server_core::ServerObjectStore::local(
-                tempdir2.path().join("chunks"),
-            )
-            .unwrap(),
+            &shardline_server_core::ServerObjectStore::local(tempdir2.path().join("chunks"))
+                .unwrap(),
             &record,
             &mut seen,
             &mut file_versions,

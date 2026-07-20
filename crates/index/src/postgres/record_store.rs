@@ -654,7 +654,18 @@ pub(super) fn record_locator(
 
 #[cfg(test)]
 mod tests {
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_in_result, clippy::arithmetic_side_effects, clippy::option_if_let_else, clippy::unreachable, clippy::shadow_unrelated, clippy::let_underscore_must_use)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
     use super::PostgresRecordKind;

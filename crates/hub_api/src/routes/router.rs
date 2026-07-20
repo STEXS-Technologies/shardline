@@ -45,6 +45,7 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
             "/api/{type}/{ns}/{repo}/modelcard",
             get(super::repo_modelcard),
         )
+        .route("/api/validate-yaml", post(super::validate_yaml))
         .route(
             "/api/{type}/{ns}/{repo}/revisions",
             get(super::repo_revisions),
@@ -76,14 +77,8 @@ pub fn router(register_xet_token_routes: bool) -> Router<HubState> {
         // Git Smart HTTP endpoints
         .route("/{type}/{ns}/{repo}/info/refs", get(info_refs))
         .route("/{type}/{ns}/{repo}/HEAD", get(super::git_head))
-        .route(
-            "/{type}/{ns}/{repo}/git-upload-pack",
-            post(upload_pack),
-        )
-        .route(
-            "/{type}/{ns}/{repo}/git-receive-pack",
-            post(receive_pack),
-        )
+        .route("/{type}/{ns}/{repo}/git-upload-pack", post(upload_pack))
+        .route("/{type}/{ns}/{repo}/git-receive-pack", post(receive_pack))
         // Dataset viewer endpoints
         .route(
             "/api/datasets/{ns}/{repo}/parquet",

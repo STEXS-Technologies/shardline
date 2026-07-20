@@ -4,9 +4,9 @@ use axum::{Router, routing};
 use tokio::sync::Semaphore;
 
 use crate::{
-    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter,
-    app::protocol_routes::oci_dispatch, app::ProtocolMetrics,
-    reconstruction_cache::ReconstructionCacheService, server_role::ServerRole,
+    AppState, ServerBackend, ServerConfig, ServerFrontend, TransferLimiter, app::ProtocolMetrics,
+    app::protocol_routes::oci_dispatch, reconstruction_cache::ReconstructionCacheService,
+    server_role::ServerRole,
 };
 
 /// A guard that holds a `tempfile::TempDir` and an `Arc<AppState>` backed by a
@@ -68,9 +68,6 @@ pub(crate) async fn build_oci_test_state() -> OciTestContext {
 /// given shared state.
 pub(crate) fn oci_test_router(state: &Arc<AppState>) -> Router {
     Router::new()
-        .route(
-            "/v2/{*path}",
-            routing::any(oci_dispatch),
-        )
+        .route("/v2/{*path}", routing::any(oci_dispatch))
         .with_state(Arc::clone(state))
 }

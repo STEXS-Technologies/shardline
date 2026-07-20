@@ -971,7 +971,9 @@ fn store_test_content(td: &tempfile::TempDir, sha: &str, content: &[u8]) {
         shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
         content.len() as u64,
     );
-    object_store.put_if_absent(&key, body, &integrity).expect("store test content");
+    object_store
+        .put_if_absent(&key, body, &integrity)
+        .expect("store test content");
 }
 
 fn default_headers() -> HeaderMap {
@@ -1019,10 +1021,8 @@ async fn handler_repo_list_with_repos() {
     store
         .create_repo(HubRepoType::Dataset, "org/data-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1091,10 +1091,8 @@ async fn handler_repo_search_finds_matching() {
     store
         .create_repo(HubRepoType::Model, "other/other", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1140,10 +1138,8 @@ async fn handler_repo_info_missing_repo() {
 #[tokio::test]
 async fn handler_repo_info_returns_repo() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/existing");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1177,10 +1173,8 @@ async fn handler_repo_info_with_card_data() {
         }],
     );
     store_test_content(&_td, "readme_sha", readme_content);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1222,10 +1216,8 @@ async fn handler_repo_modelcard_missing_repo() {
 #[tokio::test]
 async fn handler_repo_modelcard_no_readme() {
     let (_td, store) = make_store_with_revision(HubRepoType::Model, "org/no-readme", "sha_nr", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1257,10 +1249,8 @@ async fn handler_repo_modelcard_with_readme() {
         }],
     );
     store_test_content(&_td, "rm_sha", content);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1293,10 +1283,8 @@ async fn handler_repo_modelcard_with_readme() {
 async fn handler_repo_revisions_with_revisions() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/has-revs", "sha_rev1", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1409,10 +1397,8 @@ async fn handler_repo_delete_missing_repo() {
 #[tokio::test]
 async fn handler_repo_delete_success() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/to-delete");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1477,10 +1463,8 @@ async fn handler_preupload_checks_existence() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1554,10 +1538,8 @@ fn ndjson_headers() -> HeaderMap {
 async fn handler_commit_inline_file_success() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/commit-test", "parent_sha_001", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1589,10 +1571,8 @@ async fn handler_commit_inline_file_success() {
 async fn handler_commit_lfs_pointer_success() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/lfs-commit", "parent_lfs", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1636,10 +1616,8 @@ async fn handler_commit_delete_file() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1672,10 +1650,8 @@ async fn handler_commit_parent_mismatch() {
         "actual_parent_sha",
         &[],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1714,10 +1690,8 @@ async fn handler_commit_parent_mismatch() {
 async fn handler_apply_commit_inline_file() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/apply-test", "parent_apply", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1751,10 +1725,8 @@ async fn handler_apply_commit_inline_file() {
 async fn handler_apply_commit_lfs_pointer() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/apply-lfs", "parent_lfs2", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1794,10 +1766,8 @@ async fn handler_apply_commit_delete() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1822,10 +1792,8 @@ async fn handler_apply_commit_delete() {
 async fn handler_apply_commit_parent_mismatch() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/apply-mismatch", "actual_sha", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1871,10 +1839,8 @@ async fn handler_file_tree_basic() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1924,10 +1890,8 @@ async fn handler_file_tree_recursive() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -1983,10 +1947,8 @@ async fn handler_file_tree_with_limit_and_cursor() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2037,10 +1999,8 @@ async fn handler_resolve_file_inline() {
     );
     // Pre-load file content into ObjectStore
     store_test_content(&_td, "data_sha", content);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2074,10 +2034,8 @@ async fn handler_resolve_file_inline() {
 async fn handler_resolve_file_not_found() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/resolve-miss", "sha_miss", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2106,10 +2064,8 @@ async fn handler_resolve_file_not_found() {
 
 fn make_lfs_state() -> (tempfile::TempDir, HubState) {
     let (td, store) = make_delete_test_store();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2222,11 +2178,10 @@ async fn handler_lfs_batch_verify_existing() {
     // Store an LFS object in the object store
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
     let key = ObjectKey::parse("lfs/verify_oid").unwrap();
-    let integrity =
-        ObjectIntegrity::new(
-            shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes()),
-            4,
-        );
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes()),
+        4,
+    );
     state
         .object_store
         .put_if_absent(&key, ObjectBody::from_slice(b"data"), &integrity)
@@ -2315,7 +2270,10 @@ async fn handler_lfs_upload_success() {
     use shardline_storage::{ObjectKey, ObjectStore};
     let key = ObjectKey::parse(&format!("lfs/{oid}")).unwrap();
     assert!(state.object_store.contains(&key).unwrap());
-    let data = state.object_store.read_range(&key, shardline_protocol::ByteRange::new(0, 12).unwrap()).unwrap();
+    let data = state
+        .object_store
+        .read_range(&key, shardline_protocol::ByteRange::new(0, 12).unwrap())
+        .unwrap();
     assert_eq!(data, b"some lfs data");
 }
 
@@ -2368,10 +2326,8 @@ async fn handler_lfs_download_success() {
 #[tokio::test]
 async fn handler_repo_revisions_has_initial() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/init-rev");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2394,10 +2350,8 @@ async fn handler_repo_revisions_has_initial() {
 async fn handler_git_head_with_revision() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/has-head", "sha_head123", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2422,10 +2376,8 @@ async fn handler_git_head_with_revision() {
 #[tokio::test]
 async fn handler_commit_no_revision() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/no-rev");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2470,10 +2422,8 @@ async fn handler_dataset_parquet_lists_files() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2518,10 +2468,8 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2546,10 +2494,8 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
 async fn handler_dataset_first_rows_empty_dataset() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Dataset, "org/empty-ds", "sha_empty_ds", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2587,10 +2533,8 @@ async fn handler_dataset_first_rows_with_jsonl() {
         }],
     );
     store_test_content(&_td, "jsonl_sha", jsonl_content);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2634,10 +2578,8 @@ async fn handler_dataset_viewer_with_data() {
         }],
     );
     store_test_content(&_td, "csv_sha", csv_content);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2677,10 +2619,8 @@ async fn handler_dataset_viewer_pagination() {
         }],
     );
     store_test_content(&_td, "vp_sha", csv_content);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2712,10 +2652,8 @@ async fn handler_dataset_viewer_pagination() {
 #[tokio::test]
 async fn handler_webhook_create_success() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-test");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2742,10 +2680,8 @@ async fn handler_webhook_create_success() {
 #[tokio::test]
 async fn handler_webhook_create_invalid_url() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-badurl");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2774,10 +2710,8 @@ async fn handler_webhook_create_invalid_url() {
 #[tokio::test]
 async fn handler_webhook_create_too_many_events() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-toomany");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2811,10 +2745,8 @@ async fn handler_webhook_create_too_many_events() {
 #[tokio::test]
 async fn handler_webhook_list_empty() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/wh-list-empty");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2850,10 +2782,8 @@ async fn handler_webhook_list_with_webhooks() {
             Some("secret"),
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2885,10 +2815,8 @@ async fn handler_webhook_delete_success() {
             None,
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2937,10 +2865,9 @@ fn route_authorize_with_auth_and_no_header_is_err() {
         }
     }
     let (object_store_td, store) = make_delete_test_store();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        object_store_td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store =
+        shardline_server_core::ServerObjectStore::local(object_store_td.path().join("lfs"))
+            .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2965,10 +2892,8 @@ fn route_authorize_with_auth_and_no_header_is_err() {
 async fn handler_apply_commit_empty_instructions() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/empty-inst", "parent_empty", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -2994,10 +2919,8 @@ async fn handler_apply_commit_empty_instructions() {
 async fn handler_dataset_parquet_non_dataset_repo_errors() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/model-repo", "sha_model", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3026,10 +2949,8 @@ async fn handler_dataset_parquet_non_dataset_repo_errors() {
 async fn handler_dataset_first_rows_non_dataset_errors() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/model-ds", "sha_model_ds", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3063,10 +2984,8 @@ async fn handler_dataset_first_rows_non_dataset_errors() {
 async fn handler_dataset_viewer_non_dataset_errors() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/model-view", "sha_model_view", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3102,10 +3021,8 @@ async fn handler_repo_search_sort_by_last_modified_asc() {
     store
         .create_repo(HubRepoType::Model, "org/model-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3135,10 +3052,8 @@ async fn handler_repo_search_sort_likes_noop() {
     store
         .create_repo(HubRepoType::Model, "org/likes-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3169,10 +3084,8 @@ async fn handler_repo_search_sort_downloads_noop() {
     store
         .create_repo(HubRepoType::Model, "org/dl-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3207,10 +3120,8 @@ async fn handler_repo_search_unknown_sort_keeps_default_order() {
     store
         .create_repo(HubRepoType::Model, "org/order-b", false)
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3272,10 +3183,8 @@ async fn handler_dataset_first_rows_content_not_inline() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3304,10 +3213,8 @@ async fn handler_dataset_first_rows_content_not_inline() {
 async fn handler_dataset_viewer_split_not_found() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Dataset, "org/no-split", "sha_no_split", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3426,10 +3333,8 @@ async fn handler_repo_revision_info_returns_siblings() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3474,10 +3379,8 @@ async fn handler_repo_revision_info_missing_repo() {
 #[tokio::test]
 async fn handler_repo_delete_compat_success() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/compat-del");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store: store.clone(),
         object_store,
@@ -3501,10 +3404,8 @@ async fn handler_repo_delete_compat_success() {
 #[tokio::test]
 async fn handler_repo_delete_compat_with_organization() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/compat-org");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store: store.clone(),
         object_store,
@@ -3542,10 +3443,8 @@ async fn handler_file_tree_at_root_returns_files() {
             is_lfs: false,
         }],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3580,10 +3479,8 @@ async fn handler_file_tree_at_root_returns_files() {
 async fn handler_git_head_returns_ref() {
     let (_td, store) =
         make_store_with_revision(HubRepoType::Model, "org/git-head", "sha_head", &[]);
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3639,10 +3536,8 @@ async fn handler_repo_create_with_organization() {
 #[tokio::test]
 async fn handler_repo_create_conflict() {
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "ns/existing");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3747,10 +3642,8 @@ async fn handler_webhook_create_duplicate_url() {
             None,
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3780,10 +3673,8 @@ async fn handler_lfs_upload_and_download_roundtrip() {
     let oid = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     let data = b"lfs file content";
     let (_td, store) = make_store_with_repo(HubRepoType::Model, "org/lfs-io");
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store: store.clone(),
         object_store,
@@ -3834,10 +3725,8 @@ async fn handler_dataset_parquet_finds_data_files() {
             },
         ],
     );
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,
@@ -3878,10 +3767,8 @@ async fn handler_webhook_list_with_hooks() {
             None,
         )
         .unwrap();
-    let object_store = shardline_server_core::ServerObjectStore::local(
-        _td.path().join("lfs"),
-    )
-    .expect("local object store");
+    let object_store = shardline_server_core::ServerObjectStore::local(_td.path().join("lfs"))
+        .expect("local object store");
     let state = HubState {
         store,
         object_store,

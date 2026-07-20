@@ -15,6 +15,7 @@ use crate::{
     record_store::LocalRecordStore,
 };
 
+use super::WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS;
 use super::classification::{
     classify_quarantine_repair_action, classify_retention_hold_repair_action,
     classify_webhook_delivery_repair_action,
@@ -24,7 +25,6 @@ use super::types::{
     LifecycleRepairOptions, LifecycleRepairReport, QuarantineRepairAction, RepairReachability,
     RetentionHoldRepairAction, WebhookDeliveryRepairAction,
 };
-use super::WEBHOOK_DELIVERY_FUTURE_SKEW_SECONDS;
 
 /// Repairs stale lifecycle metadata against the configured metadata backend.
 ///

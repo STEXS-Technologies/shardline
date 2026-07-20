@@ -4,7 +4,6 @@
 //! `git clone` and `git fetch` operations. This is a minimal
 //! implementation that generates non-delta packs.
 
-
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use sha1::{Digest, Sha1};

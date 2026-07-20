@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use shardline_protocol::{parse_bool, SecretString};
+use shardline_protocol::{SecretString, parse_bool};
 use shardline_server::{
     ObjectStorageAdapter, ServerConfigError, ServerError, StorageMigrationEndpoint,
     StorageMigrationOptions, StorageMigrationReport,
@@ -232,7 +232,11 @@ fn build_s3_config<LoadCredentials>(
 ) -> Result<S3ObjectStoreConfig, StorageMigrationRuntimeError>
 where
     LoadCredentials: FnOnce() -> Result<
-        (Option<SecretString>, Option<SecretString>, Option<SecretString>),
+        (
+            Option<SecretString>,
+            Option<SecretString>,
+            Option<SecretString>,
+        ),
         StorageMigrationRuntimeError,
     >,
 {
@@ -295,9 +299,7 @@ fn optional_s3_secret_from_sources(
             })
         }
         (Some(value), None) => Ok(Some(SecretString::new(value))),
-        (None, Some(path)) => {
-            read_s3_credential_file(Path::new(&path), file_env_name).map(Some)
-        }
+        (None, Some(path)) => read_s3_credential_file(Path::new(&path), file_env_name).map(Some),
         (None, None) => Ok(None),
     }
 }
@@ -499,7 +501,7 @@ mod tests {
         PendingS3Config, StorageMigrationRuntimeError, build_s3_config, local_endpoint,
         optional_s3_secret_from_sources, read_s3_credential_file,
     };
-use shardline_protocol::{parse_bool, SecretString};
+    use shardline_protocol::{SecretString, parse_bool};
 
     fn set_before_s3_credential_read_hook_for_tests(
         path: PathBuf,
@@ -1115,23 +1117,23 @@ use shardline_protocol::{parse_bool, SecretString};
 
     #[test]
     fn build_s3_config_with_all_options_constructs_config() {
-    let configured = build_s3_config(
-        Ok("my-bucket".to_owned()),
-        PendingS3Config {
-            region: "eu-west-1".to_owned(),
-            endpoint: Some("https://s3.custom.com".to_owned()),
-            key_prefix: Some("prefix/".to_owned()),
-            allow_http: Ok(Some(true)),
-            virtual_hosted_style_request: Ok(Some(true)),
-        },
-        || {
-            Ok((
-                Some(SecretString::from_secret("ak")),
-                Some(SecretString::from_secret("sk")),
-                None,
-            ))
-        },
-    );
+        let configured = build_s3_config(
+            Ok("my-bucket".to_owned()),
+            PendingS3Config {
+                region: "eu-west-1".to_owned(),
+                endpoint: Some("https://s3.custom.com".to_owned()),
+                key_prefix: Some("prefix/".to_owned()),
+                allow_http: Ok(Some(true)),
+                virtual_hosted_style_request: Ok(Some(true)),
+            },
+            || {
+                Ok((
+                    Some(SecretString::from_secret("ak")),
+                    Some(SecretString::from_secret("sk")),
+                    None,
+                ))
+            },
+        );
 
         assert!(configured.is_ok());
         // Debug output should not leak credentials

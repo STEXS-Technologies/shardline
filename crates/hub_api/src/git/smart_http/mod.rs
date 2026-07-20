@@ -18,6 +18,8 @@ mod tests;
 pub use error::SmartHttpError;
 pub use pack_parse::parse_pack_data;
 pub use receive_pack::receive_pack;
-pub use ref_advertisement::{info_refs, info_refs_receive_pack, info_refs_upload_pack, InfoRefsQuery};
+pub use ref_advertisement::{
+    InfoRefsQuery, info_refs, info_refs_receive_pack, info_refs_upload_pack,
+};
 pub use tree_walk::{parse_commit_object, walk_git_tree};
 pub use upload_pack::upload_pack;

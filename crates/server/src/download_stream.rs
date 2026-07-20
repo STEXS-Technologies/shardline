@@ -201,10 +201,10 @@ mod tests {
     use tokio::fs;
 
     use super::{local_object_byte_range_stream, local_object_byte_stream};
+    use crate::ServerError;
     use crate::error::ObjectStoreError;
     use crate::object_store::ServerObjectStore;
     use crate::object_store::set_before_local_object_read_hook;
-    use crate::ServerError;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_object_byte_stream_reads_object_in_segments() {
         let storage = shardline_test_support::TempStorage::new();
@@ -462,10 +462,7 @@ mod tests {
         // range.end_inclusive = 10, total_length = 4 → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::RangeNotSatisfiable)
-        ));
+        assert!(matches!(result, Err(ServerError::RangeNotSatisfiable)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -837,10 +834,7 @@ mod tests {
         // Range end_inclusive (10) >= total_length (4) → RangeNotSatisfiable
         let range = ByteRange::new(0, 10).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::RangeNotSatisfiable)
-        ));
+        assert!(matches!(result, Err(ServerError::RangeNotSatisfiable)));
     }
 
     // ── object_byte_range_stream — range end equals total_length ─────────
@@ -859,10 +853,7 @@ mod tests {
         // range.end_inclusive() == total_length → >= check triggers RangeNotSatisfiable
         let range = ByteRange::new(0, 4).unwrap();
         let result = local_object_byte_range_stream(object_store, object_key, 4, range).await;
-        assert!(matches!(
-            result,
-            Err(ServerError::RangeNotSatisfiable)
-        ));
+        assert!(matches!(result, Err(ServerError::RangeNotSatisfiable)));
     }
 
     // ── object_byte_stream — 404 via blackhole metadata check ────────────

@@ -453,10 +453,8 @@ mod tests {
         let record_store = MemoryRecordStore::new();
         let index_store = MemoryIndexStore::new();
         let tempdir = tempfile::tempdir().unwrap();
-        let object_store = shardline_server_core::ServerObjectStore::local(
-            tempdir.path().join("chunks"),
-        )
-        .unwrap();
+        let object_store =
+            shardline_server_core::ServerObjectStore::local(tempdir.path().join("chunks")).unwrap();
         let event = RepositoryWebhookEvent::new(
             RepositoryRef::new(ProviderKind::GitHub, "team", "empty-repo").unwrap(),
             WebhookDeliveryId::new("delivery-empty-1").unwrap(),

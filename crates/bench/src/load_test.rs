@@ -55,7 +55,9 @@ impl BenchmarkResult {
         let idx = ((p / 100.0)
             * f64::from(u32::try_from(self.latencies_ms.len()).unwrap_or(u32::MAX)))
         .ceil() as usize;
-        let idx = idx.saturating_sub(1).min(self.latencies_ms.len().saturating_sub(1));
+        let idx = idx
+            .saturating_sub(1)
+            .min(self.latencies_ms.len().saturating_sub(1));
         self.latencies_ms.get(idx).copied().unwrap_or(0.0)
     }
 
@@ -321,7 +323,11 @@ fn print_json_result(label: &str, result: &BenchmarkResult) {
     eprintln!("{obj}");
 }
 
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects, clippy::let_underscore_must_use)]
+#[allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::let_underscore_must_use
+)]
 #[tokio::main]
 async fn main() {
     let config = parse_config();

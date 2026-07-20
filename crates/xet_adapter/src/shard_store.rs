@@ -203,11 +203,22 @@ fn read_bounded_shard_sections<R: Read>(
 ) -> Result<BoundedShardSections, XetAdapterError> {
     let mut file_infos = Vec::new();
     let mut file_start_entries = HashMap::<MerkleHash, HashSet<usize>>::new();
-    read_bounded_file_sections(reader, &mut file_infos, &mut file_start_entries, limits, version)?;
+    read_bounded_file_sections(
+        reader,
+        &mut file_infos,
+        &mut file_start_entries,
+        limits,
+        version,
+    )?;
 
     let mut xorb_infos = Vec::new();
-    let dedupe_chunk_hashes =
-        read_bounded_xorb_sections(reader, &file_start_entries, &mut xorb_infos, limits, version)?;
+    let dedupe_chunk_hashes = read_bounded_xorb_sections(
+        reader,
+        &file_start_entries,
+        &mut xorb_infos,
+        limits,
+        version,
+    )?;
 
     Ok(BoundedShardSections {
         file_infos,
@@ -821,7 +832,12 @@ mod tests {
             vec![FileDataSequenceEntry::new(xorb_hash, 1_u64, 0_u64, 1_u64); term_count];
         serialize_test_shard(
             vec![MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash, file_segments.len() as u64, false, false),
+                metadata: FileDataSequenceHeader::new(
+                    file_hash,
+                    file_segments.len() as u64,
+                    false,
+                    false,
+                ),
                 segments: file_segments,
                 verification: Vec::new(),
                 metadata_ext: None,
@@ -855,7 +871,11 @@ mod tests {
                 metadata_ext: None,
             }],
             vec![MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb_hash, chunks.len() as u64, chunks.len() as u64),
+                metadata: XorbChunkSequenceHeader::new(
+                    xorb_hash,
+                    chunks.len() as u64,
+                    chunks.len() as u64,
+                ),
                 chunks,
             }],
         )
@@ -1149,7 +1169,9 @@ mod tests {
                 metadata: FileDataSequenceHeader::new(file_hash_bytes, 1u64, false, false),
                 segments: vec![FileDataSequenceEntry::new(
                     xorb_hash_bytes,
-                    1_u64, 0_u64, 1_u64,
+                    1_u64,
+                    0_u64,
+                    1_u64,
                 )],
                 verification: Vec::new(),
                 metadata_ext: None,

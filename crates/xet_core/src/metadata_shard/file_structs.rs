@@ -323,7 +323,10 @@ impl MDBFileInfo {
         Ok(bytes_written)
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Option<Self>, std::io::Error> {
+    pub fn deserialize<R: Read>(
+        reader: &mut R,
+        version: u64,
+    ) -> Result<Option<Self>, std::io::Error> {
         let metadata = FileDataSequenceHeader::deserialize(reader, version)?;
         if metadata.is_bookend() {
             return Ok(None);
@@ -424,9 +427,7 @@ impl MDBFileInfoView {
 
     pub fn entry(&self, idx: usize) -> FileDataSequenceEntry {
         FileDataSequenceEntry::deserialize(
-            &mut Cursor::new(
-                &self.data[((1 + idx) * MDB_FILE_INFO_ENTRY_SIZE)..],
-            ),
+            &mut Cursor::new(&self.data[((1 + idx) * MDB_FILE_INFO_ENTRY_SIZE)..]),
             3,
         )
         .expect("bookkeeping error on data bounds for entry")
@@ -728,10 +729,7 @@ mod tests {
     fn file_info_serialize_with_verification() {
         let info = MDBFileInfo {
             metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, false),
-            segments: vec![FileDataSequenceEntry::new(
-                MerkleHash::default(),
-                50, 0, 25,
-            )],
+            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25)],
             verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
             metadata_ext: None,
         };
@@ -747,10 +745,7 @@ mod tests {
     fn file_info_serialize_with_metadata_ext() {
         let info = MDBFileInfo {
             metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, false, true),
-            segments: vec![FileDataSequenceEntry::new(
-                MerkleHash::default(),
-                50, 0, 25,
-            )],
+            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25)],
             verification: vec![],
             metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
         };
@@ -766,10 +761,7 @@ mod tests {
     fn file_info_serialize_with_both() {
         let info = MDBFileInfo {
             metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, true),
-            segments: vec![FileDataSequenceEntry::new(
-                MerkleHash::default(),
-                50, 0, 25,
-            )],
+            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25)],
             verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
             metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
         };
@@ -821,10 +813,7 @@ mod tests {
     fn file_info_contains_methods() {
         let info = MDBFileInfo {
             metadata: FileDataSequenceHeader::new(compute_data_hash(b"f"), 1, true, true),
-            segments: vec![FileDataSequenceEntry::new(
-                MerkleHash::default(),
-                50, 0, 25,
-            )],
+            segments: vec![FileDataSequenceEntry::new(MerkleHash::default(), 50, 0, 25)],
             verification: vec![FileVerificationEntry::new(compute_data_hash(b"v"))],
             metadata_ext: Some(FileMetadataExt::new(compute_data_hash(b"ext"))),
         };

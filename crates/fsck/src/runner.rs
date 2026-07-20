@@ -8,9 +8,9 @@ use shardline_storage::{ObjectKey, ObjectStore};
 use shardline_xet_adapter::{XetAdapterError, retained_shard_chunk_hashes};
 
 use crate::{
-    lifecycle_checks::inspect_lifecycle_metadata, record_checks::scan_record_tree, FsckError,
-    FsckIssue, FsckIssueDetail, FsckIssueKind, FsckReachability, FsckReconstructionPlanDetail,
-    FsckReport, RecordKind,
+    FsckError, FsckIssue, FsckIssueDetail, FsckIssueKind, FsckReachability,
+    FsckReconstructionPlanDetail, FsckReport, RecordKind,
+    lifecycle_checks::inspect_lifecycle_metadata, record_checks::scan_record_tree,
 };
 
 /// Runs local filesystem integrity checks over Shardline metadata and chunk storage.
