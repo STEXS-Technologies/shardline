@@ -123,9 +123,9 @@ pub(crate) async fn lfs_batch(
     let cas_url = state.config.public_base_url().trim_end_matches('/').to_owned();
     let xet_action_header = cas_token.as_ref().map(|token| {
         json!({
-            "X-Xet-Cas-Url": &cas_url,
-            "X-Xet-Access-Token": token,
-            "X-Xet-Token-Expiration": "0"
+            crate::cas_headers::URL: &cas_url,
+            crate::cas_headers::ACCESS_TOKEN: token,
+            crate::cas_headers::TOKEN_EXPIRATION: "0"
         })
     });
 

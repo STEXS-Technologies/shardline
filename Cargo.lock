@@ -3282,6 +3282,7 @@ dependencies = [
  "shardline-hub-api",
  "shardline-index",
  "shardline-protocol",
+ "shardline-protocol-adapters",
  "shardline-rebuild",
  "shardline-server",
  "shardline-server-core",
