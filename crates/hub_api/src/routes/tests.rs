@@ -111,7 +111,6 @@ fn repo_delete_cleans_up_revisions() {
         size: 100,
         sha: "sha_readme".into(),
         is_lfs: false,
-        inline_content: None,
     }];
     store.store_files("sha1", &files).unwrap();
 
@@ -398,28 +397,24 @@ fn tree_entries_at_path_root_lists_files_and_dirs() {
             size: 100,
             sha: "a".into(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "src/main.rs".into(),
             size: 200,
             sha: "b".into(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "src/lib.rs".into(),
             size: 300,
             sha: "c".into(),
             is_lfs: true,
-            inline_content: None,
         },
         HubFileEntry {
             path: "data/big.bin".into(),
             size: 5_000_000,
             sha: "d".into(),
             is_lfs: true,
-            inline_content: None,
         },
     ];
     let entries = tree_entries_at_path(&files, "");
@@ -448,14 +443,12 @@ fn tree_entries_at_path_nested() {
             size: 200,
             sha: "b".into(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "src/lib.rs".into(),
             size: 300,
             sha: "c".into(),
             is_lfs: true,
-            inline_content: None,
         },
     ];
     let entries = tree_entries_at_path(&files, "src");
@@ -486,14 +479,12 @@ fn tree_entries_recursive_root() {
             size: 100,
             sha: "a".into(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "src/main.rs".into(),
             size: 200,
             sha: "b".into(),
             is_lfs: false,
-            inline_content: None,
         },
     ];
     let entries = tree_entries_recursive(&files, "");
@@ -511,14 +502,12 @@ fn tree_entries_recursive_nested() {
             size: 200,
             sha: "b".into(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "src/lib.rs".into(),
             size: 300,
             sha: "c".into(),
             is_lfs: true,
-            inline_content: None,
         },
     ];
     let entries = tree_entries_recursive(&files, "src");
@@ -533,7 +522,6 @@ fn tree_entries_recursive_lfs_shows_lfs_info() {
         size: 5_000_000,
         sha: "abcd".into(),
         is_lfs: true,
-        inline_content: None,
     }];
     let entries = tree_entries_recursive(&files, "");
     assert_eq!(entries.len(), 1);
@@ -559,7 +547,6 @@ fn find_dataset_file_default_train() {
         size: 100,
         sha: "abc".into(),
         is_lfs: false,
-        inline_content: None,
     }];
     let result = find_dataset_file(&files, "default", "train");
     assert!(result.is_some());
@@ -574,7 +561,6 @@ fn find_dataset_file_config_split() {
         size: 200,
         sha: "def".into(),
         is_lfs: false,
-        inline_content: None,
     }];
     let result = find_dataset_file(&files, "myconfig", "test");
     assert!(result.is_some());
@@ -589,7 +575,6 @@ fn find_dataset_file_split_only() {
         size: 300,
         sha: "ghi".into(),
         is_lfs: false,
-        inline_content: None,
     }];
     let result = find_dataset_file(&files, "default", "train");
     assert!(result.is_some());
@@ -604,7 +589,6 @@ fn find_dataset_file_root() {
         size: 400,
         sha: "jkl".into(),
         is_lfs: false,
-        inline_content: None,
     }];
     let result = find_dataset_file(&files, "default", "train");
     assert!(result.is_some());
@@ -619,7 +603,6 @@ fn find_dataset_file_not_found() {
         size: 10,
         sha: "x".into(),
         is_lfs: false,
-        inline_content: None,
     }];
     assert!(find_dataset_file(&files, "default", "train").is_none());
 }
@@ -916,7 +899,6 @@ fn tree_entries_at_path_lfs_file_at_root() {
         size: 5_000_000,
         sha: "oid123".into(),
         is_lfs: true,
-        inline_content: None,
     }];
     let entries = tree_entries_at_path(&files, "");
     assert_eq!(entries.len(), 1);
@@ -939,7 +921,6 @@ fn tree_entries_recursive_non_matching_prefix() {
         size: 10,
         sha: "x".into(),
         is_lfs: false,
-        inline_content: None,
     }];
     let entries = tree_entries_recursive(&files, "nonexistent");
     assert!(entries.is_empty());
@@ -977,6 +958,20 @@ fn make_store_with_revision(
         store.store_files(rev_sha, files).expect("store_files");
     }
     (td, store)
+}
+
+/// Pre-populate ObjectStore with content for a given SHA.
+fn store_test_content(td: &tempfile::TempDir, sha: &str, content: &[u8]) {
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+    let object_store = shardline_server_core::ServerObjectStore::local(td.path().join("lfs"))
+        .expect("local object store");
+    let key = ObjectKey::parse(&format!("lfs/{sha}")).expect("valid key");
+    let body = ObjectBody::from_slice(content);
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
+        content.len() as u64,
+    );
+    object_store.put_if_absent(&key, body, &integrity).expect("store test content");
 }
 
 fn default_headers() -> HeaderMap {
@@ -1179,9 +1174,9 @@ async fn handler_repo_info_with_card_data() {
             size: readme_content.len() as u64,
             sha: "readme_sha".into(),
             is_lfs: false,
-            inline_content: Some(readme_content.to_vec()),
         }],
     );
+    store_test_content(&_td, "readme_sha", readme_content);
     let object_store = shardline_server_core::ServerObjectStore::local(
         _td.path().join("lfs"),
     )
@@ -1259,9 +1254,9 @@ async fn handler_repo_modelcard_with_readme() {
             size: content.len() as u64,
             sha: "rm_sha".into(),
             is_lfs: false,
-            inline_content: Some(content.to_vec()),
         }],
     );
+    store_test_content(&_td, "rm_sha", content);
     let object_store = shardline_server_core::ServerObjectStore::local(
         _td.path().join("lfs"),
     )
@@ -1480,7 +1475,6 @@ async fn handler_preupload_checks_existence() {
             size: content.len() as u64,
             sha: "existing_sha".into(),
             is_lfs: false,
-            inline_content: Some(content.to_vec()),
         }],
     );
     let object_store = shardline_server_core::ServerObjectStore::local(
@@ -1640,7 +1634,6 @@ async fn handler_commit_delete_file() {
             size: content.len() as u64,
             sha: "old_sha".into(),
             is_lfs: false,
-            inline_content: Some(content.to_vec()),
         }],
     );
     let object_store = shardline_server_core::ServerObjectStore::local(
@@ -1799,7 +1792,6 @@ async fn handler_apply_commit_delete() {
             size: content.len() as u64,
             sha: "old_sha2".into(),
             is_lfs: false,
-            inline_content: Some(content.to_vec()),
         }],
     );
     let object_store = shardline_server_core::ServerObjectStore::local(
@@ -1870,14 +1862,12 @@ async fn handler_file_tree_basic() {
                 size: 100,
                 sha: "a".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "src/main.rs".into(),
                 size: 200,
                 sha: "b".into(),
                 is_lfs: false,
-                inline_content: None,
             },
         ],
     );
@@ -1925,14 +1915,12 @@ async fn handler_file_tree_recursive() {
                 size: 200,
                 sha: "b".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "src/lib.rs".into(),
                 size: 300,
                 sha: "c".into(),
                 is_lfs: false,
-                inline_content: None,
             },
         ],
     );
@@ -1980,21 +1968,18 @@ async fn handler_file_tree_with_limit_and_cursor() {
                 size: 1,
                 sha: "s1".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "b.txt".into(),
                 size: 2,
                 sha: "s2".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "c.txt".into(),
                 size: 3,
                 sha: "s3".into(),
                 is_lfs: false,
-                inline_content: None,
             },
         ],
     );
@@ -2048,9 +2033,10 @@ async fn handler_resolve_file_inline() {
             size: content.len() as u64,
             sha: "data_sha".into(),
             is_lfs: false,
-            inline_content: Some(content.to_vec()),
         }],
     );
+    // Pre-load file content into ObjectStore
+    store_test_content(&_td, "data_sha", content);
     let object_store = shardline_server_core::ServerObjectStore::local(
         _td.path().join("lfs"),
     )
@@ -2475,14 +2461,12 @@ async fn handler_dataset_parquet_lists_files() {
                 size: 5000,
                 sha: "pq".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "README.md".into(),
                 size: 10,
                 sha: "rm".into(),
                 is_lfs: false,
-                inline_content: None,
             },
         ],
     );
@@ -2519,21 +2503,18 @@ async fn handler_dataset_parquet_csv_and_jsonl_included() {
                 size: 100,
                 sha: "csv".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "b.jsonl".into(),
                 size: 200,
                 sha: "jl".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "c.txt".into(),
                 size: 50,
                 sha: "txt".into(),
                 is_lfs: false,
-                inline_content: None,
             },
         ],
     );
@@ -2603,9 +2584,9 @@ async fn handler_dataset_first_rows_with_jsonl() {
             size: jsonl_content.len() as u64,
             sha: "jsonl_sha".into(),
             is_lfs: false,
-            inline_content: Some(jsonl_content.to_vec()),
         }],
     );
+    store_test_content(&_td, "jsonl_sha", jsonl_content);
     let object_store = shardline_server_core::ServerObjectStore::local(
         _td.path().join("lfs"),
     )
@@ -2650,9 +2631,9 @@ async fn handler_dataset_viewer_with_data() {
             size: csv_content.len() as u64,
             sha: "csv_sha".into(),
             is_lfs: false,
-            inline_content: Some(csv_content.to_vec()),
         }],
     );
+    store_test_content(&_td, "csv_sha", csv_content);
     let object_store = shardline_server_core::ServerObjectStore::local(
         _td.path().join("lfs"),
     )
@@ -2693,9 +2674,9 @@ async fn handler_dataset_viewer_pagination() {
             size: csv_content.len() as u64,
             sha: "vp_sha".into(),
             is_lfs: false,
-            inline_content: Some(csv_content.to_vec()),
         }],
     );
+    store_test_content(&_td, "vp_sha", csv_content);
     let object_store = shardline_server_core::ServerObjectStore::local(
         _td.path().join("lfs"),
     )
@@ -3289,7 +3270,6 @@ async fn handler_dataset_first_rows_content_not_inline() {
             size: 50,
             sha: "no_inline_sha".into(),
             is_lfs: false,
-            inline_content: None,
         }],
     );
     let object_store = shardline_server_core::ServerObjectStore::local(
@@ -3444,7 +3424,6 @@ async fn handler_repo_revision_info_returns_siblings() {
             size: content.len() as u64,
             sha: "file_sha".into(),
             is_lfs: false,
-            inline_content: Some(content.to_vec()),
         }],
     );
     let object_store = shardline_server_core::ServerObjectStore::local(
@@ -3561,7 +3540,6 @@ async fn handler_file_tree_at_root_returns_files() {
             size: 50,
             sha: "r_sha".into(),
             is_lfs: false,
-            inline_content: None,
         }],
     );
     let object_store = shardline_server_core::ServerObjectStore::local(
@@ -3847,14 +3825,12 @@ async fn handler_dataset_parquet_finds_data_files() {
                 size: 1000,
                 sha: "pq_sha".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "README.md".into(),
                 size: 50,
                 sha: "rm_sha".into(),
                 is_lfs: false,
-                inline_content: None,
             },
         ],
     );

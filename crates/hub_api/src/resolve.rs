@@ -1,7 +1,7 @@
-use crate::{error::HubApiError, routes::HubState};
+use shardline_protocol::ByteRange;
+use shardline_storage::{ObjectKey, ObjectStore};
 
-/// Maximum inline file size (1 MiB).
-const MAX_INLINE_SIZE: u64 = 1_048_576;
+use crate::{error::HubApiError, routes::HubState};
 
 /// Resolves a file download request.
 ///
@@ -25,11 +25,13 @@ pub fn resolve_file_from_store(
         .find(|f| f.path == file_path)
         .ok_or(HubApiError::NotFound)?;
 
+    let content = get_object_store_content(state, &file.sha);
+
     if file.size <= MAX_INLINE_SIZE {
         Ok(DownloadResult::Inline {
             size: file.size,
             sha: file.sha.clone(),
-            content: file.inline_content.clone(),
+            content,
         })
     } else if file.is_lfs {
         Ok(DownloadResult::LfsRedirect {
@@ -40,9 +42,21 @@ pub fn resolve_file_from_store(
         Ok(DownloadResult::Inline {
             size: file.size,
             sha: file.sha.clone(),
-            content: file.inline_content.clone(),
+            content,
         })
     }
+}
+
+/// Maximum inline file size (1 MiB).
+const MAX_INLINE_SIZE: u64 = 1_048_576;
+
+/// Reads file content from ObjectStore using its SHA.
+fn get_object_store_content(state: &HubState, sha: &str) -> Option<Vec<u8>> {
+    let key = ObjectKey::parse(&format!("lfs/{sha}")).ok()?;
+    let size = state.object_store.metadata(&key).ok()??.length();
+    let range_end = size.checked_sub(1)?;
+    let range = ByteRange::new(0, range_end).ok()?;
+    state.object_store.read_range(&key, range).ok()
 }
 
 /// Result of resolving a file download.
@@ -267,10 +281,13 @@ mod tests {
 
     /// Helper: creates a minimal HubState with a LocalIndexStore, creates a
     /// repo + revision with the given file entries.
+    /// Optionally pre-loads content into ObjectStore for the given `(sha, data)` pairs.
     fn setup_resolve_state(
         files: &[shardline_index::hub::HubFileEntry],
+        content: &[(&str, &[u8])],
     ) -> (tempfile::TempDir, HubState) {
         use shardline_index::hub::{BoxedHubStore, HubRepoType, ensure_hub_tables};
+        use shardline_storage::{ObjectBody, ObjectIntegrity};
         let ts = tempfile::tempdir().expect("tempdir");
         let root = ts.path();
         ensure_hub_tables(root).expect("ensure hub tables");
@@ -291,6 +308,18 @@ mod tests {
             ts.path().join("lfs"),
         )
         .expect("local object store");
+
+        // Pre-load content into ObjectStore
+        for (sha, data) in content {
+            let key = ObjectKey::parse(&format!("lfs/{sha}")).expect("valid key");
+            let body = ObjectBody::from_slice(data);
+            let integrity = ObjectIntegrity::new(
+                shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
+                data.len() as u64,
+            );
+            object_store.put_if_absent(&key, body, &integrity).expect("put content");
+        }
+
         let state = HubState {
             store,
             object_store,
@@ -302,15 +331,15 @@ mod tests {
 
     #[test]
     fn resolve_file_from_store_small_inline_file() {
-        let content = b"small file content".to_vec();
+        let content = b"small file content";
         let files = vec![shardline_index::hub::HubFileEntry {
             path: "readme.md".into(),
             size: content.len() as u64,
             sha: "abc123".into(),
             is_lfs: false,
-            inline_content: Some(content.clone()),
         }];
-        let (_ts, state) = setup_resolve_state(&files);
+        let content_data = content.to_vec();
+        let (_ts, state) = setup_resolve_state(&files, &[("abc123", content)]);
         let result = resolve_file_from_store(&state, "sha_resolve", "readme.md").unwrap();
         match &result {
             DownloadResult::Inline {
@@ -318,9 +347,9 @@ mod tests {
                 sha,
                 content: c,
             } => {
-                assert_eq!(*size, content.len() as u64);
+                assert_eq!(*size, content_data.len() as u64);
                 assert_eq!(sha.as_str(), "abc123");
-                assert_eq!(c, &Some(content));
+                assert_eq!(c, &Some(content_data));
             }
             _ => assert!(
                 matches!(result, DownloadResult::Inline { .. }),
@@ -337,9 +366,8 @@ mod tests {
             size,
             sha: "oid123".into(),
             is_lfs: true,
-            inline_content: None,
         }];
-        let (_ts, state) = setup_resolve_state(&files);
+        let (_ts, state) = setup_resolve_state(&files, &[]);
         let result = resolve_file_from_store(&state, "sha_resolve", "model.bin").unwrap();
         match &result {
             DownloadResult::LfsRedirect { oid, size: s } => {
@@ -355,7 +383,7 @@ mod tests {
 
     #[test]
     fn resolve_file_from_store_file_not_found() {
-        let (_ts, state) = setup_resolve_state(&[]);
+        let (_ts, state) = setup_resolve_state(&[], &[]);
         let result = resolve_file_from_store(&state, "sha_resolve", "nonexistent.txt");
         assert!(matches!(result, Err(HubApiError::NotFound)));
     }
@@ -368,9 +396,8 @@ mod tests {
             size: content.len() as u64,
             sha: "bigsha".into(),
             is_lfs: false,
-            inline_content: Some(content),
         }];
-        let (_ts, state) = setup_resolve_state(&files);
+        let (_ts, state) = setup_resolve_state(&files, &[("bigsha", &content)]);
         let result = resolve_file_from_store(&state, "sha_resolve", "big.txt").unwrap();
         match &result {
             DownloadResult::Inline { size, .. } => {
@@ -393,9 +420,8 @@ mod tests {
             size,
             sha: "hugesha".into(),
             is_lfs: false,
-            inline_content: None,
         }];
-        let (_ts, state) = setup_resolve_state(&files);
+        let (_ts, state) = setup_resolve_state(&files, &[]);
         let result = resolve_file_from_store(&state, "sha_resolve", "huge.txt").unwrap();
         match &result {
             DownloadResult::Inline {

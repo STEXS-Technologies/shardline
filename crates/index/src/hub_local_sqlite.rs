@@ -69,7 +69,7 @@ pub fn ensure_hub_tables(root: &std::path::Path) -> Result<(), Box<dyn std::erro
         );
         CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
             commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
-            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
+            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (commit_sha, path)
         );
         CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
@@ -432,8 +432,8 @@ impl HubStore for LocalIndexStore {
         let tx = conn.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs, inline_content)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO shardline_hub_file_entries (commit_sha, path, size, sha, is_lfs)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for file in files {
                 stmt.execute(params![
@@ -442,7 +442,6 @@ impl HubStore for LocalIndexStore {
                     u64_to_i64(file.size)?,
                     file.sha,
                     file.is_lfs as i64,
-                    file.inline_content,
                 ])?;
             }
         }
@@ -453,7 +452,7 @@ impl HubStore for LocalIndexStore {
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error> {
         let conn = open_hub_connection(self.root())?;
         let mut stmt = conn.prepare(
-            "SELECT path, size, sha, is_lfs, inline_content FROM shardline_hub_file_entries
+            "SELECT path, size, sha, is_lfs FROM shardline_hub_file_entries
              WHERE commit_sha = ?1 ORDER BY path",
         )?;
         let rows = stmt.query_map(params![commit_sha], |row| {
@@ -462,7 +461,6 @@ impl HubStore for LocalIndexStore {
                 size: i64_to_u64(row.get::<_, i64>(1)?).map_err(|e| sqlite_store_error(&e))?,
                 sha: row.get(2)?,
                 is_lfs: row.get::<_, i64>(3)? != 0,
-                inline_content: row.get(4)?,
             })
         })?;
         let mut entries = Vec::new();
@@ -670,7 +668,6 @@ mod tests {
                 size INTEGER NOT NULL CHECK (size >= 0),
                 sha TEXT NOT NULL,
                 is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
-                inline_content BLOB,
                 PRIMARY KEY (commit_sha, path)
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
@@ -1201,21 +1198,18 @@ mod tests {
                 size: 100,
                 sha: "sha_a".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "b.bin".into(),
                 size: 2048,
                 sha: "sha_b".into(),
                 is_lfs: true,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "c/d.txt".into(),
                 size: 50,
                 sha: "sha_c".into(),
                 is_lfs: false,
-                inline_content: None,
             },
         ];
 
@@ -1251,14 +1245,12 @@ mod tests {
             size: 10,
             sha: "old".into(),
             is_lfs: false,
-            inline_content: None,
         }];
         let v2 = vec![HubFileEntry {
             path: "f.txt".into(),
             size: 20,
             sha: "new".into(),
             is_lfs: true,
-            inline_content: None,
         }];
 
         store.store_files("c1", &v1).unwrap();
@@ -1295,14 +1287,12 @@ mod tests {
                 size: 256,
                 sha: "sha_readme".into(),
                 is_lfs: false,
-                inline_content: None,
             },
             HubFileEntry {
                 path: "model.bin".into(),
                 size: 5_000_000,
                 sha: "sha_model".into(),
                 is_lfs: true,
-                inline_content: None,
             },
         ];
         store.store_files(&initial_sha, &files).unwrap();
@@ -1405,7 +1395,6 @@ mod tests {
             size: 42,
             sha: "sha_py".into(),
             is_lfs: false,
-            inline_content: None,
         }];
         boxed.store_files("rev1", &files).unwrap();
 
@@ -1818,21 +1807,18 @@ mod tests {
                 size: 13,
                 sha: "sha_readme".into(),
                 is_lfs: false,
-                inline_content: Some(b"Hello, world!".to_vec()),
             },
             HubFileEntry {
                 path: "small.txt".into(),
                 size: 5,
                 sha: "sha_small".into(),
                 is_lfs: false,
-                inline_content: Some(b"abcde".to_vec()),
             },
             HubFileEntry {
                 path: "binary.bin".into(),
                 size: 3,
                 sha: "sha_bin".into(),
                 is_lfs: false,
-                inline_content: Some(vec![0x00, 0xFF, 0x42]),
             },
         ];
 
@@ -1844,20 +1830,8 @@ mod tests {
         assert_eq!(retrieved.len(), 3);
         // Files are sorted by path: README.md, binary.bin, small.txt
         assert_eq!(retrieved[0].path, "README.md");
-        assert_eq!(
-            retrieved[0].inline_content.as_deref(),
-            Some(b"Hello, world!" as &[u8])
-        );
         assert_eq!(retrieved[1].path, "binary.bin");
-        assert_eq!(
-            retrieved[1].inline_content.as_deref(),
-            Some(vec![0x00, 0xFF, 0x42].as_slice())
-        );
         assert_eq!(retrieved[2].path, "small.txt");
-        assert_eq!(
-            retrieved[2].inline_content.as_deref(),
-            Some(b"abcde" as &[u8])
-        );
     }
 
     // === Hub commit and revisions focused test ===
@@ -1933,7 +1907,6 @@ mod tests {
             size: 10,
             sha: "sha_existing".into(),
             is_lfs: false,
-            inline_content: None,
         }];
         store.store_files("commit_rollback", &valid_files).unwrap();
 
@@ -1974,7 +1947,6 @@ mod tests {
             size: 100,
             sha: "sha_readme".into(),
             is_lfs: false,
-            inline_content: None,
         }];
         store.store_files(initial_sha, &files).unwrap();
 
@@ -1993,7 +1965,6 @@ mod tests {
             size: 1024,
             sha: "sha_model".into(),
             is_lfs: true,
-            inline_content: None,
         }];
         store.store_files("sha2", &files2).unwrap();
 
@@ -2073,7 +2044,6 @@ mod tests {
             size: 1024,
             sha: "sha_weights".into(),
             is_lfs: true,
-            inline_content: None,
         }];
         store.store_files(commit_sha, &files).unwrap();
 

@@ -187,7 +187,6 @@ fn walk_git_tree_inner(
                     size,
                     sha: oid,
                     is_lfs: true,
-                    inline_content: None,
                 });
             } else {
                 // Inline file — compute content hash.
@@ -201,7 +200,6 @@ fn walk_git_tree_inner(
                     size: blob_obj.data.len() as u64,
                     sha,
                     is_lfs: false,
-                    inline_content: Some(blob_obj.data.clone()),
                 });
             }
         }

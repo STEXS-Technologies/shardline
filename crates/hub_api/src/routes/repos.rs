@@ -6,6 +6,9 @@ use axum::{
     response::IntoResponse,
 };
 
+use shardline_protocol::ByteRange;
+use shardline_storage::{ObjectKey, ObjectStore};
+
 use crate::{error::HubApiError, models::*};
 use shardline_index::hub::HubRepoType;
 use shardline_protocol::TokenScope;
@@ -305,11 +308,9 @@ pub(crate) async fn repo_modelcard(
         ("Content-Type", "text/markdown; charset=utf-8"),
         ("X-Shardline-SHA", readme.sha.as_str()),
     ];
-    let content = readme
-        .inline_content
-        .as_ref()
+    let content = read_file_from_object_store(&state, &readme.sha)
         .ok_or(HubApiError::NotFound)?;
-    Ok((resp_headers, content.clone()).into_response())
+    Ok((resp_headers, content).into_response())
 }
 
 // ---- Repo revisions (requires Read) ----
@@ -367,9 +368,9 @@ pub(crate) async fn repo_info(
         && let Some(sha) = commit_sha
         && let Ok(files) = state.store.get_files(&sha)
         && let Some(readme) = files.iter().find(|f| f.path == "README.md")
-        && let Some(content) = &readme.inline_content
+        && let Some(content) = read_file_from_object_store(&state, &readme.sha)
     {
-        response.card_data = parse_yaml_frontmatter(content);
+        response.card_data = parse_yaml_frontmatter(&content);
     }
 
     Ok(Json(response))
@@ -437,6 +438,15 @@ pub(crate) async fn repo_delete_compat(
         None => request.name,
     };
     delete_repository(&state, &headers, &name)
+}
+
+/// Reads a file from the ObjectStore by its SHA.
+fn read_file_from_object_store(state: &HubState, sha: &str) -> Option<Vec<u8>> {
+    let key = ObjectKey::parse(&format!("lfs/{sha}")).ok()?;
+    let size = state.object_store.metadata(&key).ok()??.length();
+    let range_end = size.checked_sub(1)?;
+    let range = ByteRange::new(0, range_end).ok()?;
+    state.object_store.read_range(&key, range).ok()
 }
 
 fn delete_repository(

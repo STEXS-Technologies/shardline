@@ -5,6 +5,8 @@ use axum::{
 };
 use tracing;
 
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+
 use crate::{commit::{self, CommitInstruction, ParsedCommit}, error::HubApiError, models::*};
 use shardline_index::hub::HubFileEntry;
 use shardline_protocol::TokenScope;
@@ -142,13 +144,24 @@ pub(crate) async fn apply_commit(
                     hex::encode(h.finalize().as_bytes())
                 };
                 let size = content.len() as u64;
+
+                // Store in ObjectStore
+                let key = ObjectKey::parse(&format!("lfs/{sha}"))
+                    .map_err(|e| HubApiError::CasError(e.to_string()))?;
+                let body = ObjectBody::from_slice(content);
+                let integrity = ObjectIntegrity::new(
+                    shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(content).as_bytes()),
+                    size,
+                );
+                state.object_store.put_if_absent(&key, body, &integrity)
+                    .map_err(|e| HubApiError::CasError(e.to_string()))?;
+
                 files.retain(|f| f.path != *path);
                 files.push(HubFileEntry {
                     path: path.clone(),
                     size,
                     sha: sha.clone(),
                     is_lfs: false,
-                    inline_content: Some(content.clone()),
                 });
                 file_hashes.push(sha);
             }
@@ -163,7 +176,6 @@ pub(crate) async fn apply_commit(
                     size: *size,
                     sha: oid.clone(),
                     is_lfs: true,
-                    inline_content: None,
                 });
                 file_hashes.push(oid.clone());
             }

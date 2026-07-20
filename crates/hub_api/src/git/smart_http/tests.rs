@@ -64,7 +64,6 @@ fn inline_blob_deterministic() {
         size: 11,
         sha: "aabbccdd".to_owned(),
         is_lfs: false,
-        inline_content: None,
     };
     let b1 = build_inline_blob(&file);
     let b2 = build_inline_blob(&file);
@@ -84,7 +83,6 @@ fn tree_from_single_file() {
         size: 13,
         sha: "deadbeef".to_owned(),
         is_lfs: false,
-        inline_content: None,
     }];
     let (tree, sub_trees) = build_git_tree_objects(&files);
     let tree_sha = tree.sha1();
@@ -100,14 +98,12 @@ fn tree_from_nested_files() {
             size: 100,
             sha: "aaaa".to_owned(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "Cargo.toml".to_owned(),
             size: 200,
             sha: "bbbb".to_owned(),
             is_lfs: false,
-            inline_content: None,
         },
     ];
     let (tree, sub_trees) = build_git_tree_objects(&files);
@@ -125,14 +121,12 @@ fn gitattributes_blob_generated_for_lfs_files() {
             size: 1024,
             sha: "oid1".to_owned(),
             is_lfs: true,
-            inline_content: None,
         },
         HubFileEntry {
             path: "README.md".to_owned(),
             size: 100,
             sha: "oid2".to_owned(),
             is_lfs: false,
-            inline_content: None,
         },
     ];
     let blob = build_gitattributes_blob(&files);
@@ -149,7 +143,6 @@ fn gitattributes_blob_none_when_no_lfs() {
         size: 100,
         sha: "oid2".to_owned(),
         is_lfs: false,
-        inline_content: None,
     }];
     assert!(build_gitattributes_blob(&files).is_none());
 }
@@ -475,7 +468,7 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
         );
         CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
             commit_sha TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
-            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0, inline_content BLOB,
+            sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (commit_sha, path)
         );
         CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
@@ -1186,21 +1179,18 @@ fn build_gitattributes_blob_multiple_lfs_files() {
             size: 200,
             sha: "oid_z".to_owned(),
             is_lfs: true,
-            inline_content: None,
         },
         HubFileEntry {
             path: "a.bin".to_owned(),
             size: 100,
             sha: "oid_a".to_owned(),
             is_lfs: true,
-            inline_content: None,
         },
         HubFileEntry {
             path: "m.bin".to_owned(),
             size: 300,
             sha: "oid_m".to_owned(),
             is_lfs: true,
-            inline_content: None,
         },
     ];
     let blob = build_gitattributes_blob(&files);
@@ -1444,14 +1434,12 @@ fn gitattributes_blob_handles_nested_lfs_paths() {
             size: 1024,
             sha: "oid_nested".to_owned(),
             is_lfs: true,
-            inline_content: None,
         },
         HubFileEntry {
             path: "data/nested/readme.md".to_owned(),
             size: 100,
             sha: "oid_rn".to_owned(),
             is_lfs: false,
-            inline_content: None,
         },
     ];
     let blob = build_gitattributes_blob(&files);
@@ -1470,14 +1458,12 @@ fn tree_from_nested_lfs_files_creates_sub_trees() {
             size: 2_000_000,
             sha: "lfs_oid_ab".to_owned(),
             is_lfs: true,
-            inline_content: None,
         },
         HubFileEntry {
             path: "models/b/big.bin".to_owned(),
             size: 2_000_000,
             sha: "lfs_oid_bb".to_owned(),
             is_lfs: true,
-            inline_content: None,
         },
     ];
     let (root, sub_trees) = build_git_tree_objects(&files);
@@ -1605,7 +1591,6 @@ fn tree_from_inline_files_creates_blobs_in_tree_entries() {
         size: 3,
         sha: "abc".to_owned(),
         is_lfs: false,
-        inline_content: Some(b"abc".to_vec()),
     }];
     let (root, sub_trees) = build_git_tree_objects(&files);
     assert_eq!(sub_trees.len(), 2, "a/ and a/b/ sub-trees");
@@ -1690,7 +1675,6 @@ fn build_tree_entries_lfs_leaf_blob() {
         size: 2_000_000,
         sha: "oid_lfs_leaf".to_owned(),
         is_lfs: true,
-        inline_content: None,
     }];
     let (root, sub_trees) = build_git_tree_objects(&files);
     assert!(sub_trees.is_empty());
