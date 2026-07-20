@@ -133,6 +133,7 @@ pub(crate) async fn lfs_upload(
     body: Bytes,
 ) -> Result<StatusCode, HubApiError> {
     shardline_metrics::record_hub_api_request("lfs_upload", "PUT", 200);
+    shardline_metrics::record_hub_api_file_upload();
     authorize(&state, &headers, TokenScope::Write)?;
     commit::validate_lfs_oid(&oid)?;
 
@@ -168,6 +169,7 @@ pub(crate) async fn lfs_download(
     HubApiError,
 > {
     shardline_metrics::record_hub_api_request("lfs_download", "GET", 200);
+    shardline_metrics::record_hub_api_file_download();
     authorize(&state, &headers, TokenScope::Read)?;
 
     let key = ObjectKey::parse(&format!("lfs/{oid}"))

@@ -79,6 +79,7 @@ pub(super) async fn issue_provider_token_response(
     let issued = provider_tokens
         .issue_token(headers, provider, request)
         .map_err(map_provider_issue_error)?;
+    shardline_metrics::record_provider_token_exchange();
     reconcile_provider_repository_state(state, &issued).await?;
     Ok(issued)
 }

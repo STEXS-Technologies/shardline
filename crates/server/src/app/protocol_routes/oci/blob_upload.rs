@@ -77,6 +77,7 @@ pub(crate) async fn oci_post_blob_upload(
             .backend
             .put_sha256_addressed_object_stream_if_absent(&object_key, &digest_hex, body)
             .await?;
+        shardline_metrics::metrics().protocol.record_oci_upload();
         return oci_created_response(
             &oci_blob_location(repository, &digest_hex),
             Some(&digest_hex),
@@ -267,6 +268,7 @@ pub(crate) async fn oci_put_blob_upload(
         &integrity,
     )?;
     delete_upload_session(state.config.root_dir(), session_id).await?;
+    shardline_metrics::metrics().protocol.record_oci_upload();
     oci_created_response(
         &oci_blob_location(repository, &digest_hex),
         Some(&digest_hex),

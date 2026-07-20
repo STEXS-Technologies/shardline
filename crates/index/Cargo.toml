@@ -20,6 +20,7 @@ libc.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+shardline-metrics.workspace = true
 shardline-protocol.workspace = true
 shardline-storage.workspace = true
 sqlx = { workspace = true, features = [
