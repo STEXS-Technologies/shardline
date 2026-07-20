@@ -19,3 +19,4 @@ coverage.json
 coverage*.lcov
 coverage_html/
 .slim/deepwork/
+.opencode
