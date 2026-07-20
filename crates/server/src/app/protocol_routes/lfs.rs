@@ -19,13 +19,13 @@ use shardline_protocol::TokenScope;
 use futures_util::StreamExt;
 use shardline_storage::DeleteOutcome;
 
+use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     ServerError, lfs_object_key, metrics,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
-
-use super::{AppState, MAX_LFS_BATCH_OBJECTS, authorize, direct_object_response, scope_from_auth};
+use crate::app::{AppState, authorize, scope_from_auth};
 
 /// Maximum LFS object size allowed for server-side verification (1 GiB).
 /// Objects above this threshold are rejected with a 413 to prevent OOM.
