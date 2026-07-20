@@ -24,7 +24,8 @@ mod lfs;
 pub use bazel::{BazelCacheKind, bazel_cache_object_key};
 pub use lfs::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectRequest,
-    LfsObjectResponse, lfs_object_key,
+    LfsObjectResponse, LfsOperation, LfsValidationError, TransferAdapter, cas_headers,
+    lfs_object_key,
 };
 
 use shardline_storage::ObjectKey;

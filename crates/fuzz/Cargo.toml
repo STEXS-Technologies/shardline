@@ -26,6 +26,7 @@ shardline-gc.workspace = true
 shardline-hub-api.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
+shardline-protocol-adapters.workspace = true
 shardline-rebuild.workspace = true
 shardline-server = { workspace = true, features = ["fuzzing"] }
 shardline-server-core.workspace = true
@@ -224,6 +225,12 @@ doc = false
 [[bin]]
 name = "shardline_xorb_reconstruct"
 path = "fuzz_targets/shardline/xorb_reconstruct.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_lfs_operation"
+path = "fuzz_targets/shardline/protocol_lfs_operation.rs"
 test = false
 doc = false
 

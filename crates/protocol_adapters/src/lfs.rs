@@ -7,6 +7,117 @@ use crate::{ProtocolError, object_key, scope_namespace, validate_content_hash};
 
 pub const LFS_CONTENT_TYPE: &str = "application/vnd.git-lfs+json";
 
+/// Xet CAS transfer header names used in LFS batch responses and
+/// provider token-issuance flows. These tell the git-xet transfer agent
+/// where and how to connect to the content-addressed storage layer.
+pub mod cas_headers {
+    /// Base URL of the CAS endpoint.
+    pub const URL: &str = "X-Xet-Cas-Url";
+    /// Scoped bearer token for CAS operations.
+    pub const ACCESS_TOKEN: &str = "X-Xet-Access-Token";
+    /// Unix-seconds timestamp when the access token expires.
+    pub const TOKEN_EXPIRATION: &str = "X-Xet-Token-Expiration";
+}
+
+/// LFS transfer adapter identifiers negotiated in the batch API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferAdapter {
+    /// Standard HTTP object upload/download.
+    Basic,
+    /// Xet chunk-level deduplicated transfer via CAS.
+    Xet,
+}
+
+impl TransferAdapter {
+    /// Returns the wire-protocol string for this transfer adapter.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::Xet => "xet",
+        }
+    }
+}
+
+impl std::fmt::Display for TransferAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// LFS batch operation identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LfsOperation {
+    /// Retrieve objects from the server.
+    Download,
+    /// Store objects on the server.
+    Upload,
+}
+
+impl LfsOperation {
+    /// Returns the wire-protocol string for this operation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Download => "download",
+            Self::Upload => "upload",
+        }
+    }
+}
+
+impl std::str::FromStr for LfsOperation {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "download" => Ok(Self::Download),
+            "upload" => Ok(Self::Upload),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Well-known LFS validation error messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LfsValidationError {
+    /// Invalid object ID format.
+    InvalidOid,
+    /// Unsupported batch operation.
+    UnsupportedOperation,
+    /// Unsupported hash algorithm.
+    UnsupportedHashAlgorithm,
+    /// Unsupported transfer adapter.
+    UnsupportedTransferAdapter,
+    /// Too many objects in a single batch request.
+    TooManyObjects,
+    /// Object does not exist on the server.
+    ObjectNotFound,
+    /// Object too large for server-side verification.
+    ObjectTooLarge,
+    /// SHA-256 hash of uploaded content does not match the expected digest.
+    HashMismatch,
+    /// Generic validation failure.
+    Generic(&'static str),
+}
+
+impl LfsValidationError {
+    /// Returns the stable message string for this error.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::InvalidOid => "invalid oid",
+            Self::UnsupportedOperation => "unsupported operation",
+            Self::UnsupportedHashAlgorithm => "unsupported hash algorithm",
+            Self::UnsupportedTransferAdapter => "unsupported transfer adapter",
+            Self::TooManyObjects => "too many objects",
+            Self::ObjectNotFound => "Object does not exist",
+            Self::ObjectTooLarge => "object too large for server-side verification",
+            Self::HashMismatch => "SHA-256 hash mismatch",
+            Self::Generic(msg) => msg,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LfsBatchRequest {
     pub operation: String,

@@ -206,6 +206,7 @@ pub(crate) mod gc {
 }
 pub(crate) use shardline_protocol_adapters::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
+    cas_headers,
 };
 pub(crate) use shardline_xet_adapter::ShardUploadResponse;
 pub use storage_migration::{

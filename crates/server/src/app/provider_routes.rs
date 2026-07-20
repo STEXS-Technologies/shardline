@@ -57,15 +57,15 @@ pub(super) async fn git_lfs_authenticate(
     let issued = issue_provider_token_response(&state, &headers, &provider, &request).await?;
     let mut header = BTreeMap::new();
     header.insert(
-        "X-Xet-Cas-Url".to_owned(),
+        crate::cas_headers::URL.to_owned(),
         state.config.public_base_url().to_owned(),
     );
     header.insert(
-        "X-Xet-Access-Token".to_owned(),
+        crate::cas_headers::ACCESS_TOKEN.to_owned(),
         issued.token.expose_secret().to_owned(),
     );
     header.insert(
-        "X-Xet-Token-Expiration".to_owned(),
+        crate::cas_headers::TOKEN_EXPIRATION.to_owned(),
         issued.expires_at_unix_seconds.to_string(),
     );
     let now = unix_now_seconds_checked()?;
