@@ -25,6 +25,7 @@ use shardline_hub_api::git::pack::{
 };
 use shardline_hub_api::git::pktline;
 use shardline_index::hub::{HubFileEntry, HubRepoType};
+use shardline_storage::ObjectStore;
 use std::io::Read;
 use tower::ServiceExt;
 
@@ -1090,21 +1091,19 @@ async fn receive_pack_stores_lfs_objects() {
         "LFS push should succeed: {body_str}"
     );
 
-    // Verify the LFS object was stored.
+    // Verify the LFS object was stored via ObjectStore.
     let state = common::state();
-    let has = state
-        .store
-        .has_lfs_object(lfs_oid)
-        .expect("has_lfs_object should not error");
-    assert!(has, "LFS object should be stored after push");
+    let key = shardline_storage::ObjectKey::parse(&format!("lfs/{lfs_oid}")).unwrap();
+    assert!(
+        state.object_store.contains(&key).unwrap(),
+        "LFS object should be stored after push"
+    );
 
     // Verify the stored data matches the pointer blob content.
-    let stored = state
-        .store
-        .get_lfs_object(lfs_oid)
-        .expect("get_lfs_object should not error");
-    assert!(stored.is_some(), "get_lfs_object should return data");
-    let data = stored.unwrap();
+    let meta = state.object_store.metadata(&key).unwrap().unwrap();
+    let range_end = meta.length().saturating_sub(1);
+    let range = shardline_protocol::ByteRange::new(0, range_end).unwrap();
+    let data = state.object_store.read_range(&key, range).unwrap();
     let data_str = String::from_utf8_lossy(&data);
     assert!(
         data_str.contains("version https://git-lfs.github.com/spec/v1"),

@@ -17,6 +17,8 @@ use super::tree_walk::{parse_commit_object, walk_git_tree};
 use super::upload_pack::build_lfs_pointer_blob;
 use crate::{error::HubApiError, routes::HubState};
 use shardline_index::hub::canonical_ref_name;
+use shardline_protocol::ShardlineHash;
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
 // ---- Receive-pack: POST /{type}/{ns}/{repo}/git-receive-pack ----
 
@@ -182,7 +184,8 @@ async fn store_push_objects(
     // Store LFS objects that were included in the pack.
     // LFS pointer blobs only contain metadata; the actual file content is
     // uploaded separately via PUT /lfs/objects/{oid}.  If the client bundled
-    // the real content as a blob (e.g. for small files), store it.
+    // the real content as a blob (e.g. for small files), store it via
+    // ObjectStore rather than Postgres BYTEA.
     for file in &files {
         if file.is_lfs {
             // Look up the blob data from the pack objects by computing
@@ -190,10 +193,16 @@ async fn store_push_objects(
             let pointer_blob = build_lfs_pointer_blob(&file.sha, file.size);
             let pointer_sha = pointer_blob.sha1();
             if let Some(blob_obj) = sha_to_obj.get(&pointer_sha) {
-                // Store the blob data keyed by the LFS oid.
+                let key = ObjectKey::parse(&format!("lfs/{}", file.sha))
+                    .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
+                let object_body = ObjectBody::from_slice(&blob_obj.data);
+                let integrity = ObjectIntegrity::new(
+                    ShardlineHash::from_bytes(*blake3::hash(&blob_obj.data).as_bytes()),
+                    blob_obj.data.len() as u64,
+                );
                 state
-                    .store
-                    .put_lfs_object(&file.sha, &blob_obj.data)
+                    .object_store
+                    .put_if_absent(&key, object_body, &integrity)
                     .map_err(|e| SmartHttpError::StoreLfsObject(e.to_string()))?;
             }
         }

@@ -472,40 +472,6 @@ impl HubStore for LocalIndexStore {
         Ok(entries)
     }
 
-    fn put_lfs_object(&self, oid: &str, data: &[u8]) -> Result<(), Self::Error> {
-        let conn = open_hub_connection_rw(self.root())?;
-        let now = unix_now_seconds_lossy();
-        conn.execute(
-            "INSERT OR REPLACE INTO shardline_hub_lfs_objects (oid, data, size, created_at_unix_seconds)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![oid, data, i64::try_from(data.len())
-    .map_err(|err| LocalIndexStoreError::IntegerOutOfRange(err.to_string()))?, u64_to_i64(now)?],
-        )?;
-        Ok(())
-    }
-
-    fn get_lfs_object(&self, oid: &str) -> Result<Option<Vec<u8>>, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let result = conn
-            .query_row(
-                "SELECT data FROM shardline_hub_lfs_objects WHERE oid = ?1",
-                params![oid],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()?;
-        Ok(result)
-    }
-
-    fn has_lfs_object(&self, oid: &str) -> Result<bool, Self::Error> {
-        let conn = open_hub_connection(self.root())?;
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM shardline_hub_lfs_objects WHERE oid = ?1)",
-            params![oid],
-            |row| row.get(0),
-        )?;
-        Ok(exists)
-    }
-
     fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {
         let conn = open_hub_connection_rw(self.root())?;
         let tx = conn.unchecked_transaction()?;
@@ -1305,61 +1271,7 @@ mod tests {
         assert!(files[0].is_lfs);
     }
 
-    #[test]
-    fn put_and_get_lfs_object() {
-        let (_ts, store) = make_store();
-
-        let data = b"hello lfs content";
-        store
-            .put_lfs_object("oid_abc", data)
-            .expect("put_lfs_object");
-
-        let retrieved = store.get_lfs_object("oid_abc").expect("get_lfs_object");
-        assert_eq!(retrieved.as_deref(), Some(data as &[u8]));
-    }
-
-    #[test]
-    fn get_lfs_object_nonexistent_returns_none() {
-        let (_ts, store) = make_store();
-        let result = store.get_lfs_object("nope").expect("get_lfs_object");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn has_lfs_object_true() {
-        let (_ts, store) = make_store();
-        store.put_lfs_object("oid_1", b"data").unwrap();
-        assert!(store.has_lfs_object("oid_1").expect("has_lfs_object"));
-    }
-
-    #[test]
-    fn has_lfs_object_false() {
-        let (_ts, store) = make_store();
-        assert!(!store.has_lfs_object("nope").expect("has_lfs_object"));
-    }
-
-    #[test]
-    fn put_lfs_object_overwrites() {
-        let (_ts, store) = make_store();
-        store.put_lfs_object("oid", b"old").unwrap();
-        store.put_lfs_object("oid", b"new").unwrap();
-
-        let data = store.get_lfs_object("oid").unwrap().unwrap();
-        assert_eq!(&data, b"new");
-    }
-
-    #[test]
-    fn lfs_object_large_data() {
-        let (_ts, store) = make_store();
-        let large = vec![0xABu8; 1024 * 1024]; // 1 MB
-        store.put_lfs_object("large_oid", &large).unwrap();
-
-        let retrieved = store.get_lfs_object("large_oid").unwrap().unwrap();
-        assert_eq!(retrieved.len(), 1024 * 1024);
-        assert!(retrieved.iter().all(|&b| b == 0xAB));
-    }
-
-    // === Full lifecycle: create repo → commit → files → LFS ===
+    // === Full lifecycle: create repo → commit → files ===
 
     #[test]
     fn full_lifecycle_single_commit() {
@@ -1394,11 +1306,6 @@ mod tests {
             },
         ];
         store.store_files(&initial_sha, &files).unwrap();
-
-        // Store LFS object
-        store
-            .put_lfs_object("sha_model", b"model weights data")
-            .unwrap();
 
         // Second commit
         let new_sha = "abc123def456";
@@ -1505,19 +1412,6 @@ mod tests {
         let retrieved = boxed.get_files("rev1").unwrap();
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].path, "test.py");
-    }
-
-    #[test]
-    fn boxed_hub_store_lfs() {
-        let (_ts, store) = make_store();
-        let boxed = BoxedHubStore::from_store(store);
-
-        boxed.put_lfs_object("oid1", b"content").unwrap();
-        assert!(boxed.has_lfs_object("oid1").unwrap());
-        assert!(!boxed.has_lfs_object("oid2").unwrap());
-
-        let data = boxed.get_lfs_object("oid1").unwrap().unwrap();
-        assert_eq!(&data, b"content");
     }
 
     #[test]
