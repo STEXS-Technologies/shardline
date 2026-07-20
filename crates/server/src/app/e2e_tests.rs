@@ -156,7 +156,8 @@ async fn test_app_for_frontends_with_role(
                         )
                         .route(
                             "/transfer/xorb/{prefix}/{hash}",
-                            get(super::operational::read_xorb_transfer),
+                            get(super::operational::read_xorb_transfer)
+                                .put(super::operational::write_xorb_transfer),
                         );
                 }
             }
@@ -374,7 +375,8 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
                         )
                         .route(
                             "/transfer/xorb/{prefix}/{hash}",
-                            get(super::operational::read_xorb_transfer),
+                            get(super::operational::read_xorb_transfer)
+                                .put(super::operational::write_xorb_transfer),
                         );
                 }
             }
@@ -628,7 +630,8 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
                         )
                         .route(
                             "/transfer/xorb/{prefix}/{hash}",
-                            get(super::operational::read_xorb_transfer),
+                            get(super::operational::read_xorb_transfer)
+                                .put(super::operational::write_xorb_transfer),
                         );
                 }
             }
@@ -943,6 +946,141 @@ async fn xorb_read_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_transfer_put_upload_and_download() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let content = b"xorb-transfer-put-test-content";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+
+    // Upload via PUT /transfer/xorb/default/{hash} — the endpoint git-xet uses
+    let upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/transfer/xorb/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        upload.status(),
+        StatusCode::OK,
+        "xorb transfer PUT failed: {}",
+        String::from_utf8_lossy(&body_bytes(upload).await)
+    );
+
+    // HEAD to verify
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+
+    // Download via GET /transfer/xorb/default/{hash}
+    let download = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/transfer/xorb/default/{xorb_hash}"))
+                .header(header::RANGE, "bytes=0-")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        download.status().is_success(),
+        "transfer GET status: {}",
+        download.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_transfer_put_invalid_namespace_returns_error() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let hash = "a".repeat(64);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/transfer/xorb/invalid/{hash}"))
+                .body(Body::from(b"test".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_transfer_put_invalid_hash_returns_error() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/transfer/xorb/default/short-hash")
+                .body(Body::from(b"test".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_transfer_put_with_auth_rejects_read_token() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Xet]).await;
+    let read_token = test_token(TokenScope::Read);
+    let hash = "a".repeat(64);
+
+    // PUT with Read token should fail (requires Write)
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/transfer/xorb/default/{hash}"))
+                .header(header::AUTHORIZATION, format!("Bearer {read_token}"))
+                .body(Body::from(b"test".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_transfer_get_with_auth_requires_read_token() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Xet]).await;
+    let hash = "a".repeat(64);
+
+    // GET without auth should fail
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/transfer/xorb/default/{hash}"))
+                .header(header::RANGE, "bytes=0-")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 /// Error-path test only — the happy path is covered by [`chunk_read_happy_path`]
@@ -6225,6 +6363,28 @@ async fn hub_delete_repo_removes_repo() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hub_validate_yaml_returns_ok() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/validate-yaml")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content": "test: valid"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["warnings"], serde_json::json!([]));
+    assert_eq!(json["errors"], serde_json::json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
