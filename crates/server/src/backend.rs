@@ -268,6 +268,13 @@ impl ServerBackend {
         }
     }
 
+    pub(crate) fn object_store(&self) -> ServerObjectStore {
+        match self {
+            Self::Local(backend) => backend.object_store(),
+            Self::Postgres(backend) => backend.object_store(),
+        }
+    }
+
     pub(crate) const fn backend_name(&self) -> &'static str {
         match self {
             Self::Local(_backend) => "local",

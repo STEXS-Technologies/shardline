@@ -8,6 +8,7 @@ use bytes::Bytes;
 
 use crate::{commit, error::HubApiError, models::*};
 use shardline_protocol::TokenScope;
+use shardline_storage::{ObjectKey, ObjectStore};
 
 use super::{HubState, authorize};
 
@@ -25,7 +26,21 @@ pub(crate) async fn lfs_batch(
         .objects
         .iter()
         .map(|obj| {
-            let exists = state.store.has_lfs_object(&obj.oid).unwrap_or(false);
+            let key = match ObjectKey::parse(&format!("lfs/{}", obj.oid)) {
+                Ok(k) => k,
+                Err(e) => {
+                    return LfsObjectResponse {
+                        oid: obj.oid.clone(),
+                        size: obj.size,
+                        actions: None,
+                        error: Some(LfsObjectError {
+                            code: 400,
+                            message: format!("invalid oid: {e}"),
+                        }),
+                    };
+                }
+            };
+            let exists = state.object_store.contains(&key).unwrap_or(false);
             let actions = match request.operation {
                 LfsBatchOperation::Download => {
                     if exists {
@@ -120,10 +135,21 @@ pub(crate) async fn lfs_upload(
     shardline_metrics::record_hub_api_request("lfs_upload", "PUT", 200);
     authorize(&state, &headers, TokenScope::Write)?;
     commit::validate_lfs_oid(&oid)?;
-    state
-        .store
-        .put_lfs_object(&oid, &body)
+
+    use shardline_storage::{ObjectBody, ObjectIntegrity};
+    let key = ObjectKey::parse(&format!("lfs/{oid}"))
         .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let object_body = ObjectBody::from_slice(&body);
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&body).as_bytes()),
+        body.len() as u64,
+    );
+    state
+        .object_store
+        .put_if_absent(&key, object_body, &integrity)
+        .map_err(|e: shardline_server_core::ServerObjectStoreError| {
+            HubApiError::CasError(e.to_string())
+        })?;
     Ok(StatusCode::OK)
 }
 
@@ -143,11 +169,24 @@ pub(crate) async fn lfs_download(
 > {
     shardline_metrics::record_hub_api_request("lfs_download", "GET", 200);
     authorize(&state, &headers, TokenScope::Read)?;
-    let data = state
-        .store
-        .get_lfs_object(&oid)
+
+    let key = ObjectKey::parse(&format!("lfs/{oid}"))
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+    let meta = state
+        .object_store
+        .metadata(&key)
         .map_err(|e| HubApiError::CasError(e.to_string()))?
         .ok_or(HubApiError::NotFound)?;
+    let range_end = meta
+        .length()
+        .checked_sub(1)
+        .ok_or(HubApiError::NotFound)?;
+    let range = shardline_protocol::ByteRange::new(0, range_end)
+        .map_err(|_range_err| HubApiError::NotFound)?;
+    let data = state
+        .object_store
+        .read_range(&key, range)
+        .map_err(|e| HubApiError::CasError(e.to_string()))?;
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],

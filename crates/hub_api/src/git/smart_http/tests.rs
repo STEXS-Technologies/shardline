@@ -495,8 +495,13 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
 
     let store = LocalIndexStore::open(root);
     let boxed = BoxedHubStore::from_store(store);
+    let object_store = shardline_server_core::ServerObjectStore::local(
+        tmp.path().join("lfs"),
+    )
+    .expect("local object store");
     let state = HubState {
         store: boxed,
+        object_store,
         auth: None,
         http_client: None,
     };
@@ -1271,8 +1276,10 @@ fn authorize_read_with_auth_rejects_missing_token() {
             Err(AuthError::ProviderError("nope".into()))
         }
     }
+    let (_tmp, hub_state) = make_hub_state();
     let state = HubState {
-        store: make_hub_state().1.store,
+        store: hub_state.store,
+        object_store: hub_state.object_store,
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
     };
@@ -1415,8 +1422,10 @@ fn authorize_write_with_auth_rejects_missing_token() {
             Err(AuthError::ProviderError("nope".into()))
         }
     }
+    let (_tmp, hub_state) = make_hub_state();
     let state = HubState {
-        store: make_hub_state().1.store,
+        store: hub_state.store,
+        object_store: hub_state.object_store,
         auth: Some(crate::auth::HubAuth::new(Box::new(MockAuth))),
         http_client: None,
     };

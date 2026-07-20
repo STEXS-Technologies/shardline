@@ -3,6 +3,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use tracing;
 
 use crate::{commit::{self, CommitInstruction, ParsedCommit}, error::HubApiError, models::*};
 use shardline_index::hub::HubFileEntry;
@@ -18,7 +19,6 @@ pub(crate) async fn preupload(
     Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
     Json(request): Json<PreuploadRequest>,
 ) -> Result<Json<PreuploadResponse>, HubApiError> {
-    shardline_metrics::record_hub_api_request("preupload", "POST", 200);
     authorize(&state, &headers, TokenScope::Write)?;
     const MAX_PREUPLOAD_FILES: usize = 10_000;
     if request.files.len() > MAX_PREUPLOAD_FILES {
@@ -49,6 +49,7 @@ pub(crate) async fn preupload(
         })
         .collect();
 
+    shardline_metrics::record_hub_api_request("preupload", "POST", 200);
     Ok(Json(PreuploadResponse {
         files: result.clone(),
         result,
@@ -63,8 +64,6 @@ pub(crate) async fn commit(
     Path((_repo_type, ns, repo, rev)): Path<(String, String, String, String)>,
     body: String,
 ) -> Result<Json<CommitResponse>, HubApiError> {
-    shardline_metrics::record_hub_api_request("commit", "POST", 200);
-    shardline_metrics::record_hub_api_commit("ndjson");
     // HF spec requires Content-Type to be application/x-ndjson or application/json.
     let ct_ok = headers
         .get(axum::http::header::CONTENT_TYPE)
@@ -82,10 +81,30 @@ pub(crate) async fn commit(
     let parent_sha = state
         .store
         .resolve_revision(&name, &rev)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?
+        .map_err(|e| {
+            tracing::error!(error = %e, repo = %name, rev = %rev, "resolve_revision failed");
+            HubApiError::CasError(e.to_string())
+        })?
         .ok_or(HubApiError::RevisionNotFound)?;
-    let parsed = commit::parse_ndjson_commit(&body)?;
-    apply_commit(&state, &name, &parent_sha, &parsed).await
+    let parsed = match commit::parse_ndjson_commit(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, repo = %name, "parse_ndjson_commit failed");
+            return Err(e);
+        }
+    };
+    match apply_commit(&state, &name, &parent_sha, &parsed).await {
+        Ok(response) => {
+            shardline_metrics::record_hub_api_request("commit", "POST", 200);
+            shardline_metrics::record_hub_api_commit("ndjson");
+            Ok(response)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, repo = %name, parent = %parent_sha, "commit failed");
+            shardline_metrics::record_hub_api_request("commit", "POST", 500);
+            Err(e)
+        }
+    }
 }
 
 pub(crate) async fn apply_commit(
@@ -107,7 +126,10 @@ pub(crate) async fn apply_commit(
     let existing_files: Vec<HubFileEntry> = state
         .store
         .get_files(parent_sha)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, parent_sha, "get_files failed during commit");
+            HubApiError::CasError(e.to_string())
+        })?;
     let mut files: Vec<HubFileEntry> = existing_files;
     let mut file_hashes = Vec::new();
 
@@ -131,7 +153,10 @@ pub(crate) async fn apply_commit(
                 file_hashes.push(sha);
             }
             CommitInstruction::LfsPointer { path, oid, size } => {
-                commit::validate_lfs_oid(oid)?;
+                commit::validate_lfs_oid(oid).map_err(|e| {
+                    tracing::error!(error = %e, oid, path, "invalid LFS OID");
+                    HubApiError::PathValidation(format!("invalid LFS OID: {e}"))
+                })?;
                 files.retain(|f| f.path != *path);
                 files.push(HubFileEntry {
                     path: path.clone(),
@@ -157,7 +182,10 @@ pub(crate) async fn apply_commit(
     };
     let commit_sha =
         shardline_index::hub::HubRepo::compute_commit_sha(parent_sha, &parsed.message, &files_hash)
-            .map_err(|e| HubApiError::CasError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "compute_commit_sha failed");
+                HubApiError::CasError(e.to_string())
+            })?;
 
     // HUB-008: Orphan cleanup trade-off.
     //
@@ -173,7 +201,10 @@ pub(crate) async fn apply_commit(
     state
         .store
         .store_files(&commit_sha, &files)
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, commit_sha, "store_files failed");
+            HubApiError::CasError(e.to_string())
+        })?;
     state
         .store
         .create_revision(
@@ -183,7 +214,10 @@ pub(crate) async fn apply_commit(
             "main",
             &parsed.message,
         )
-        .map_err(|e| HubApiError::CasError(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, commit_sha, repo_id, "create_revision failed");
+            HubApiError::CasError(e.to_string())
+        })?;
 
     // Fire webhook deliveries in the background (non-blocking).
     deliver_webhook_events(state, repo_id, "push", &commit_sha).await;

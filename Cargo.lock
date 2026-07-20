@@ -3335,6 +3335,7 @@ dependencies = [
  "shardline-metrics",
  "shardline-protocol",
  "shardline-server-core",
+ "shardline-storage",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

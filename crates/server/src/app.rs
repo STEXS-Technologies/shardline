@@ -520,6 +520,7 @@ fn build_hub_state(
 
     Ok(shardline_hub_api::routes::HubState {
         store,
+        object_store: app_state.backend.object_store(),
         auth: hub_auth,
         http_client,
     })
