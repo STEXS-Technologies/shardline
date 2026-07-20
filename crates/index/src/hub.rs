@@ -256,27 +256,6 @@ pub trait HubStore: Send + Sync {
     /// Returns an error when the storage backend operation fails.
     fn get_files(&self, commit_sha: &str) -> Result<Vec<HubFileEntry>, Self::Error>;
 
-    /// Stores an LFS object.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the storage backend operation fails.
-    fn put_lfs_object(&self, oid: &str, data: &[u8]) -> Result<(), Self::Error>;
-
-    /// Returns an LFS object by OID.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the storage backend operation fails.
-    fn get_lfs_object(&self, oid: &str) -> Result<Option<Vec<u8>>, Self::Error>;
-
-    /// Returns whether an LFS object exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the storage backend operation fails.
-    fn has_lfs_object(&self, oid: &str) -> Result<bool, Self::Error>;
-
     /// Creates a webhook for a repository.
     ///
     /// # Errors
@@ -401,19 +380,6 @@ trait ErasedHubStore: Send + Sync {
         commit_sha: &str,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>>;
 
-    fn put_lfs_object(
-        &self,
-        oid: &str,
-        data: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-    fn get_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>>;
-
-    fn has_lfs_object(&self, oid: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
-
     fn create_webhook(
         &self,
         repo_id: &str,
@@ -534,28 +500,6 @@ impl<T: HubStore> ErasedHubStore for T {
         commit_sha: &str,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
         T::get_files(self, commit_sha)
-            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
-    }
-
-    fn put_lfs_object(
-        &self,
-        oid: &str,
-        data: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        T::put_lfs_object(self, oid, data)
-            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
-    }
-
-    fn get_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
-        T::get_lfs_object(self, oid)
-            .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
-    }
-
-    fn has_lfs_object(&self, oid: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        T::has_lfs_object(self, oid)
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())) as _)
     }
 
@@ -764,43 +708,6 @@ impl BoxedHubStore {
         self.inner.get_files(commit_sha)
     }
 
-    /// Stores an LFS object.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the storage backend operation fails.
-    pub fn put_lfs_object(
-        &self,
-        oid: &str,
-        data: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.inner.put_lfs_object(oid, data)
-    }
-
-    /// Returns an LFS object.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the storage backend operation fails.
-    pub fn get_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
-        self.inner.get_lfs_object(oid)
-    }
-
-    /// Returns whether an LFS object exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the storage backend operation fails.
-    pub fn has_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        self.inner.has_lfs_object(oid)
-    }
-
     /// Creates a webhook for a repository.
     ///
     /// # Errors
@@ -959,25 +866,6 @@ where
         commit_sha: &str,
     ) -> Result<Vec<HubFileEntry>, Box<dyn std::error::Error + Send + Sync>> {
         T::get_files(&self.0, commit_sha).map_err(Into::into)
-    }
-
-    fn put_lfs_object(
-        &self,
-        oid: &str,
-        data: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        T::put_lfs_object(&self.0, oid, data).map_err(Into::into)
-    }
-
-    fn get_lfs_object(
-        &self,
-        oid: &str,
-    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
-        T::get_lfs_object(&self.0, oid).map_err(Into::into)
-    }
-
-    fn has_lfs_object(&self, oid: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        T::has_lfs_object(&self.0, oid).map_err(Into::into)
     }
 
     fn create_webhook(
@@ -1208,7 +1096,6 @@ mod tests {
         revisions: std::sync::Mutex<HashMap<String, Vec<HubRevision>>>,
         refs: std::sync::Mutex<HashMap<String, HashMap<String, String>>>,
         files: std::sync::Mutex<HashMap<String, Vec<HubFileEntry>>>,
-        lfs: std::sync::Mutex<HashMap<String, Vec<u8>>>,
         webhooks: std::sync::Mutex<HashMap<String, Vec<HubWebhook>>>,
     }
 
@@ -1219,7 +1106,6 @@ mod tests {
                 revisions: std::sync::Mutex::new(HashMap::new()),
                 refs: std::sync::Mutex::new(HashMap::new()),
                 files: std::sync::Mutex::new(HashMap::new()),
-                lfs: std::sync::Mutex::new(HashMap::new()),
                 webhooks: std::sync::Mutex::new(HashMap::new()),
             }
         }
@@ -1441,22 +1327,6 @@ mod tests {
                 .get(commit_sha)
                 .cloned()
                 .unwrap_or_default())
-        }
-
-        fn put_lfs_object(&self, oid: &str, data: &[u8]) -> Result<(), Self::Error> {
-            self.lfs
-                .lock()
-                .unwrap()
-                .insert(oid.to_owned(), data.to_vec());
-            Ok(())
-        }
-
-        fn get_lfs_object(&self, oid: &str) -> Result<Option<Vec<u8>>, Self::Error> {
-            Ok(self.lfs.lock().unwrap().get(oid).cloned())
-        }
-
-        fn has_lfs_object(&self, oid: &str) -> Result<bool, Self::Error> {
-            Ok(self.lfs.lock().unwrap().contains_key(oid))
         }
 
         fn create_webhook(
@@ -1709,32 +1579,6 @@ mod tests {
     }
 
     #[test]
-    fn boxed_hub_store_lfs_objects() {
-        let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        let data = b"lfs-content-123";
-
-        assert!(!store.has_lfs_object("oid-1").unwrap());
-
-        store.put_lfs_object("oid-1", data).unwrap();
-        assert!(store.has_lfs_object("oid-1").unwrap());
-
-        let loaded = store.get_lfs_object("oid-1").unwrap();
-        assert_eq!(loaded, Some(data.to_vec()));
-
-        let missing = store.get_lfs_object("no-such-oid").unwrap();
-        assert!(missing.is_none());
-    }
-
-    #[test]
-    fn boxed_hub_store_lfs_put_overwrites() {
-        let store = BoxedHubStore::from_store(MemoryHubStore::new());
-        store.put_lfs_object("oid-overwrite", b"v1").unwrap();
-        store.put_lfs_object("oid-overwrite", b"v2").unwrap();
-        let loaded = store.get_lfs_object("oid-overwrite").unwrap();
-        assert_eq!(loaded, Some(b"v2".to_vec()));
-    }
-
-    #[test]
     fn boxed_hub_store_webhook_crud() {
         let store = BoxedHubStore::from_store(MemoryHubStore::new());
         store
@@ -1872,11 +1716,6 @@ mod tests {
         store.store_files("c1", &files).unwrap();
         let loaded = store.get_files("c1").unwrap();
         assert_eq!(loaded.len(), 1);
-
-        // LFS
-        store.put_lfs_object("l1", b"data").unwrap();
-        assert!(store.has_lfs_object("l1").unwrap());
-        assert_eq!(store.get_lfs_object("l1").unwrap(), Some(b"data".to_vec()));
 
         // webhooks
         let wh = store

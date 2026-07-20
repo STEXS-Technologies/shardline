@@ -517,63 +517,6 @@ impl HubStore for PostgresIndexStore {
         })
     }
 
-    fn put_lfs_object(&self, oid: &str, data: &[u8]) -> Result<(), Self::Error> {
-        let pool = self.pool().clone();
-        let oid = oid.to_owned();
-        let data = data.to_vec();
-
-        block_on_async(async {
-            sqlx::query(
-                "INSERT INTO shardline_hub_lfs_objects (oid, data, size, created_at_unix_seconds)
-                 VALUES ($1, $2, $3, EXTRACT(EPOCH FROM now())::bigint)
-                 ON CONFLICT (oid) DO UPDATE SET data = EXCLUDED.data, size = EXCLUDED.size",
-            )
-            .bind(&oid)
-            .bind(&data)
-            .bind(
-                i64::try_from(data.len()).map_err(|err| {
-                    PostgresMetadataStoreError::IntegerOutOfRange(err.to_string())
-                })?,
-            )
-            .execute(&pool)
-            .await?;
-            Ok(())
-        })
-    }
-
-    fn get_lfs_object(&self, oid: &str) -> Result<Option<Vec<u8>>, Self::Error> {
-        let pool = self.pool().clone();
-        let oid = oid.to_owned();
-
-        block_on_async(async {
-            let row = sqlx::query("SELECT data FROM shardline_hub_lfs_objects WHERE oid = $1")
-                .bind(&oid)
-                .fetch_optional(&pool)
-                .await?;
-
-            let Some(row) = row else {
-                return Ok(None);
-            };
-
-            Ok(Some(row.try_get::<Vec<u8>, _>("data")?))
-        })
-    }
-
-    fn has_lfs_object(&self, oid: &str) -> Result<bool, Self::Error> {
-        let pool = self.pool().clone();
-        let oid = oid.to_owned();
-
-        block_on_async(async {
-            let exists: bool = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM shardline_hub_lfs_objects WHERE oid = $1)",
-            )
-            .bind(&oid)
-            .fetch_one(&pool)
-            .await?;
-            Ok(exists)
-        })
-    }
-
     fn delete_repo(&self, repo_id: &str) -> Result<(), Self::Error> {
         let pool = self.pool().clone();
         let repo_id = repo_id.to_owned();
@@ -1020,33 +963,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_put_and_get_lfs_object() {
-        let Some(pool) = connect_postgres().await else {
-            eprintln!("skipping Postgres test: no DATABASE_URL");
-            return;
-        };
-        let store = make_store(pool);
-
-        store
-            .put_lfs_object("pg-lfs-oid1", b"hello pg lfs")
-            .expect("put_lfs_object");
-
-        let retrieved = store.get_lfs_object("pg-lfs-oid1").expect("get_lfs_object");
-        assert_eq!(retrieved.as_deref(), Some(b"hello pg lfs" as &[u8]));
-
-        assert!(store.has_lfs_object("pg-lfs-oid1").expect("has_lfs_object"));
-        assert!(!store.has_lfs_object("pg-lfs-nope").expect("has_lfs_object"));
-
-        if let Err(e) = sqlx::query("DELETE FROM shardline_hub_lfs_objects WHERE oid = $1")
-            .bind("pg-lfs-oid1")
-            .execute(store.pool())
-            .await
-        {
-            eprintln!("cleanup: failed to delete lfs object pg-lfs-oid1: {e}");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn pg_optimistic_concurrency_rejects_stale_parent() {
         let Some(pool) = connect_postgres().await else {
             eprintln!("skipping Postgres test: no DATABASE_URL");
@@ -1116,12 +1032,5 @@ mod tests {
         boxed.store_files(&commit_sha, &files).expect("store_files");
         let retrieved = boxed.get_files(&commit_sha).expect("get_files");
         assert_eq!(retrieved.len(), 1);
-
-        boxed
-            .put_lfs_object("pg-boxed-oid", b"boxed data")
-            .expect("put_lfs");
-        assert!(boxed.has_lfs_object("pg-boxed-oid").unwrap());
-        let data = boxed.get_lfs_object("pg-boxed-oid").unwrap().unwrap();
-        assert_eq!(&data, b"boxed data");
     }
 }
