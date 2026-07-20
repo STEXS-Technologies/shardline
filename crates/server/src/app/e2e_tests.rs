@@ -261,8 +261,10 @@ async fn build_test_hub_state(root: &std::path::Path) -> shardline_hub_api::rout
     let store = shardline_index::LocalIndexStore::new(hub_root.clone()).expect("hub sqlite store");
     shardline_index::hub::ensure_hub_tables(&hub_root).ok();
     let boxed = shardline_index::hub::BoxedHubStore::from_store(store);
+    let object_store = ServerObjectStore::local(root.join("lfs")).expect("local object store");
     shardline_hub_api::routes::HubState {
         store: boxed,
+        object_store,
         auth: None,
         http_client: None,
     }

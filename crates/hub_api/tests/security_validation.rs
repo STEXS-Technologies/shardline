@@ -548,10 +548,15 @@ async fn validate_commit_body_bounded_by_router() {
     .unwrap();
     drop(conn);
 
-    let store = LocalIndexStore::open(root);
+    let store = LocalIndexStore::open(root.clone());
     let boxed = BoxedHubStore::from_store(store);
+    let object_store = shardline_server_core::ServerObjectStore::local(
+        root.join("lfs"),
+    )
+    .expect("local object store");
     let state = HubState {
         store: boxed,
+        object_store,
         auth: None,
         http_client: None,
     };

@@ -287,8 +287,13 @@ mod tests {
         if !files.is_empty() {
             store.store_files("sha_resolve", files).unwrap();
         }
+        let object_store = shardline_server_core::ServerObjectStore::local(
+            ts.path().join("lfs"),
+        )
+        .expect("local object store");
         let state = HubState {
             store,
+            object_store,
             auth: None,
             http_client: None,
         };

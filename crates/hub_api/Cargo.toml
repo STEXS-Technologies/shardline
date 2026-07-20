@@ -27,6 +27,7 @@ shardline-index.workspace = true
 shardline-metrics.workspace = true
 shardline-protocol.workspace = true
 shardline-server-core.workspace = true
+shardline-storage.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 tower-http = { workspace = true, features = ["cors", "set-header"] }
