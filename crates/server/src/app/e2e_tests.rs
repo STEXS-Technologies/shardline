@@ -2150,23 +2150,28 @@ async fn lfs_batch_unsupported_transfer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_put_wrong_content_type() {
+async fn lfs_put_accepts_any_content_type() {
+    // The Content-Type check was relaxed for git-lfs compatibility.
+    // Non-octet-stream Content-Types are accepted; the body is validated
+    // by its SHA-256 digest regardless.
     let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
 
-    let oid = test_oid(b"wrong-content-type-test");
+    let content = b"lfs-put-test-content-42";
+    let oid = test_oid(content);
     let response = app
         .oneshot(
             Request::builder()
                 .method("PUT")
                 .uri(format!("/v1/lfs/objects/{oid}"))
                 .header(header::CONTENT_TYPE, "text/plain")
-                .body(Body::from(b"test".to_vec()))
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2504,6 +2509,314 @@ async fn lfs_batch_with_insufficient_scope() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+// ---------------------------------------------------------------------------
+// LFS Batch Xet Transfer Tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_xet_transfer_upload_returns_xet_headers() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    let token = test_token(TokenScope::Write);
+    let oid = test_oid(b"xet-e2e-upload-test");
+
+    let request = json!({
+        "operation": "upload",
+        "transfers": ["xet", "basic"],
+        "objects": [{"oid": oid, "size": 100}]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["transfer"], "xet", "should negotiate xet transfer");
+    assert_eq!(json["hash_algo"], "sha256");
+
+    let obj = &json["objects"][0];
+    assert_eq!(obj["oid"], oid);
+    let upload = &obj["actions"]["upload"];
+    assert!(
+        upload["href"].as_str().unwrap().contains(&oid),
+        "upload href should contain the OID"
+    );
+
+    let header = &upload["header"];
+    assert!(
+        header["X-Xet-Cas-Url"].as_str().is_some_and(|u| !u.is_empty()),
+        "X-Xet-Cas-Url must be present and non-empty"
+    );
+    assert!(
+        header["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+        "X-Xet-Access-Token must be present and non-empty"
+    );
+    assert!(
+        header["X-Xet-Token-Expiration"].as_str().is_some(),
+        "X-Xet-Token-Expiration must be present"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_xet_transfer_download_existing() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    let token = test_token(TokenScope::Write);
+    let content = b"xet-e2e-download-test-content";
+    let oid = test_oid(content);
+
+    // Upload first (requires auth)
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Batch download with xet
+    let request = json!({
+        "operation": "download",
+        "transfers": ["xet", "basic"],
+        "objects": [{"oid": oid, "size": content.len() as u64}]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["transfer"], "xet");
+
+    let obj = &json["objects"][0];
+    assert_eq!(obj["oid"], oid);
+    let download = &obj["actions"]["download"];
+    assert!(
+        download["header"]["X-Xet-Cas-Url"].as_str().is_some_and(|u| !u.is_empty()),
+        "download should include X-Xet-Cas-Url"
+    );
+    assert!(
+        download["header"]["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+        "download should include X-Xet-Access-Token"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_xet_transfer_upload_existing_object_has_no_actions() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    let token = test_token(TokenScope::Write);
+    let content = b"xet-e2e-existing-test";
+    let oid = test_oid(content);
+
+    // Upload first (requires auth)
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Batch upload — should be a no-op (already exists)
+    let request = json!({
+        "operation": "upload",
+        "transfers": ["xet", "basic"],
+        "objects": [{"oid": oid, "size": content.len() as u64}]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["transfer"], "xet");
+
+    let obj = &json["objects"][0];
+    assert_eq!(obj["oid"], oid);
+    // Existing object should NOT have upload actions
+    assert!(
+        obj.get("actions").is_none() || obj["actions"].as_object().is_none_or(|m| m.is_empty()),
+        "existing object should not have upload actions"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_xet_transfer_download_missing_returns_404() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    let token = test_token(TokenScope::Read);
+    let oid = test_oid(b"xet-e2e-never-uploaded");
+
+    let request = json!({
+        "operation": "download",
+        "transfers": ["xet", "basic"],
+        "objects": [{"oid": oid, "size": 100}]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["transfer"], "xet");
+    let obj = &json["objects"][0];
+    assert_eq!(obj["error"]["code"], 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_xet_transfer_without_auth_uses_basic() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let request = json!({
+        "operation": "download",
+        "transfers": ["xet", "basic"],
+        "objects": []
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    // Without auth, falls back to basic transfer
+    assert_eq!(json["transfer"], "basic");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_xet_transfer_xet_only_without_auth_rejected() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    let request = json!({
+        "operation": "download",
+        "transfers": ["xet"],
+        "objects": []
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_batch_xet_transfer_returns_correct_size() {
+    let (app, _tmp) = test_app_with_auth(&[ServerFrontend::Lfs]).await;
+    let token = test_token(TokenScope::Write);
+    let content = b"xet-e2e-size-test-data-123";
+    let oid = test_oid(content);
+
+    // Upload (requires auth)
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Download with xet — verify size matches
+    let request = json!({
+        "operation": "download",
+        "transfers": ["xet", "basic"],
+        "objects": [{"oid": oid, "size": content.len() as u64}]
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lfs/objects/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let obj = &json["objects"][0];
+    assert_eq!(obj["size"], content.len() as u64);
+}
+
+// ---------------------------------------------------------------------------
+// End LFS Batch Xet Transfer Tests
+// ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_verify_not_found() {
