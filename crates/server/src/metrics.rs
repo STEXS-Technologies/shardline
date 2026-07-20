@@ -132,6 +132,24 @@ pub fn record_shard_stored() {
     shardline_metrics::metrics().storage.record_shard_stored();
 }
 
+pub fn record_lfs_upload() {
+    shardline_metrics::metrics().protocol.record_lfs_upload();
+}
+
+pub fn record_lfs_download() {
+    shardline_metrics::metrics().protocol.record_lfs_download();
+}
+
+pub fn record_xet_xorb_download(bytes: u64) {
+    shardline_metrics::record_xet_xorb_download(bytes);
+}
+
+pub fn record_xet_reconstruction_request() {
+    shardline_metrics::metrics()
+        .xet
+        .record_reconstruction(true, std::time::Duration::from_secs(0), 0);
+}
+
 pub fn record_dedup_saves(bytes: u64) {
     shardline_metrics::metrics()
         .storage

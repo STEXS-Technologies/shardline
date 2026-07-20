@@ -248,6 +248,7 @@ pub(crate) async fn lfs_get_object(
             return Ok(lfs_validation_response("invalid oid"));
         }
     };
+    metrics::record_lfs_download();
     direct_object_response(
         &state,
         &headers,
@@ -318,6 +319,7 @@ pub(crate) async fn lfs_put_object(
         .await?;
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_upload("lfs", content_length, elapsed, true);
+    shardline_metrics::metrics().protocol.record_lfs_upload();
     Ok(StatusCode::OK.into_response())
 }
 

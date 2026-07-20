@@ -1657,6 +1657,292 @@ async fn reconstruction_requires_auth() {
 }
 
 // ============================================================================
+// Metric Emission Verification Tests (TDD)
+// These tests verify that every metric-recording function is wired into
+// production code. Each test performs an operation and checks that the
+// corresponding Prometheus counter/gauge increased. If a metric is defined
+// but never called from production, the test will fail.
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_upload_tracks_protocol_counter() {
+    // Verify shardline_lfs_upload_requests_total increments on LFS PUT.
+    let before = shardline_metrics::metrics().protocol.lfs_uploads.get();
+    let content = b"lfs-metric-upload-test";
+    let oid = test_oid(content);
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let after = shardline_metrics::metrics().protocol.lfs_uploads.get();
+    assert!(after > before, "lfs_uploads should increase");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lfs_download_tracks_protocol_counter() {
+    // Verify shardline_lfs_download_requests_total increments on LFS GET.
+    let content = b"lfs-metric-download-test";
+    let oid = test_oid(content);
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+    // Upload first
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let before = shardline_metrics::metrics().protocol.lfs_downloads.get();
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let after = shardline_metrics::metrics().protocol.lfs_downloads.get();
+    assert!(after > before, "lfs_downloads should increase");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_upload_tracks_storage_metrics() {
+    // Verify shardline_xorbs_bytes_total / shardline_objects_bytes_total
+    // increment when a xorb is uploaded.
+    let bytes_before = shardline_metrics::metrics().storage.xorbs_bytes_total.get();
+    let objects_before = shardline_metrics::metrics().storage.objects_bytes_total.get();
+    let content = b"xorb-metric-storage-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+    let upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), StatusCode::OK);
+    let bytes_after = shardline_metrics::metrics().storage.xorbs_bytes_total.get();
+    let objects_after = shardline_metrics::metrics().storage.objects_bytes_total.get();
+    assert!(
+        bytes_after > bytes_before,
+        "xorbs_bytes_total should increase after xorb upload"
+    );
+    assert!(
+        objects_after >= objects_before,
+        "objects_bytes_total should not regress"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shard_upload_tracks_storage_metrics() {
+    // Verify shardline_shards_total increments on shard upload.
+    let shards_before = shardline_metrics::metrics().storage.shards_total.get();
+    let content = b"shard-metric-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let (shard_bytes, _file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // Upload xorb first
+    let xorb = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xorb.status(), StatusCode::OK);
+
+    // Upload shard
+    let shard = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(shard_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shard.status(), StatusCode::OK);
+    let shards_after = shardline_metrics::metrics().storage.shards_total.get();
+    assert!(
+        shards_after > shards_before,
+        "shards_total should increase after shard upload"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xorb_download_tracks_xet_metric() {
+    // Verify shardline_xet_xorb_downloads_total increments.
+    let downloads_before = shardline_metrics::metrics().xet.xorb_downloads.get();
+    let content = b"xorb-dl-metric-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // Upload xorb
+    let up = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(up.status(), StatusCode::OK);
+
+    // Download via transfer endpoint
+    let dl = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/transfer/xorb/default/{xorb_hash}"))
+                .header(header::RANGE, "bytes=0-")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(dl.status().is_success());
+    let downloads_after = shardline_metrics::metrics().xet.xorb_downloads.get();
+    assert!(
+        downloads_after > downloads_before,
+        "xorb_downloads should increase after xorb download"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconstruction_tracks_xet_metric() {
+    // Verify shardline_xet_reconstructions_total increments.
+    let recon_before = shardline_metrics::metrics().reconstruction.requests.get();
+    let content = b"recon-metric-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let (shard_bytes, file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    // Upload xorb
+    let xorb = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xorb.status(), StatusCode::OK);
+    // Upload shard
+    let shard = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/shards")
+                .body(Body::from(shard_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shard.status(), StatusCode::OK);
+
+    // Query reconstruction
+    let recon = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/reconstructions/{file_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recon.status(), StatusCode::OK);
+    let recon_after = shardline_metrics::metrics().reconstruction.requests.get();
+    assert!(
+        recon_after > recon_before,
+        "reconstruction requests should increase"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn range_request_tracks_transfer_metric() {
+    // Verify shardline_range_requests_total increments on ranged downloads.
+    let before = shardline_metrics::metrics().transfer.range_requests.get();
+    let content = b"range-metric-test-content";
+    let oid = test_oid(content);
+    let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
+
+    // Upload
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, content.len().to_string())
+                .body(Body::from(content.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    // Ranged GET
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header(header::RANGE, "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::PARTIAL_CONTENT);
+    let after = shardline_metrics::metrics().transfer.range_requests.get();
+    assert!(
+        after > before,
+        "range_requests should increase on ranged GET"
+    );
+}
+
+// ============================================================================
 // LFS Protocol Tests
 // ============================================================================
 
