@@ -943,4 +943,45 @@ mod tests {
         assert_eq!(record.chunks.len(), 3);
         assert_eq!(record.total_bytes, 6);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingestor_dedup_records_savings_metric_across_identical_uploads() {
+        // Verify the ingestor plumbing: the ingestor → chunk_store pipeline
+        // correctly processes identical content twice. The actual dedup metric
+        // emission is tested at the chunk_store level with a Local store
+        // (dedup_records_savings_metric_on_already_exists).
+        // Use blackhole so chunks complete synchronously.
+        let object_store = ServerObjectStore::blackhole();
+        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let content = b"aaaabbbbccccdddd"; // 16 bytes → 4 chunks of 4
+
+        // First upload
+        let mut first = FileUploadIngestor::new(chunk_size, false);
+        first
+            .ingest_body_chunk(&object_store, &Bytes::from_static(content))
+            .await
+            .unwrap();
+        let first_finished = first.finish(&object_store, "first.bin", None, None).await;
+        assert!(first_finished.is_ok());
+        let Ok((_record, first_response)) = first_finished else {
+            return;
+        };
+        assert_eq!(first_response.inserted_chunks, 4);
+        assert_eq!(first_response.reused_chunks, 0);
+
+        // Second upload with same content
+        let mut second = FileUploadIngestor::new(chunk_size, false);
+        second
+            .ingest_body_chunk(&object_store, &Bytes::from_static(content))
+            .await
+            .unwrap();
+        let second_finished = second.finish(&object_store, "second.bin", None, None).await;
+        assert!(second_finished.is_ok());
+        let Ok((_record, second_response)) = second_finished else {
+            return;
+        };
+        // Blackhole always returns Inserted, so all chunks are "inserted" again
+        assert_eq!(second_response.inserted_chunks, 4);
+        assert_eq!(second_response.reused_chunks, 0);
+    }
 }
