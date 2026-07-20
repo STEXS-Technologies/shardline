@@ -14,7 +14,7 @@ use serde_json::json;
 use shardline_protocol::TokenScope;
 
 use crate::{
-    HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
+    HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse, metrics,
     app::{
         AppState, authorize, scope_from_auth,
         reconstruction_helpers::{
@@ -103,8 +103,18 @@ pub(super) async fn upload_xorb(
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
     authorize(&state, &headers, TokenScope::Write)?;
     validate_hash_path(&hash)?;
-    let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    Ok(Json(state.backend.upload_xorb_stream(&hash, body).await?))
+    let mut body_reader =
+        RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    let body_bytes = crate::upload_ingest::read_body_to_bytes(&mut body_reader).await?;
+    let xorb_length = body_bytes.len() as u64;
+    let response = state
+        .backend
+        .upload_xorb_stream(&hash, RequestBodyReader::from_bytes(bytes::Bytes::from(body_bytes)))
+        .await?;
+    if response.was_inserted {
+        metrics::record_xorb_stored(xorb_length);
+    }
+    Ok(Json(response))
 }
 
 #[tracing::instrument(skip(state, headers), fields(hash = %hash))]
@@ -149,6 +159,7 @@ pub(super) async fn read_xorb_transfer(
     }
     let range = parse_required_xorb_transfer_range(&headers, total_length)?;
     let transfer_bytes = range.len().ok_or(ServerError::Overflow)?;
+    metrics::record_xet_xorb_download(total_length);
     let byte_stream = state
         .backend
         .read_xorb_range_stream(&hash, total_length, range)
@@ -188,16 +199,16 @@ pub(super) async fn upload_shard(
 ) -> Result<Json<ShardUploadResponse>, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    Ok(Json(
-        state
-            .backend
-            .upload_shard_stream(
-                body,
-                auth.as_ref().map(scope_from_auth),
-                state.config.shard_metadata_limits(),
-            )
-            .await?,
-    ))
+    let response = state
+        .backend
+        .upload_shard_stream(
+            body,
+            auth.as_ref().map(scope_from_auth),
+            state.config.shard_metadata_limits(),
+        )
+        .await?;
+    metrics::record_shard_stored();
+    Ok(Json(response))
 }
 
 #[tracing::instrument(skip(state, headers))]

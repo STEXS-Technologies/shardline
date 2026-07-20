@@ -25,6 +25,7 @@ pub(crate) async fn direct_object_response(
         .read_object_stream(object_key, total_length, range)
         .await?;
     let mut response = if let Some(range) = range {
+        metrics::record_range_request();
         let transfer_length = range.len().ok_or(ServerError::Overflow)?;
         byte_range_stream_response(
             byte_stream,
