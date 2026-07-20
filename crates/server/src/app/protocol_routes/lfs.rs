@@ -20,12 +20,12 @@ use futures_util::StreamExt;
 use shardline_storage::DeleteOutcome;
 
 use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
+use crate::app::{AppState, authorize, scope_from_auth};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     ServerError, lfs_object_key, metrics,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
-use crate::app::{AppState, authorize, scope_from_auth};
 
 /// Maximum LFS object size allowed for server-side verification (1 GiB).
 /// Objects above this threshold are rejected with a 413 to prevent OOM.
@@ -89,9 +89,8 @@ pub(crate) async fn lfs_batch(
 
     // Determine the transfer adapter. Prefer "xet" when the client supports it
     // and the server has an auth provider to mint CAS tokens. Fall back to "basic".
-    let use_xet = request.transfers.iter().any(|t| t == "xet")
-        && state.auth.is_some()
-        && auth.is_some();
+    let use_xet =
+        request.transfers.iter().any(|t| t == "xet") && state.auth.is_some() && auth.is_some();
     let transfer = if use_xet {
         "xet"
     } else if request.transfers.is_empty()
@@ -110,17 +109,20 @@ pub(crate) async fn lfs_batch(
     // Mint a CAS token when using xet transfer. The existing claims are
     // re-signed so git-xet receives a scoped token for the CAS layer.
     let cas_token = if use_xet {
-        auth.as_ref()
-            .and_then(|ctx| {
-                state
-                    .auth
-                    .as_ref()
-                    .and_then(|server_auth| server_auth.provider().mint_token(ctx.claims()).ok())
-            })
+        auth.as_ref().and_then(|ctx| {
+            state
+                .auth
+                .as_ref()
+                .and_then(|server_auth| server_auth.provider().mint_token(ctx.claims()).ok())
+        })
     } else {
         None
     };
-    let cas_url = state.config.public_base_url().trim_end_matches('/').to_owned();
+    let cas_url = state
+        .config
+        .public_base_url()
+        .trim_end_matches('/')
+        .to_owned();
     let xet_action_header = cas_token.as_ref().map(|token| {
         json!({
             crate::cas_headers::URL: &cas_url,
@@ -1173,11 +1175,16 @@ mod tests {
 
         let header = &upload["header"];
         assert!(
-            header["X-Xet-Cas-Url"].as_str().unwrap().contains("http://127.0.0.1:8080"),
+            header["X-Xet-Cas-Url"]
+                .as_str()
+                .unwrap()
+                .contains("http://127.0.0.1:8080"),
             "CAS URL should point to the server"
         );
         assert!(
-            header["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+            header["X-Xet-Access-Token"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
             "Access token should be present and non-empty"
         );
         assert!(
@@ -1243,11 +1250,15 @@ mod tests {
 
         let header = &download["header"];
         assert!(
-            header["X-Xet-Cas-Url"].as_str().is_some_and(|u| !u.is_empty()),
+            header["X-Xet-Cas-Url"]
+                .as_str()
+                .is_some_and(|u| !u.is_empty()),
             "download actions should include X-Xet-Cas-Url"
         );
         assert!(
-            header["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+            header["X-Xet-Access-Token"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
             "download actions should include X-Xet-Access-Token"
         );
     }

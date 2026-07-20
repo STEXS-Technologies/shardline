@@ -1731,7 +1731,10 @@ async fn xorb_upload_tracks_storage_metrics() {
     // Verify shardline_xorbs_bytes_total / shardline_objects_bytes_total
     // increment when a xorb is uploaded.
     let bytes_before = shardline_metrics::metrics().storage.xorbs_bytes_total.get();
-    let objects_before = shardline_metrics::metrics().storage.objects_bytes_total.get();
+    let objects_before = shardline_metrics::metrics()
+        .storage
+        .objects_bytes_total
+        .get();
     let content = b"xorb-metric-storage-test";
     let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
@@ -1748,7 +1751,10 @@ async fn xorb_upload_tracks_storage_metrics() {
         .unwrap();
     assert_eq!(upload.status(), StatusCode::OK);
     let bytes_after = shardline_metrics::metrics().storage.xorbs_bytes_total.get();
-    let objects_after = shardline_metrics::metrics().storage.objects_bytes_total.get();
+    let objects_after = shardline_metrics::metrics()
+        .storage
+        .objects_bytes_total
+        .get();
     assert!(
         bytes_after > bytes_before,
         "xorbs_bytes_total should increase after xorb upload"
@@ -1765,7 +1771,8 @@ async fn shard_upload_tracks_storage_metrics() {
     let shards_before = shardline_metrics::metrics().storage.shards_total.get();
     let content = b"shard-metric-test";
     let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
-    let (shard_bytes, _file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let (shard_bytes, _file_id) =
+        test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 
     // Upload xorb first
@@ -1983,7 +1990,10 @@ async fn oci_download_tracks_protocol_counter() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_api_file_upload_tracks_protocol_counter() {
-    let up_before = shardline_metrics::metrics().protocol.hub_api_file_uploads.get();
+    let up_before = shardline_metrics::metrics()
+        .protocol
+        .hub_api_file_uploads
+        .get();
     let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
 
     // Create a repo first
@@ -1994,7 +2004,9 @@ async fn hub_api_file_upload_tracks_protocol_counter() {
                 .method("POST")
                 .uri("/api/repos/create")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"metric-test","type":"model","organization":"org","private":false}"#))
+                .body(Body::from(
+                    r#"{"name":"metric-test","type":"model","organization":"org","private":false}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -2017,13 +2029,19 @@ async fn hub_api_file_upload_tracks_protocol_counter() {
         .await
         .unwrap();
     assert_eq!(upload.status(), StatusCode::OK);
-    let up_after = shardline_metrics::metrics().protocol.hub_api_file_uploads.get();
+    let up_after = shardline_metrics::metrics()
+        .protocol
+        .hub_api_file_uploads
+        .get();
     assert!(up_after > up_before, "hub_api_file_uploads should increase");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_api_file_download_tracks_protocol_counter() {
-    let dl_before = shardline_metrics::metrics().protocol.hub_api_file_downloads.get();
+    let dl_before = shardline_metrics::metrics()
+        .protocol
+        .hub_api_file_downloads
+        .get();
     let (app, _tmp) = test_app(&[ServerFrontend::Hub]).await;
     let content = b"hub-api-file-dl-metric";
     let oid = test_oid(content);
@@ -2055,8 +2073,14 @@ async fn hub_api_file_download_tracks_protocol_counter() {
         .await
         .unwrap();
     assert_eq!(dl.status(), StatusCode::OK);
-    let dl_after = shardline_metrics::metrics().protocol.hub_api_file_downloads.get();
-    assert!(dl_after > dl_before, "hub_api_file_downloads should increase");
+    let dl_after = shardline_metrics::metrics()
+        .protocol
+        .hub_api_file_downloads
+        .get();
+    assert!(
+        dl_after > dl_before,
+        "hub_api_file_downloads should increase"
+    );
 }
 
 // ============================================================================
@@ -2096,7 +2120,8 @@ async fn dedupe_shard_query_tracks_xet_metric() {
     let before_queries = shardline_metrics::metrics().xet.dedupe_shard_queries.get();
     let content = b"dedupe-query-metric-test";
     let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
-    let (shard_bytes, _file_id) = test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
+    let (shard_bytes, _file_id) =
+        test_fixtures::single_file_shard(&[(content, xorb_hash.as_str())]);
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 
     // Upload xorb
@@ -2156,7 +2181,10 @@ async fn dedupe_shard_query_tracks_xet_metric() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn object_stored_tracks_metrics_on_lfs_upload() {
-    let obj_before = shardline_metrics::metrics().storage.objects_bytes_total.get();
+    let obj_before = shardline_metrics::metrics()
+        .storage
+        .objects_bytes_total
+        .get();
     let (app, _tmp) = test_app(&[ServerFrontend::Lfs]).await;
     let content = b"object-stored-metric-test-data";
     let oid = test_oid(content);
@@ -2175,7 +2203,10 @@ async fn object_stored_tracks_metrics_on_lfs_upload() {
         .await
         .unwrap();
     assert_eq!(upload.status(), StatusCode::OK);
-    let obj_after = shardline_metrics::metrics().storage.objects_bytes_total.get();
+    let obj_after = shardline_metrics::metrics()
+        .storage
+        .objects_bytes_total
+        .get();
     assert!(
         obj_after >= obj_before,
         "objects_bytes_total should not regress after LFS upload"
@@ -3218,11 +3249,15 @@ async fn lfs_batch_xet_transfer_upload_returns_xet_headers() {
 
     let header = &upload["header"];
     assert!(
-        header["X-Xet-Cas-Url"].as_str().is_some_and(|u| !u.is_empty()),
+        header["X-Xet-Cas-Url"]
+            .as_str()
+            .is_some_and(|u| !u.is_empty()),
         "X-Xet-Cas-Url must be present and non-empty"
     );
     assert!(
-        header["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+        header["X-Xet-Access-Token"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
         "X-Xet-Access-Token must be present and non-empty"
     );
     assert!(
@@ -3282,11 +3317,15 @@ async fn lfs_batch_xet_transfer_download_existing() {
     assert_eq!(obj["oid"], oid);
     let download = &obj["actions"]["download"];
     assert!(
-        download["header"]["X-Xet-Cas-Url"].as_str().is_some_and(|u| !u.is_empty()),
+        download["header"]["X-Xet-Cas-Url"]
+            .as_str()
+            .is_some_and(|u| !u.is_empty()),
         "download should include X-Xet-Cas-Url"
     );
     assert!(
-        download["header"]["X-Xet-Access-Token"].as_str().is_some_and(|t| !t.is_empty()),
+        download["header"]["X-Xet-Access-Token"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
         "download should include X-Xet-Access-Token"
     );
 }
