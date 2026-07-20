@@ -198,6 +198,9 @@ impl FileUploadIngestor {
         if matches!(object_store, ServerObjectStore::Blackhole) {
             let chunk = ChunkBuffer::Shared(chunk);
             let outcome = put_if_absent_chunk_buffer(object_store, chunk).await?;
+            if outcome.inserted {
+                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+            }
             self.completed_chunks.push(SequencedStoredChunkOutcome {
                 sequence,
                 offset,
@@ -211,6 +214,9 @@ impl FileUploadIngestor {
         self.in_flight_chunks.spawn(async move {
             let chunk = ChunkBuffer::Shared(chunk);
             let outcome = put_if_absent_chunk_buffer(&object_store, chunk).await?;
+            if outcome.inserted {
+                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+            }
             Ok(SequencedStoredChunkTaskOutcome {
                 sequence,
                 offset,
@@ -236,6 +242,9 @@ impl FileUploadIngestor {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
                 put_if_absent_pooled_chunk_buffer(object_store, chunk).await?;
+            if outcome.inserted {
+                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+            }
             if let Some(reusable_buffer) = reusable_buffer {
                 self.recycle_pending_buffer(reusable_buffer);
             }
@@ -253,6 +262,9 @@ impl FileUploadIngestor {
             let chunk = ChunkBuffer::Pooled(chunk.freeze());
             let (outcome, reusable_buffer) =
                 put_if_absent_pooled_chunk_buffer(&object_store, chunk).await?;
+            if outcome.inserted {
+                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+            }
             Ok(SequencedStoredChunkTaskOutcome {
                 sequence,
                 offset,
