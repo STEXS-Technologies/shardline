@@ -2072,7 +2072,8 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
         rollback_read, upgraded_repo,
         "rollback must preserve v1.0.0 Hub metadata"
     );
-    let added_column_exists: bool = sqlx::query_scalar(
+    // Verify the drop_inline_content migration removed the column
+    let column_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT FROM information_schema.columns \
          WHERE table_name = 'shardline_hub_file_entries' AND column_name = 'inline_content')",
     )
@@ -2080,8 +2081,8 @@ async fn test_v1_0_0_database_upgrade_and_rollback_preserves_hub_metadata() {
     .await
     .unwrap();
     assert!(
-        !added_column_exists,
-        "rollback must remove the column unknown to the v1.0.0 schema"
+        !column_exists,
+        "drop_inline_content migration must remove the column"
     );
 
     pool.close().await;

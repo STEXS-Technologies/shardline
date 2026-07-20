@@ -471,10 +471,6 @@ fn make_hub_state() -> (tempfile::TempDir, HubState) {
             sha TEXT NOT NULL, is_lfs INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (commit_sha, path)
         );
-        CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
-            oid TEXT PRIMARY KEY, data BLOB NOT NULL, size INTEGER NOT NULL,
-            created_at_unix_seconds INTEGER NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
             id TEXT PRIMARY KEY, repo_id TEXT NOT NULL,
             url TEXT NOT NULL, events TEXT NOT NULL DEFAULT 'push', secret TEXT,
