@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 
 // ──── Pattern 1: MemoryReconstructionCache loading-dedup ────────────────
 //
-// Models `crates/cache/src/memory.rs`'s RwLock + Notify pattern:
+// Models `crates/shardline-cache/src/memory.rs`'s RwLock + Notify pattern:
 // Multiple tasks request the same key simultaneously. The first acquires a
 // write lock and loads; subsequent tasks read from the cache.
 
@@ -86,7 +86,7 @@ mod loading_dedup {
 
 // ──── Pattern 2: Reconstruction cache atomic counters ───────────────────
 //
-// Models `crates/server/src/reconstruction_cache.rs` AtomicUsize counters
+// Models `crates/shardline-server/src/reconstruction_cache.rs` AtomicUsize counters
 // used to track loader calls.
 
 mod atomic_counters {
@@ -139,7 +139,7 @@ mod atomic_counters {
 
 // ──── Pattern 3: GC quarantine state transitions ────────────────────────
 //
-// Models `crates/gc/src/quarantine.rs` state machine: concurrent reads and
+// Models `crates/shardline-gc/src/quarantine.rs` state machine: concurrent reads and
 // writes to a shared Mutex-protected set.
 
 mod quarantine_state {
@@ -206,7 +206,7 @@ mod quarantine_state {
 
 // ──── Pattern 4: Mutex-protected hook registration (local_fs style) ─────
 //
-// Models `crates/storage/src/local_fs.rs`'s `BEFORE_LOCAL_WRITE_HOOK`
+// Models `crates/shardline-storage/src/local_fs.rs`'s `BEFORE_LOCAL_WRITE_HOOK`
 // pattern: a global Mutex<Option<...>> set before a write, consumed during it.
 
 mod hook_registration {
@@ -332,7 +332,7 @@ mod concurrency_limit {
 
 // ──── Pattern 6: RwLock concurrent read + write (cache store style) ─────
 //
-// Models `crates/cache/src/memory.rs`'s store operation: one thread writes
+// Models `crates/shardline-cache/src/memory.rs`'s store operation: one thread writes
 // to the cache while readers concurrently read. Verifies no torn reads and
 // eventual consistency.
 

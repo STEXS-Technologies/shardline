@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PG_DIR="$REPO_ROOT/migrations"
-SQLITE_DIR="$REPO_ROOT/crates/index/migrations"
+SQLITE_DIR="$REPO_ROOT/crates/shardline-index/migrations"
 
 pg_versions=$(ls "$PG_DIR"/*.up.sql 2>/dev/null | xargs -I{} basename {} | sed 's/_.*//' | sort)
 sqlite_versions=$(ls "$SQLITE_DIR"/*.up.sql 2>/dev/null | xargs -I{} basename {} | sed 's/_.*//' | sort)
@@ -33,7 +33,7 @@ if [ -n "$only_pg" ]; then
   echo "$only_pg" | sed 's/^/  - /'
 fi
 if [ -n "$only_sqlite" ]; then
-  echo "Only in SQLite (crates/index/migrations/):"
+  echo "Only in SQLite (crates/shardline-index/migrations/):"
   echo "$only_sqlite" | sed 's/^/  - /'
 fi
 exit 1
