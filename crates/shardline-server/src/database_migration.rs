@@ -157,21 +157,17 @@ const SHARDLINE_MIGRATIONS: [DatabaseMigration; 13] = [
     DatabaseMigration {
         version: "20260418020000",
         name: "provider_repository_states",
-        up_sql: include_str!(
-            "../../../migrations/20260418020000_provider_repository_states.up.sql"
-        ),
-        down_sql: include_str!(
-            "../../../migrations/20260418020000_provider_repository_states.down.sql"
-        ),
+        up_sql: include_str!("../migrations/20260418020000_provider_repository_states.up.sql"),
+        down_sql: include_str!("../migrations/20260418020000_provider_repository_states.down.sql"),
     },
     DatabaseMigration {
         version: "20260418110000",
         name: "provider_repository_reconciliation",
         up_sql: include_str!(
-            "../../../migrations/20260418110000_provider_repository_reconciliation.up.sql"
+            "../migrations/20260418110000_provider_repository_reconciliation.up.sql"
         ),
         down_sql: include_str!(
-            "../../../migrations/20260418110000_provider_repository_reconciliation.down.sql"
+            "../migrations/20260418110000_provider_repository_reconciliation.down.sql"
         ),
     },
     DatabaseMigration {
