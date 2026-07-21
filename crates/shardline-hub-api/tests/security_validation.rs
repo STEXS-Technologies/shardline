@@ -25,7 +25,7 @@
 /// `alg: "none"`. The `exp` claim is required (not defaulted to u64::MAX).
 #[test]
 fn validate_jwt_signature_checked_oidc() {
-    let oidc_source = include_str!("../../server/src/oidc_provider.rs");
+    let oidc_source = include_str!("../../shardline-server/src/oidc_provider.rs");
 
     assert!(
         oidc_source.contains("let keys = self.get_cached_keys()"),
@@ -61,7 +61,7 @@ fn validate_jwt_signature_checked_oidc() {
 /// validates the issuer, and requires the `exp` claim.
 #[test]
 fn validate_jwt_signature_checked_jwks() {
-    let jwks_source = include_str!("../../server/src/jwks_provider.rs");
+    let jwks_source = include_str!("../../shardline-server/src/jwks_provider.rs");
 
     assert!(
         jwks_source.contains("cached_keys.try_read()"),
@@ -91,8 +91,8 @@ fn validate_jwt_signature_checked_jwks() {
 /// `AuthError::InvalidToken`.
 #[test]
 fn validate_jwt_alg_none_attack_blocked() {
-    let oidc_source = include_str!("../../server/src/oidc_provider.rs");
-    let jwks_source = include_str!("../../server/src/jwks_provider.rs");
+    let oidc_source = include_str!("../../shardline-server/src/oidc_provider.rs");
+    let jwks_source = include_str!("../../shardline-server/src/jwks_provider.rs");
 
     let oidc_verify_start = oidc_source.find("fn verify_jwt_claims").unwrap();
     let oidc_verify_end = oidc_source
@@ -121,8 +121,8 @@ fn validate_jwt_alg_none_attack_blocked() {
 /// instead of `unwrap_or(u64::MAX)`.
 #[test]
 fn validate_missing_exp_now_rejected() {
-    let oidc_source = include_str!("../../server/src/oidc_provider.rs");
-    let jwks_source = include_str!("../../server/src/jwks_provider.rs");
+    let oidc_source = include_str!("../../shardline-server/src/oidc_provider.rs");
+    let jwks_source = include_str!("../../shardline-server/src/jwks_provider.rs");
 
     assert!(
         !oidc_source.contains("unwrap_or(u64::MAX)"),
@@ -152,7 +152,7 @@ fn validate_missing_exp_now_rejected() {
 /// performs DNS resolution to block private/internal IPs at delivery time.
 #[test]
 fn validate_deliver_one_webhook_has_url_validation() {
-    let routes_source = include_str!("../../hub_api/src/routes/webhooks.rs");
+    let routes_source = include_str!("../src/routes/webhooks.rs");
 
     let start = routes_source.find("async fn deliver_one_webhook").unwrap();
     let fn_body = &routes_source[start..start + 2000];
@@ -173,7 +173,7 @@ fn validate_deliver_one_webhook_has_url_validation() {
 /// host presence, URL length, and rejects private/internal IPs.
 #[test]
 fn validate_webhook_url_validation_exists() {
-    let routes_source = include_str!("../../hub_api/src/routes/webhooks.rs");
+    let routes_source = include_str!("../src/routes/webhooks.rs");
 
     assert!(
         routes_source.contains("fn validate_webhook_url("),
@@ -268,7 +268,7 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
 /// **[FIXED]**: The hub API router now applies `DefaultBodyLimit::max(64MB)`.
 #[test]
 fn validate_hub_router_has_body_limit() {
-    let lib_source = include_str!("../../hub_api/src/lib.rs");
+    let lib_source = include_str!("../src/lib.rs");
 
     assert!(
         lib_source.contains("DefaultBodyLimit::max"),
@@ -284,7 +284,7 @@ fn validate_hub_router_has_body_limit() {
 /// oversized requests before they reach the handler.
 #[test]
 fn validate_commit_handler_body_bounded_by_router() {
-    let lib_source = include_str!("../../hub_api/src/lib.rs");
+    let lib_source = include_str!("../src/lib.rs");
 
     assert!(
         lib_source.contains("DefaultBodyLimit::max"),
@@ -297,7 +297,7 @@ fn validate_commit_handler_body_bounded_by_router() {
 /// **[MITIGATED]**: Same as above — the router-level limit applies.
 #[test]
 fn validate_lfs_upload_unbounded_body() {
-    let routes_source = include_str!("../../hub_api/src/routes/lfs.rs");
+    let routes_source = include_str!("../src/routes/lfs.rs");
 
     assert!(
         routes_source.contains("body: Bytes") && routes_source.contains("async fn lfs_upload("),
@@ -351,7 +351,7 @@ fn validate_commit_rejects_absolute_paths() {
 /// max length.
 #[test]
 fn validate_commit_has_path_validation() {
-    let commit_source = include_str!("../../hub_api/src/commit.rs");
+    let commit_source = include_str!("../src/commit.rs");
 
     assert!(
         commit_source.contains("fn validate_commit_path("),
@@ -373,7 +373,7 @@ fn validate_commit_has_path_validation() {
 /// decompression. Oversized output is rejected.
 #[test]
 fn validate_decompress_zlib_has_size_limit() {
-    let smart_http_source = include_str!("../../hub_api/src/git/smart_http/pack_parse.rs");
+    let smart_http_source = include_str!("../src/git/smart_http/pack_parse.rs");
 
     assert!(
         smart_http_source.contains("MAX_DECOMPRESSED_SIZE"),
@@ -395,7 +395,7 @@ fn validate_decompress_zlib_has_size_limit() {
 /// before left-shifting, preventing integer overflow from malicious packs.
 #[test]
 fn validate_pack_parser_shift_overflow_protected() {
-    let smart_http_source = include_str!("../../hub_api/src/git/smart_http/pack_parse.rs");
+    let smart_http_source = include_str!("../src/git/smart_http/pack_parse.rs");
 
     let parse_start = smart_http_source.find("fn parse_pack_data").unwrap();
     let parse_fn = &smart_http_source[parse_start..parse_start + 2500];
@@ -415,7 +415,7 @@ fn validate_pack_parser_shift_overflow_protected() {
 /// **[FIXED]**: The whoami handler now returns `is_admin: false` (not hardcoded true).
 #[test]
 fn validate_whoami_hardcoded_admin() {
-    let handlers_source = include_str!("../../hub_api/src/routes/handlers.rs");
+    let handlers_source = include_str!("../src/routes/handlers.rs");
 
     let whoami_start = handlers_source.find("async fn whoami(").unwrap();
     let whoami_fn = &handlers_source[whoami_start..whoami_start + 800];
@@ -436,7 +436,7 @@ fn validate_whoami_hardcoded_admin() {
 /// "internal error" string instead of `self.to_string()`.
 #[test]
 fn validate_cas_error_no_longer_leaks_internals() {
-    let error_source = include_str!("../../hub_api/src/error.rs");
+    let error_source = include_str!("../src/error.rs");
 
     assert!(
         error_source.contains("CasError(_)") && error_source.contains("\"internal error\""),
@@ -454,7 +454,7 @@ fn validate_cas_error_no_longer_leaks_internals() {
 /// before accumulating each instruction.
 #[test]
 fn validate_ndjson_has_instruction_count_limit() {
-    let commit_source = include_str!("../../hub_api/src/commit.rs");
+    let commit_source = include_str!("../src/commit.rs");
 
     assert!(
         commit_source.contains("MAX_COMMIT_INSTRUCTIONS"),
