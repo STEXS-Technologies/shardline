@@ -5,10 +5,10 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::items_after_test_module
     )
 )]
 
@@ -214,10 +214,18 @@ where
     match outcome {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
-            let _deleted_delivery = index_store
+            if let Err(delete_err) = index_store
                 .delete_webhook_delivery(&recorded_delivery)
                 .await
-                .map_err(Into::into)?;
+                .map_err(Into::into)
+            {
+                tracing::warn!(
+                    delivery_id = recorded_delivery.delivery_id(),
+                    owner = recorded_delivery.owner(),
+                    repo = recorded_delivery.repo(),
+                    "failed to remove webhook delivery record for retry: {delete_err}"
+                );
+            }
             Err(error)
         }
     }

@@ -20,15 +20,21 @@ pub fn parse_xet_hash_hex(value: &str) -> Result<ShardlineHash, HashParseError> 
         .bytes()
         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     {
-        return Err(HashParseError::InvalidCharacter);
+        return Err(HashParseError::InvalidCharacter(
+            "non-lowercase hexadecimal character".to_owned(),
+        ));
     }
 
-    let decoded = hex::decode(value).map_err(|_error| HashParseError::InvalidCharacter)?;
+    let decoded =
+        hex::decode(value).map_err(|e| HashParseError::InvalidCharacter(e.to_string()))?;
     let reordered = decoded
         .chunks_exact(XET_HASH_GROUP_BYTES)
         .flat_map(|chunk| chunk.iter().rev().copied())
         .collect::<Vec<u8>>();
-    let bytes = <[u8; 32]>::try_from(reordered).map_err(|_error| HashParseError::InvalidLength)?;
+    let bytes = <[u8; 32]>::try_from(reordered).map_err(|vec| {
+        let _ = vec;
+        HashParseError::InvalidLength
+    })?;
 
     Ok(ShardlineHash::from_bytes(bytes))
 }
@@ -92,7 +98,49 @@ mod tests {
             xet_hex,
             "07060504030201000f0e0d0c0b0a090817161514131211101f1e1d1c1b1a1918"
         );
-        assert_eq!(parse_xet_hash_hex(&xet_hex), Ok(hash));
+        assert!(matches!(parse_xet_hash_hex(&xet_hex), Ok(h) if h == hash));
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_short_string() {
+        assert!(matches!(
+            parse_xet_hash_hex("abc"),
+            Err(shardline_protocol::HashParseError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_long_string() {
+        assert!(matches!(
+            parse_xet_hash_hex(&"a".repeat(65)),
+            Err(shardline_protocol::HashParseError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_uppercase() {
+        let hex = "A".repeat(64);
+        assert!(matches!(
+            parse_xet_hash_hex(&hex),
+            Err(shardline_protocol::HashParseError::InvalidCharacter(_))
+        ));
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_non_hex_characters() {
+        let hex = format!("{}z{}", "a".repeat(32), "b".repeat(31));
+        assert!(matches!(
+            parse_xet_hash_hex(&hex),
+            Err(shardline_protocol::HashParseError::InvalidCharacter(_))
+        ));
+    }
+
+    #[test]
+    fn parse_xet_hash_hex_rejects_empty_string() {
+        assert!(matches!(
+            parse_xet_hash_hex(""),
+            Err(shardline_protocol::HashParseError::InvalidLength)
+        ));
     }
 
     #[test]
@@ -120,7 +168,7 @@ mod tests {
             let hash = ShardlineHash::from_bytes(bytes);
 
             assert_eq!(xet_hash_hex_string(hash), xet_hex);
-            assert_eq!(parse_xet_hash_hex(xet_hex), Ok(hash));
+            assert!(matches!(parse_xet_hash_hex(xet_hex), Ok(h) if h == hash));
         }
     }
 }

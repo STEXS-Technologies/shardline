@@ -85,3 +85,163 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use prometheus::Registry;
+    use tower::Layer;
+
+    use super::{MetricsLayer, MetricsService};
+    use crate::CasMetrics;
+
+    #[test]
+    fn metrics_layer_and_service_are_clone() {
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+        let _cloned_layer = layer.clone();
+
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(
+                axum::response::Response::builder()
+                    .status(200)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        });
+        let metrics_svc: MetricsService<_> = layer.layer(svc);
+        let _cloned_svc = metrics_svc;
+    }
+
+    #[test]
+    fn metrics_layer_new_stores_metrics_reference() {
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+        // The layer should be usable to wrap a service.
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(
+                axum::response::Response::builder()
+                    .status(200)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        });
+        let _wrapped: MetricsService<_> = layer.layer(svc);
+    }
+
+    #[tokio::test]
+    async fn metrics_service_call_records_metrics() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use prometheus::{Encoder, Registry, TextEncoder};
+        use std::sync::Arc;
+        use tower::Service;
+        use tower::ServiceExt;
+
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(
+                axum::response::Response::builder()
+                    .status(200)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        });
+        let mut wrapped = layer.layer(svc);
+
+        let req = Request::get("/health").body(Body::empty()).unwrap();
+        let response = wrapped.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(response.status(), 200);
+
+        // Verify metrics were recorded
+        let encoder = TextEncoder::new();
+        let families = registry.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&families, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("shardline_active_connections"));
+        assert!(output.contains("shardline_upload_duration_seconds_count"));
+        assert!(output.contains("shardline_download_duration_seconds_count"));
+    }
+
+    #[tokio::test]
+    async fn metrics_service_call_with_error_status_still_records() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use prometheus::{Encoder, Registry, TextEncoder};
+        use std::sync::Arc;
+        use tower::Service;
+        use tower::ServiceExt;
+
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(
+                axum::response::Response::builder()
+                    .status(404)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        });
+        let mut wrapped = layer.layer(svc);
+
+        let req = Request::get("/missing").body(Body::empty()).unwrap();
+        let response = wrapped.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(response.status(), 404);
+
+        // Metrics still recorded
+        let encoder = TextEncoder::new();
+        let families = registry.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&families, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("shardline_active_connections"));
+    }
+
+    #[tokio::test]
+    async fn metrics_service_call_with_server_error_still_records() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use prometheus::{Encoder, Registry, TextEncoder};
+        use std::sync::Arc;
+        use tower::Service;
+        use tower::ServiceExt;
+
+        let registry = Registry::new();
+        let metrics = Arc::new(CasMetrics::new(&registry));
+        let layer = MetricsLayer::new(metrics);
+
+        let svc = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, std::convert::Infallible>(
+                axum::response::Response::builder()
+                    .status(500)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        });
+        let mut wrapped = layer.layer(svc);
+
+        let req = Request::get("/error").body(Body::empty()).unwrap();
+        let response = wrapped.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(response.status(), 500);
+
+        let encoder = TextEncoder::new();
+        let families = registry.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&families, &mut buffer).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("shardline_active_connections"));
+        assert!(output.contains("shardline_upload_duration_seconds_count"));
+        assert!(output.contains("shardline_download_duration_seconds_count"));
+    }
+}

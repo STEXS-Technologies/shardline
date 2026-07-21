@@ -1,6 +1,7 @@
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
+    error::Error,
     fs::{self, File, remove_file, symlink_metadata},
     io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
@@ -12,7 +13,7 @@ const LOCAL_DIRECTORY_MODE: u32 = 0o700;
 const LOCAL_FILE_MODE: u32 = 0o600;
 
 #[cfg(unix)]
-use shardline_storage::anchored_fs::{
+use shardline_storage::{
     AnchoredPathOptions, AnchoredTarget,
     ensure_parent_path_matches_anchor as ensure_parent_path_matches_anchor_shared, fd_child_path,
     open_directory_chain as open_directory_chain_shared, open_new_file as open_new_file_shared,
@@ -307,22 +308,31 @@ fn invalid_output_path_error() -> io::Error {
     )
 }
 
+/// Prints an error and its full source chain to stderr.
+pub fn print_error_chain(error: &dyn Error) {
+    eprintln!("{error}");
+    let mut source = error.source();
+    while let Some(next) = source {
+        eprintln!("caused by: {next}");
+        source = next.source();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::{fs, io::ErrorKind, path::PathBuf};
 
-    use super::{remove_output_file_if_present, set_before_local_write_hook, write_output_bytes};
+    use super::{
+        effective_parent_path, remove_output_file_if_present, set_before_local_write_hook,
+        write_output_bytes,
+    };
 
     #[cfg(unix)]
     #[test]
     fn write_output_bytes_rejects_symlinked_output_path() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let target = sandbox.path().join("target.json");
         let write = fs::write(&target, b"original");
         assert!(write.is_ok());
@@ -336,34 +346,18 @@ mod tests {
             result,
             Err(error) if error.kind() == ErrorKind::InvalidInput
         ));
-        let target_bytes = fs::read(&target);
-        assert!(target_bytes.is_ok());
-        let Ok(target_bytes) = target_bytes else {
-            return;
-        };
+        let target_bytes = fs::read(&target).unwrap();
         assert_eq!(target_bytes, b"original");
     }
 
     #[cfg(unix)]
     #[test]
     fn write_output_bytes_rejects_parent_swap_race() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
-        let outside = tempfile::tempdir();
-        assert!(outside.is_ok());
-        let Ok(outside) = outside else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
 
         let output = sandbox.path().join("reports").join("output.json");
-        let parent = output.parent().map(PathBuf::from);
-        assert!(parent.is_some());
-        let Some(parent) = parent else {
-            return;
-        };
+        let parent = output.parent().map(PathBuf::from).unwrap();
         let created = fs::create_dir_all(&parent);
         assert!(created.is_ok());
         let moved_parent = sandbox.path().join("detached-reports");
@@ -396,16 +390,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remove_output_file_if_present_rejects_symlinked_parent_directory() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
-        let outside = tempfile::tempdir();
-        assert!(outside.is_ok());
-        let Ok(outside) = outside else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
 
         let output_dir = sandbox.path().join("units");
         let linked = symlink(outside.path(), &output_dir);
@@ -415,31 +401,229 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn ensure_output_directory_creates_missing_parent_dirs() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let nested = sandbox.path().join("a").join("b").join("c");
+        assert!(!nested.exists());
+        let result = super::ensure_output_directory(&nested);
+        assert!(result.is_ok());
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn ensure_output_directory_succeeds_on_existing_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::ensure_output_directory(sandbox.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn remove_output_file_if_present_returns_false_for_missing_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let missing = sandbox.path().join("nonexistent.txt");
+        let result = super::remove_output_file_if_present(&missing);
+        assert!(matches!(result, Ok(false)));
+    }
+
+    #[test]
+    fn remove_output_file_if_present_returns_true_for_existing_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("exists.txt");
+        std::fs::write(&path, b"content").unwrap();
+        let result = super::remove_output_file_if_present(&path);
+        assert!(matches!(result, Ok(true)));
+        assert!(!path.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_output_bytes_creates_private_file_and_directory_modes() {
-        let sandbox = tempfile::tempdir();
-        assert!(sandbox.is_ok());
-        let Ok(sandbox) = sandbox else {
-            return;
-        };
+        let sandbox = tempfile::tempdir().unwrap();
         let output = sandbox.path().join("reports").join("output.json");
 
         let wrote = write_output_bytes(&output, br#"{"ok":true}"#, true);
         assert!(wrote.is_ok());
 
-        let file_metadata = fs::metadata(&output);
-        assert!(file_metadata.is_ok());
-        let Ok(file_metadata) = file_metadata else {
-            return;
-        };
-        let directory_metadata = fs::metadata(sandbox.path().join("reports"));
-        assert!(directory_metadata.is_ok());
-        let Ok(directory_metadata) = directory_metadata else {
-            return;
-        };
+        let file_metadata = fs::metadata(&output).unwrap();
+        let directory_metadata = fs::metadata(sandbox.path().join("reports")).unwrap();
 
         assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(directory_metadata.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_parent_path_uses_dot_for_rootless_path() {
+        // Simulate a path with no parent (e.g. just "file.txt")
+        let path = std::path::Path::new("file.txt");
+        let parent = effective_parent_path(path);
+        assert_eq!(parent, std::path::Path::new("."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_parent_path_uses_given_parent() {
+        let path = std::path::Path::new("/some/dir/file.txt");
+        let parent = effective_parent_path(path);
+        assert_eq!(parent, std::path::Path::new("/some/dir"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_output_path_error_has_expected_message() {
+        let err = super::invalid_output_path_error();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_output_bytes_creates_file_with_content() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("output.json");
+        let wrote = write_output_bytes(&output, br#"{"ok":true}"#, true);
+        assert!(wrote.is_ok());
+        let bytes = std::fs::read(&output).unwrap();
+        assert_eq!(bytes, br#"{"ok":true}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_output_bytes_overwrites_existing_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("existing.json");
+        std::fs::write(&output, b"old").unwrap();
+        let wrote = write_output_bytes(&output, br#"{"updated":true}"#, false);
+        assert!(wrote.is_ok());
+        let bytes = std::fs::read(&output).unwrap();
+        assert_eq!(bytes, br#"{"updated":true}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_output_file_cleanup_on_drop() {
+        use super::AtomicOutputFile;
+        let sandbox = tempfile::tempdir().unwrap();
+        let output = sandbox.path().join("cleanup-test.json");
+        // Create and then drop without committing
+        let file = AtomicOutputFile::create(&output, true);
+        assert!(file.is_ok());
+        drop(file); // Drop should clean up the temp file
+        // The final path should not exist
+        assert!(!output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_existing_target_is_regular_or_missing_rejects_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::ensure_existing_target_is_regular_or_missing(sandbox.path());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_existing_target_is_regular_or_missing_accepts_missing() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let missing = sandbox.path().join("nonexistent.json");
+        let result = super::ensure_existing_target_is_regular_or_missing(&missing);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_existing_target_is_regular_or_missing_accepts_regular_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("regular.json");
+        std::fs::write(&path, b"content").unwrap();
+        let result = super::ensure_existing_target_is_regular_or_missing(&path);
+        assert!(result.is_ok());
+    }
+
+    // ── print_error_chain ─────────────────────────────────────────────
+
+    #[derive(Debug)]
+    struct TestError(&'static str);
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for TestError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    struct ChainedError {
+        message: &'static str,
+        source: Option<Box<dyn std::error::Error>>,
+    }
+
+    impl std::fmt::Display for ChainedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for ChainedError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source.as_ref().map(|e| e.as_ref())
+        }
+    }
+
+    #[test]
+    fn print_error_chain_single_error() {
+        let err = TestError("simple error");
+        super::print_error_chain(&err);
+    }
+
+    #[test]
+    fn print_error_chain_chained_error() {
+        let inner = TestError("inner cause");
+        let outer = ChainedError {
+            message: "outer error",
+            source: Some(Box::new(inner)),
+        };
+        super::print_error_chain(&outer);
+    }
+
+    #[test]
+    fn print_error_chain_deeply_chained() {
+        let level3 = TestError("root cause");
+        let level2 = ChainedError {
+            message: "middle layer",
+            source: Some(Box::new(level3)),
+        };
+        let level1 = ChainedError {
+            message: "outer layer",
+            source: Some(Box::new(level2)),
+        };
+        super::print_error_chain(&level1);
+    }
+
+    #[test]
+    fn print_error_chain_no_source() {
+        #[derive(Debug)]
+        struct NoSourceError;
+
+        impl std::fmt::Display for NoSourceError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("no source error")
+            }
+        }
+
+        impl std::error::Error for NoSourceError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                None
+            }
+        }
+
+        super::print_error_chain(&NoSourceError);
     }
 }

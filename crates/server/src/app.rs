@@ -12,31 +12,39 @@ pub use provider::{
 pub use reconstruction_helpers::{full_byte_stream_response, parse_batch_reconstruction_query};
 
 use std::{
+    fs,
+    future::{Future, pending},
+    io::Error,
     num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::HeaderMap,
+    http::{HeaderMap, Method, header},
+    middleware::{self, Next},
     routing::{get, head, post},
     serve as serve_http,
 };
 use shardline_protocol::{RepositoryScope, TokenScope};
 use tokio::net::TcpListener;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     ServerConfig, ServerError,
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
     config::AuthProviderKind,
+    config::ServerConfigError,
+    jwks_provider::JwksProvider,
     metrics::MetricsLayer,
+    oidc_provider::OidcProvider,
     provider::ProviderTokenService,
     reconstruction_cache::ReconstructionCacheService,
     server_frontend::ServerFrontend,
@@ -46,13 +54,15 @@ use crate::{
 };
 use operational::{
     head_xorb, health, metrics, read_chunk, read_xorb_transfer, ready, stats, upload_shard,
-    upload_xorb,
+    upload_xorb, write_xorb_transfer,
 };
 use protocol_routes::{
-    bazel_get_ac, bazel_get_cas, bazel_put_ac, bazel_put_cas, lfs_batch, lfs_get_object,
-    lfs_head_object, lfs_put_object, oci_api_dispatch, oci_dispatch, oci_registry_token,
-    oci_transfer_dispatch, oci_v2_root,
+    bazel_get, bazel_get_ac, bazel_get_cas, bazel_head, bazel_head_ac, bazel_head_cas, bazel_put,
+    bazel_put_ac, bazel_put_cas, lfs_batch, lfs_delete_object, lfs_get_object, lfs_head_object,
+    lfs_patch_object, lfs_put_object, lfs_verify_object, oci_api_dispatch, oci_dispatch,
+    oci_registry_token, oci_transfer_dispatch, oci_v2_root,
 };
+#[cfg(feature = "fuzzing")]
 pub(crate) use protocol_routes::{parse_oci_path, parse_upload_content_range};
 use provider_routes::{
     git_lfs_authenticate, handle_provider_webhook, issue_provider_token, issue_xet_read_token,
@@ -191,11 +201,24 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         protocol_metrics: ProtocolMetrics::default(),
     });
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers(Any);
+
     let mut app = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/metrics", get(metrics))
-        .layer(MetricsLayer);
+        .layer(MetricsLayer)
+        .layer(middleware::from_fn(security_headers_middleware));
     if role.serves_api() {
         app = app
             .route(
@@ -213,13 +236,42 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
             )
             .route("/v1/stats", get(stats));
     }
+
+    // Build hub routes separately — they carry their own state type (HubState)
+    // and must be merged at the Router<()> level after both sides are
+    // converted via `.with_state()`.
+    let mut hub_state: Option<shardline_hub_api::routes::HubState> = None;
+    let mut xet_frontend_enabled = false;
     for frontend in state.config.server_frontends() {
-        app = register_frontend_routes(app, *frontend, role, &state)?;
+        match frontend {
+            ServerFrontend::Hub => {
+                hub_state = Some(build_hub_state(&state)?);
+            }
+            ServerFrontend::Xet => {
+                xet_frontend_enabled = true;
+                app = register_frontend_routes(app, *frontend, role, &state);
+            }
+            ServerFrontend::Lfs | ServerFrontend::BazelHttp | ServerFrontend::Oci => {
+                app = register_frontend_routes(app, *frontend, role, &state);
+            }
+        }
     }
 
-    Ok(app
+    let app = app
         .layer(DefaultBodyLimit::max(max_request_body_bytes.get()))
-        .with_state(state))
+        .with_state(state);
+
+    // Merge hub routes (Router<()>) into the main app (Router<()>).
+    let app = if let Some(hs) = hub_state {
+        app.merge(shardline_hub_api::hub_routes(hs, !xet_frontend_enabled))
+    } else {
+        app
+    };
+
+    // Apply CORS after every optional frontend has been registered and the Hub
+    // router has been merged, so preflight and normal requests are covered by
+    // the same policy regardless of which protocol owns the route.
+    Ok(app.layer(cors))
 }
 
 /// Runs the Shardline HTTP server.
@@ -230,6 +282,9 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
 /// IO error.
 #[tracing::instrument(skip(config), fields(bind_addr = %config.bind_addr()))]
 pub async fn serve(config: ServerConfig) -> Result<(), ServerError> {
+    shardline_metrics::metrics()
+        .system
+        .set_uptime(shardline_protocol::unix_now_seconds_lossy() as i64);
     let listener = TcpListener::bind(config.bind_addr()).await?;
     tracing::info!("listening on {}", config.bind_addr());
     serve_with_listener(config, listener).await
@@ -245,9 +300,52 @@ pub async fn serve_with_listener(
     config: ServerConfig,
     listener: TcpListener,
 ) -> Result<(), ServerError> {
-    let app = router(config).await?;
+    serve_with_listener_until(config, listener, async {
+        tokio::signal::ctrl_c().await.ok();
+    })
+    .await
+}
+
+/// Runs the server until the supplied shutdown signal resolves.
+///
+/// Keeping the signal injectable lets the shutdown timeout be exercised without
+/// delivering a process-wide signal during tests.
+async fn serve_with_listener_until<F>(
+    config: ServerConfig,
+    listener: TcpListener,
+    shutdown_signal: F,
+) -> Result<(), ServerError>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let app = router(config.clone()).await?;
     tracing::info!("router initialized, starting HTTP serve");
-    serve_http(listener, app).await?;
+    let shutdown_timeout = config.shutdown_timeout();
+    let (shutdown_started_tx, shutdown_started_rx) = oneshot::channel();
+    let graceful_shutdown = async move {
+        shutdown_signal.await;
+        tracing::info!("shutdown signal received, draining connections");
+        let _ignored = shutdown_started_tx.send(());
+    };
+    let serve = serve_http(listener, app).with_graceful_shutdown(graceful_shutdown);
+    if let Some(timeout) = shutdown_timeout {
+        tokio::select! {
+            result = serve => {
+                result.map_err(ServerError::from)?;
+            }
+            () = async {
+                if shutdown_started_rx.await.is_ok() {
+                    tokio::time::sleep(timeout).await;
+                } else {
+                    pending::<()>().await;
+                }
+            } => {
+                tracing::warn!("graceful shutdown timed out after {timeout:?}, aborting");
+            }
+        }
+    } else {
+        serve.await.map_err(ServerError::from)?;
+    }
     Ok(())
 }
 
@@ -255,14 +353,14 @@ fn register_frontend_routes(
     app: Router<Arc<AppState>>,
     frontend: ServerFrontend,
     role: ServerRole,
-    app_state: &AppState,
-) -> Result<Router<Arc<AppState>>, ServerError> {
+    _app_state: &AppState,
+) -> Router<Arc<AppState>> {
     match frontend {
-        ServerFrontend::Xet => Ok(register_xet_routes(app, role)),
-        ServerFrontend::Lfs => Ok(register_lfs_routes(app, role)),
-        ServerFrontend::BazelHttp => Ok(register_bazel_routes(app, role)),
-        ServerFrontend::Oci => Ok(register_oci_routes(app, role)),
-        ServerFrontend::Hub => register_hub_routes(app, app_state),
+        ServerFrontend::Xet => register_xet_routes(app, role),
+        ServerFrontend::Lfs => register_lfs_routes(app, role),
+        ServerFrontend::BazelHttp => register_bazel_routes(app, role),
+        ServerFrontend::Oci => register_oci_routes(app, role),
+        ServerFrontend::Hub => app, // Hub routes are built separately
     }
 }
 
@@ -286,7 +384,10 @@ fn register_xet_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
                 "/v1/xorbs/default/{hash}",
                 head(head_xorb).post(upload_xorb),
             )
-            .route(XORB_TRANSFER_ROUTE, get(read_xorb_transfer));
+            .route(
+                XORB_TRANSFER_ROUTE,
+                get(read_xorb_transfer).put(write_xorb_transfer),
+            );
     }
     app
 }
@@ -296,12 +397,16 @@ fn register_lfs_routes(mut app: Router<Arc<AppState>>, role: ServerRole) -> Rout
         app = app.route("/v1/lfs/objects/batch", post(lfs_batch));
     }
     if role.serves_transfer() {
-        app = app.route(
-            "/v1/lfs/objects/{oid}",
-            get(lfs_get_object)
-                .head(lfs_head_object)
-                .put(lfs_put_object),
-        );
+        app = app
+            .route(
+                "/v1/lfs/objects/{oid}",
+                get(lfs_get_object)
+                    .head(lfs_head_object)
+                    .put(lfs_put_object)
+                    .patch(lfs_patch_object)
+                    .delete(lfs_delete_object),
+            )
+            .route("/v1/lfs/objects/{oid}/verify", post(lfs_verify_object));
     }
     app
 }
@@ -314,11 +419,16 @@ fn register_bazel_routes(
         app = app
             .route(
                 "/v1/bazel/cache/ac/{hash}",
-                get(bazel_get_ac).put(bazel_put_ac),
+                get(bazel_get_ac).put(bazel_put_ac).head(bazel_head_ac),
             )
             .route(
                 "/v1/bazel/cache/cas/{hash}",
-                get(bazel_get_cas).put(bazel_put_cas),
+                get(bazel_get_cas).put(bazel_put_cas).head(bazel_head_cas),
+            )
+            // Flat routes for Bazel client compatibility
+            .route(
+                "/v1/bazel/{hash}",
+                get(bazel_get).put(bazel_put).head(bazel_head),
             );
     }
     app
@@ -366,10 +476,9 @@ pub fn bounded_api_body_limit(configured_limit: NonZeroUsize, endpoint_limit: us
     configured_limit.get().min(endpoint_limit)
 }
 
-fn register_hub_routes(
-    app: Router<Arc<AppState>>,
+fn build_hub_state(
     app_state: &AppState,
-) -> Result<Router<Arc<AppState>>, ServerError> {
+) -> Result<shardline_hub_api::routes::HubState, ServerError> {
     let hub_auth = app_state
         .auth
         .as_ref()
@@ -383,11 +492,15 @@ fn register_hub_routes(
         app_state.config.index_postgres_url().map_or_else(
             || -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
                 let hub_root = root_dir.join("hub");
-                if let Err(e) = std::fs::create_dir_all(&hub_root) {
+                if let Err(e) = fs::create_dir_all(&hub_root) {
                     tracing::warn!("failed to create hub directory: {e}");
                 }
-                let sqlite_store = shardline_index::LocalIndexStore::new(hub_root)
-                    .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
+                let sqlite_store = shardline_index::LocalIndexStore::new(hub_root.clone())
+                    .map_err(|e| ServerError::Io(Error::other(e)))?;
+                // Ensure hub-specific tables exist
+                if let Err(e) = shardline_index::hub::ensure_hub_tables(&hub_root) {
+                    tracing::warn!("failed to create hub tables: {e}");
+                }
                 Ok(shardline_index::hub::BoxedHubStore::from_store(
                     sqlite_store,
                 ))
@@ -396,25 +509,30 @@ fn register_hub_routes(
                 let pool = sqlx::postgres::PgPoolOptions::new()
                     .max_connections(16)
                     .connect_lazy(pg_url)
-                    .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
+                    .map_err(|e| ServerError::Io(Error::other(e)))?;
                 let pg_store = shardline_index::PostgresIndexStore::new(pool);
                 Ok(shardline_index::hub::BoxedHubStore::from_store(pg_store))
             },
         )?;
 
     // Build an HTTP client for outbound webhook delivery.
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+    let http_client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
         .build()
-        .ok();
+    {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::warn!("failed to build HTTP client for webhook delivery: {e}");
+            None
+        }
+    };
 
-    let hub_state = shardline_hub_api::routes::HubState {
+    Ok(shardline_hub_api::routes::HubState {
         store,
+        object_store: app_state.backend.object_store(),
         auth: hub_auth,
         http_client,
-    };
-    shardline_hub_api::init(hub_state);
-    Ok(app.merge(shardline_hub_api::hub_routes()))
+    })
 }
 
 fn endpoint_body_limit(
@@ -452,30 +570,63 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             Ok(Some(ServerAuth::from_provider(provider)))
         }
         AuthProviderKind::Oidc => {
-            let issuer = config.auth_oidc_issuer().ok_or_else(|| {
-                ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
-            })?;
-            let provider = crate::oidc_provider::OidcProvider::new(issuer, None)
+            let issuer = config
+                .auth_oidc_issuer()
+                .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
+            let provider = OidcProvider::new(issuer, None)
                 .await
-                .map_err(|_e| {
-                    ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
-                })?;
+                .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
         AuthProviderKind::Jwks => {
-            let jwks_url = config.auth_jwks_url().ok_or_else(|| {
-                ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
-            })?;
+            let jwks_url = config
+                .auth_jwks_url()
+                .ok_or_else(|| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             let issuer = config.auth_jwks_issuer().unwrap_or("jwks");
-            let provider = crate::jwks_provider::JwksProvider::new(jwks_url, issuer)
+            let provider = JwksProvider::new(jwks_url, issuer)
                 .await
-                .map_err(|_e| {
-                    ServerError::Config(crate::config::ServerConfigError::InvalidAuthProvider)
-                })?;
+                .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
     }
 }
 
+pub(super) async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let response = next.run(request).await;
+    let (mut parts, body) = response.into_parts();
+    let headers = &mut parts.headers;
+    if !headers.contains_key(header::X_CONTENT_TYPE_OPTIONS) {
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            header::HeaderValue::from_static("nosniff"),
+        );
+    }
+    if !headers.contains_key(header::X_FRAME_OPTIONS) {
+        headers.insert(
+            header::X_FRAME_OPTIONS,
+            header::HeaderValue::from_static("DENY"),
+        );
+    }
+    if !headers.contains_key(header::STRICT_TRANSPORT_SECURITY) {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            header::HeaderValue::from_static("max-age=31536000"),
+        );
+    }
+    if !headers.contains_key(header::REFERRER_POLICY) {
+        headers.insert(
+            header::REFERRER_POLICY,
+            header::HeaderValue::from_static("strict-origin-when-cross-origin"),
+        );
+    }
+    axum::response::Response::from_parts(parts, body)
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod e2e_tests;

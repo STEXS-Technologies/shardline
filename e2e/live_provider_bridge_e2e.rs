@@ -809,7 +809,7 @@ async fn reconstruct_record_through_shardline(
             "{}/v1/reconstructions/{}?content_hash={}",
             state.shardline_api_base_url, record.file_id, record.content_hash
         ))
-        .bearer_auth(&issued.token)
+        .bearer_auth(issued.token.expose_secret())
         .send()
         .await?
         .error_for_status()?
@@ -817,7 +817,7 @@ async fn reconstruct_record_through_shardline(
         .await?;
     let mut output = Vec::with_capacity(usize::try_from(record.total_bytes)?);
     for term in &record.chunks {
-        append_record_term_through_shardline(state, &issued.token, term, &mut output).await?;
+        append_record_term_through_shardline(state, issued.token.expose_secret(), term, &mut output).await?;
     }
     if u64::try_from(output.len())? != record.total_bytes {
         return Err(
@@ -1009,7 +1009,7 @@ async fn read_server_stats_for_repository(
     .await?;
     Ok(client
         .get(format!("{shardline_base_url}/v1/stats"))
-        .bearer_auth(&read_token.token)
+        .bearer_auth(read_token.token.expose_secret())
         .send()
         .await?
         .error_for_status()?

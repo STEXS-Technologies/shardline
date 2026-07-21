@@ -101,3 +101,229 @@ fn inspect_repository_record_for_xorb(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::to_vec;
+    use shardline_index::{FileChunkRecord, FileRecord};
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+
+    use super::inspect_repository_record_for_xorb;
+
+    fn make_scope() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None).unwrap()
+    }
+
+    fn make_other_scope() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "other-owner", "repo", None).unwrap()
+    }
+
+    fn make_record(scope: &RepositoryScope, chunk_hash: &str) -> FileRecord {
+        FileRecord {
+            file_id: "test.txt".to_owned(),
+            content_hash: "deadbeef".to_owned(),
+            total_bytes: 100,
+            chunk_size: 64,
+            repository_scope: Some(scope.clone()),
+            chunks: vec![FileChunkRecord {
+                hash: chunk_hash.to_owned(),
+                offset: 0,
+                length: 100,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn matching_hash_and_scope() {
+        let scope = make_scope();
+        let record = make_record(&scope, "abc123");
+        let bytes = to_vec(&record).unwrap();
+
+        let mut found = false;
+        inspect_repository_record_for_xorb(&mut found, &bytes, "abc123", &scope).unwrap();
+        assert!(found);
+    }
+
+    #[test]
+    fn matching_hash_wrong_scope() {
+        let scope = make_scope();
+        let record = make_record(&scope, "abc123");
+        let bytes = to_vec(&record).unwrap();
+
+        let mut found = false;
+        let other = make_other_scope();
+        inspect_repository_record_for_xorb(&mut found, &bytes, "abc123", &other).unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn different_hash() {
+        let scope = make_scope();
+        let record = make_record(&scope, "abc123");
+        let bytes = to_vec(&record).unwrap();
+
+        let mut found = false;
+        inspect_repository_record_for_xorb(&mut found, &bytes, "xyz789", &scope).unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn already_found() {
+        let scope = make_scope();
+        let mut found = true;
+
+        // When found is already true, the function returns early without parsing,
+        // so even garbage bytes are fine.
+        inspect_repository_record_for_xorb(&mut found, b"not valid json", "anything", &scope)
+            .unwrap();
+        assert!(found);
+    }
+
+    #[test]
+    fn invalid_bytes() {
+        let scope = make_scope();
+        let mut found = false;
+
+        let result =
+            inspect_repository_record_for_xorb(&mut found, b"not valid json", "anything", &scope);
+        assert!(result.is_err());
+    }
+
+    // ── read_record tests ───────────────────────────────────────────────────
+
+    use super::read_record;
+    use shardline_index::LocalRecordStore;
+
+    fn make_temp_record_store() -> (tempfile::TempDir, LocalRecordStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalRecordStore::open(tmp.path().to_path_buf());
+        (tmp, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_returns_not_found_for_missing_file() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(&store, "nonexistent.txt", None, None).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_rejects_invalid_file_id() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(&store, "../bad", None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_rejects_invalid_content_hash() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(&store, "test.txt", Some("badhash"), None).await;
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::InvalidContentHash)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_record_with_hash_not_found_for_missing_file() {
+        let (_tmp, store) = make_temp_record_store();
+        let result = read_record(
+            &store,
+            "test.txt",
+            Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    // ── repository_references_xorb tests ────────────────────────────────────
+
+    use super::repository_references_xorb;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_returns_false_for_empty_store() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let result = repository_references_xorb(
+            &store,
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            &scope,
+        )
+        .await
+        .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_returns_true_for_matching_record_in_latest() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let chunk_hash = "fedcba0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let record = make_record(&scope, chunk_hash);
+        shardline_index::RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let result = repository_references_xorb(&store, chunk_hash, &scope)
+            .await
+            .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_returns_true_for_matching_record_in_version() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let chunk_hash = "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let record = make_record(&scope, chunk_hash);
+        shardline_index::RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+
+        let result = repository_references_xorb(&store, chunk_hash, &scope)
+            .await
+            .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_false_for_wrong_hash() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let record = make_record(
+            &scope,
+            "1111aaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff0000",
+        );
+        shardline_index::RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let different_hash = "2222aaaabbbbccccddddeeeeffff00002222aaaabbbbccccddddeeeeffff0000";
+        let result = repository_references_xorb(&store, different_hash, &scope)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repository_references_xorb_false_for_wrong_scope() {
+        let (_tmp, store) = make_temp_record_store();
+        let scope = make_scope();
+        let other_scope = make_other_scope();
+        let chunk_hash = "3333aaaabbbbccccddddeeeeffff00003333aaaabbbbccccddddeeeeffff0000";
+        let record = make_record(&scope, chunk_hash);
+        shardline_index::RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let result = repository_references_xorb(&store, chunk_hash, &other_scope)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+}

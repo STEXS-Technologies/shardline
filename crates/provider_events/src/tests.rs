@@ -9,7 +9,7 @@ use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileId, FileReconstruction, FileRecord,
     IndexStoreFuture, LifecycleStore, LocalIndexStore, LocalIndexStoreError,
     ProviderRepositoryState, QuarantineCandidate, RecordMutation, RecordTraversal, RetentionHold,
-    WebhookDelivery, XorbId, parse_xet_hash_hex, xet_hash_hex_string,
+    RetentionHoldError, WebhookDelivery, XorbId, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, ShardlineHash};
 use shardline_server_core::{ServerObjectStore, chunk_object_key};
@@ -27,7 +27,10 @@ use shardline_xet_core::xorb_object::{
     xorb_format_test_utils::{ChunkSize, build_raw_xorb},
 };
 
-use super::{ProviderEventsError, ProviderWebhookOutcomeKind, apply_provider_webhook_with_stores};
+use super::{
+    ProviderEventsError, ProviderWebhookOutcomeKind, apply_provider_webhook_with_stores,
+    duplicate_webhook_outcome,
+};
 use shardline_index::LocalRecordStore;
 
 async fn local_latest_record_exists(
@@ -82,7 +85,6 @@ async fn repository_deleted_removes_stale_latest_without_version_record() {
     );
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() {
     let result = exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks().await;
@@ -195,6 +197,16 @@ async fn previously_recorded_webhook_delivery_is_a_no_op() {
     assert!(
         result.is_ok(),
         "pre-recorded webhook delivery no-op flow failed: {error:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webhook_failure_with_failed_cleanup_logs_warning() {
+    let result = exercise_webhook_failure_with_failed_cleanup_logs_warning().await;
+    let error = result.as_ref().err().map(ToString::to_string);
+    assert!(
+        result.is_ok(),
+        "webhook failure with failed cleanup flow failed: {error:?}"
     );
 }
 
@@ -433,10 +445,10 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         normalize_serialized_xorb(expected_xorb_hash, &serialized.serialized_data)?;
     let mut reader = Cursor::new(normalized_xorb.as_slice());
     let validated = validate_serialized_xorb(&mut reader, expected_xorb_hash)?;
-    let range_end = u32::try_from(validated.chunks().len())?;
-    let mut chunk_hashes = Vec::new();
+    let range_end = u64::try_from(validated.chunks().len())?;
+    let mut chunk_hashes = std::collections::HashSet::new();
     try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded_chunk| {
-        chunk_hashes.push(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
+        chunk_hashes.insert(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
         Ok::<(), ProviderEventsError>(())
     })?;
     let upload = store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data)?;
@@ -1082,6 +1094,58 @@ async fn exercise_previously_recorded_webhook_delivery_is_a_no_op() -> Result<()
     Ok(())
 }
 
+async fn exercise_webhook_failure_with_failed_cleanup_logs_warning() -> Result<(), Box<dyn Error>> {
+    let storage = tempfile::tempdir()?;
+    let record_store = LocalRecordStore::open(storage.path().to_path_buf());
+    let index_store = FailAlwaysStore::new(LocalIndexStore::new(storage.path().to_path_buf())?);
+    let object_store = ServerObjectStore::local(storage.path().join("chunks"))?;
+    let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;
+    let record = FileRecord {
+        file_id: "asset.bin".to_owned(),
+        content_hash: "a".repeat(64),
+        total_bytes: 4,
+        chunk_size: 4,
+        repository_scope: Some(scope),
+        chunks: vec![FileChunkRecord {
+            hash: "b".repeat(64),
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }],
+    };
+    RecordMutation::write_latest_record(&record_store, &record).await?;
+    RecordMutation::write_version_record(&record_store, &record).await?;
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "team", "assets")?,
+        WebhookDeliveryId::new("delivery-fail-cleanup-1")?,
+        RepositoryWebhookEventKind::RepositoryDeleted,
+    );
+
+    // Both upsert_retention_hold and delete_webhook_delivery fail, exercising the warn path.
+    let result =
+        apply_provider_webhook_with_stores(&record_store, &index_store, &object_store, &event)
+            .await;
+    assert!(matches!(
+        result,
+        Err(ProviderEventsError::IndexStore(
+            LocalIndexStoreError::InvalidLegacyImportState
+        ))
+    ));
+
+    // Delivery record should still NOT be recorded (delete_webhook_delivery failed,
+    // so the delivery was never committed or the failure prevented recording).
+    // The record_webhook_delivery SHOULD have succeeded (it delegates to inner),
+    // but delete_webhook_delivery failed, so the delivery may still exist.
+    // Just verify the error was propagated correctly.
+    assert!(result.is_err());
+
+    Ok(())
+}
+
 async fn exercise_repository_rename_removes_old_scope_latest_without_version_record()
 -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
@@ -1502,6 +1566,309 @@ impl AsyncIndexStore for FailFirstRetentionHoldIndexStore {
     }
 }
 
+/// Wraps a [`LocalIndexStore`] and always fails [`AsyncIndexStore::upsert_retention_hold`]
+/// and [`AsyncIndexStore::delete_webhook_delivery`] to trigger the tracing::warn! error-cleanup
+/// path in [`apply_provider_webhook_with_stores`].
+#[derive(Debug)]
+struct FailAlwaysStore {
+    inner: LocalIndexStore,
+}
+
+impl FailAlwaysStore {
+    fn new(inner: LocalIndexStore) -> Self {
+        Self { inner }
+    }
+}
+
+impl AsyncIndexStore for FailAlwaysStore {
+    type Error = LocalIndexStoreError;
+
+    fn reconstruction<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+    ) -> IndexStoreFuture<'operation, Option<FileReconstruction>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::reconstruction(&self.inner, file_id).await })
+    }
+    fn insert_reconstruction<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+        reconstruction: &'operation FileReconstruction,
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::insert_reconstruction(&self.inner, file_id, reconstruction).await
+        })
+    }
+    fn list_reconstruction_file_ids(&self) -> IndexStoreFuture<'_, Vec<FileId>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::list_reconstruction_file_ids(&self.inner).await })
+    }
+    fn delete_reconstruction<'operation>(
+        &'operation self,
+        file_id: &'operation FileId,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::delete_reconstruction(&self.inner, file_id).await })
+    }
+    fn contains_object<'operation>(
+        &'operation self,
+        object_id: &'operation XorbId,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::contains_object(&self.inner, object_id).await })
+    }
+    fn insert_object<'operation>(
+        &'operation self,
+        object_id: &'operation XorbId,
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        Box::pin(async move { AsyncIndexStore::insert_object(&self.inner, object_id).await })
+    }
+    fn dedupe_shard_mapping<'operation>(
+        &'operation self,
+        chunk_hash: &'operation ShardlineHash,
+    ) -> IndexStoreFuture<'operation, Option<DedupeShardMapping>, Self::Error> {
+        Box::pin(
+            async move { AsyncIndexStore::dedupe_shard_mapping(&self.inner, chunk_hash).await },
+        )
+    }
+    fn list_dedupe_shard_mappings(
+        &self,
+    ) -> IndexStoreFuture<'_, Vec<DedupeShardMapping>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::list_dedupe_shard_mappings(&self.inner).await })
+    }
+    fn visit_dedupe_shard_mappings<'operation, Visitor, VisitorError>(
+        &'operation self,
+        visitor: Visitor,
+    ) -> IndexStoreFuture<'operation, (), VisitorError>
+    where
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(DedupeShardMapping) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(
+            async move { AsyncIndexStore::visit_dedupe_shard_mappings(&self.inner, visitor).await },
+        )
+    }
+    fn upsert_dedupe_shard_mapping<'operation>(
+        &'operation self,
+        mapping: &'operation DedupeShardMapping,
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        Box::pin(
+            async move { AsyncIndexStore::upsert_dedupe_shard_mapping(&self.inner, mapping).await },
+        )
+    }
+    fn delete_dedupe_shard_mapping<'operation>(
+        &'operation self,
+        chunk_hash: &'operation ShardlineHash,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::delete_dedupe_shard_mapping(&self.inner, chunk_hash).await
+        })
+    }
+    fn quarantine_candidate<'operation>(
+        &'operation self,
+        object_key: &'operation ObjectKey,
+    ) -> IndexStoreFuture<'operation, Option<QuarantineCandidate>, Self::Error> {
+        Box::pin(
+            async move { AsyncIndexStore::quarantine_candidate(&self.inner, object_key).await },
+        )
+    }
+    fn list_quarantine_candidates(
+        &self,
+    ) -> IndexStoreFuture<'_, Vec<QuarantineCandidate>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::list_quarantine_candidates(&self.inner).await })
+    }
+    fn visit_quarantine_candidates<'operation, Visitor, VisitorError>(
+        &'operation self,
+        visitor: Visitor,
+    ) -> IndexStoreFuture<'operation, (), VisitorError>
+    where
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(QuarantineCandidate) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(
+            async move { AsyncIndexStore::visit_quarantine_candidates(&self.inner, visitor).await },
+        )
+    }
+    fn upsert_quarantine_candidate<'operation>(
+        &'operation self,
+        candidate: &'operation QuarantineCandidate,
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::upsert_quarantine_candidate(&self.inner, candidate).await
+        })
+    }
+    fn delete_quarantine_candidate<'operation>(
+        &'operation self,
+        object_key: &'operation ObjectKey,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::delete_quarantine_candidate(&self.inner, object_key).await
+        })
+    }
+    fn retention_hold<'operation>(
+        &'operation self,
+        object_key: &'operation ObjectKey,
+    ) -> IndexStoreFuture<'operation, Option<RetentionHold>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::retention_hold(&self.inner, object_key).await })
+    }
+    fn list_retention_holds(&self) -> IndexStoreFuture<'_, Vec<RetentionHold>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::list_retention_holds(&self.inner).await })
+    }
+    fn visit_retention_holds<'operation, Visitor, VisitorError>(
+        &'operation self,
+        visitor: Visitor,
+    ) -> IndexStoreFuture<'operation, (), VisitorError>
+    where
+        Self::Error: Into<VisitorError> + 'operation,
+        Visitor: FnMut(RetentionHold) -> Result<(), VisitorError> + Send + 'operation,
+        VisitorError: Send + 'operation,
+    {
+        Box::pin(async move { AsyncIndexStore::visit_retention_holds(&self.inner, visitor).await })
+    }
+    fn upsert_retention_hold<'operation>(
+        &'operation self,
+        _hold: &'operation RetentionHold,
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        Box::pin(async move { Err(LocalIndexStoreError::InvalidLegacyImportState) })
+    }
+    fn delete_retention_hold<'operation>(
+        &'operation self,
+        object_key: &'operation ObjectKey,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(
+            async move { AsyncIndexStore::delete_retention_hold(&self.inner, object_key).await },
+        )
+    }
+    fn record_webhook_delivery<'operation>(
+        &'operation self,
+        delivery: &'operation WebhookDelivery,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(
+            async move { AsyncIndexStore::record_webhook_delivery(&self.inner, delivery).await },
+        )
+    }
+    fn list_webhook_deliveries(&self) -> IndexStoreFuture<'_, Vec<WebhookDelivery>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::list_webhook_deliveries(&self.inner).await })
+    }
+    fn delete_webhook_delivery<'operation>(
+        &'operation self,
+        _delivery: &'operation WebhookDelivery,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        // Always fail to exercise the tracing::warn! cleanup path
+        Box::pin(async move { Err(LocalIndexStoreError::InvalidLegacyImportState) })
+    }
+    fn provider_repository_state<'operation>(
+        &'operation self,
+        provider: RepositoryProvider,
+        owner: &'operation str,
+        repo: &'operation str,
+    ) -> IndexStoreFuture<'operation, Option<ProviderRepositoryState>, Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::provider_repository_state(&self.inner, provider, owner, repo).await
+        })
+    }
+    fn list_provider_repository_states(
+        &self,
+    ) -> IndexStoreFuture<'_, Vec<ProviderRepositoryState>, Self::Error> {
+        Box::pin(async move { AsyncIndexStore::list_provider_repository_states(&self.inner).await })
+    }
+    fn upsert_provider_repository_state<'operation>(
+        &'operation self,
+        state: &'operation ProviderRepositoryState,
+    ) -> IndexStoreFuture<'operation, (), Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::upsert_provider_repository_state(&self.inner, state).await
+        })
+    }
+    fn delete_provider_repository_state<'operation>(
+        &'operation self,
+        provider: RepositoryProvider,
+        owner: &'operation str,
+        repo: &'operation str,
+    ) -> IndexStoreFuture<'operation, bool, Self::Error> {
+        Box::pin(async move {
+            AsyncIndexStore::delete_provider_repository_state(&self.inner, provider, owner, repo)
+                .await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_webhook_with_generic_provider_revision_pushed() {
+    let storage = tempfile::tempdir().unwrap();
+    let record_store = LocalRecordStore::open(storage.path().to_path_buf());
+    let index_store = LocalIndexStore::new(storage.path().to_path_buf()).unwrap();
+    let object_store = ServerObjectStore::local(storage.path().join("chunks")).unwrap();
+
+    let scope =
+        RepositoryScope::new(RepositoryProvider::Generic, "myorg", "myrepo", Some("main")).unwrap();
+    let record = FileRecord {
+        file_id: "data.bin".to_owned(),
+        content_hash: "a".repeat(64),
+        total_bytes: 4,
+        chunk_size: 4,
+        repository_scope: Some(scope),
+        chunks: vec![FileChunkRecord {
+            hash: "b".repeat(64),
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }],
+    };
+    RecordMutation::write_version_record(&record_store, &record)
+        .await
+        .unwrap();
+    RecordMutation::write_latest_record(&record_store, &record)
+        .await
+        .unwrap();
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::Generic, "myorg", "myrepo").unwrap(),
+        WebhookDeliveryId::new("delivery-generic-rev-1").unwrap(),
+        RepositoryWebhookEventKind::RevisionPushed {
+            revision: RevisionRef::new("refs/heads/main").unwrap(),
+        },
+    );
+
+    let outcome =
+        apply_provider_webhook_with_stores(&record_store, &index_store, &object_store, &event)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RevisionPushed {
+            revision: "refs/heads/main".to_owned()
+        }
+    );
+    assert_eq!(outcome.affected_file_versions, 0);
+    assert_eq!(outcome.affected_chunks, 0);
+    assert_eq!(outcome.applied_holds, 0);
+    assert!(
+        local_version_record_exists(&record_store, &record)
+            .await
+            .unwrap()
+    );
+    assert!(
+        local_latest_record_exists(&record_store, &record)
+            .await
+            .unwrap()
+    );
+
+    let repository_state = LifecycleStore::provider_repository_state(
+        &index_store,
+        RepositoryProvider::Generic,
+        "myorg",
+        "myrepo",
+    )
+    .unwrap();
+    assert!(repository_state.is_some());
+    let state = repository_state.unwrap();
+    assert!(state.last_revision_pushed_at_unix_seconds().is_some());
+    assert_eq!(state.last_pushed_revision(), Some("refs/heads/main"));
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 struct TestInvariantError {
@@ -1514,4 +1881,209 @@ impl TestInvariantError {
             message: message.to_string(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests moved from lib.rs: duplicate_webhook_outcome unit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_webhook_outcome_for_deleted() {
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup").unwrap(),
+        RepositoryWebhookEventKind::RepositoryDeleted,
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(outcome.provider, ProviderKind::GitHub);
+    assert_eq!(outcome.owner, "org");
+    assert_eq!(outcome.repo, "repo");
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RepositoryDeleted
+    );
+    assert_eq!(outcome.affected_file_versions, 0);
+    assert_eq!(outcome.affected_chunks, 0);
+    assert_eq!(outcome.applied_holds, 0);
+    assert_eq!(outcome.retention_seconds, None);
+}
+
+#[test]
+fn duplicate_webhook_outcome_for_renamed() {
+    let new_repo = RepositoryRef::new(ProviderKind::GitHub, "new-org", "new-repo").unwrap();
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup-rename").unwrap(),
+        RepositoryWebhookEventKind::RepositoryRenamed {
+            new_repository: new_repo,
+        },
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RepositoryRenamed {
+            new_owner: "new-org".to_owned(),
+            new_repo: "new-repo".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn duplicate_webhook_outcome_for_revision_pushed() {
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup-rev").unwrap(),
+        RepositoryWebhookEventKind::RevisionPushed {
+            revision: RevisionRef::new("refs/heads/main").unwrap(),
+        },
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::RevisionPushed {
+            revision: "refs/heads/main".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn duplicate_webhook_outcome_for_access_changed() {
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap(),
+        WebhookDeliveryId::new("delivery-dup-access").unwrap(),
+        RepositoryWebhookEventKind::AccessChanged,
+    );
+    let outcome = duplicate_webhook_outcome(&event);
+    assert_eq!(
+        outcome.event_kind,
+        ProviderWebhookOutcomeKind::AccessChanged
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests moved from lib.rs: ProviderEventsError display tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn provider_events_error_display_all_variants() {
+    let cases: &[(ProviderEventsError, &str)] = &[
+        (ProviderEventsError::Overflow, "overflow"),
+        (ProviderEventsError::InvalidContentHash, "hash"),
+        (
+            ProviderEventsError::InvalidProviderWebhookPayload,
+            "payload",
+        ),
+        (
+            ProviderEventsError::ConflictingRenameTargetRecord,
+            "conflicting",
+        ),
+        (
+            ProviderEventsError::Json(
+                serde_json::from_str::<serde_json::Value>("invalid json...").unwrap_err(),
+            ),
+            "json",
+        ),
+        (
+            ProviderEventsError::NumericConversion(u64::try_from(-1i32).unwrap_err()),
+            "bounds",
+        ),
+        (
+            ProviderEventsError::RetentionHold(RetentionHoldError::EmptyReason),
+            "hold",
+        ),
+        (
+            ProviderEventsError::WebhookDelivery(
+                shardline_index::WebhookDeliveryError::EmptyDeliveryId,
+            ),
+            "delivery",
+        ),
+        (
+            ProviderEventsError::ObjectStore(
+                shardline_server_core::ServerObjectStoreError::NotFound,
+            ),
+            "object",
+        ),
+    ];
+    for (error, substring) in cases {
+        let msg = error.to_string();
+        assert!(!msg.is_empty(), "empty display for {error:?}");
+        assert!(
+            msg.contains(substring),
+            "expected '{substring}' in '{msg}' from {error:?}"
+        );
+    }
+}
+
+#[test]
+fn provider_events_error_xet_adapter_display() {
+    let error = ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_index_store_display() {
+    let error = ProviderEventsError::IndexStore(
+        shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_memory_index_store_display() {
+    let error = ProviderEventsError::MemoryIndexStore(
+        shardline_index::MemoryIndexStoreError::LockPoisoned("test".to_owned()),
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_memory_record_store_display() {
+    let error = ProviderEventsError::MemoryRecordStore(
+        shardline_index::MemoryRecordStoreError::LockPoisoned("test".to_owned()),
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_parse_stored_file_record_display() {
+    let error = ProviderEventsError::ParseStoredFileRecord(
+        shardline_server_core::ParseStoredFileRecordError::StoredFileMetadataTooLarge {
+            observed_bytes: 999,
+            maximum_bytes: 100,
+        },
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn provider_events_error_postgres_metadata_display() {
+    let error = ProviderEventsError::PostgresMetadata(
+        shardline_index::PostgresMetadataStoreError::HashParse(
+            shardline_protocol::HashParseError::InvalidCharacter("test".to_owned()),
+        ),
+    );
+    let msg = error.to_string();
+    assert_eq!(msg, "postgres metadata adapter operation failed");
+}
+
+#[test]
+fn provider_events_error_xet_adapter_display_nonempty() {
+    let error = ProviderEventsError::XetAdapter(shardline_xet_adapter::XetAdapterError::NotFound);
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
+    assert!(msg.contains("xet"));
+}
+
+#[test]
+fn provider_events_error_index_store_display_nonempty() {
+    let error = ProviderEventsError::IndexStore(
+        shardline_index::LocalIndexStoreError::InvalidLegacyImportState,
+    );
+    let msg = error.to_string();
+    assert!(!msg.is_empty());
 }

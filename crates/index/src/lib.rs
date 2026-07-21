@@ -1,21 +1,4 @@
 #![deny(unsafe_code)]
-#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        clippy::shadow_unrelated,
-        clippy::let_underscore_must_use,
-        clippy::format_push_string,
-        unused_imports,
-        unused_variables,
-        unused_mut,
-        dead_code,
-    )
-)]
 
 //! Metadata index contracts and adapters for Shardline.
 //!

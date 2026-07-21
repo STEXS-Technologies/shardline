@@ -242,3 +242,504 @@ fn inspect_provider_state_timestamp(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clean_report() -> FsckReport {
+        FsckReport {
+            latest_records: 0,
+            version_records: 0,
+            inspected_chunk_references: 0,
+            inspected_dedupe_shard_mappings: 0,
+            inspected_reconstructions: 0,
+            inspected_webhook_deliveries: 0,
+            inspected_provider_repository_states: 0,
+            issues: Vec::new(),
+        }
+    }
+
+    fn empty_reachability() -> FsckReachability {
+        FsckReachability {
+            referenced_object_keys: HashSet::new(),
+            live_dedupe_chunk_hashes: HashSet::new(),
+        }
+    }
+
+    fn make_key(path: &str) -> shardline_storage::ObjectKey {
+        shardline_storage::ObjectKey::parse(path).unwrap()
+    }
+
+    // ── inspect_provider_state_timestamp ────────────────────────────────
+
+    #[test]
+    fn provider_state_timestamp_none_is_ok() {
+        let mut report = clean_report();
+        inspect_provider_state_timestamp(
+            &mut report,
+            "test/loc",
+            ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
+            None,
+            100,
+        )
+        .unwrap();
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn provider_state_timestamp_within_bounds_is_ok() {
+        let mut report = clean_report();
+        inspect_provider_state_timestamp(
+            &mut report,
+            "test/loc",
+            ProviderRepositoryStateTimestampField::LastAccessChangedAtUnixSeconds,
+            Some(50),
+            100,
+        )
+        .unwrap();
+        assert!(report.is_clean());
+    }
+
+    #[allow(clippy::panic, clippy::wildcard_enum_match_arm)]
+    #[test]
+    fn provider_state_timestamp_exceeding_max_creates_issue() {
+        let mut report = clean_report();
+        inspect_provider_state_timestamp(
+            &mut report,
+            "test/loc",
+            ProviderRepositoryStateTimestampField::LastRevisionPushedAtUnixSeconds,
+            Some(200),
+            100,
+        )
+        .unwrap();
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            FsckIssueKind::InvalidProviderRepositoryStateTimestamp
+        );
+        assert_eq!(report.issues[0].location, "test/loc");
+        match &report.issues[0].detail {
+            FsckIssueDetail::ProviderRepositoryStateTimestampExceeded {
+                field,
+                timestamp,
+                max_allowed_unix_seconds,
+            } => {
+                assert_eq!(
+                    *field,
+                    ProviderRepositoryStateTimestampField::LastRevisionPushedAtUnixSeconds
+                );
+                assert_eq!(*timestamp, 200);
+                assert_eq!(*max_allowed_unix_seconds, 100);
+            }
+            other => panic!("unexpected detail: {other:?}"),
+        }
+    }
+
+    // ── inspect_lifecycle_metadata ──────────────────────────────────────
+
+    /// Helper: create stores, run inspect_lifecycle_metadata, return report.
+    async fn run_lifecycle_check(
+        index_store: &shardline_index::MemoryIndexStore,
+        reachability: Option<FsckReachability>,
+    ) -> FsckReport {
+        let object_root = std::path::Path::new("/tmp");
+        let object_store = ServerObjectStore::blackhole();
+        let mut report = clean_report();
+        let reach = reachability.unwrap_or_else(empty_reachability);
+        inspect_lifecycle_metadata(index_store, object_root, &object_store, &reach, &mut report)
+            .await
+            .unwrap();
+        report
+    }
+
+    #[tokio::test]
+    async fn lifecycle_clean_with_no_data() {
+        let store = shardline_index::MemoryIndexStore::new();
+        let report = run_lifecycle_check(&store, None).await;
+        assert!(report.is_clean());
+        assert_eq!(report.inspected_webhook_deliveries, 0);
+        assert_eq!(report.inspected_provider_repository_states, 0);
+    }
+
+    #[tokio::test]
+    async fn quarantine_missing_object_detected() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+        let candidate =
+            shardline_index::QuarantineCandidate::new(obj_key.clone(), 100, 100, 200).unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        // blackhole store returns None for metadata => MissingQuarantinedObject
+        let report = run_lifecycle_check(&store, None).await;
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            FsckIssueKind::MissingQuarantinedObject
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantined_reachable_object_detected() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+        let candidate =
+            shardline_index::QuarantineCandidate::new(obj_key.clone(), 100, 100, 200).unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        let mut reach = empty_reachability();
+        reach.referenced_object_keys.insert("ab/1234".to_owned());
+        let report = run_lifecycle_check(&store, Some(reach)).await;
+        // 1 missing object (blackhole) + 1 reachable
+        assert_eq!(report.issue_count(), 2);
+        assert_eq!(
+            report.issues[1].kind,
+            FsckIssueKind::ReachableQuarantinedObject
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_hold_missing_object_detected() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+        // Active hold (no release_after = permanently active) with missing object
+        let hold = shardline_index::RetentionHold::new(
+            obj_key.clone(),
+            "test-reason".to_owned(),
+            100,
+            None, // no release = always active
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
+        let report = run_lifecycle_check(&store, None).await;
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(report.issues[0].kind, FsckIssueKind::MissingHeldObject);
+    }
+
+    #[tokio::test]
+    async fn held_quarantined_object_detected() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+        let candidate =
+            shardline_index::QuarantineCandidate::new(obj_key.clone(), 100, 100, 200).unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate).unwrap();
+        let hold =
+            shardline_index::RetentionHold::new(obj_key.clone(), "reason".to_owned(), 100, None)
+                .unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
+        let report = run_lifecycle_check(&store, None).await;
+        // 1 missing object (quarantine) + 1 held+quarantined
+        let held_quarantined = report
+            .issues
+            .iter()
+            .filter(|i| i.kind == FsckIssueKind::HeldQuarantinedObject)
+            .count();
+        assert_eq!(held_quarantined, 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_delivery_future_timestamp_detected() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        let delivery = shardline_index::WebhookDelivery::new(
+            shardline_protocol::RepositoryProvider::GitHub,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            "delivery-1".to_owned(),
+            u64::MAX,
+        )
+        .unwrap();
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+        let report = run_lifecycle_check(&store, None).await;
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            FsckIssueKind::InvalidWebhookDeliveryTimestamp
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_state_invalid_identity_detected() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        // Empty owner + repo creates an invalid RepositoryScope
+        let state = shardline_index::ProviderRepositoryState::new(
+            shardline_protocol::RepositoryProvider::GitHub,
+            String::new(),
+            String::new(),
+            None,
+            None,
+            None,
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let report = run_lifecycle_check(&store, None).await;
+        let count = report
+            .issues
+            .iter()
+            .filter(|i| i.kind == FsckIssueKind::InvalidProviderRepositoryState)
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn expired_retention_hold_does_not_trigger_missing_object() {
+        use shardline_index::LifecycleStore;
+        let store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+        // A hold that expires immediately (release_after = 1) is inactive at
+        // any realistic current timestamp.
+        let hold = shardline_index::RetentionHold::new(
+            obj_key.clone(),
+            "short hold".to_owned(),
+            0,
+            Some(1), // release_after = 1 → inactive at current time
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&store, &hold).unwrap();
+        // Even though the object doesn't exist, the hold is inactive so no issue.
+        let report = run_lifecycle_check(&store, None).await;
+        assert!(
+            report.is_clean(),
+            "expected no issues for expired hold, got: {report:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantine_length_mismatch_detected() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+
+        // Create the object at the expected key with a specific length
+        let content = b"actual object content that is 27 bytes";
+        let object_storage_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_storage_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_storage_path, content).unwrap();
+
+        // Create the object store after writing the file
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // Create a quarantine candidate with a DIFFERENT observed_length (10 instead of 27)
+        let candidate = shardline_index::QuarantineCandidate::new(
+            obj_key.clone(),
+            10,  // observed_length (different from actual 27)
+            100, // first_seen
+            200, // delete_after
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&index_store, &candidate).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.is_clean(), "expected issues");
+        assert_eq!(report.issue_count(), 1);
+        assert_eq!(
+            report.issues[0].kind,
+            FsckIssueKind::QuarantineLengthMismatch,
+            "expected QuarantineLengthMismatch, got: {:#?}",
+            report.issues
+        );
+    }
+
+    // ── Quarantine candidate with matching length (happy path) ───────
+
+    #[tokio::test]
+    async fn quarantine_length_matches_is_clean() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        let obj_key = make_key("ab/1234");
+
+        let content = b"exact-length-content";
+        let object_storage_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_storage_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_storage_path, content).unwrap();
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        // observed_length matches actual content length
+        let candidate = shardline_index::QuarantineCandidate::new(
+            obj_key.clone(),
+            content.len() as u64,
+            100,
+            200,
+        )
+        .unwrap();
+        LifecycleStore::upsert_quarantine_candidate(&index_store, &candidate).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
+
+        // No length-mismatch issue; only MissingQuarantinedObject would appear
+        // if the object were missing, but it exists.  The object is not reachable,
+        // so no ReachableQuarantinedObject either.  Report should be clean.
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
+
+    // ── All five provider state timestamps exceed max ─────────────────
+
+    #[tokio::test]
+    async fn provider_state_all_timestamps_exceed_max() {
+        use shardline_index::LifecycleStore;
+
+        let store = shardline_index::MemoryIndexStore::new();
+        // Set all 5 timestamps to u64::MAX so they exceed the computed max.
+        // First create the base state with 2 timestamps + a pushed_revision string.
+        let state = shardline_index::ProviderRepositoryState::new(
+            shardline_protocol::RepositoryProvider::GitHub,
+            "owner".to_owned(),
+            "repo".to_owned(),
+            Some(u64::MAX), // last_access_changed_at
+            Some(u64::MAX), // last_revision_pushed_at
+            None,           // last_pushed_revision (not a timestamp field)
+        )
+        .with_reconciliation(
+            Some(u64::MAX), // last_cache_invalidated_at
+            Some(u64::MAX), // last_authorization_rechecked_at
+            Some(u64::MAX), // last_drift_checked_at
+        );
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        let object_root = std::path::Path::new("/tmp");
+        let object_store = ServerObjectStore::blackhole();
+        inspect_lifecycle_metadata(&store, object_root, &object_store, &reach, &mut report)
+            .await
+            .unwrap();
+
+        // All 5 timestamp fields should produce issues.
+        let timestamp_count = report
+            .issues
+            .iter()
+            .filter(|i| i.kind == FsckIssueKind::InvalidProviderRepositoryStateTimestamp)
+            .count();
+        assert_eq!(
+            timestamp_count, 5,
+            "expected 5 timestamp issues (for all 5 fields), got: {report:?}"
+        );
+    }
+
+    // ── Retention hold with active hold and existing object is clean ────
+
+    #[tokio::test]
+    async fn retention_hold_active_with_existing_object_clean() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+        let obj_key = make_key("ab/1234");
+
+        // Create the object on disk
+        let object_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_path, b"some data").unwrap();
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        // Valid retention hold with release_after > held_at
+        let hold = shardline_index::RetentionHold::new(
+            obj_key.clone(),
+            "operator hold".to_owned(),
+            100,
+            Some(200),
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&index_store, &hold).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
+        // Active hold with existing object and not quarantined → clean
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
+
+    // ── Retention hold with permanent hold (no release_after) is active ──
+
+    #[tokio::test]
+    async fn retention_hold_permanent_without_release_is_active() {
+        use shardline_index::LifecycleStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().to_path_buf();
+        let object_root = root.join("chunks");
+        let obj_key = make_key("ab/5678");
+
+        // Create the object on disk
+        let object_path = object_root.join(obj_key.as_str());
+        if let Some(parent) = object_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&object_path, b"permanent data").unwrap();
+        let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+        let index_store = shardline_index::MemoryIndexStore::new();
+        // Permanent hold: no release_after → always active
+        let hold = shardline_index::RetentionHold::new(
+            obj_key.clone(),
+            "permanent hold".to_owned(),
+            100,
+            None,
+        )
+        .unwrap();
+        LifecycleStore::upsert_retention_hold(&index_store, &hold).unwrap();
+
+        let mut report = clean_report();
+        let reach = empty_reachability();
+        inspect_lifecycle_metadata(
+            &index_store,
+            &object_root,
+            &object_store,
+            &reach,
+            &mut report,
+        )
+        .await
+        .unwrap();
+        // Permanent hold with existing object → clean
+        assert!(report.is_clean(), "expected clean report, got: {report:?}");
+    }
+}

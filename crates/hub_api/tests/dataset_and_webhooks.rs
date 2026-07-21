@@ -16,16 +16,17 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use shardline_index::hub::{HubFileEntry, HubRepoType};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 use tower::ServiceExt;
 
-use common::{app, setup};
+use common::{app, setup, state};
 
 // ---- Dataset viewer tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_lists_data_files() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     // Create a dataset repo
     store
@@ -39,21 +40,18 @@ async fn dataset_parquet_lists_data_files() {
             size: 1024,
             sha: "sha_parquet".to_owned(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "default/test/data.csv".to_owned(),
             size: 512,
             sha: "sha_csv".to_owned(),
             is_lfs: false,
-            inline_content: None,
         },
         HubFileEntry {
             path: "README.md".to_owned(),
             size: 100,
             sha: "sha_readme".to_owned(),
             is_lfs: false,
-            inline_content: Some(b"# Dataset".to_vec()),
         },
     ];
     store.store_files("commit1", &files).unwrap();
@@ -84,7 +82,7 @@ async fn dataset_parquet_lists_data_files() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_jsonl_data() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/jsonl-dataset", false)
@@ -96,9 +94,21 @@ async fn dataset_first_rows_returns_jsonl_data() {
         size: jsonl_content.len() as u64,
         sha: "sha_jsonl".to_owned(),
         is_lfs: false,
-        inline_content: Some(jsonl_content.as_bytes().to_vec()),
     }];
     store.store_files("commit_jsonl", &files).unwrap();
+    // Pre-populate ObjectStore
+    let key = ObjectKey::parse("lfs/sha_jsonl").unwrap();
+    let body = ObjectBody::from_slice(jsonl_content.as_bytes());
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(
+            *blake3::hash(jsonl_content.as_bytes()).as_bytes(),
+        ),
+        jsonl_content.len() as u64,
+    );
+    state()
+        .object_store
+        .put_if_absent(&key, body, &integrity)
+        .unwrap();
     store
         .create_revision("team/jsonl-dataset", None, "commit_jsonl", "main", "init")
         .unwrap();
@@ -127,7 +137,7 @@ async fn dataset_first_rows_returns_jsonl_data() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_first_rows_returns_csv_data() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/csv-dataset", false)
@@ -139,9 +149,21 @@ async fn dataset_first_rows_returns_csv_data() {
         size: csv_content.len() as u64,
         sha: "sha_csv2".to_owned(),
         is_lfs: false,
-        inline_content: Some(csv_content.as_bytes().to_vec()),
     }];
     store.store_files("commit_csv", &files).unwrap();
+    // Pre-populate ObjectStore
+    let key = ObjectKey::parse("lfs/sha_csv2").unwrap();
+    let body = ObjectBody::from_slice(csv_content.as_bytes());
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(
+            *blake3::hash(csv_content.as_bytes()).as_bytes(),
+        ),
+        csv_content.len() as u64,
+    );
+    state()
+        .object_store
+        .put_if_absent(&key, body, &integrity)
+        .unwrap();
     store
         .create_revision("team/csv-dataset", None, "commit_csv", "main", "init")
         .unwrap();
@@ -169,7 +191,7 @@ async fn dataset_first_rows_returns_csv_data() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_viewer_returns_paginated_rows() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Dataset, "team/paginated", false)
@@ -179,14 +201,25 @@ async fn dataset_viewer_returns_paginated_rows() {
     for i in 0..10 {
         jsonl.push_str(&format!("{{\"index\":{i}}}\n"));
     }
+    let jsonl_bytes = jsonl.into_bytes();
     let files = vec![HubFileEntry {
         path: "data.jsonl".to_owned(),
-        size: jsonl.len() as u64,
+        size: jsonl_bytes.len() as u64,
         sha: "sha_paginated".to_owned(),
         is_lfs: false,
-        inline_content: Some(jsonl.into_bytes()),
     }];
     store.store_files("commit_paginated", &files).unwrap();
+    // Pre-populate ObjectStore
+    let key = ObjectKey::parse("lfs/sha_paginated").unwrap();
+    let body = ObjectBody::from_slice(&jsonl_bytes);
+    let integrity = ObjectIntegrity::new(
+        shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(&jsonl_bytes).as_bytes()),
+        jsonl_bytes.len() as u64,
+    );
+    state()
+        .object_store
+        .put_if_absent(&key, body, &integrity)
+        .unwrap();
     store
         .create_revision("team/paginated", None, "commit_paginated", "main", "init")
         .unwrap();
@@ -213,7 +246,7 @@ async fn dataset_viewer_returns_paginated_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dataset_parquet_rejects_non_dataset_repo() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Model, "team/model", false)
@@ -240,7 +273,7 @@ async fn dataset_parquet_rejects_non_dataset_repo() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn webhook_crud_lifecycle() {
     setup();
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = common::state().store.clone();
 
     store
         .create_repo(HubRepoType::Model, "team/webhook-model", false)

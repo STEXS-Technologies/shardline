@@ -21,6 +21,8 @@ Primary references:
 
 - Rust stable toolchain
 - `cargo-make` (used by contributor quality gates)
+- Docker (for Docker-backed integration tests)
+- `kind`, `kubectl`, and Python 3 (for the disposable Kubernetes smoke test)
 
 Quick smoke check:
 
@@ -173,11 +175,37 @@ This includes:
 - release binary packaging smoke test
 - dependency audit
 
+Run infrastructure coverage when changing Docker-backed storage, service lifecycle, or
+Kubernetes deployment behavior:
+
+```bash
+cargo make test-docker
+cargo make test-kubernetes
+```
+
+To run both sequentially (Docker coverage first, then the disposable `kind` cluster):
+
+```bash
+cargo make test-infrastructure
+```
+
+`test-kubernetes` creates and deletes a local `kind` cluster and image; it preserves
+diagnostics only when the smoke test fails.
+
 For dependency-policy checks too:
 
 ```bash
 cargo make ci-full
 ```
+
+Coverage uses LLVM source-based instrumentation. Generate a machine-readable summary
+and enforce the checked-in non-regression ratchet with:
+
+```bash
+cargo make coverage-check
+```
+
+Use `cargo make coverage-html` for the local HTML report.
 
 ## Architecture and code rules
 
@@ -218,6 +246,8 @@ Fuzzing workflow:
 
 - Fuzz targets and corpora are in `crates/fuzz/`.
 - Run bounded fuzz smoke locally with `cargo make shardline-fuzz-smoke`.
+- Replay every checked-in corpus deterministically with
+  `cargo make shardline-fuzz-regression`.
 - For deeper campaigns, run `bash scripts/shardline/fuzz.sh run <target>` or use the
   underlying `cargo fuzz` workflow from `crates/fuzz/` if needed.
 - When fuzz finds a crash, reproduce it, then add:

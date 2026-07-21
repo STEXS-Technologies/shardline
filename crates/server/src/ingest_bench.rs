@@ -128,4 +128,64 @@ mod tests {
         assert_eq!(second.reused_chunks, 0);
         assert_eq!(second.stored_bytes, 8);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingest_without_storage_rejects_invalid_file_id() {
+        let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+        let result =
+            ingest_without_storage(chunk_size, "../invalid", Bytes::from_static(b"test"), None)
+                .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingest_without_storage_with_expected_sha256_verifies_digest() {
+        use sha2::{Digest, Sha256};
+        let chunk_size = NonZeroUsize::new(4096).unwrap_or(NonZeroUsize::MIN);
+        let body = Bytes::from_static(b"hello ingest bench");
+        let expected = format!("{:x}", Sha256::digest(&body));
+        let result = ingest_without_storage(
+            chunk_size,
+            "test-file.bin",
+            body.clone(),
+            Some(expected.as_str()),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingest_without_storage_rejects_mismatched_expected_sha256() {
+        let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+        let body = Bytes::from_static(b"hello world");
+        let result = ingest_without_storage(
+            chunk_size,
+            "test-file.bin",
+            body,
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::ServerError::ExpectedBodyHashMismatch)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ingest_without_storage_with_parallelism_uses_custom_parallelism() {
+        use super::ingest_without_storage_with_parallelism;
+        let chunk_size = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+        let max_in_flight = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
+        let result = ingest_without_storage_with_parallelism(
+            chunk_size,
+            max_in_flight,
+            "asset.bin",
+            Bytes::from_static(b"abcdef"),
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+        let Ok(response) = result else { return };
+        assert_eq!(response.total_bytes, 6);
+    }
 }

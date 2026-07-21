@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.95.0
+ARG RUST_VERSION=1.94.0
 
 FROM rust:${RUST_VERSION}-bookworm AS builder
 
@@ -35,7 +35,6 @@ ENV SHARDLINE_CHUNK_SIZE_BYTES=65536
 EXPOSE 8080
 VOLUME ["/var/lib/shardline"]
 STOPSIGNAL SIGINT
-HEALTHCHECK --interval=10s --timeout=5s --retries=5 CMD ["shardline", "health", "--server", "http://127.0.0.1:8080"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["serve"]

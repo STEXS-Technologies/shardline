@@ -12,6 +12,7 @@ use std::{
     },
 };
 
+use shardline_protocol::SecretString;
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::{
@@ -686,7 +687,11 @@ fn s3_config_rejects_missing_bucket_before_loading_credentials() {
         },
         move || {
             credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-            Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+            Ok((
+                Some(SecretString::from_secret("access")),
+                Some(SecretString::from_secret("secret")),
+                None,
+            ))
         },
     );
 
@@ -713,7 +718,11 @@ fn s3_config_rejects_invalid_allow_http_before_loading_credentials() {
         },
         move || {
             credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-            Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+            Ok((
+                Some(SecretString::from_secret("access")),
+                Some(SecretString::from_secret("secret")),
+                None,
+            ))
         },
     );
 
@@ -742,7 +751,11 @@ fn s3_config_rejects_invalid_virtual_hosted_style_before_loading_credentials() {
         },
         move || {
             credentials_loaded_for_hook.store(true, Ordering::SeqCst);
-            Ok((Some("access".to_owned()), Some("secret".to_owned()), None))
+            Ok((
+                Some(SecretString::from_secret("access")),
+                Some(SecretString::from_secret("secret")),
+                None,
+            ))
         },
     );
 
@@ -859,7 +872,8 @@ fn token_signing_key_accepts_direct_env_source() {
     let Ok(loaded) = loaded else {
         return;
     };
-    assert_eq!(loaded, Some(b"direct-signing-key".to_vec()));
+    let inner = loaded.unwrap();
+    assert_eq!(inner.expose_secret(), b"direct-signing-key");
 }
 
 #[test]
@@ -1060,7 +1074,7 @@ fn read_secret_file_bytes_accepts_projected_secret_symlink_within_directory() {
     let Ok(bytes) = bytes else {
         return;
     };
-    assert_eq!(bytes, b"test-signing-key-32-bytes-long!!".to_vec());
+    assert_eq!(bytes.expose_secret(), b"test-signing-key-32-bytes-long!!");
 }
 
 #[cfg(unix)]
@@ -1140,7 +1154,7 @@ fn read_secret_file_bytes_rejects_growth_after_validation_without_retaining_appe
 
     let expected = b"test-signing-key-32-bytes-long!!-rotated";
     assert!(bytes.is_ok());
-    assert_eq!(bytes.unwrap(), expected.to_vec());
+    assert_eq!(bytes.unwrap().expose_secret(), expected);
 }
 
 #[test]
@@ -1184,4 +1198,310 @@ fn server_config_runtime_validation_accepts_signed_transfer_role() {
     let validation = config.validate_runtime_requirements();
 
     assert!(validation.is_ok());
+}
+
+// --- Remaining HIGH-risk gap tests ---
+
+#[test]
+fn read_secret_file_bytes_accepts_valid_regular_file() {
+    let temp = tempfile::NamedTempFile::new();
+    assert!(temp.is_ok());
+    let Ok(temp) = temp else {
+        return;
+    };
+    let write = write_file(temp.path(), b"test-secret-content");
+    assert!(write.is_ok());
+
+    let bytes = super::read_secret_file_bytes(
+        temp.path(),
+        1_048_576,
+        super::ServerConfigError::TokenSigningKey,
+        |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
+            observed_bytes,
+            maximum_bytes,
+        },
+        |expected_bytes, observed_bytes| super::ServerConfigError::TokenSigningKeyLengthMismatch {
+            expected_bytes,
+            observed_bytes,
+        },
+    );
+
+    assert!(bytes.is_ok());
+    assert_eq!(bytes.unwrap().expose_secret(), b"test-secret-content");
+}
+
+#[test]
+fn read_secret_file_bytes_accepts_empty_file() {
+    let temp = tempfile::NamedTempFile::new();
+    assert!(temp.is_ok());
+    let Ok(temp) = temp else {
+        return;
+    };
+
+    let bytes = super::read_secret_file_bytes(
+        temp.path(),
+        1_048_576,
+        super::ServerConfigError::TokenSigningKey,
+        |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
+            observed_bytes,
+            maximum_bytes,
+        },
+        |expected_bytes, observed_bytes| super::ServerConfigError::TokenSigningKeyLengthMismatch {
+            expected_bytes,
+            observed_bytes,
+        },
+    );
+
+    assert!(bytes.is_ok());
+    assert_eq!(bytes.unwrap().expose_secret(), b"");
+}
+
+#[test]
+fn read_secret_file_bytes_rejects_nonexistent_file() {
+    let path = PathBuf::from("/tmp/shardline-nonexistent-secret-file-which-does-not-exist");
+
+    let bytes = super::read_secret_file_bytes(
+        &path,
+        1_048_576,
+        super::ServerConfigError::TokenSigningKey,
+        |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
+            observed_bytes,
+            maximum_bytes,
+        },
+        |expected_bytes, observed_bytes| super::ServerConfigError::TokenSigningKeyLengthMismatch {
+            expected_bytes,
+            observed_bytes,
+        },
+    );
+
+    assert!(matches!(
+        bytes,
+        Err(super::ServerConfigError::TokenSigningKey(_))
+    ));
+}
+
+#[test]
+fn read_secret_file_bytes_rejects_oversized_file() {
+    let temp = tempfile::NamedTempFile::new();
+    assert!(temp.is_ok());
+    let Ok(temp) = temp else {
+        return;
+    };
+    let data = vec![b'x'; 256];
+    let write = write_file(temp.path(), &data);
+    assert!(write.is_ok());
+
+    let bytes = super::read_secret_file_bytes(
+        temp.path(),
+        128,
+        super::ServerConfigError::TokenSigningKey,
+        |observed_bytes, maximum_bytes| super::ServerConfigError::TokenSigningKeyTooLarge {
+            observed_bytes,
+            maximum_bytes,
+        },
+        |expected_bytes, observed_bytes| super::ServerConfigError::TokenSigningKeyLengthMismatch {
+            expected_bytes,
+            observed_bytes,
+        },
+    );
+
+    assert!(matches!(
+        bytes,
+        Err(super::ServerConfigError::TokenSigningKeyTooLarge {
+            maximum_bytes: 128,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn optional_s3_secret_returns_none_when_neither_set() {
+    let result = optional_s3_secret_from_sources("TEST_ENV", None, "TEST_FILE_ENV", None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), None);
+}
+
+#[test]
+fn optional_s3_secret_returns_direct_value() {
+    let result = optional_s3_secret_from_sources(
+        "TEST_ENV",
+        Some("direct-value".to_owned()),
+        "TEST_FILE_ENV",
+        None,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(
+        result.unwrap().as_ref().map(SecretString::expose_secret),
+        Some("direct-value")
+    );
+}
+
+#[test]
+fn optional_s3_secret_returns_file_value() {
+    let temp = tempfile::NamedTempFile::new();
+    assert!(temp.is_ok());
+    let Ok(temp) = temp else {
+        return;
+    };
+    let write = write_file(temp.path(), b"file-secret-value");
+    assert!(write.is_ok());
+
+    let result = optional_s3_secret_from_sources(
+        "TEST_ENV",
+        None,
+        "TEST_FILE_ENV",
+        Some(temp.path().display().to_string()),
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(
+        result.unwrap().as_ref().map(SecretString::expose_secret),
+        Some("file-secret-value")
+    );
+}
+
+#[test]
+fn optional_s3_secret_rejects_direct_and_file_conflict() {
+    let result = optional_s3_secret_from_sources(
+        "TEST_ENV",
+        Some("direct".to_owned()),
+        "TEST_FILE_ENV",
+        Some("/some/path".to_owned()),
+    );
+
+    assert!(matches!(
+        result,
+        Err(super::ServerConfigError::S3CredentialSourceConflict {
+            env: "TEST_ENV",
+            file_env: "TEST_FILE_ENV",
+        })
+    ));
+}
+
+#[test]
+fn configure_provider_runtime_from_paths_noop_when_both_none() {
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+    let config = ServerConfig::new(
+        bind_addr,
+        "https://assets.example.test".to_owned(),
+        PathBuf::from("/tmp/shardline"),
+        NonZeroUsize::MIN,
+    );
+
+    let result = configure_provider_runtime_from_paths(
+        config.clone(),
+        None,
+        None,
+        "issuer".to_owned(),
+        Ok(NonZeroU64::MIN),
+    );
+
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert_eq!(result.provider_config_path(), config.provider_config_path());
+    assert_eq!(result.provider_api_key(), config.provider_api_key());
+    assert_eq!(
+        result.provider_token_issuer(),
+        config.provider_token_issuer()
+    );
+}
+
+#[test]
+fn configure_provider_runtime_from_paths_updates_config_when_both_provided() {
+    let api_key_file = tempfile::NamedTempFile::new();
+    assert!(api_key_file.is_ok());
+    let Ok(api_key_file) = api_key_file else {
+        return;
+    };
+    let write = write_file(api_key_file.path(), b"test-api-key");
+    assert!(write.is_ok());
+
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "https://assets.example.test".to_owned(),
+        PathBuf::from("/tmp/shardline"),
+        NonZeroUsize::MIN,
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
+    assert!(config.is_ok());
+    let Ok(config) = config else {
+        return;
+    };
+
+    let result = configure_provider_runtime_from_paths(
+        config,
+        Some(PathBuf::from("/tmp/providers.json")),
+        Some(api_key_file.path().to_path_buf()),
+        "test-issuer".to_owned(),
+        Ok(NonZeroU64::new(300).unwrap()),
+    );
+
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert_eq!(
+        result.provider_config_path(),
+        Some(Path::new("/tmp/providers.json"))
+    );
+    assert_eq!(result.provider_api_key(), Some("test-api-key".as_bytes()));
+    assert_eq!(result.provider_token_issuer(), Some("test-issuer"));
+    assert_eq!(
+        result.provider_token_ttl_seconds(),
+        Some(NonZeroU64::new(300).unwrap())
+    );
+}
+
+#[test]
+fn configure_provider_runtime_from_paths_rejects_only_config_path() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "https://assets.example.test".to_owned(),
+        PathBuf::from("/tmp/shardline"),
+        NonZeroUsize::MIN,
+    );
+
+    let result = configure_provider_runtime_from_paths(
+        config,
+        Some(PathBuf::from("/tmp/providers.json")),
+        None,
+        "issuer".to_owned(),
+        Ok(NonZeroU64::MIN),
+    );
+
+    assert!(matches!(
+        result,
+        Err(super::ServerConfigError::IncompleteProviderTokenConfig)
+    ));
+}
+
+#[test]
+fn configure_provider_runtime_from_paths_rejects_only_api_key_path() {
+    let api_key_file = tempfile::NamedTempFile::new();
+    assert!(api_key_file.is_ok());
+    let Ok(api_key_file) = api_key_file else {
+        return;
+    };
+    let write = write_file(api_key_file.path(), b"test-api-key");
+    assert!(write.is_ok());
+
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "https://assets.example.test".to_owned(),
+        PathBuf::from("/tmp/shardline"),
+        NonZeroUsize::MIN,
+    );
+
+    let result = configure_provider_runtime_from_paths(
+        config,
+        None,
+        Some(api_key_file.path().to_path_buf()),
+        "issuer".to_owned(),
+        Ok(NonZeroU64::MIN),
+    );
+
+    assert!(matches!(
+        result,
+        Err(super::ServerConfigError::IncompleteProviderTokenConfig)
+    ));
 }

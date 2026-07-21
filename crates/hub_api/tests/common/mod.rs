@@ -7,6 +7,7 @@ use tempfile::TempDir;
 
 pub(crate) static INIT: Once = Once::new();
 pub(crate) static TEMP_DIR: OnceLock<Mutex<Option<TempDir>>> = OnceLock::new();
+pub(crate) static STATE: OnceLock<HubState> = OnceLock::new();
 
 pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
                 repo_id TEXT PRIMARY KEY,
@@ -28,20 +29,21 @@ pub(crate) const HUB_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shardline_hub_re
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_revisions_repo_ref_idx
                 ON shardline_hub_revisions (repo_id, ref_name);
+            CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+                repo_id TEXT NOT NULL,
+                ref_name TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                PRIMARY KEY (repo_id, ref_name),
+                FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
                 commit_sha TEXT NOT NULL,
                 path TEXT NOT NULL,
                 size INTEGER NOT NULL CHECK (size >= 0),
                 sha TEXT NOT NULL,
                 is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
-                inline_content BLOB,
+
                 PRIMARY KEY (commit_sha, path)
-            );
-            CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
-                oid TEXT PRIMARY KEY,
-                data BLOB NOT NULL,
-                size INTEGER NOT NULL CHECK (size >= 0),
-                created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0)
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
                 id TEXT PRIMARY KEY,
@@ -64,20 +66,27 @@ pub(crate) fn setup() {
         conn.execute_batch(HUB_SCHEMA).expect("execute schema");
         drop(conn);
 
-        let store = LocalIndexStore::open(root);
+        let store = LocalIndexStore::open(root.clone());
         let boxed = BoxedHubStore::from_store(store);
+        let object_store = shardline_server_core::ServerObjectStore::local(root.join("lfs"))
+            .expect("local object store");
         let state = HubState {
             store: boxed,
+            object_store,
             auth: None,
             http_client: None,
         };
-        shardline_hub_api::init(state);
+        let _ = STATE.set(state);
 
         let dir_lock = TEMP_DIR.get_or_init(|| Mutex::new(None));
         *dir_lock.lock().unwrap() = Some(tmp);
     });
 }
 
+pub(crate) fn state() -> &'static HubState {
+    STATE.get().expect("setup() must be called first")
+}
+
 pub(crate) fn app() -> axum::Router {
-    shardline_hub_api::hub_routes()
+    shardline_hub_api::hub_routes(state().clone(), true)
 }

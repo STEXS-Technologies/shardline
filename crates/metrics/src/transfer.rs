@@ -1,5 +1,7 @@
 use prometheus::{Histogram, HistogramOpts, IntCounter, Registry};
 
+use crate::{must_counter, must_histogram};
+
 pub struct TransferMetrics {
     pub upload_requests: IntCounter,
     pub upload_bytes: IntCounter,
@@ -11,18 +13,12 @@ pub struct TransferMetrics {
 }
 
 impl TransferMetrics {
-    /// # Panics
-    ///
-    /// Panics if prometheus metric registration fails (should not happen with static names).
     #[must_use]
-    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
         let upload_requests =
-            IntCounter::new("shardline_upload_requests_total", "Total upload requests")
-                .expect("prometheus metric names are static constants");
-        let upload_bytes = IntCounter::new("shardline_upload_bytes_total", "Total bytes uploaded")
-            .expect("prometheus metric names are static constants");
-        let upload_duration = Histogram::with_opts(
+            must_counter("shardline_upload_requests_total", "Total upload requests");
+        let upload_bytes = must_counter("shardline_upload_bytes_total", "Total bytes uploaded");
+        let upload_duration = must_histogram(
             HistogramOpts::new(
                 "shardline_upload_duration_seconds",
                 "Upload request duration",
@@ -30,17 +26,14 @@ impl TransferMetrics {
             .buckets(vec![
                 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
             ]),
-        )
-        .expect("prometheus metric names are static constants");
-        let download_requests = IntCounter::new(
+        );
+        let download_requests = must_counter(
             "shardline_download_requests_total",
             "Total download requests",
-        )
-        .expect("prometheus metric names are static constants");
+        );
         let download_bytes =
-            IntCounter::new("shardline_download_bytes_total", "Total bytes downloaded")
-                .expect("prometheus metric names are static constants");
-        let download_duration = Histogram::with_opts(
+            must_counter("shardline_download_bytes_total", "Total bytes downloaded");
+        let download_duration = must_histogram(
             HistogramOpts::new(
                 "shardline_download_duration_seconds",
                 "Download request duration",
@@ -48,13 +41,11 @@ impl TransferMetrics {
             .buckets(vec![
                 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
             ]),
-        )
-        .expect("prometheus metric names are static constants");
-        let range_requests = IntCounter::new(
+        );
+        let range_requests = must_counter(
             "shardline_range_requests_total",
             "Total range download requests",
-        )
-        .expect("prometheus metric names are static constants");
+        );
 
         registry.register(Box::new(upload_requests.clone())).ok();
         registry.register(Box::new(upload_bytes.clone())).ok();
@@ -95,5 +86,56 @@ impl TransferMetrics {
 
     pub fn record_range_request(&self) {
         self.range_requests.inc();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn transfer_metrics_record_upload() {
+        let registry = Registry::new();
+        let metrics = TransferMetrics::new(&registry);
+
+        assert_eq!(metrics.upload_requests.get(), 0);
+        assert_eq!(metrics.upload_bytes.get(), 0);
+
+        metrics.record_upload("https", 512);
+        assert_eq!(metrics.upload_requests.get(), 1);
+        assert_eq!(metrics.upload_bytes.get(), 512);
+
+        metrics.record_upload("grpc", 256);
+        assert_eq!(metrics.upload_requests.get(), 2);
+        assert_eq!(metrics.upload_bytes.get(), 768);
+    }
+
+    #[test]
+    fn transfer_metrics_record_download() {
+        let registry = Registry::new();
+        let metrics = TransferMetrics::new(&registry);
+
+        assert_eq!(metrics.download_requests.get(), 0);
+        assert_eq!(metrics.download_bytes.get(), 0);
+
+        metrics.record_download("https", 1024);
+        assert_eq!(metrics.download_requests.get(), 1);
+        assert_eq!(metrics.download_bytes.get(), 1024);
+    }
+
+    #[test]
+    fn transfer_metrics_record_range_request() {
+        let registry = Registry::new();
+        let metrics = TransferMetrics::new(&registry);
+
+        assert_eq!(metrics.range_requests.get(), 0);
+
+        metrics.record_range_request();
+        assert_eq!(metrics.range_requests.get(), 1);
+
+        metrics.record_range_request();
+        assert_eq!(metrics.range_requests.get(), 2);
     }
 }

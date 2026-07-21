@@ -1,6 +1,6 @@
 # Shardline
 
-[![Status](https://img.shields.io/badge/status-stable%201.0.0-1f6feb)](docs/COMPATIBILITY_STATUS.md)
+[![Status](https://img.shields.io/badge/status-stable%201.0.1-1f6feb)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
 **The open-source storage backend for AI models, datasets, containers, and large binary assets.**

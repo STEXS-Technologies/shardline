@@ -7,8 +7,9 @@ use crate::{
     InvalidSerializedShardError, ServerError,
     object_store::{ServerObjectStore, read_full_object},
     xet_adapter::{
-        XorbVisitError, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
-        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
+        XetAdapterError, XorbVisitError, try_for_each_serialized_xorb_chunk,
+        validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
+        xorb_hash_from_object_key_if_present, xorb_object_key,
     },
 };
 
@@ -52,7 +53,7 @@ where
             Ok(()) => Ok(()),
             Err(e) => {
                 result = Err(e);
-                Err(crate::xet_adapter::XetAdapterError::NotFound)
+                Err(XetAdapterError::NotFound)
             }
         }
     })?;
@@ -91,4 +92,233 @@ pub(super) fn append_referenced_term_bytes(
         Ok::<(), ServerError>(())
     })
     .map_err(map_xorb_visit_error_server)
+}
+
+#[cfg(test)]
+mod tests {
+    use shardline_storage::ObjectKey;
+
+    use super::*;
+    use crate::xet_adapter::{XorbParseError, XorbVisitError};
+
+    // -----------------------------------------------------------------------
+    // map_xorb_visit_error_server
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn map_xorb_visit_error_parse_hash_mismatch() {
+        let err = XorbVisitError::Parse(XorbParseError::HashMismatch);
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::XorbHashMismatch));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_parse_other_error() {
+        // Non-HashMismatch parse errors map to InvalidSerializedXorb
+        let io_err = std::io::Error::other("test io");
+        let err = XorbVisitError::Parse(XorbParseError::Io(io_err));
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::InvalidSerializedXorb));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_visitor_passthrough() {
+        let err = XorbVisitError::Visitor(ServerError::NotFound);
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::NotFound));
+    }
+
+    #[test]
+    fn map_xorb_visit_error_visitor_other_error() {
+        let err = XorbVisitError::Visitor(ServerError::Overflow);
+        let result = map_xorb_visit_error_server(err);
+        assert!(matches!(result, ServerError::Overflow));
+    }
+
+    // -----------------------------------------------------------------------
+    // push_optional_chunk_container_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_optional_chunk_key_valid_hash() {
+        let hash = "ab".repeat(32);
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, &hash);
+        assert!(result.is_ok());
+        assert_eq!(keys.len(), 1);
+        let expected_key = xorb_object_key(&hash).unwrap();
+        assert_eq!(keys[0], expected_key);
+    }
+
+    #[test]
+    fn push_optional_chunk_key_deduplicates() {
+        let hash = "cd".repeat(32);
+        let mut keys = Vec::new();
+        push_optional_chunk_container_key(&mut keys, &hash).unwrap();
+        push_optional_chunk_container_key(&mut keys, &hash).unwrap();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn push_optional_chunk_key_rejects_invalid_hash() {
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, "not-a-hex-hash");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn push_optional_chunk_key_rejects_uppercase_hash() {
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, &"AA".repeat(32));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn push_optional_chunk_key_rejects_short_hash() {
+        let mut keys = Vec::new();
+        let result = push_optional_chunk_container_key(&mut keys, "abc");
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // referenced_term_object_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn referenced_term_object_key_valid_hash() {
+        let hash = "ef".repeat(32);
+        let result = referenced_term_object_key(&hash);
+        assert!(result.is_ok());
+        let expected = xorb_object_key(&hash).unwrap();
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn referenced_term_object_key_invalid_hash() {
+        let result = referenced_term_object_key("invalid");
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // owns_protocol_object
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn owns_protocol_object_with_xorb_key() {
+        let hash = "01".repeat(32);
+        let key = xorb_object_key(&hash).unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn owns_protocol_object_with_non_xorb_key() {
+        let key = ObjectKey::parse("shards/ab/some.shard").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn owns_protocol_object_with_chunk_key() {
+        let key = ObjectKey::parse("ab/abcdef1234567890").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn owns_protocol_object_with_random_key() {
+        let key = ObjectKey::parse("some/arbitrary/path").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // append_referenced_term_bytes — early error paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_referenced_term_bytes_empty_range_returns_error() {
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let term = FileChunkRecord {
+            hash: "ab".repeat(32),
+            offset: 0,
+            length: 1024,
+            range_start: 10,
+            range_end: 10, // empty range: range_end == range_start
+            packed_start: 0,
+            packed_end: 1024,
+        };
+        let mut output = Vec::new();
+        let result = append_referenced_term_bytes(&store, &term, &mut output);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            ServerError::InvalidSerializedShard(
+                crate::InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange
+            )
+        ));
+    }
+
+    #[test]
+    fn append_referenced_term_bytes_inverted_range_returns_error() {
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let term = FileChunkRecord {
+            hash: "ab".repeat(32),
+            offset: 0,
+            length: 1024,
+            range_start: 20,
+            range_end: 10, // inverted: end < start
+            packed_start: 0,
+            packed_end: 1024,
+        };
+        let mut output = Vec::new();
+        let result = append_referenced_term_bytes(&store, &term, &mut output);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            ServerError::InvalidSerializedShard(
+                crate::InvalidSerializedShardError::NativeXetTermEmptyOrInvertedChunkRange
+            )
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // visit_protocol_object_member_chunks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn visit_protocol_object_member_chunks_returns_ok_without_visitor_error() {
+        // Using a non-xorb key with blackhole store; owns_protocol_object returns
+        // false for non-xorb keys, so visit_stored_xorb_chunk_hashes is not called.
+        let store = crate::object_store::ServerObjectStore::blackhole();
+        let key = ObjectKey::parse("some/random/key").unwrap();
+        let mut visited = false;
+        let result = visit_protocol_object_member_chunks(&store, &key, |_hash| {
+            visited = true;
+            Err(ServerError::Overflow)
+        });
+        // The key is not a protocol object (not under xorbs namespace), so
+        // visit_stored_xorb_chunk_hashes is never called and the function returns Ok.
+        assert!(result.is_ok());
+        assert!(!visited);
+    }
+
+    // -----------------------------------------------------------------------
+    // owns_protocol_object — key with xorb namespace
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn owns_protocol_object_returns_false_for_invalid_hash_key() {
+        let key = ObjectKey::parse("aa/short").unwrap();
+        let result = owns_protocol_object(&key);
+        assert!(result.is_ok());
+        // The key doesn't match xorb pattern
+        assert!(!result.unwrap());
+    }
 }

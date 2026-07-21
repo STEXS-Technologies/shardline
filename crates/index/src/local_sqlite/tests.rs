@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::let_underscore_must_use,
+    clippy::shadow_unrelated
+)]
+
 use std::{error::Error, fs, path::Path, slice::from_ref};
 
 use rusqlite::{Connection, config::DbConfig, params};
@@ -15,7 +24,7 @@ use super::{
 };
 use crate::{
     DedupeShardMapping, DedupeStore, FileChunkRecord, FileId, FileReconstruction, FileRecord,
-    IndexStore, LifecycleStore, MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState,
+    LifecycleStore, MemoryIndexStore, MemoryRecordStore, ProviderRepositoryState,
     QuarantineCandidate, ReconstructionStore, ReconstructionTerm, RecordMutation, RecordStore,
     RecordTraversal, RetentionHold, WebhookDelivery, XorbId, parse_xet_hash_hex,
     test_invariant_error::LocalSqliteInvariantError, xet_hash_hex_string,
@@ -1034,7 +1043,7 @@ fn sample_state_machine_provider_states() -> Vec<ProviderRepositoryState> {
     ]
 }
 
-type CanonicalChunk = (String, u64, u64, u32, u32, u64, u64);
+type CanonicalChunk = (String, u64, u64, u64, u64, u64, u64);
 type CanonicalRecord = (
     Option<String>,
     String,
@@ -1399,4 +1408,47 @@ fn canonical_provider_states(states: Vec<ProviderRepositoryState>) -> Vec<Canoni
         .collect::<Vec<_>>();
     canonical.sort();
     canonical
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_record_store_lifecycle_create_read_list_delete() {
+    let result = exercise_local_record_store_lifecycle().await;
+    let error = result.as_ref().err().map(ToString::to_string);
+    assert!(
+        result.is_ok(),
+        "record store lifecycle regression: {error:?}"
+    );
+}
+
+async fn exercise_local_record_store_lifecycle() -> Result<(), Box<dyn Error>> {
+    let storage = shardline_test_support::TempStorage::new();
+    let store = LocalRecordStore::new(storage.path_buf())?;
+    let record = sample_record(Some(sample_repository_scope()?));
+
+    // Write record
+    store.commit_file_version_metadata(&record).await?;
+
+    // Read back
+    let latest_locator = RecordTraversal::latest_record_locator(&store, &record);
+    let exists = RecordTraversal::record_locator_exists(&store, &latest_locator).await?;
+    if !exists {
+        return Err("record should exist after write".into());
+    }
+
+    // List records
+    let locators = RecordTraversal::list_latest_record_locators(&store).await?;
+    if locators.is_empty() {
+        return Err("should have at least one record locator after write".into());
+    }
+
+    // Delete record
+    store.delete_record_locator(&latest_locator).await?;
+
+    // Verify deletion
+    let still_exists = RecordTraversal::record_locator_exists(&store, &latest_locator).await?;
+    if still_exists {
+        return Err("record should not exist after delete".into());
+    }
+
+    Ok(())
 }

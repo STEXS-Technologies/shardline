@@ -10,3 +10,13 @@ COORDINATION.md
 todo.md
 todo.md
 e2e_plan.md
+opencode-todo.md
+tarpaulin-report.json
+lcov*.info
+*.profraw
+coverage_report/
+coverage.json
+coverage*.lcov
+coverage_html/
+.slim/deepwork/
+.opencode

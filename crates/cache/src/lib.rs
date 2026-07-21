@@ -1,21 +1,4 @@
 #![deny(unsafe_code)]
-#![allow(
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::missing_const_for_fn
-)]
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        clippy::shadow_unrelated,
-        clippy::let_underscore_must_use,
-        clippy::format_push_string
-    )
-)]
 
 //! Reconstruction-cache contracts and adapters for Shardline.
 //!
@@ -53,5 +36,5 @@ pub use disabled::DisabledReconstructionCache;
 pub use error::ReconstructionCacheError;
 pub use key::{ReconstructionCacheKey, RepositoryScopeCacheKey};
 pub use memory::MemoryReconstructionCache;
-pub use redis::RedisReconstructionCache;
+pub use redis::{RedisReconstructionCache, RedisTlsConfig};
 pub use store::{AsyncReconstructionCache, ReconstructionCacheFuture};

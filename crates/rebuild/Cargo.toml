@@ -20,5 +20,12 @@ shardline-xet-adapter.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["bundled"] }
+shardline-test-support.workspace = true
+shardline-xet-core.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
 [lints]
 workspace = true

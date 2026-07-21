@@ -11,7 +11,7 @@ members = ["crates/*"]
 # - getrandom: duplicate (0.3 workspace, older via xet ecosystem) — NOT FIXABLE.
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/STEXS-Technologies/shardline"
@@ -37,34 +37,38 @@ hmac = "0.12"
 jsonwebtoken = "9"
 libc = "0.2.177"
 libfuzzer-sys = "0.4"
-object_store = { version = "0.13.2", default-features = false }
+object_store = { version = "0.14.0", default-features = false }
 redis = "1.0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 reqwest = { version = "0.12.28", default-features = false }
 rusqlite = "0.32"
 serde = "1.0"
+serial_test = "3.5.0"
 serde_json = "1.0"
 sha1 = "0.10"
 sha2 = { version = "0.10", features = ["compress"] }
-shardline = { version = "1.0.0", path = "crates/cli" }
-shardline-cache = { version = "1.0.0", path = "crates/cache" }
-shardline-cas = { version = "1.0.0", path = "crates/cas" }
-shardline-fsck = { version = "1.0.0", path = "crates/fsck" }
-shardline-gc = { version = "1.0.0", path = "crates/gc" }
-shardline-hub-api = { version = "1.0.0", path = "crates/hub_api" }
-shardline-index = { version = "1.0.0", path = "crates/index" }
-shardline-metrics = { version = "1.0.0", path = "crates/metrics" }
-shardline-protocol = { version = "1.0.0", path = "crates/protocol" }
-shardline-protocol-adapters = { version = "1.0.0", path = "crates/protocol_adapters" }
-shardline-rebuild = { version = "1.0.0", path = "crates/rebuild" }
-shardline-provider-events = { version = "1.0.0", path = "crates/provider_events" }
-shardline-oci-adapter = { version = "1.0.0", path = "crates/oci_adapter" }
-shardline-server = { version = "1.0.0", path = "crates/server" }
-shardline-server-core = { version = "1.0.0", path = "crates/server_core" }
-shardline-storage = { version = "1.0.0", path = "crates/storage" }
-shardline-test-support = { version = "1.0.0", path = "crates/test_support" }
-shardline-vcs = { version = "1.0.0", path = "crates/vcs" }
-shardline-xet-adapter = { version = "1.0.0", path = "crates/xet_adapter" }
-shardline-xet-core = { version = "1.0.0", path = "crates/xet_core" }
+shardline = { version = "1.0.1", path = "crates/cli" }
+shardline-cache = { version = "1.0.1", path = "crates/cache" }
+shardline-cas = { version = "1.0.1", path = "crates/cas" }
+shardline-fsck = { version = "1.0.1", path = "crates/fsck" }
+shardline-gc = { version = "1.0.1", path = "crates/gc" }
+shardline-hub-api = { version = "1.0.1", path = "crates/hub_api" }
+shardline-index = { version = "1.0.1", path = "crates/index" }
+shardline-metrics = { version = "1.0.1", path = "crates/metrics" }
+shardline-protocol = { version = "1.0.1", path = "crates/protocol" }
+shardline-protocol-adapters = { version = "1.0.1", path = "crates/protocol_adapters" }
+shardline-rebuild = { version = "1.0.1", path = "crates/rebuild" }
+shardline-provider-events = { version = "1.0.1", path = "crates/provider_events" }
+shardline-oci-adapter = { version = "1.0.1", path = "crates/oci_adapter" }
+shardline-server = { version = "1.0.1", path = "crates/server" }
+shardline-server-core = { version = "1.0.1", path = "crates/server_core" }
+shardline-storage = { version = "1.0.1", path = "crates/storage" }
+shardline-test-support = { version = "1.0.1", path = "crates/test_support" }
+shardline-validation = { version = "1.0.1", path = "crates/shardline-validation" }
+shardline-auth = { version = "1.0.1", path = "crates/shardline-auth" }
+shardline-vcs = { version = "1.0.1", path = "crates/vcs" }
+shardline-xet-adapter = { version = "1.0.1", path = "crates/xet_adapter" }
+shardline-xet-core = { version = "1.0.1", path = "crates/xet_core" }
 sqlx = { version = "0.8.6", default-features = false }
 subtle = { version = "2.6", default-features = false }
 tempfile = "3.15"

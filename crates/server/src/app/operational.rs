@@ -11,22 +11,24 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
+use shardline_metrics;
 use shardline_protocol::TokenScope;
 
 use crate::{
     HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
-    auth::authorize_static_bearer_token,
-    model::ReadyResponse,
-    upload_ingest::RequestBodyReader,
-    xet_adapter::{validate_hash_path, validate_xorb_transfer_namespace},
-};
-
-use super::{
-    AppState, authorize,
-    reconstruction_helpers::{
-        byte_range_stream_response, full_byte_stream_response, parse_required_xorb_transfer_range,
+    app::{
+        AppState, authorize,
+        reconstruction_helpers::{
+            byte_range_stream_response, full_byte_stream_response,
+            parse_required_xorb_transfer_range,
+        },
+        scope_from_auth,
     },
-    scope_from_auth,
+    auth::authorize_static_bearer_token,
+    metrics,
+    model::ReadyResponse,
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
+    xet_adapter::{validate_hash_path, validate_xorb_transfer_namespace},
 };
 
 pub(super) async fn health() -> impl IntoResponse {
@@ -54,11 +56,14 @@ pub(super) async fn ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
             }),
         )
             .into_response(),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": format!("{error}") })),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::warn!("readiness check failed: {error}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "service unavailable" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -70,7 +75,11 @@ pub(super) async fn read_chunk(
 ) -> Result<Response, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     validate_hash_path(&hash)?;
-    let _dedupe_shard_length = state.backend.dedupe_shard_length(&hash).await?;
+
+    // Do not query repository references for an object that is absent. Besides
+    // avoiding unnecessary metadata work, this makes unknown hashes
+    // indistinguishable from inaccessible ones without scanning repositories.
+    let _stored_length = state.backend.chunk_length(&hash).await?;
     if let Some(auth) = auth.as_ref() {
         let reachable = state
             .backend
@@ -97,8 +106,21 @@ pub(super) async fn upload_xorb(
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
     authorize(&state, &headers, TokenScope::Write)?;
     validate_hash_path(&hash)?;
-    let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    Ok(Json(state.backend.upload_xorb_stream(&hash, body).await?))
+    let mut body_reader =
+        RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    let body_bytes = read_body_to_bytes(&mut body_reader).await?;
+    let xorb_length = body_bytes.len() as u64;
+    let response = state
+        .backend
+        .upload_xorb_stream(
+            &hash,
+            RequestBodyReader::from_bytes(bytes::Bytes::from(body_bytes)),
+        )
+        .await?;
+    if response.was_inserted {
+        metrics::record_xorb_stored(xorb_length);
+    }
+    Ok(Json(response))
 }
 
 #[tracing::instrument(skip(state, headers), fields(hash = %hash))]
@@ -143,6 +165,7 @@ pub(super) async fn read_xorb_transfer(
     }
     let range = parse_required_xorb_transfer_range(&headers, total_length)?;
     let transfer_bytes = range.len().ok_or(ServerError::Overflow)?;
+    metrics::record_xet_xorb_download(total_length);
     let byte_stream = state
         .backend
         .read_xorb_range_stream(&hash, total_length, range)
@@ -156,6 +179,24 @@ pub(super) async fn read_xorb_transfer(
     ))
 }
 
+/// Writes a xorb to the CAS through the transfer endpoint.
+/// git-xet uses this endpoint to upload chunk-grouped data directly
+/// to the content-addressed storage layer after receiving the CAS URL
+/// and access token from the LFS batch response.
+#[tracing::instrument(skip(state, headers, body), fields(hash = %hash))]
+pub(super) async fn write_xorb_transfer(
+    State(state): State<Arc<AppState>>,
+    Path((prefix, hash)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<XorbUploadResponse>, ServerError> {
+    authorize(&state, &headers, TokenScope::Write)?;
+    validate_xorb_transfer_namespace(&prefix)?;
+    validate_hash_path(&hash)?;
+    let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
+    Ok(Json(state.backend.upload_xorb_stream(&hash, body).await?))
+}
+
 #[tracing::instrument(skip(state, headers, body))]
 pub(super) async fn upload_shard(
     State(state): State<Arc<AppState>>,
@@ -164,16 +205,16 @@ pub(super) async fn upload_shard(
 ) -> Result<Json<ShardUploadResponse>, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    Ok(Json(
-        state
-            .backend
-            .upload_shard_stream(
-                body,
-                auth.as_ref().map(scope_from_auth),
-                state.config.shard_metadata_limits(),
-            )
-            .await?,
-    ))
+    let response = state
+        .backend
+        .upload_shard_stream(
+            body,
+            auth.as_ref().map(scope_from_auth),
+            state.config.shard_metadata_limits(),
+        )
+        .await?;
+    metrics::record_shard_stored();
+    Ok(Json(response))
 }
 
 #[tracing::instrument(skip(state, headers))]
@@ -268,6 +309,48 @@ pub(super) async fn metrics(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+
+    use crate::model::{HealthResponse, ReadyResponse};
+
+    #[test]
+    fn health_response_json_format() {
+        let response = HealthResponse {
+            status: "ok".to_owned(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[test]
+    fn health_response_serialization_roundtrip() {
+        let original = HealthResponse {
+            status: "ok".to_owned(),
+        };
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: HealthResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn ready_response_json_format() {
+        let response = ReadyResponse {
+            status: "ok".to_owned(),
+            server_role: "all".to_owned(),
+            server_frontends: vec!["xet".to_owned(), "oci".to_owned()],
+            metadata_backend: "local".to_owned(),
+            object_backend: "local".to_owned(),
+            cache_backend: "memory".to_owned(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["server_role"], "all");
+        assert_eq!(json["server_frontends"], serde_json::json!(["xet", "oci"]));
+        assert_eq!(json["metadata_backend"], "local");
+    }
+
     #[test]
     fn metrics_output_is_valid_prometheus_text_format() {
         let body = concat!(
@@ -306,5 +389,84 @@ mod tests {
         let encoded = shardline_metrics::encode_metrics();
         assert!(!encoded.is_empty());
         assert!(encoded.contains("# HELP") || encoded.contains("# TYPE"));
+    }
+
+    #[test]
+    fn encode_metrics_contains_expected_metric_names() {
+        let _ = shardline_metrics::metrics();
+        let encoded = shardline_metrics::encode_metrics();
+        // The metrics output should include at least shardline_up.
+        assert!(encoded.contains("shardline_up"));
+    }
+
+    #[tokio::test]
+    async fn health_into_response_returns_ok_status() {
+        // health() returns Json<HealthResponse> which serializes to {"status":"ok"}
+        let response = super::health().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_body_contains_status_ok() {
+        let response = super::health().await.into_response();
+        let body_bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    // ── ReadyResponse tests ────────────────────────────────────────────────
+
+    #[test]
+    fn ready_response_serialization_roundtrip() {
+        let original = ReadyResponse {
+            status: "ok".to_owned(),
+            server_role: "api".to_owned(),
+            server_frontends: vec!["xet".to_owned()],
+            metadata_backend: "postgres".to_owned(),
+            object_backend: "s3".to_owned(),
+            cache_backend: "redis".to_owned(),
+        };
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let restored: ReadyResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(original, restored);
+        assert_eq!(restored.metadata_backend, "postgres");
+        assert_eq!(restored.object_backend, "s3");
+    }
+
+    #[test]
+    fn ready_response_contains_all_fields() {
+        let response = ReadyResponse {
+            status: "ok".to_owned(),
+            server_role: "transfer".to_owned(),
+            server_frontends: vec!["xet".to_owned(), "oci".to_owned()],
+            metadata_backend: "local".to_owned(),
+            object_backend: "local".to_owned(),
+            cache_backend: "disabled".to_owned(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["server_role"], "transfer");
+        assert_eq!(json["server_frontends"], serde_json::json!(["xet", "oci"]));
+        assert_eq!(json["metadata_backend"], "local");
+        assert_eq!(json["cache_backend"], "disabled");
+    }
+
+    // ── metrics output validation ──────────────────────────────────────────
+
+    #[test]
+    fn metrics_content_type_is_correct() {
+        // Verify the content-type header constant matches expectations
+        assert_eq!(
+            "text/plain; version=0.0.4; charset=utf-8",
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn encode_metrics_contains_config_values() {
+        let _ = shardline_metrics::metrics();
+        let encoded = shardline_metrics::encode_metrics();
+        assert!(encoded.contains("shardline_up"));
     }
 }

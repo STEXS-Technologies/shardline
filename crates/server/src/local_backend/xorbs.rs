@@ -6,7 +6,7 @@ use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
     xet_adapter::{
         XorbUploadResponse, resolve_dedupe_shard_object, store_uploaded_xorb_bytes, xorb_object_key,
     },
@@ -39,7 +39,7 @@ impl LocalBackend {
         expected_hash: &str,
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
-        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
+        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let object_store = self.object_store();
         store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
             .map_err(ServerError::from)
@@ -55,14 +55,6 @@ impl LocalBackend {
         let byte_stream = object_byte_stream(object_store, object_key, total_length).await?;
 
         Ok((byte_stream, total_length))
-    }
-
-    pub(crate) async fn dedupe_shard_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
-        let object_store = self.object_store();
-        let (_object_key, total_length) =
-            resolve_dedupe_shard_object(&self.index_store, &object_store, hash_hex).await?;
-
-        Ok(total_length)
     }
 
     /// Streams a stored xorb byte range by hash.
@@ -106,5 +98,73 @@ impl LocalBackend {
     ) -> Result<bool, ServerError> {
         super::records::repository_references_xorb(&self.record_store, hash_hex, repository_scope)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::LocalBackend;
+    use crate::xet_adapter::xorb_object_key;
+
+    #[test]
+    fn xorb_object_key_accepts_valid_hash() {
+        let hash = "a".repeat(64);
+        let key = xorb_object_key(&hash);
+        assert!(key.is_ok());
+        let key = key.unwrap();
+        assert!(key.as_str().contains(&hash));
+    }
+
+    #[test]
+    fn xorb_object_key_rejects_short_hash() {
+        let hash = "abc123";
+        let key = xorb_object_key(hash);
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn xorb_object_key_rejects_non_hex_hash() {
+        let hash = "z".repeat(64);
+        let key = xorb_object_key(&hash);
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn xorb_object_key_rejects_empty_hash() {
+        let key = xorb_object_key("");
+        assert!(key.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_xorb_length_returns_not_found_for_missing_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let hash = "aa".repeat(32);
+        let result = backend.xorb_length(&hash).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_backend_xorb_length_rejects_invalid_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.xorb_length("short").await;
+        assert!(result.is_err());
     }
 }

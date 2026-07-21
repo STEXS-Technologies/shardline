@@ -81,3 +81,84 @@ pub trait ObjectStore {
     /// Returns the adapter error when deletion fails.
     fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error>;
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix,
+        ObjectStore, PutOutcome,
+    };
+
+    /// A minimal store that ONLY overrides `list_prefix` so the
+    /// default `visit_prefix` implementation from the `ObjectStore`
+    /// trait is exercised.
+    struct MinimalStore;
+
+    impl ObjectStore for MinimalStore {
+        type Error = Box<dyn std::error::Error>;
+
+        fn put_if_absent(
+            &self,
+            _key: &ObjectKey,
+            _body: ObjectBody<'_>,
+            _integrity: &ObjectIntegrity,
+        ) -> Result<PutOutcome, Self::Error> {
+            Err("not implemented".into())
+        }
+
+        fn read_range(
+            &self,
+            _key: &ObjectKey,
+            _range: shardline_protocol::ByteRange,
+        ) -> Result<Vec<u8>, Self::Error> {
+            Err("not implemented".into())
+        }
+
+        fn contains(&self, _key: &ObjectKey) -> Result<bool, Self::Error> {
+            Err("not implemented".into())
+        }
+
+        fn metadata(&self, _key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
+            Err("not implemented".into())
+        }
+
+        fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
+            // Return a single entry to test that visit_prefix visits it.
+            let key = ObjectKey::parse(&format!("{}file.xorb", prefix.as_str()))
+                .map_err(|e| -> Box<dyn std::error::Error> { format!("bad key: {e}").into() })?;
+            Ok(vec![ObjectMetadata::new(key, 42, None)])
+        }
+
+        fn delete_if_present(&self, _key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
+            Err("not implemented".into())
+        }
+    }
+
+    #[test]
+    fn default_visit_prefix_delegates_to_list_prefix() {
+        let store = MinimalStore;
+        let prefix = ObjectPrefix::parse("ns/").expect("valid prefix");
+
+        let mut visited = Vec::new();
+        let result: Result<(), Box<dyn std::error::Error>> = store.visit_prefix(&prefix, |meta| {
+            visited.push(meta.key().clone());
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(visited.len(), 1);
+        assert_eq!(visited[0].as_str(), "ns/file.xorb");
+    }
+
+    #[test]
+    fn default_visit_prefix_propagates_visitor_error() {
+        let store = MinimalStore;
+        let prefix = ObjectPrefix::parse("ns/").expect("valid prefix");
+
+        let result: Result<(), Box<dyn std::error::Error>> =
+            store.visit_prefix(&prefix, |_meta| Err("visitor rejected".into()));
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "visitor rejected");
+    }
+}

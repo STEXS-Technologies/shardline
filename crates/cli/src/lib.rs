@@ -5,10 +5,10 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::panic
     )
 )]
 
@@ -44,12 +44,13 @@ mod bench;
 mod command;
 mod config;
 mod db;
+pub mod entry;
 mod fsck;
 mod gc;
 mod gc_schedule;
 mod hold;
-mod local_output;
-mod local_path;
+pub mod local_output;
+pub mod local_path;
 mod providerless;
 mod rebuild;
 mod repair;
@@ -71,7 +72,7 @@ pub use config::{
 };
 pub use db::{DbRuntimeError, run_db_migration};
 pub use fsck::{FsckRuntimeError, run_fsck};
-pub use gc::{GcRuntimeError, run_gc, run_gc_diagnostics};
+pub use gc::{GcRuntimeError, MINIMUM_GC_RETENTION_SECONDS, run_gc, run_gc_diagnostics};
 pub use gc_schedule::{
     GcScheduleError, GcScheduleInstallOptions, GcScheduleInstallReport, GcScheduleUninstallReport,
     install_gc_schedule, uninstall_gc_schedule,

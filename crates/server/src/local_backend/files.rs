@@ -8,11 +8,15 @@ use tokio::task;
 use super::LocalBackend;
 use crate::{
     ServerError, ShardMetadataLimits,
+    chunk_store::chunk_object_key,
     model::UploadFileResponse,
     object_store::{read_full_object, reconstruct_file_record_bytes},
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes},
     validation::validate_identifier,
-    xet_adapter::{FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response},
+    xet_adapter::{
+        FileReconstructionResponse, ShardUploadResponse, build_reconstruction_response,
+        register_uploaded_shard_bytes,
+    },
 };
 
 impl LocalBackend {
@@ -53,7 +57,7 @@ impl LocalBackend {
         validate_identifier(file_id)?;
 
         let object_store = self.object_store();
-        let mut ingestor = crate::upload_ingest::FileUploadIngestor::new_with_parallelism(
+        let mut ingestor = FileUploadIngestor::new_with_parallelism(
             self.chunk_size,
             expected_sha256.is_some(),
             self.upload_max_in_flight_chunks,
@@ -84,10 +88,10 @@ impl LocalBackend {
         repository_scope: Option<&RepositoryScope>,
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
-        let uploaded_body = crate::upload_ingest::read_body_to_bytes(&mut body).await?;
+        let uploaded_body = read_body_to_bytes(&mut body).await?;
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        crate::xet_adapter::register_uploaded_shard_bytes(
+        register_uploaded_shard_bytes(
             &object_store,
             &uploaded_body,
             repository_scope,
@@ -191,7 +195,7 @@ impl LocalBackend {
     /// Returns [`ServerError`] when the hash is invalid or the chunk is missing.
     pub async fn read_chunk(&self, hash_hex: &str) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
-        let object_key = crate::chunk_store::chunk_object_key(hash_hex)?;
+        let object_key = chunk_object_key(hash_hex)?;
         let metadata = object_store.metadata(&object_key)?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
@@ -235,12 +239,210 @@ impl LocalBackend {
     /// Returns [`ServerError`] when the hash is invalid or the chunk is missing.
     pub async fn chunk_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
         let object_store = self.object_store();
-        let object_key = crate::chunk_store::chunk_object_key(hash_hex)?;
+        let object_key = chunk_object_key(hash_hex)?;
         let metadata = object_store.metadata(&object_key)?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
         };
 
         Ok(metadata.length())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::LocalBackend;
+    use crate::chunk_store::chunk_object_key;
+
+    #[test]
+    fn chunk_object_key_accepts_valid_hash() {
+        let hash = "a".repeat(64);
+        let key = chunk_object_key(&hash);
+        assert!(key.is_ok());
+        let key = key.unwrap();
+        assert!(key.as_str().contains(&hash));
+    }
+
+    #[test]
+    fn chunk_object_key_rejects_short_hash() {
+        let hash = "abc123";
+        let key = chunk_object_key(hash);
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn chunk_object_key_rejects_non_hex_hash() {
+        let hash = "z".repeat(64);
+        let key = chunk_object_key(&hash);
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn chunk_object_key_rejects_empty_hash() {
+        let key = chunk_object_key("");
+        assert!(key.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_returns_not_found_for_missing_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.read_chunk(&"aa".repeat(32)).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_rejects_invalid_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.read_chunk("short").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chunk_length_returns_not_found_for_missing_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.chunk_length(&"bb".repeat(32)).await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chunk_length_rejects_invalid_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.chunk_length("short").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_total_bytes_rejects_invalid_file_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let result = backend.file_total_bytes("../invalid-id", None, None).await;
+        assert!(matches!(result, Err(crate::ServerError::InvalidFileId)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_and_chunk_length_happy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        // Upload a file, then verify chunk length and read_chunk work.
+        let uploaded = backend
+            .upload_file(
+                "test.bin",
+                axum::body::Bytes::from_static(b"hello-chunk-data"),
+                None,
+            )
+            .await
+            .unwrap();
+        let chunk = uploaded.chunks.first().unwrap();
+        let hash = &chunk.hash;
+
+        let length = backend.chunk_length(hash).await.unwrap();
+        assert_eq!(length, chunk.length);
+
+        let data = backend.read_chunk(hash).await.unwrap();
+        assert!(!data.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_for_file_version_happy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let content = b"version-specific-data";
+        let uploaded = backend
+            .upload_file(
+                "versioned.bin",
+                axum::body::Bytes::from_static(content),
+                None,
+            )
+            .await
+            .unwrap();
+        let chunk = uploaded.chunks.first().unwrap();
+        let hash = &chunk.hash;
+
+        let result = backend
+            .read_chunk_for_file_version(hash, "versioned.bin", &uploaded.content_hash, None)
+            .await;
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.as_slice(), content);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_chunk_for_file_version_rejects_unreferenced_chunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65536).unwrap_or(NonZeroUsize::MIN),
+        )
+        .await
+        .unwrap();
+
+        let content = b"some-content";
+        let uploaded = backend
+            .upload_file("a.bin", axum::body::Bytes::from_static(content), None)
+            .await
+            .unwrap();
+
+        // A hash that is valid hex but not referenced by the file version
+        let unreferenced_hash = "ff".repeat(32);
+        let result = backend
+            .read_chunk_for_file_version(&unreferenced_hash, "a.bin", &uploaded.content_hash, None)
+            .await;
+        assert!(matches!(result, Err(crate::ServerError::NotFound)));
     }
 }

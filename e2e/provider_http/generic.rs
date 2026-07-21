@@ -54,7 +54,7 @@ async fn generic_provider_token_endpoint_issues_runtime_tokens() -> Result<(), B
             "{}/v1/xorbs/default/{xorb_hash}",
             runtime.base_url()
         ))
-        .bearer_auth(&issued.token)
+        .bearer_auth(issued.token.expose_secret())
         .body(xorb_body)
         .send()
         .await?;

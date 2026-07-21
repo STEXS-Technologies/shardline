@@ -12,6 +12,7 @@ description = "HuggingFace Hub API compatibility layer for Shardline."
 [dependencies]
 axum.workspace = true
 base64.workspace = true
+blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 flate2.workspace = true
@@ -26,15 +27,18 @@ shardline-index.workspace = true
 shardline-metrics.workspace = true
 shardline-protocol.workspace = true
 shardline-server-core.workspace = true
+shardline-storage.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tower-http = { workspace = true, features = ["cors", "set-header"] }
 tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+proptest.workspace = true
 rusqlite.workspace = true
+serial_test = "3"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
