@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-rebuild"
-readme = "../../README.md"
+readme = "README.md"
 description = "Index rebuild logic for the Shardline server ecosystem."
 
 [dependencies]

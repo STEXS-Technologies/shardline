@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-hub-api"
-readme = "../../README.md"
+readme = "README.md"
 description = "HuggingFace Hub API compatibility layer for Shardline."
 
 [dependencies]

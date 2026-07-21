@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Shared Prometheus metrics for the Shardline server ecosystem."
+readme = "README.md"
 
 [dependencies]
 prometheus = { workspace = true }

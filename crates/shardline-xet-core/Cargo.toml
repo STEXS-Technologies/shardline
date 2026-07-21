@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-xet-core"
-readme = "../../README.md"
+readme = "README.md"
 description = "Re-implementation of xet-core-structures surface area without xet-runtime dependencies."
 
 [dependencies]

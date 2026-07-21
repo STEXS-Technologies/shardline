@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-server"
-readme = "../../README.md"
+readme = "README.md"
 description = "HTTP server boundary, runtime, and operator workflows for Shardline."
 
 [package.metadata.docs.rs]
