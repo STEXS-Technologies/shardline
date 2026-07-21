@@ -1,8 +1,6 @@
 #[cfg(test)]
 use serial_test::serial;
 #[cfg(test)]
-use std::path::PathBuf;
-#[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use std::{
     env::var,
@@ -361,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial_test::serial]
     fn mint_admin_token_rejects_signing_key_growth_after_validation_without_retaining_appended_bytes()
      {
         let temp = tempfile::NamedTempFile::new().unwrap();
@@ -685,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial_test::serial]
     fn mint_admin_token_rejects_shrinking_signing_key_after_validation() {
         let temp = tempfile::NamedTempFile::new().unwrap();
         let initial = b"some signing key that is long enough to be truncated";
