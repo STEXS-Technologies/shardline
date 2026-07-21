@@ -204,12 +204,12 @@ impl MDBShardInfo {
 
         let mut footer = MDBShardFileFooter::default();
 
-        for (_, file_info) in shard.file_content.iter() {
+        for file_info in shard.file_content.values() {
             file_info.serialize(writer)?;
         }
         FileDataSequenceHeader::bookend().serialize(writer)?;
 
-        for (_, xorb_info) in shard.xorb_content.iter() {
+        for xorb_info in shard.xorb_content.values() {
             xorb_info.serialize(writer)?;
         }
         XorbChunkSequenceHeader::bookend().serialize(writer)?;
