@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use axum::{
     Json,
@@ -134,7 +134,7 @@ pub(super) async fn handle_provider_webhook(
     let Some(event) = event else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let outcome = apply_provider_webhook(&state.config, &event).await?;
     let elapsed = start.elapsed().as_secs_f64();
     metrics::record_webhook_event(&provider, "", elapsed);

@@ -1,8 +1,11 @@
 use std::{
     str::FromStr,
     sync::Arc,
+    sync::OnceLock,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    task::Poll,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
@@ -25,7 +28,7 @@ pub struct JwksProvider {
     jwks_url: String,
     issuer: String,
     cached_keys: Arc<RwLock<Option<CachedJwks>>>,
-    background_handle: Arc<std::sync::OnceLock<tokio::task::JoinHandle<()>>>,
+    background_handle: Arc<OnceLock<tokio::task::JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -127,7 +130,7 @@ impl JwksProvider {
                 etag,
                 refresh_interval,
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
         provider.start_background_refresh();
@@ -150,9 +153,9 @@ impl JwksProvider {
                     () = tokio::time::sleep(interval) => {}
                     () = futures_util::future::poll_fn(|_| {
                         if shutdown.load(Ordering::Acquire) {
-                            std::task::Poll::Ready(())
+                            Poll::Ready(())
                         } else {
-                            std::task::Poll::Pending
+                            Poll::Pending
                         }
                     }) => return,
                 }
@@ -235,7 +238,7 @@ impl JwksProvider {
                         "JWKS cache lock contended".to_owned(),
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
             }
         }?;
 
@@ -278,8 +281,8 @@ impl JwksProvider {
 
         let payload = token_data.claims;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_else(|e| {
                 tracing::error!("SystemTime before UNIX_EPOCH: {e}");
@@ -866,7 +869,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
             jwks_url: "https://example.com/.well-known/jwks".to_owned(),
             issuer: "https://example.com".to_owned(),
             cached_keys: Arc::new(RwLock::new(cached)),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1337,7 +1340,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("my-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1384,7 +1387,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("old-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1427,7 +1430,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: None,
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1505,7 +1508,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("old-jwks-version".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1781,7 +1784,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: None,
                 refresh_interval: Duration::from_millis(50),
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1884,7 +1887,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("my-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -1913,7 +1916,7 @@ AyLKOERs8eToNOVrylNpcw/dRahPBUPuHZ/rHzIbscVeuU14wYIq3Eje5qZU0NW6\n\
                 etag: Some("my-etag".to_owned()),
                 refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             }))),
-            background_handle: Arc::new(std::sync::OnceLock::new()),
+            background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 

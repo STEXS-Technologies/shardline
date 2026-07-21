@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use shardline_protocol::{RepositoryProvider, SecretString, TokenScope};
@@ -122,8 +123,8 @@ pub struct XetCasTokenResponse {
     pub access_token: String,
 }
 
-impl std::fmt::Debug for XetCasTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for XetCasTokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("XetCasTokenResponse")
             .field("cas_url", &self.cas_url)
             .field("exp", &self.exp)
@@ -143,8 +144,8 @@ pub struct GitLfsAuthenticateResponse {
     pub expires_in: u64,
 }
 
-impl std::fmt::Debug for GitLfsAuthenticateResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for GitLfsAuthenticateResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GitLfsAuthenticateResponse")
             .field("href", &self.href)
             .field("header", &"<redacted>")
@@ -164,8 +165,8 @@ pub struct OciRegistryTokenResponse {
     pub expires_in: u64,
 }
 
-impl std::fmt::Debug for OciRegistryTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for OciRegistryTokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OciRegistryTokenResponse")
             .field("token", &"<redacted>")
             .field("access_token", &"<redacted>")

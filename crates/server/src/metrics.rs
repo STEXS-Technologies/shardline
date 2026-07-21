@@ -2,7 +2,7 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::body::Body;
@@ -43,7 +43,7 @@ pub fn record_webhook_event(provider: &str, event_type: &str, duration_secs: f64
     shardline_metrics::record_provider_webhook(provider, event_type);
     shardline_metrics::metrics()
         .provider
-        .record_webhook_duration(std::time::Duration::from_secs_f64(duration_secs));
+        .record_webhook_duration(Duration::from_secs_f64(duration_secs));
 }
 
 pub fn record_token_exchange() {

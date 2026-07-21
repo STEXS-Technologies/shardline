@@ -6,6 +6,7 @@ use std::{
     io::{self, Error as IoError, ErrorKind, Read},
     num::NonZeroU64,
     path::{Path, PathBuf},
+    str,
 };
 
 use shardline_cache::RedisTlsConfig;
@@ -183,7 +184,7 @@ pub(super) fn optional_s3_secret_from_sources(
                     observed_bytes,
                 },
             )?;
-            let s = std::str::from_utf8(bytes.expose_secret()).map_err(|_error| {
+            let s = str::from_utf8(bytes.expose_secret()).map_err(|_error| {
                 ServerConfigError::S3CredentialUtf8 {
                     name: file_env_name,
                 }

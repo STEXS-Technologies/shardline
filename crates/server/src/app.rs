@@ -12,12 +12,15 @@ pub use provider::{
 pub use reconstruction_helpers::{full_byte_stream_response, parse_batch_reconstruction_query};
 
 use std::{
-    future::Future,
+    fs,
+    future::{Future, pending},
+    io::Error,
     num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
@@ -334,7 +337,7 @@ where
                 if shutdown_started_rx.await.is_ok() {
                     tokio::time::sleep(timeout).await;
                 } else {
-                    std::future::pending::<()>().await;
+                    pending::<()>().await;
                 }
             } => {
                 tracing::warn!("graceful shutdown timed out after {timeout:?}, aborting");
@@ -489,11 +492,11 @@ fn build_hub_state(
         app_state.config.index_postgres_url().map_or_else(
             || -> Result<shardline_index::hub::BoxedHubStore, ServerError> {
                 let hub_root = root_dir.join("hub");
-                if let Err(e) = std::fs::create_dir_all(&hub_root) {
+                if let Err(e) = fs::create_dir_all(&hub_root) {
                     tracing::warn!("failed to create hub directory: {e}");
                 }
                 let sqlite_store = shardline_index::LocalIndexStore::new(hub_root.clone())
-                    .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
+                    .map_err(|e| ServerError::Io(Error::other(e)))?;
                 // Ensure hub-specific tables exist
                 if let Err(e) = shardline_index::hub::ensure_hub_tables(&hub_root) {
                     tracing::warn!("failed to create hub tables: {e}");
@@ -506,7 +509,7 @@ fn build_hub_state(
                 let pool = sqlx::postgres::PgPoolOptions::new()
                     .max_connections(16)
                     .connect_lazy(pg_url)
-                    .map_err(|e| ServerError::Io(std::io::Error::other(e)))?;
+                    .map_err(|e| ServerError::Io(Error::other(e)))?;
                 let pg_store = shardline_index::PostgresIndexStore::new(pool);
                 Ok(shardline_index::hub::BoxedHubStore::from_store(pg_store))
             },
@@ -514,7 +517,7 @@ fn build_hub_state(
 
     // Build an HTTP client for outbound webhook delivery.
     let http_client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .build()
     {
         Ok(client) => Some(client),
