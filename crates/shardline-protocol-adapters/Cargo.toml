@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-protocol-adapters"
-readme = "../../README.md"
+readme = "README.md"
 description = "Shared protocol adapters for Git LFS, Bazel HTTP cache, and related object-key mapping."
 
 [dependencies]

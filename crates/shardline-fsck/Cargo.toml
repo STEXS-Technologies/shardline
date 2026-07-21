@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-fsck"
-readme = "../../README.md"
+readme = "README.md"
 description = "Storage integrity checking logic for the Shardline server ecosystem."
 
 [dependencies]

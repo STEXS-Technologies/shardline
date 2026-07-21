@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-test-support"
-readme = "../../README.md"
+readme = "README.md"
 description = "Test support utilities for Shardline crates."
 
 [package.metadata.docs.rs]

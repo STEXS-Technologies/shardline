@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-oci-adapter"
-readme = "../../README.md"
+readme = "README.md"
 description = "OCI Distribution protocol adapter for the Shardline server ecosystem."
 
 [dependencies]

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-xet-adapter"
-readme = "../../README.md"
+readme = "README.md"
 description = "Xet xorb and shard adapter for the Shardline server ecosystem."
 
 [dependencies]

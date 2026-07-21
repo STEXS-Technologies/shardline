@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-provider-events"
-readme = "../../README.md"
+readme = "README.md"
 description = "Provider webhook event processing for the Shardline server."
 
 [dependencies]

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-server-core"
-readme = "../../README.md"
+readme = "README.md"
 description = "Shared core types for the Shardline server ecosystem."
 
 [dependencies]

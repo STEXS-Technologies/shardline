@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-auth"
-readme = "../../README.md"
+readme = "README.md"
 description = "Token signing and verification for Shardline authentication."
 publish = true
 

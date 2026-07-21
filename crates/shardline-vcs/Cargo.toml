@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/shardline-vcs"
-readme = "../../README.md"
+readme = "README.md"
 description = "Provider adapters and authorization boundaries for Git-backed Shardline deployments."
 
 [package.metadata.docs.rs]
