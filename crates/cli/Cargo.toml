@@ -55,6 +55,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["bundled"] }
+serial_test.workspace = true
 shardline-test-support.workspace = true
 tempfile.workspace = true
 url.workspace = true
