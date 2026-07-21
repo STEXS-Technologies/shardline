@@ -23,7 +23,7 @@ use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
 use crate::app::{AppState, authorize, scope_from_auth};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    ServerError, lfs_object_key, metrics,
+    ServerError, cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL}, lfs_object_key, metrics,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -125,9 +125,9 @@ pub(crate) async fn lfs_batch(
         .to_owned();
     let xet_action_header = cas_token.as_ref().map(|token| {
         json!({
-            crate::cas_headers::URL: &cas_url,
-            crate::cas_headers::ACCESS_TOKEN: token,
-            crate::cas_headers::TOKEN_EXPIRATION: "0"
+            URL: &cas_url,
+            ACCESS_TOKEN: token,
+            TOKEN_EXPIRATION: "0"
         })
     });
 

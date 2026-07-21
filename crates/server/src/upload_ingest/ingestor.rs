@@ -17,6 +17,7 @@ use crate::config::default_upload_max_in_flight_chunks;
 use crate::{
     ServerError,
     local_backend::content_hash,
+    metrics::record_chunk_inserted,
     model::{UploadChunkResult, UploadFileResponse},
     object_store::ServerObjectStore,
     overflow::{checked_add, checked_increment},
@@ -199,7 +200,7 @@ impl FileUploadIngestor {
             let chunk = ChunkBuffer::Shared(chunk);
             let outcome = put_if_absent_chunk_buffer(object_store, chunk).await?;
             if outcome.inserted {
-                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+                record_chunk_inserted(outcome.chunk_length);
             }
             self.completed_chunks.push(SequencedStoredChunkOutcome {
                 sequence,
@@ -215,7 +216,7 @@ impl FileUploadIngestor {
             let chunk = ChunkBuffer::Shared(chunk);
             let outcome = put_if_absent_chunk_buffer(&object_store, chunk).await?;
             if outcome.inserted {
-                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+                record_chunk_inserted(outcome.chunk_length);
             }
             Ok(SequencedStoredChunkTaskOutcome {
                 sequence,
@@ -243,7 +244,7 @@ impl FileUploadIngestor {
             let (outcome, reusable_buffer) =
                 put_if_absent_pooled_chunk_buffer(object_store, chunk).await?;
             if outcome.inserted {
-                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+                record_chunk_inserted(outcome.chunk_length);
             }
             if let Some(reusable_buffer) = reusable_buffer {
                 self.recycle_pending_buffer(reusable_buffer);
@@ -263,7 +264,7 @@ impl FileUploadIngestor {
             let (outcome, reusable_buffer) =
                 put_if_absent_pooled_chunk_buffer(&object_store, chunk).await?;
             if outcome.inserted {
-                crate::metrics::record_chunk_inserted(outcome.chunk_length);
+                record_chunk_inserted(outcome.chunk_length);
             }
             Ok(SequencedStoredChunkTaskOutcome {
                 sequence,
