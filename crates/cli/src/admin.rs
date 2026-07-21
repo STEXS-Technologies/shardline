@@ -382,14 +382,25 @@ mod tests {
             60,
         );
 
-        assert!(matches!(
-            minted,
+        match minted {
             Err(super::AdminTokenError::SigningKeyLengthMismatch {
                 expected_bytes,
                 observed_bytes,
-            }) if expected_bytes == u64::try_from(initial.len()).unwrap_or(u64::MAX)
-                && observed_bytes > expected_bytes
-        ));
+            }) => {
+                assert_eq!(
+                    expected_bytes,
+                    u64::try_from(initial.len()).unwrap_or(u64::MAX),
+                    "expected length mismatch"
+                );
+                assert!(
+                    observed_bytes > expected_bytes,
+                    "file should have grown: {observed_bytes} <= {expected_bytes}"
+                );
+            }
+            other => panic!(
+                "expected SigningKeyLengthMismatch, got: {other:?}"
+            ),
+        }
     }
 
     #[cfg(unix)]
