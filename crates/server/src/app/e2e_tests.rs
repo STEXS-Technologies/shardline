@@ -8480,7 +8480,8 @@ async fn hub_resolve_model_file_shorthand() {
 
     // Commit a file
     let file_content = b"model-shorthand-test";
-    let content_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, file_content);
+    let content_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, file_content);
     let ndjson = format!(
         "{{\"header\":{{\"message\":\"add file\",\"parentCommit\":\"\"}}}}\n\
          {{\"file\":{{\"path\":\"test.txt\",\"content\":\"{content_b64}\"}}}}"

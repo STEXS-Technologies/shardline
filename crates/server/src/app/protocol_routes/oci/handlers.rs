@@ -97,11 +97,8 @@ async fn oci_dispatch_parsed(
             },
         ) => {
             let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key = oci_blob_key(
-                &repository,
-                &digest_hex,
-                auth.as_ref().map(scope_from_auth),
-            )?;
+            let object_key =
+                oci_blob_key(&repository, &digest_hex, auth.as_ref().map(scope_from_auth))?;
             metrics().protocol.record_oci_download();
             direct_object_response(
                 state,
@@ -121,11 +118,8 @@ async fn oci_dispatch_parsed(
             },
         ) => {
             let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key = oci_blob_key(
-                &repository,
-                &digest_hex,
-                auth.as_ref().map(scope_from_auth),
-            )?;
+            let object_key =
+                oci_blob_key(&repository, &digest_hex, auth.as_ref().map(scope_from_auth))?;
             let total_length = state.backend.object_length(&object_key).await?;
             Ok(Response::builder()
                 .status(StatusCode::OK)

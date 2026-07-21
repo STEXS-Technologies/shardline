@@ -25,7 +25,9 @@ use super::{MAX_LFS_BATCH_OBJECTS, direct_object_response};
 use crate::app::{AppState, authorize, scope_from_auth};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
-    ServerError, cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL}, lfs_object_key, metrics,
+    ServerError,
+    cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
+    lfs_object_key, metrics,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 

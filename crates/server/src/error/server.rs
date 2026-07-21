@@ -1,4 +1,7 @@
-use std::{io::{Error as IoError, ErrorKind}, num::TryFromIntError};
+use std::{
+    io::{Error as IoError, ErrorKind},
+    num::TryFromIntError,
+};
 
 use axum::{
     Error as AxumError, Json,
@@ -464,10 +467,9 @@ impl From<ProviderEventsError> for ServerError {
             }
             ProviderEventsError::WebhookDelivery(e) => Self::Index(IndexError::WebhookDelivery(e)),
             ProviderEventsError::ObjectStore(e) => Self::from(e),
-            ProviderEventsError::ParseStoredFileRecord(e) => Self::Io(IoError::new(
-                ErrorKind::InvalidData,
-                e.to_string(),
-            )),
+            ProviderEventsError::ParseStoredFileRecord(e) => {
+                Self::Io(IoError::new(ErrorKind::InvalidData, e.to_string()))
+            }
         }
     }
 }

@@ -5,11 +5,8 @@ use tokio::task;
 
 use super::body_reader::ChunkBuffer;
 use crate::{
-    ServerError,
-    chunk_store::chunk_object_key_for_computed_hash,
-    local_backend::chunk_hash,
-    metrics::record_dedup_saves,
-    object_store::ServerObjectStore,
+    ServerError, chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
+    metrics::record_dedup_saves, object_store::ServerObjectStore,
 };
 
 pub(super) struct SequencedStoredChunkOutcome {
