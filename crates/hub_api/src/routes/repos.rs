@@ -255,7 +255,7 @@ pub(crate) async fn repo_search(
     if let Some(sort) = &query.sort {
         match sort.as_str() {
             "lastModified" => {
-                repos.sort_by(|a, b| b.updated_at_unix_seconds.cmp(&a.updated_at_unix_seconds));
+                repos.sort_by_key(|b| std::cmp::Reverse(b.updated_at_unix_seconds));
             }
             "likes" => {
                 // No likes field on HubRepo yet; keep default order.
