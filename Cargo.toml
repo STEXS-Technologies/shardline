@@ -99,10 +99,10 @@ debug = 2
 strip = "none"
 
 [profile.dev]
-debug = 1
+debug = 2
 opt-level = 0
 overflow-checks = true
-incremental = true
+incremental = false
 panic = "unwind"
 lto = false
 
