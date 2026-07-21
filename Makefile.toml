@@ -286,8 +286,7 @@ description = "Run tests with integer overflow detection enabled"
 workspace = false
 command = "cargo"
 args = ["test", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--lib"]
-[tasks.test-overflow.environment]
-RUSTFLAGS = "-C overflow-checks=on"
+env = { RUSTFLAGS = "-C overflow-checks=on" }
 
 [tasks.test-miri]
 description = "Run MIRI on crates with unsafe code to detect undefined behavior"

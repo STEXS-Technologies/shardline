@@ -11,8 +11,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::json;
-use shardline_protocol::TokenScope;
 use shardline_metrics;
+use shardline_protocol::TokenScope;
 
 use crate::{
     HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
