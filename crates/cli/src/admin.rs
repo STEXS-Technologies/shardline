@@ -397,9 +397,7 @@ mod tests {
                     "file should have grown: {observed_bytes} <= {expected_bytes}"
                 );
             }
-            other => panic!(
-                "expected SigningKeyLengthMismatch, got: {other:?}"
-            ),
+            other => panic!("expected SigningKeyLengthMismatch, got: {other:?}"),
         }
     }
 
