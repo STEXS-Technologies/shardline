@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
-## [1.0.1] - 2026-07-16
+## [1.0.1] - 2026-07-21
 
 Patch release focused on correctness, security hardening, test coverage, and regression protection.
 There are no intentional breaking API or configuration changes from `1.0.0`.
