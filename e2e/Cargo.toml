@@ -67,15 +67,15 @@ name = "mixed_protocol_soak"
 path = "mixed_protocol_soak.rs"
 
 [dependencies]
-shardline-server = { path = "../crates/server", features = ["test-utils"] }
-shardline-hub-api = { path = "../crates/hub_api" }
-shardline-server-core = { path = "../crates/server_core" }
-shardline-protocol = { path = "../crates/protocol" }
-shardline-index = { path = "../crates/index" }
-shardline-storage = { path = "../crates/storage" }
-shardline-test-support = { path = "../crates/test_support", features = ["docker"] }
-shardline-vcs = { path = "../crates/vcs" }
-shardline-xet-core = { path = "../crates/xet_core" }
+shardline-server = { path = "../crates/shardline-server", features = ["test-utils"] }
+shardline-hub-api = { path = "../crates/shardline-hub-api" }
+shardline-server-core = { path = "../crates/shardline-server-core" }
+shardline-protocol = { path = "../crates/shardline-protocol" }
+shardline-index = { path = "../crates/shardline-index" }
+shardline-storage = { path = "../crates/shardline-storage" }
+shardline-test-support = { path = "../crates/shardline-test-support", features = ["docker"] }
+shardline-vcs = { path = "../crates/shardline-vcs" }
+shardline-xet-core = { path = "../crates/shardline-xet-core" }
 blake3 = "1.8.3"
 redis = "1.0.2"
 sqlx = { version = "0.8.6", default-features = false }
