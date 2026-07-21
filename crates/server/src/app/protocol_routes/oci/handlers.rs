@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
+use shardline_metrics::metrics;
 use shardline_protocol::TokenScope;
 use shardline_storage::{DeleteOutcome, ObjectKey};
 
@@ -96,12 +97,12 @@ async fn oci_dispatch_parsed(
             },
         ) => {
             let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key = crate::oci_adapter::oci_blob_key(
+            let object_key = oci_blob_key(
                 &repository,
                 &digest_hex,
                 auth.as_ref().map(scope_from_auth),
             )?;
-            shardline_metrics::metrics().protocol.record_oci_download();
+            metrics().protocol.record_oci_download();
             direct_object_response(
                 state,
                 &headers,
@@ -120,7 +121,7 @@ async fn oci_dispatch_parsed(
             },
         ) => {
             let auth = oci_authorize(state, &headers, Some(&repository), TokenScope::Read)?;
-            let object_key = crate::oci_adapter::oci_blob_key(
+            let object_key = oci_blob_key(
                 &repository,
                 &digest_hex,
                 auth.as_ref().map(scope_from_auth),

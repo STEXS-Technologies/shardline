@@ -10,6 +10,7 @@ use serde_json::from_slice;
 use shardline_index::{
     AsyncIndexStore, LocalIndexStore, PostgresIndexStore, ProviderRepositoryState,
 };
+use shardline_metrics::record_provider_token_exchange;
 use shardline_protocol::{SecretBytes, TokenScope};
 use shardline_vcs::BuiltInProviderError;
 
@@ -79,7 +80,7 @@ pub(super) async fn issue_provider_token_response(
     let issued = provider_tokens
         .issue_token(headers, provider, request)
         .map_err(map_provider_issue_error)?;
-    shardline_metrics::record_provider_token_exchange();
+    record_provider_token_exchange();
     reconcile_provider_repository_state(state, &issued).await?;
     Ok(issued)
 }

@@ -5,7 +5,10 @@ use tokio::task;
 
 use super::body_reader::ChunkBuffer;
 use crate::{
-    ServerError, chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
+    ServerError,
+    chunk_store::chunk_object_key_for_computed_hash,
+    local_backend::chunk_hash,
+    metrics::record_dedup_saves,
     object_store::ServerObjectStore,
 };
 
@@ -51,7 +54,7 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
 /// Records dedup savings when a chunk already exists in the store.
 fn record_dedup_on_already_exists(outcome: PutOutcome, chunk_length: u64) {
     if matches!(outcome, PutOutcome::AlreadyExists) {
-        crate::metrics::record_dedup_saves(chunk_length);
+        record_dedup_saves(chunk_length);
     }
 }
 
