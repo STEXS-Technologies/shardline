@@ -11,7 +11,7 @@ use serde::Deserialize;
 use shardline_protocol::TokenScope;
 
 use crate::{
-    ServerError,
+    ServerError, cas_headers, metrics,
     app::AppState,
     app::provider::{
         XetTokenRequest, authenticate_provider_token_request, issue_provider_token_response,
@@ -54,15 +54,15 @@ pub(super) async fn git_lfs_authenticate(
     let issued = issue_provider_token_response(&state, &headers, &provider, &request).await?;
     let mut header = BTreeMap::new();
     header.insert(
-        crate::cas_headers::URL.to_owned(),
+        cas_headers::URL.to_owned(),
         state.config.public_base_url().to_owned(),
     );
     header.insert(
-        crate::cas_headers::ACCESS_TOKEN.to_owned(),
+        cas_headers::ACCESS_TOKEN.to_owned(),
         issued.token.expose_secret().to_owned(),
     );
     header.insert(
-        crate::cas_headers::TOKEN_EXPIRATION.to_owned(),
+        cas_headers::TOKEN_EXPIRATION.to_owned(),
         issued.expires_at_unix_seconds.to_string(),
     );
     let now = unix_now_seconds_checked()?;
@@ -137,7 +137,7 @@ pub(super) async fn handle_provider_webhook(
     let start = std::time::Instant::now();
     let outcome = apply_provider_webhook(&state.config, &event).await?;
     let elapsed = start.elapsed().as_secs_f64();
-    crate::metrics::record_webhook_event(&provider, "", elapsed);
+    metrics::record_webhook_event(&provider, "", elapsed);
     Ok((
         StatusCode::ACCEPTED,
         Json(provider_webhook_response(outcome)),

@@ -12,6 +12,7 @@ use axum::{
 };
 use serde_json::json;
 use shardline_protocol::TokenScope;
+use shardline_metrics;
 
 use crate::{
     HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
@@ -26,7 +27,7 @@ use crate::{
     auth::authorize_static_bearer_token,
     metrics,
     model::ReadyResponse,
-    upload_ingest::RequestBodyReader,
+    upload_ingest::{RequestBodyReader, read_body_to_bytes},
     xet_adapter::{validate_hash_path, validate_xorb_transfer_namespace},
 };
 
@@ -107,7 +108,7 @@ pub(super) async fn upload_xorb(
     validate_hash_path(&hash)?;
     let mut body_reader =
         RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
-    let body_bytes = crate::upload_ingest::read_body_to_bytes(&mut body_reader).await?;
+    let body_bytes = read_body_to_bytes(&mut body_reader).await?;
     let xorb_length = body_bytes.len() as u64;
     let response = state
         .backend
