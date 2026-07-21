@@ -88,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
-          package_version="$(cargo pkgid -p shardline | sed -E 's/.*@([^@]+)$/\1/')"
+          package_version="$(cargo pkgid -p shardline | sed -E 's/.*#([^#]+)$/\1/')"
           if [[ "${tag_version}" != "${package_version}" ]]; then
             echo "Release tag ${GITHUB_REF_NAME} does not match Cargo package version ${package_version}" >&2
             exit 1
@@ -133,7 +133,7 @@ jobs:
           fi
 
           crate_version() {
-            cargo pkgid -p "$1" | sed -E 's/.*@([^@]+)$/\1/'
+            cargo pkgid -p "$1" | sed -E 's/.*#([^#]+)$/\1/'
           }
 
           crate_version_published() {
