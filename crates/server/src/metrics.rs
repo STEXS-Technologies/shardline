@@ -39,62 +39,6 @@ pub fn record_range_request() {
     shardline_metrics::metrics().transfer.record_range_request();
 }
 
-pub fn record_xet_reconstruction(duration_secs: f64, chunks: u64) {
-    shardline_metrics::metrics().xet.record_reconstruction(
-        true,
-        std::time::Duration::from_secs_f64(duration_secs),
-        chunks,
-    );
-}
-
-pub fn record_reconstruction(ok: bool, duration_secs: f64, chunks: u64) {
-    shardline_metrics::record_reconstruction(
-        ok,
-        std::time::Duration::from_secs_f64(duration_secs),
-        chunks,
-    );
-}
-
-pub fn record_gc_run(duration_secs: f64, objects: u64, bytes: u64) {
-    shardline_metrics::record_gc_run(
-        std::time::Duration::from_secs_f64(duration_secs),
-        objects,
-        bytes,
-    );
-}
-
-pub fn record_fsck_run(duration_secs: f64, errors: u64) {
-    shardline_metrics::record_fsck_run(std::time::Duration::from_secs_f64(duration_secs), errors);
-}
-
-pub fn record_hub_api_request(endpoint: &str, method: &str, status: &str) {
-    let code: u16 = status.parse().unwrap_or(0);
-    shardline_metrics::record_hub_api_request(endpoint, method, code);
-}
-
-pub fn record_hub_api_commit(operation_type: &str) {
-    shardline_metrics::record_hub_api_commit(operation_type);
-}
-
-pub fn record_s3_request(operation: &str, ok: bool, duration_secs: f64) {
-    shardline_metrics::metrics()
-        .backend
-        .record_s3_request(std::time::Duration::from_secs_f64(duration_secs));
-    let _ = (operation, ok);
-}
-
-pub fn record_s3_error(error_type: &str) {
-    shardline_metrics::metrics().backend.record_s3_error();
-    let _ = error_type;
-}
-
-pub fn record_local_io(operation: &str, ok: bool, duration_secs: f64) {
-    shardline_metrics::metrics()
-        .backend
-        .record_local_io(std::time::Duration::from_secs_f64(duration_secs));
-    let _ = (operation, ok);
-}
-
 pub fn record_webhook_event(provider: &str, event_type: &str, duration_secs: f64) {
     shardline_metrics::record_provider_webhook(provider, event_type);
     shardline_metrics::metrics()
@@ -104,16 +48,6 @@ pub fn record_webhook_event(provider: &str, event_type: &str, duration_secs: f64
 
 pub fn record_token_exchange() {
     shardline_metrics::record_provider_token_exchange();
-}
-
-pub fn record_object_inserted(bytes: u64) {
-    shardline_metrics::metrics()
-        .storage
-        .record_object_stored(bytes);
-}
-
-pub fn record_object_reused() {
-    shardline_metrics::metrics().storage.record_object_stored(0);
 }
 
 pub fn record_chunk_inserted(bytes: u64) {
@@ -144,22 +78,10 @@ pub fn record_xet_xorb_download(bytes: u64) {
     shardline_metrics::record_xet_xorb_download(bytes);
 }
 
-pub fn record_xet_reconstruction_request() {
-    shardline_metrics::metrics().xet.record_reconstruction(
-        true,
-        std::time::Duration::from_secs(0),
-        0,
-    );
-}
-
 pub fn record_dedup_saves(bytes: u64) {
     shardline_metrics::metrics()
         .storage
         .record_dedup_saves(bytes);
-}
-
-pub const fn update_dedup_ratio(_numerator: u64, _denominator: u64) {
-    // The shardline-metrics crate does not currently expose a dedup-ratio gauge.
 }
 
 #[cfg(test)]
@@ -185,48 +107,6 @@ mod tests {
     fn record_range_request_no_panic() {
         record_range_request();
         record_range_request();
-    }
-
-    #[test]
-    fn record_xet_reconstruction_no_panic() {
-        record_xet_reconstruction(0.1, 5);
-        record_xet_reconstruction(0.0, 0);
-    }
-
-    #[test]
-    fn record_reconstruction_no_panic() {
-        record_reconstruction(true, 0.05, 10);
-        record_reconstruction(false, 0.0, 0);
-    }
-
-    #[test]
-    fn record_gc_run_no_panic() {
-        record_gc_run(1.0, 100, 4096);
-        record_gc_run(0.0, 0, 0);
-    }
-
-    #[test]
-    fn record_fsck_run_no_panic() {
-        record_fsck_run(0.5, 3);
-        record_fsck_run(0.0, 0);
-    }
-
-    #[test]
-    fn record_s3_request_no_panic() {
-        record_s3_request("GetObject", true, 0.05);
-        record_s3_request("PutObject", false, 0.0);
-    }
-
-    #[test]
-    fn record_s3_error_no_panic() {
-        record_s3_error("AccessDenied");
-        record_s3_error("NoSuchKey");
-    }
-
-    #[test]
-    fn record_local_io_no_panic() {
-        record_local_io("read", true, 0.01);
-        record_local_io("write", false, 0.0);
     }
 
     #[test]
@@ -271,28 +151,6 @@ mod tests {
     }
 
     #[test]
-    fn record_hub_api_request_increments_counter() {
-        let before = metrics().protocol.hub_api_requests.get();
-        record_hub_api_request("/models", "GET", "200");
-        let after = metrics().protocol.hub_api_requests.get();
-        assert!(
-            after > before,
-            "hub_api_requests should increase (before: {before}, after: {after})"
-        );
-    }
-
-    #[test]
-    fn record_hub_api_commit_increments_counter() {
-        let before = metrics().protocol.hub_api_commits.get();
-        record_hub_api_commit("create");
-        let after = metrics().protocol.hub_api_commits.get();
-        assert!(
-            after > before,
-            "hub_api_commits should increase (before: {before}, after: {after})"
-        );
-    }
-
-    #[test]
     fn record_token_exchange_increments_counter() {
         let before = metrics().provider.token_exchanges.get();
         record_token_exchange();
@@ -300,28 +158,6 @@ mod tests {
         assert!(
             after > before,
             "token_exchanges should increase (before: {before}, after: {after})"
-        );
-    }
-
-    #[test]
-    fn record_object_inserted_increments_object_counter() {
-        let before = metrics().storage.objects_total.get();
-        record_object_inserted(256);
-        let after = metrics().storage.objects_total.get();
-        assert!(
-            after > before,
-            "objects_total should increase (before: {before}, after: {after})"
-        );
-    }
-
-    #[test]
-    fn record_object_reused_increments_object_counter() {
-        let before = metrics().storage.objects_total.get();
-        record_object_reused();
-        let after = metrics().storage.objects_total.get();
-        assert!(
-            after > before,
-            "objects_total should increase (before: {before}, after: {after})"
         );
     }
 
@@ -369,30 +205,6 @@ mod tests {
         );
     }
 
-    // ── S3 backend counter checks ────────────────────────────────────────
-
-    #[test]
-    fn record_s3_request_increments_s3_counter() {
-        let before = metrics().backend.s3_requests.get();
-        record_s3_request("GetObject", true, 0.01);
-        let after = metrics().backend.s3_requests.get();
-        assert!(
-            after > before,
-            "s3_requests should increase (before: {before}, after: {after})"
-        );
-    }
-
-    #[test]
-    fn record_s3_error_increments_s3_error_counter() {
-        let before = metrics().backend.s3_errors.get();
-        record_s3_error("Timeout");
-        let after = metrics().backend.s3_errors.get();
-        assert!(
-            after > before,
-            "s3_errors should increase (before: {before}, after: {after})"
-        );
-    }
-
     // ── MetricsLayer & MetricsService tests ──────────────────────────────
 
     #[test]
@@ -433,37 +245,8 @@ mod tests {
     // ── No-panic for the remaining counters ───────────────────────────────
 
     #[test]
-    fn record_hub_api_request_no_panic() {
-        record_hub_api_request("/repos", "POST", "201");
-        record_hub_api_request("/orgs", "GET", "200");
-    }
-
-    #[test]
-    fn record_hub_api_commit_no_panic() {
-        record_hub_api_commit("upsert");
-        record_hub_api_commit("delete");
-    }
-
-    #[test]
     fn record_token_exchange_no_panic() {
         record_token_exchange();
-    }
-
-    #[test]
-    fn record_hub_api_request_unknown_status_defaults_to_zero() {
-        record_hub_api_request("test", "GET", "unknown");
-        // Should not panic; metrics should still record
-    }
-
-    #[test]
-    fn record_object_inserted_increments_bytes_counter() {
-        let before_bytes = metrics().storage.objects_bytes_total.get();
-        record_object_inserted(42);
-        let after_bytes = metrics().storage.objects_bytes_total.get();
-        assert!(
-            after_bytes >= before_bytes + 42,
-            "objects_bytes_total should increase by at least 42 (before: {before_bytes}, after: {after_bytes})"
-        );
     }
 
     #[test]
@@ -500,17 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn record_local_io_increments_local_io_counter() {
-        let before = metrics().backend.local_io_operations.get();
-        record_local_io("read", true, 0.01);
-        let after = metrics().backend.local_io_operations.get();
-        assert!(
-            after > before,
-            "local_io_operations should increase (before: {before}, after: {after})"
-        );
-    }
-
-    #[test]
     fn record_webhook_event_increments_webhook_counter() {
         let before = metrics().provider.webhook_events.get();
         record_webhook_event("github", "push", 0.25);
@@ -529,41 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn record_gc_run_does_not_panic() {
-        record_gc_run(1.5, 100, 4096);
-    }
-
-    #[test]
-    fn record_fsck_run_does_not_panic() {
-        record_fsck_run(0.5, 3);
-    }
-
-    #[test]
-    fn record_s3_request_does_not_panic() {
-        record_s3_request("GetObject", true, 0.1);
-    }
-
-    #[test]
-    fn record_s3_error_does_not_panic() {
-        record_s3_error("NoSuchKey");
-    }
-
-    #[test]
-    fn record_hub_api_request_with_unknown_status_does_not_panic() {
-        record_hub_api_request("/api/v1/test", "PATCH", "unknown");
-    }
-
-    #[test]
-    fn record_local_io_read_success_does_not_panic() {
-        record_local_io("read", true, 0.01);
-    }
-
-    #[test]
-    fn record_local_io_write_failure_does_not_panic() {
-        record_local_io("write", false, 0.05);
-    }
-
-    #[test]
     fn record_upload_protocol_variants() {
         record_upload("xet", 1024, 0.5, true);
         record_upload("lfs", 2048, 1.0, false);
@@ -576,48 +313,8 @@ mod tests {
     }
 
     #[test]
-    fn record_xet_reconstruction_does_not_panic() {
-        record_xet_reconstruction(0.25, 10);
-    }
-
-    #[test]
-    fn record_reconstruction_with_ok_and_err() {
-        record_reconstruction(true, 0.1, 5);
-        record_reconstruction(false, 0.2, 0);
-    }
-
-    #[test]
-    fn record_hub_api_request_different_methods() {
-        record_hub_api_request("/repos/test/assets", "GET", "200");
-        record_hub_api_request("/repos/test/assets/contents/path", "PUT", "201");
-        record_hub_api_request("/repos/test/assets/contents/path", "DELETE", "204");
-    }
-
-    #[test]
-    fn record_hub_api_commit_different_types() {
-        record_hub_api_commit("upsert");
-        record_hub_api_commit("delete");
-        record_hub_api_commit("unknown-operation");
-    }
-
-    #[test]
     fn record_token_exchange_does_not_panic() {
         record_token_exchange();
-    }
-
-    #[test]
-    fn record_s3_request_with_false_ok_status() {
-        record_s3_request("PutObject", false, 0.3);
-        record_s3_request("ListObjects", true, 0.05);
-    }
-
-    // ── update_dedup_ratio ────────────────────────────────────────────────
-
-    #[test]
-    fn update_dedup_ratio_is_noop() {
-        // This is a const fn that does nothing — verify it compiles and runs.
-        update_dedup_ratio(100, 200);
-        update_dedup_ratio(0, 1);
     }
 
     // ── MetricsLayer ──────────────────────────────────────────────────────
