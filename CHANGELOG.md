@@ -14,7 +14,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 ### Added
 
 **Protocol & Feature Coverage**
-- OCI blob `DELETE` per spec with reference checking — implements the full OCI lifecycle (`ae6a9e2`, `631be63`)
+- OCI blob `DELETE` per spec with reference checking: implements the full OCI lifecycle (`ae6a9e2`, `631be63`)
 - Git LFS `DELETE` endpoint for object removal (`9f7adf2`)
 - Git Smart HTTP reference deletion (`9b06cac`)
 - Redis TLS and mutual-TLS integration support (`63d0751`)
@@ -48,19 +48,19 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
   - HTTP-level E2E test framework parameterized for Postgres, S3, and combined backends (`a1e91ae`)
 - **15+ fuzz targets** including lifecycle classification, stateful Hub-reference fuzzing, deterministic corpus replay, and scheduled bounded campaigns
 - **Property tests** for Hub references and Git pkt-line encoding
-- **Coverage ratchet** — line-coverage floor enforced in CI to prevent regression
+- **Coverage ratchet**: line-coverage floor enforced in CI to prevent regression
 - **Unit tests** for previously untested crates: clock, cache/error, cache/disabled, frontend, index/provider, local_backend records, postgres_backend read/metrics/backend
 
 ### Changed
 
-- **Modularized `local_backend`** — split `crates/server/src/local_backend.rs` into focused domain modules (`b62ec09`)
+- **Modularized `local_backend`**: split `crates/server/src/local_backend.rs` into focused domain modules (`b62ec09`)
 - **LLVM source-based coverage** via `cargo-llvm-cov` with CI enforcement and a line-coverage ratchet (`0997dea`)
 - **Trait splits**: `RecordStore` / `HubStore` and `IndexStore` god traits split into focused sub-traits (parallel read/write, metadata, lifecycle) (`a19cbb9`)
-- **Split `ServerConfig`** — removed dual-impl pattern, cleaned public re-exports (`3d0d72a`)
-- **Split `ServerError`** — moved CLI output to dedicated types, added test lint overrides (`3d0d72a`)
+- **Split `ServerConfig`**: removed dual-impl pattern, cleaned public re-exports (`3d0d72a`)
+- **Split `ServerError`**: moved CLI output to dedicated types, added test lint overrides (`3d0d72a`)
 - **Moved E2E tests** out of crate dirs into dedicated `e2e/` folder, simplified CI filtering
-- **Finished CAS-agnostic runtime foundation** — decoupled storage/index from protocol specifics with frontend routing via `--frontend` / `SHARDLINE_SERVER_FRONTENDS`
-- **`LocalEd25519Provider` renamed to `LocalHmacProvider`** — the implementation always used HMAC-SHA256, not Ed25519 (`1f7a7a3`)
+- **Finished CAS-agnostic runtime foundation**: decoupled storage/index from protocol specifics with frontend routing via `--frontend` / `SHARDLINE_SERVER_FRONTENDS`
+- **`LocalEd25519Provider` renamed to `LocalHmacProvider`**: the implementation always used HMAC-SHA256, not Ed25519 (`1f7a7a3`)
 - **Replaced all `#[allow(arithmetic_side_effects)]`** with explicit checked arithmetic (`4a0978e`)
 - **308 KiB of dev tracking files removed** from workspace (`.slim/`, `.opencode/`, `AUDIT_REPORT.md`, `TEST_GAPS.md`, coverage artifacts, profraw/lcov files, TODO.md, coordination notes)
 - `cargo-deny` removed from CI pipeline (advisory responsibility delegated to Dependabot)
@@ -80,7 +80,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - **TOCTOU races closed**: `ensure_directory` hardened with `O_NOFOLLOW` + fd-stat (`cac0c62`), `ensure_legacy_import_state` (`0cb31e7`), streaming TOCTOU guard in `objects.rs` (`2c03c3b`)
 - **P0 audit items fixed**: exhaustive error matches, mutex poison recovery, unsafe docs (`f550b78`)
 - **Deep audit (pass 2 & 3)**: JWKS refresh strategy, DRY improvements, error handling, security/performance hardening
-- **Hub API audit**: 5 bugs fixed — SQL injection surface, auth bypass, permission checks (`fba6220`)
+- **Hub API audit**: 5 bugs fixed: SQL injection surface, auth bypass, permission checks (`fba6220`)
 - **JWKS/OIDC hardening**: `iat`/`nbf` validation added, `Cache-Control max-age` used instead of fixed 60s interval, bearer token timing, key caching (`0374a61`, `3c366df`)
 - **`#[allow(unwrap_used)]` replaced** with `HeaderValue::from_static` where applicable (`5cb6c31`)
 - **6 production bugs found by E2E tests** fixed: broken `readyz`, OCI tag delete, metrics counter races, Hub schema mismatch, port retry logic, test fixture drift (`05652e5`)
@@ -88,7 +88,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 **Protocol & Server Reliability**
 - **Transfer limiter timeout**: `Semaphore::acquire_many_owned()` now has a configurable timeout, returning 503 on exhaustion instead of hanging forever (`0498fba`)
 - **Graceful shutdown timeout**: `serve_with_listener` drains connections with configurable timeout; server no longer hangs on open connections during shutdown (`5dca9c2`)
-- **Redis reconnect fix**: `get_connection()` error path hardened — handles mid-operation connection drops instead of panicking (`5dca9c2`)
+- **Redis reconnect fix**: `get_connection()` error path hardened: handles mid-operation connection drops instead of panicking (`5dca9c2`)
 - **S3 multipart leak fixed**: `streaming_large_copy` cleans up multipart upload on completion failure (`1c0012d`)
 - **SQLITE-MIG-001**: missing Hub migrations added to `LOCAL_SQLITE_MIGRATIONS` (`13b0e69`)
 - **LFS PATCH safety** + OOM guard + OIDC/token race fixed (`12cc125`)
@@ -99,7 +99,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - **OCI PATCH Content-Range end mismatch** corrected to return 416 (`c110c5e`)
 
 **Test Quality & CI**
-- **All 22 test workarounds hardened** — every assertion now expects exact correct behavior (`0ac8b65`, `4e906b9`)
+- **All 22 test workarounds hardened**: every assertion now expects exact correct behavior (`0ac8b65`, `4e906b9`)
 - **7 weak assertions and misleading test names fixed** (`338a4b5`)
 - **10 remaining minor workarounds fixed**: no more silent defaults or string contains patterns (`4e906b9`)
 - **`serial_test` applied** to all `git_smart_http` tests sharing a single SQLite database (`70794af`)
@@ -156,11 +156,11 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 
 ### Changed
 
-- **Streaming SHA-256 digest uploads to S3** — eliminated full-body buffering for content-addressed uploads by streaming through `Sha256` hasher during multipart transfer (`5ff5e14`)
-- **S3-native multipart OCI uploads** — bypassed local staging file for S3 backends with resumable upload sessions (`981b973`)
-- **CAS-agnostic runtime foundation** — decoupled storage/index layer from protocol specifics with frontend routing via `--frontend` / `SHARDLINE_SERVER_FRONTENDS` (`c461d81`)
+- **Streaming SHA-256 digest uploads to S3**: eliminated full-body buffering for content-addressed uploads by streaming through `Sha256` hasher during multipart transfer (`5ff5e14`)
+- **S3-native multipart OCI uploads**: bypassed local staging file for S3 backends with resumable upload sessions (`981b973`)
+- **CAS-agnostic runtime foundation**: decoupled storage/index layer from protocol specifics with frontend routing via `--frontend` / `SHARDLINE_SERVER_FRONTENDS` (`c461d81`)
 - **Comprehensive module splits** across 91 files: `protocol_routes` (8 files), `postgres_backend` (4 files), `upload_ingest` (3 files), `local_sqlite` (6 files), config directory restructure (`d03c763`)
-- **New crates extracted** from server: `fsck`, `gc`, `hub_api`, `metrics`, `oci_adapter`, `protocol_adapters`, `server_core`, `xet_adapter` — workspace grew from 10 to 20 crates (`d03c763`)
+- **New crates extracted** from server: `fsck`, `gc`, `hub_api`, `metrics`, `oci_adapter`, `protocol_adapters`, `server_core`, `xet_adapter`: workspace grew from 10 to 20 crates (`d03c763`)
 - **All crate versions bumped to 1.0.0** with centralized `[workspace.dependencies]` (`737c625`)
 - **README rewritten** as user-facing product page with validated coverage matrix (`3b86a0b`, `c461d81`)
 - **ARCHITECTURE.md rewritten** for 20-crate layered dependency graph with Hub API, Git Smart HTTP, metrics, and auth sections (`1203d8e`)
@@ -170,19 +170,19 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 
 ### Fixed
 
-- **Non-Unix compile surface restored** — removed `#[cfg(not(unix))] compile_error!` blocks from cli, index, server, and storage crates; added conservative path validation fallbacks for Windows (`5c69e59`)
-- **Git pack encoding** — fixed size varint to use 4 bits in first byte per Git pack spec (`cc0f3cf`)
-- **Hub API revision ordering** — added `rowid DESC` tiebreaker to `list_revisions` (`cc0f3cf`)
+- **Non-Unix compile surface restored**: removed `#[cfg(not(unix))] compile_error!` blocks from cli, index, server, and storage crates; added conservative path validation fallbacks for Windows (`5c69e59`)
+- **Git pack encoding**: fixed size varint to use 4 bits in first byte per Git pack spec (`cc0f3cf`)
+- **Hub API revision ordering**: added `rowid DESC` tiebreaker to `list_revisions` (`cc0f3cf`)
 
 ### Performance
 
-- **Streaming S3 uploads** — SHA-256 digest computed incrementally during multipart transfer instead of buffering entire body (`5ff5e14`)
-- **Reduced upload staging I/O** — S3-native multipart uploads skip local staging file entirely (`981b973`)
+- **Streaming S3 uploads**: SHA-256 digest computed incrementally during multipart transfer instead of buffering entire body (`5ff5e14`)
+- **Reduced upload staging I/O**: S3-native multipart uploads skip local staging file entirely (`981b973`)
 
 ### Security
 
 - **TOCTOU race windows documented** in S3 adapter for `begin_content_addressed_upload`, `put_file_if_absent`, `copy_object_if_absent` (`40ef000`)
-- **Symlink escape prevention** — `ensure_directory_path_components_are_not_symlinked` applied to backend root, stats traversal, and metadata paths (`f389559`)
+- **Symlink escape prevention**: `ensure_directory_path_components_are_not_symlinked` applied to backend root, stats traversal, and metadata paths (`f389559`)
 - **`cargo-deny` policy** enforced in CI for license compliance and security advisories (`78ff8ac`)
 
 ### Documentation
