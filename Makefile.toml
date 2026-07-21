@@ -63,12 +63,18 @@ command = "cargo"
 args = ["check", "--workspace", "--all-targets", "--all-features", "${@}"]
 
 [tasks.test]
-description = "Run shardline tests using cargo-nextest"
+description = "Run workspace lib tests (fast, no external infrastructure needed)"
+workspace = false
+command = "cargo"
+args = ["test", "--workspace", "--lib", "${@}"]
+
+[tasks.test-integration]
+description = "Run integration tests sequentially (requires Docker: Postgres, MinIO, Redis)"
 workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "${@}"]
+args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "--test-threads", "1", "${@}"]
 
 [tasks.test-postgres]
 description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
