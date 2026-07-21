@@ -2,6 +2,7 @@
 /dist
 /dist-release-check
 /.shardline
+crates/cli/.shardline/
 /cobertura.xml
 /report.json
 /tarpaulin-report.html
