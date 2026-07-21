@@ -12,12 +12,10 @@ use shardline_storage::{
     ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
 };
 
-#[cfg(test)]
 use std::sync::{
     Arc, LazyLock, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
-#[cfg(test)]
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::{
@@ -48,12 +46,9 @@ pub struct BenchmarkBackend {
     backend: ServerBackend,
 }
 
-#[cfg(test)]
 static REPOSITORY_REFERENCE_PROBE_COUNT: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
 static REPOSITORY_REFERENCE_PROBE_FILTER: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
-#[cfg(test)]
 static REPOSITORY_REFERENCE_PROBE_TEST_LOCK: LazyLock<Arc<AsyncMutex<()>>> =
     LazyLock::new(|| Arc::new(AsyncMutex::new(())));
 
@@ -947,7 +942,6 @@ fn compose_benchmark_object_key_prefix(
     }
 }
 
-#[cfg(test)]
 pub fn reset_repository_reference_probe_count_for_hash(hash_hex: &str) {
     REPOSITORY_REFERENCE_PROBE_COUNT.store(0, Ordering::Relaxed);
     let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
@@ -957,12 +951,10 @@ pub fn reset_repository_reference_probe_count_for_hash(hash_hex: &str) {
     }
 }
 
-#[cfg(test)]
 pub fn repository_reference_probe_count() -> usize {
     REPOSITORY_REFERENCE_PROBE_COUNT.load(Ordering::Relaxed)
 }
 
-#[cfg(test)]
 pub fn clear_repository_reference_probe_filter() {
     let filter = REPOSITORY_REFERENCE_PROBE_FILTER.lock();
     match filter {
@@ -971,7 +963,6 @@ pub fn clear_repository_reference_probe_filter() {
     }
 }
 
-#[cfg(test)]
 pub async fn lock_repository_reference_probe_test() -> OwnedMutexGuard<()> {
     REPOSITORY_REFERENCE_PROBE_TEST_LOCK
         .clone()

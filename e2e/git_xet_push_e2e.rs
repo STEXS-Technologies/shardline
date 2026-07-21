@@ -295,7 +295,7 @@ async fn exercise_git_xet_push_flow() -> Result<(), TestError> {
         issue_provider_token(&client, &shardline_base_url, TokenScopeRequest::Read).await?;
     let stats = client
         .get(format!("{shardline_base_url}/v1/stats"))
-        .bearer_auth(&read_token.token)
+        .bearer_auth(read_token.token.expose_secret())
         .send()
         .await?
         .error_for_status()?
@@ -943,7 +943,7 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
             "{shardline_base_url}/v1/reconstructions/{}?content_hash={}",
             repo_b_record.file_id, repo_b_record.content_hash
         ))
-        .bearer_auth(&repo_a_read.token)
+        .bearer_auth(repo_a_read.token.expose_secret())
         .send()
         .await?;
     if cross_repo_read.status() != StatusCode::NOT_FOUND {
@@ -967,7 +967,7 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
             "{shardline_base_url}/v1/reconstructions/{}?content_hash={}",
             repo_b_record.file_id, repo_b_record.content_hash
         ))
-        .bearer_auth(&repo_b_read.token)
+        .bearer_auth(repo_b_read.token.expose_secret())
         .send()
         .await?;
     if !repo_b_reconstruction.status().is_success() {
@@ -1215,7 +1215,7 @@ async fn reconstruct_record_through_cas(
             "{}/v1/reconstructions/{}?content_hash={}",
             state.shardline_api_base_url, record.file_id, record.content_hash
         ))
-        .bearer_auth(&issued.token)
+        .bearer_auth(issued.token.expose_secret())
         .send()
         .await?
         .error_for_status()?
@@ -1223,7 +1223,7 @@ async fn reconstruct_record_through_cas(
         .await?;
     let mut output = Vec::with_capacity(usize::try_from(record.total_bytes)?);
     for term in &record.chunks {
-        append_record_term_through_cas(state, &issued.token, term, &mut output).await?;
+        append_record_term_through_cas(state, issued.token.expose_secret(), term, &mut output).await?;
     }
     if u64::try_from(output.len())? != record.total_bytes {
         return Err(
@@ -1512,7 +1512,7 @@ async fn read_server_stats_for_repository(
     .await?;
     Ok(client
         .get(format!("{shardline_base_url}/v1/stats"))
-        .bearer_auth(&read_token.token)
+        .bearer_auth(read_token.token.expose_secret())
         .send()
         .await?
         .error_for_status()?

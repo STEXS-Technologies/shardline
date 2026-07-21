@@ -48,6 +48,11 @@ jobs:
       - name: Setup Rust CI toolchain and tools
         uses: ./.github/actions/rust-ci-setup
 
+      - name: Apply database schema
+        env:
+          DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
+        run: cargo run -p shardline -- db migrate up --database-url "$DATABASE_URL" 2>&1
+
       - name: Run Postgres-gated unit tests
         env:
           DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
@@ -60,4 +65,4 @@ jobs:
       - name: Run Postgres-gated E2E tests
         env:
           DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
-        run: cargo test -p shardline-cli --test db_migrate_e2e 2>&1
+        run: cargo test -p shardline --test db_migrate_e2e 2>&1

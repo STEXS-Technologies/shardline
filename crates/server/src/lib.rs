@@ -73,9 +73,7 @@ mod runtime_check;
 mod server_frontend;
 mod server_role;
 mod storage_migration;
-#[cfg(test)]
 pub mod test_fixtures;
-#[cfg(test)]
 pub mod test_invariant_error;
 
 pub use app::ProtocolMetrics;
@@ -84,7 +82,11 @@ pub use app::{
     MAX_PROVIDER_TOKEN_REQUEST_BODY_BYTES, MAX_PROVIDER_WEBHOOK_BODY_BYTES,
     acquire_chunk_transfer_permit, full_byte_stream_response,
 };
-pub use backend::{BenchmarkBackend, ServerBackend};
+pub use backend::{
+    BenchmarkBackend, ServerBackend, clear_repository_reference_probe_filter,
+    lock_repository_reference_probe_test, repository_reference_probe_count,
+    reset_repository_reference_probe_count_for_hash,
+};
 pub use download_stream::{STREAM_READ_BUFFER_BYTES, ServerByteStream};
 pub use local_backend::chunk_hash;
 pub use object_store::ServerObjectStore;

@@ -314,5 +314,5 @@ async fn issue_write_token(client: &Client, api_url: &str) -> Result<String, Tes
         StatusCode::OK,
         "api provider token issuance failed"
     );
-    Ok(response.json::<ProviderTokenIssueResponse>().await?.token)
+    Ok(response.json::<ProviderTokenIssueResponse>().await?.token.expose_secret().to_owned())
 }
