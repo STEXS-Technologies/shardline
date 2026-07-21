@@ -17,6 +17,7 @@ use shardline_vcs::{
     ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind, RevisionRef,
     WebhookDeliveryId,
 };
+use shardline_xet_adapter::normalize_serialized_xorb;
 use shardline_xet_core::xorb_object::{
     CompressionScheme, SerializedXorbObject,
     xorb_format_test_utils::{ChunkSize, build_raw_xorb},
@@ -31,7 +32,7 @@ use crate::{
     record_store::LocalRecordStore,
     test_invariant_error::ServerTestInvariantError,
     try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
-    xet_adapter::{normalize_serialized_xorb, store_uploaded_xorb, xorb_object_key},
+    xet_adapter::{store_uploaded_xorb, xorb_object_key},
 };
 
 async fn local_latest_record_exists(
@@ -86,7 +87,6 @@ async fn repository_deleted_removes_stale_latest_without_version_record() {
     );
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repository_deleted_holds_native_xet_xorb_and_unpacked_chunks() {
     let result = exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks().await;
@@ -437,12 +437,13 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         normalize_serialized_xorb(expected_xorb_hash, &serialized.serialized_data)?;
     let mut reader = Cursor::new(normalized_xorb.as_slice());
     let validated = validate_serialized_xorb(&mut reader, expected_xorb_hash)?;
-    let range_end = u32::try_from(validated.chunks().len())?;
-    let mut chunk_hashes = Vec::new();
+    let range_end = u64::try_from(validated.chunks().len())?;
+    let mut chunk_hashes = std::collections::HashSet::new();
     try_for_each_serialized_xorb_chunk(&mut reader, &validated, |decoded_chunk| {
-        chunk_hashes.push(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
+        chunk_hashes.insert(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
         Ok::<(), ServerError>(())
     })?;
+    let unique_chunk_count = u64::try_from(chunk_hashes.len())?;
     let upload = store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data)?;
     assert!(upload.was_inserted);
 
@@ -476,7 +477,7 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         apply_provider_webhook_with_stores(&record_store, &index_store, &object_store, &event)
             .await?;
     assert_eq!(outcome.affected_file_versions, 1);
-    assert_eq!(outcome.affected_chunks, u64::try_from(chunk_hashes.len())?);
+    assert_eq!(outcome.affected_chunks, unique_chunk_count);
     assert_eq!(
         outcome.applied_holds,
         u64::try_from(
@@ -1511,4 +1512,91 @@ impl AsyncIndexStore for FailFirstRetentionHoldIndexStore {
                 .await
         })
     }
+}
+
+// ── Top-level apply_provider_webhook (local backend) ────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_provider_webhook_with_local_config_uses_local_stores() {
+    use crate::ServerConfig;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    );
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap(),
+        WebhookDeliveryId::new("delivery-top-level-1").unwrap(),
+        RepositoryWebhookEventKind::AccessChanged,
+    );
+
+    let result = super::apply_provider_webhook(&config, &event).await;
+    // Without pre-populated data, the webhook should succeed as a no-op
+    assert!(result.is_ok());
+    let outcome = result.unwrap();
+    assert_eq!(outcome.affected_file_versions, 0);
+    assert_eq!(outcome.affected_chunks, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_provider_webhook_with_local_config_repository_deleted_is_noop_on_empty_store() {
+    use crate::ServerConfig;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    );
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap(),
+        WebhookDeliveryId::new("delivery-top-level-2").unwrap(),
+        RepositoryWebhookEventKind::RepositoryDeleted,
+    );
+
+    let result = super::apply_provider_webhook(&config, &event).await;
+    assert!(result.is_ok());
+    let outcome = result.unwrap();
+    assert_eq!(outcome.affected_file_versions, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_provider_webhook_with_local_config_revision_pushed_is_noop_on_empty_store() {
+    use crate::ServerConfig;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ServerConfig::new(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        std::num::NonZeroUsize::new(65536).unwrap(),
+    );
+
+    let event = RepositoryWebhookEvent::new(
+        RepositoryRef::new(ProviderKind::GitHub, "team", "assets").unwrap(),
+        WebhookDeliveryId::new("delivery-top-level-3").unwrap(),
+        RepositoryWebhookEventKind::RevisionPushed {
+            revision: RevisionRef::new("refs/heads/main").unwrap(),
+        },
+    );
+
+    let result = super::apply_provider_webhook(&config, &event).await;
+    assert!(result.is_ok());
+}
+
+// ── ProviderWebhookOutcomeKind Debug ───────────────────────────────────
+
+#[test]
+fn provider_webhook_outcome_kind_debug() {
+    use super::ProviderWebhookOutcomeKind;
+    let deleted = ProviderWebhookOutcomeKind::RepositoryDeleted;
+    let debug = format!("{deleted:?}");
+    assert!(!debug.is_empty());
+
+    let access = ProviderWebhookOutcomeKind::AccessChanged;
+    let debug = format!("{access:?}");
+    assert!(!debug.is_empty());
 }

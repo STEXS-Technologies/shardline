@@ -38,7 +38,7 @@ shardline-provider-events.workspace = true
 shardline-oci-adapter.workspace = true
 shardline-metrics.workspace = true
 shardline-server-core.workspace = true
-shardline-storage.workspace = true
+shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 shardline-xet-adapter.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
@@ -50,27 +50,34 @@ sqlx = { workspace = true, features = [
 ] }
 subtle.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
 tracing.workspace = true
 url.workspace = true
 shardline-xet-core.workspace = true
 prometheus.workspace = true
 tower.workspace = true
-tower-http = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["util", "cors"] }
 zeroize.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
 hmac.workspace = true
-redis = { workspace = true, features = ["tokio-comp"] }
-reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+redis = { workspace = true, features = ["tokio-rustls-comp"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
+serial_test = "3"
 shardline-test-support.workspace = true
 tempfile.workspace = true
+wiremock = "0.6"
 xet-client.workspace = true
 xet-data.workspace = true
 xet-runtime.workspace = true
+
+[features]
+docker = ["shardline-test-support/docker"]
+fuzzing = []
+test-utils = []
 
 [lints]
 workspace = true

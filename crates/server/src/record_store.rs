@@ -1,8 +1,10 @@
+use crate::ServerError;
+
 pub(crate) use shardline_index::LocalRecordStore;
 
 pub(crate) fn parse_stored_file_record_bytes(
     bytes: &[u8],
-) -> Result<shardline_index::FileRecord, crate::ServerError> {
+) -> Result<shardline_index::FileRecord, ServerError> {
     Ok(shardline_server_core::parse_stored_file_record_bytes(
         bytes,
     )?)
@@ -32,5 +34,17 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn parse_stored_file_record_bytes_rejects_invalid_json() {
+        let result = parse_stored_file_record_bytes(b"not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_stored_file_record_bytes_rejects_empty_bytes() {
+        let result = parse_stored_file_record_bytes(b"");
+        assert!(result.is_err());
     }
 }

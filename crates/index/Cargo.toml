@@ -20,6 +20,7 @@ libc.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+shardline-metrics.workspace = true
 shardline-protocol.workspace = true
 shardline-storage.workspace = true
 sqlx = { workspace = true, features = [
@@ -33,6 +34,7 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 [dev-dependencies]
+proptest.workspace = true
 shardline-test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

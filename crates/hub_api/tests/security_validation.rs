@@ -55,16 +55,17 @@ fn validate_jwt_signature_checked_oidc() {
 
 /// Verifies JWKS provider now performs proper JWT signature verification.
 ///
-/// **[FIXED]**: The provider now uses `self.get_or_refresh_keys()` (not `_keys`),
-/// calls `decode()` with proper key material, validates the issuer, and
-/// requires the `exp` claim.
+/// **[FIXED]**: The provider now reads from a background-refreshed cache
+/// (via `try_read()` retry loop) instead of calling `block_on`-based
+/// `get_or_refresh_keys()`. It calls `decode()` with proper key material,
+/// validates the issuer, and requires the `exp` claim.
 #[test]
 fn validate_jwt_signature_checked_jwks() {
     let jwks_source = include_str!("../../server/src/jwks_provider.rs");
 
     assert!(
-        jwks_source.contains("get_or_refresh_keys()"),
-        "JWKS provider calls get_or_refresh_keys()"
+        jwks_source.contains("cached_keys.try_read()"),
+        "JWKS provider reads from background-refreshed cache via try_read()"
     );
     assert!(
         jwks_source.contains("decode::<serde_json::Value>("),
@@ -145,27 +146,24 @@ fn validate_missing_exp_now_rejected() {
 // FINDING 2: Webhook SSRF — PARTIALLY FIXED (URL validation at creation)
 // ============================================================================
 
-/// Validates that deliver_one_webhook sends POST to URL without delivery-time
-/// validation (SSRF via delivery is still possible).
+/// Validates that delivery-time URL validation exists in `deliver_one_webhook`.
 ///
-/// **[STILL OPEN]**: Delivery-time URL validation was not added; however,
-/// webhook URL validation is now applied at creation time.
+/// **[FIXED]**: `deliver_one_webhook` now calls `validate_webhook_url` and
+/// performs DNS resolution to block private/internal IPs at delivery time.
 #[test]
-fn validate_deliver_one_webhook_no_url_validation() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+fn validate_deliver_one_webhook_has_url_validation() {
+    let routes_source = include_str!("../../hub_api/src/routes/webhooks.rs");
 
     let start = routes_source.find("async fn deliver_one_webhook").unwrap();
-    let fn_body = &routes_source[start..start + 600];
+    let fn_body = &routes_source[start..start + 2000];
 
     assert!(
-        !fn_body.contains("scheme")
-            && !fn_body.contains("localhost")
-            && !fn_body.contains("127.0.0")
-            && !fn_body.contains("10.0.")
-            && !fn_body.contains("172.16.")
-            && !fn_body.contains("192.168.")
-            && !fn_body.contains("is_loopback"),
-        "deliver_one_webhook still contains no delivery-time URL validation"
+        fn_body.contains("validate_webhook_url"),
+        "deliver_one_webhook calls validate_webhook_url"
+    );
+    assert!(
+        fn_body.contains("is_private_ip"),
+        "deliver_one_webhook checks resolved addresses for private IPs"
     );
 }
 
@@ -175,7 +173,7 @@ fn validate_deliver_one_webhook_no_url_validation() {
 /// host presence, URL length, and rejects private/internal IPs.
 #[test]
 fn validate_webhook_url_validation_exists() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+    let routes_source = include_str!("../../hub_api/src/routes/webhooks.rs");
 
     assert!(
         routes_source.contains("fn validate_webhook_url("),
@@ -223,6 +221,12 @@ fn validate_webhook_accepts_dangerous_urls_at_store_level() {
             created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0),
             PRIMARY KEY (repo_id, sha),
             FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+            repo_id TEXT NOT NULL,
+            ref_name TEXT NOT NULL,
+            sha TEXT NOT NULL,
+            PRIMARY KEY (repo_id, ref_name)
         );
         CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
             id TEXT PRIMARY KEY,
@@ -293,11 +297,10 @@ fn validate_commit_handler_body_bounded_by_router() {
 /// **[MITIGATED]**: Same as above — the router-level limit applies.
 #[test]
 fn validate_lfs_upload_unbounded_body() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+    let routes_source = include_str!("../../hub_api/src/routes/lfs.rs");
 
     assert!(
-        routes_source.contains("body: bytes::Bytes")
-            && routes_source.contains("async fn lfs_upload("),
+        routes_source.contains("body: Bytes") && routes_source.contains("async fn lfs_upload("),
         "lfs_upload accepts body: bytes::Bytes — bounded by router DefaultBodyLimit"
     );
 }
@@ -370,7 +373,7 @@ fn validate_commit_has_path_validation() {
 /// decompression. Oversized output is rejected.
 #[test]
 fn validate_decompress_zlib_has_size_limit() {
-    let smart_http_source = include_str!("../../hub_api/src/git/smart_http.rs");
+    let smart_http_source = include_str!("../../hub_api/src/git/smart_http/pack_parse.rs");
 
     assert!(
         smart_http_source.contains("MAX_DECOMPRESSED_SIZE"),
@@ -392,10 +395,10 @@ fn validate_decompress_zlib_has_size_limit() {
 /// before left-shifting, preventing integer overflow from malicious packs.
 #[test]
 fn validate_pack_parser_shift_overflow_protected() {
-    let smart_http_source = include_str!("../../hub_api/src/git/smart_http.rs");
+    let smart_http_source = include_str!("../../hub_api/src/git/smart_http/pack_parse.rs");
 
     let parse_start = smart_http_source.find("fn parse_pack_data").unwrap();
-    let parse_fn = &smart_http_source[parse_start..parse_start + 1500];
+    let parse_fn = &smart_http_source[parse_start..parse_start + 2500];
 
     assert!(
         parse_fn.contains("shift >= 64"),
@@ -412,10 +415,10 @@ fn validate_pack_parser_shift_overflow_protected() {
 /// **[FIXED]**: The whoami handler now returns `is_admin: false` (not hardcoded true).
 #[test]
 fn validate_whoami_hardcoded_admin() {
-    let routes_source = include_str!("../../hub_api/src/routes.rs");
+    let handlers_source = include_str!("../../hub_api/src/routes/handlers.rs");
 
-    let whoami_start = routes_source.find("async fn whoami(").unwrap();
-    let whoami_fn = &routes_source[whoami_start..whoami_start + 800];
+    let whoami_start = handlers_source.find("async fn whoami(").unwrap();
+    let whoami_fn = &handlers_source[whoami_start..whoami_start + 800];
 
     assert!(
         whoami_fn.contains("is_admin: false"),
@@ -483,20 +486,15 @@ async fn validate_commit_body_bounded_by_router() {
     use shardline_hub_api::routes::HubState;
     use shardline_index::LocalIndexStore;
     use shardline_index::hub::{BoxedHubStore, HubRepoType};
-    use std::sync::{Mutex, Once, OnceLock};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    static COMMIT_INIT: Once = Once::new();
-    static COMMIT_DIR: OnceLock<Mutex<Option<TempDir>>> = OnceLock::new();
-
-    COMMIT_INIT.call_once(|| {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let db_path = root.join("metadata.sqlite3");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let db_path = root.join("metadata.sqlite3");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS shardline_hub_repos (
                 repo_id TEXT PRIMARY KEY,
                 repo_type TEXT NOT NULL CHECK (repo_type IN ('model', 'dataset', 'space')),
                 private INTEGER NOT NULL DEFAULT 0 CHECK (private IN (0, 1)),
@@ -514,20 +512,19 @@ async fn validate_commit_body_bounded_by_router() {
                 PRIMARY KEY (repo_id, sha),
                 FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS shardline_hub_refs (
+                repo_id TEXT NOT NULL,
+                ref_name TEXT NOT NULL,
+                sha TEXT NOT NULL,
+                PRIMARY KEY (repo_id, ref_name)
+            );
             CREATE TABLE IF NOT EXISTS shardline_hub_file_entries (
                 commit_sha TEXT NOT NULL,
                 path TEXT NOT NULL,
                 size INTEGER NOT NULL CHECK (size >= 0),
                 sha TEXT NOT NULL,
                 is_lfs INTEGER NOT NULL DEFAULT 0 CHECK (is_lfs IN (0, 1)),
-                inline_content BLOB,
                 PRIMARY KEY (commit_sha, path)
-            );
-            CREATE TABLE IF NOT EXISTS shardline_hub_lfs_objects (
-                oid TEXT PRIMARY KEY,
-                data BLOB NOT NULL,
-                size INTEGER NOT NULL CHECK (size >= 0),
-                created_at_unix_seconds INTEGER NOT NULL CHECK (created_at_unix_seconds >= 0)
             );
             CREATE TABLE IF NOT EXISTS shardline_hub_webhooks (
                 id TEXT PRIMARY KEY,
@@ -540,24 +537,22 @@ async fn validate_commit_body_bounded_by_router() {
                 FOREIGN KEY (repo_id) REFERENCES shardline_hub_repos(repo_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS shardline_hub_webhooks_repo_idx ON shardline_hub_webhooks (repo_id);",
-        )
-        .unwrap();
-        drop(conn);
+    )
+    .unwrap();
+    drop(conn);
 
-        let store = LocalIndexStore::open(root);
-        let boxed = BoxedHubStore::from_store(store);
-        let state = HubState {
-            store: boxed,
-            auth: None,
-            http_client: None,
-        };
-        shardline_hub_api::init(state);
+    let store = LocalIndexStore::open(root.clone());
+    let boxed = BoxedHubStore::from_store(store);
+    let object_store = shardline_server_core::ServerObjectStore::local(root.join("lfs"))
+        .expect("local object store");
+    let state = HubState {
+        store: boxed,
+        object_store,
+        auth: None,
+        http_client: None,
+    };
 
-        let dir_lock = COMMIT_DIR.get_or_init(|| Mutex::new(None));
-        *dir_lock.lock().unwrap() = Some(tmp);
-    });
-
-    let store = shardline_hub_api::state::get_for_test().store.clone();
+    let store = state.store.clone();
     store
         .create_repo(HubRepoType::Model, "team/body-limit-test", false)
         .unwrap();
@@ -579,7 +574,7 @@ async fn validate_commit_body_bounded_by_router() {
         ndjson_body.push('\n');
     }
 
-    let app = shardline_hub_api::hub_routes();
+    let app = shardline_hub_api::hub_routes(state, true);
     let response = app
         .oneshot(
             Request::builder()

@@ -1,5 +1,7 @@
 use prometheus::{Histogram, HistogramOpts, IntCounter, Registry};
 
+use crate::{must_counter, must_histogram};
+
 pub struct StorageBackendMetrics {
     pub s3_requests: IntCounter,
     pub s3_duration: Histogram,
@@ -9,15 +11,10 @@ pub struct StorageBackendMetrics {
 }
 
 impl StorageBackendMetrics {
-    /// # Panics
-    ///
-    /// Panics if prometheus metric registration fails (should not happen with static names).
     #[must_use]
-    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let s3_requests = IntCounter::new("shardline_s3_requests_total", "S3 API requests")
-            .expect("prometheus metric names are static constants");
-        let s3_duration = Histogram::with_opts(
+        let s3_requests = must_counter("shardline_s3_requests_total", "S3 API requests");
+        let s3_duration = must_histogram(
             HistogramOpts::new(
                 "shardline_s3_request_duration_seconds",
                 "S3 request latency",
@@ -25,16 +22,13 @@ impl StorageBackendMetrics {
             .buckets(vec![
                 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
             ]),
-        )
-        .expect("prometheus metric names are static constants");
-        let s3_errors = IntCounter::new("shardline_s3_errors_total", "S3 API errors")
-            .expect("prometheus metric names are static constants");
-        let local_io_operations = IntCounter::new(
+        );
+        let s3_errors = must_counter("shardline_s3_errors_total", "S3 API errors");
+        let local_io_operations = must_counter(
             "shardline_local_io_operations_total",
             "Local filesystem IO operations",
-        )
-        .expect("prometheus metric names are static constants");
-        let local_io_duration = Histogram::with_opts(
+        );
+        let local_io_duration = must_histogram(
             HistogramOpts::new(
                 "shardline_local_io_duration_seconds",
                 "Local filesystem IO latency",
@@ -42,8 +36,7 @@ impl StorageBackendMetrics {
             .buckets(vec![
                 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
             ]),
-        )
-        .expect("prometheus metric names are static constants");
+        );
 
         registry.register(Box::new(s3_requests.clone())).ok();
         registry.register(Box::new(s3_duration.clone())).ok();
@@ -74,5 +67,48 @@ impl StorageBackendMetrics {
     pub fn record_local_io(&self, dur: std::time::Duration) {
         self.local_io_operations.inc();
         self.local_io_duration.observe(dur.as_secs_f64());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn backend_metrics_record_s3_request_increments_counter() {
+        let registry = Registry::new();
+        let metrics = StorageBackendMetrics::new(&registry);
+
+        assert_eq!(metrics.s3_requests.get(), 0);
+        metrics.record_s3_request(std::time::Duration::from_millis(50));
+        assert_eq!(metrics.s3_requests.get(), 1);
+        metrics.record_s3_request(std::time::Duration::from_millis(100));
+        assert_eq!(metrics.s3_requests.get(), 2);
+    }
+
+    #[test]
+    fn backend_metrics_record_s3_error_increments_counter() {
+        let registry = Registry::new();
+        let metrics = StorageBackendMetrics::new(&registry);
+
+        assert_eq!(metrics.s3_errors.get(), 0);
+        metrics.record_s3_error();
+        assert_eq!(metrics.s3_errors.get(), 1);
+        metrics.record_s3_error();
+        assert_eq!(metrics.s3_errors.get(), 2);
+    }
+
+    #[test]
+    fn backend_metrics_record_local_io_increments_counter() {
+        let registry = Registry::new();
+        let metrics = StorageBackendMetrics::new(&registry);
+
+        assert_eq!(metrics.local_io_operations.get(), 0);
+        metrics.record_local_io(std::time::Duration::from_millis(5));
+        assert_eq!(metrics.local_io_operations.get(), 1);
+        metrics.record_local_io(std::time::Duration::from_millis(10));
+        assert_eq!(metrics.local_io_operations.get(), 2);
     }
 }

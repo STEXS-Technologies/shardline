@@ -1,11 +1,9 @@
-#![deny(unsafe_code)]
 #![cfg_attr(
     test,
     allow(
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
         clippy::format_push_string
@@ -44,15 +42,22 @@
 /// Symlink-resistant filesystem helpers used by local storage adapters.
 #[cfg(unix)]
 #[cfg_attr(docsrs, doc(cfg(unix)))]
-pub mod anchored_fs;
+pub(crate) mod anchored_fs;
 mod key;
 mod local;
 mod local_fs;
-pub mod local_path;
+pub(crate) mod local_path;
 mod object;
+#[cfg(feature = "s3")]
 mod s3;
 mod store;
 
+#[cfg(unix)]
+pub use anchored_fs::{
+    AnchoredPathOptions, AnchoredTarget, ensure_parent_path_matches_anchor, fd_child_path,
+    open_anchored_target, open_directory_chain, open_new_file, remove_at, remove_if_present,
+    rename_at, temporary_file_name, write_anchored_temporary_file,
+};
 pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
 pub use local_path::{
@@ -60,6 +65,7 @@ pub use local_path::{
     resolve_platform_symlinks,
 };
 pub use object::{DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectMetadata, PutOutcome};
+#[cfg(feature = "s3")]
 pub use s3::{
     BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,
     S3ObjectStoreConfig, S3ObjectStoreError,

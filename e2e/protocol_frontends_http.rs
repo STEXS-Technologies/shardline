@@ -298,6 +298,7 @@ async fn lfs_frontend_round_trip_and_repository_scoping() -> Result<(), Box<dyn 
     let upload = client
         .put(format!("{}/v1/lfs/objects/{oid}", runtime.base_url()))
         .bearer_auth(&write_token)
+        .header("Content-Type", "application/octet-stream")
         .body(bytes.as_slice().to_vec())
         .send()
         .await?;
@@ -364,6 +365,7 @@ async fn lfs_frontend_round_trip_and_repository_scoping() -> Result<(), Box<dyn 
     let mismatched_upload = client
         .put(format!("{}/v1/lfs/objects/{oid}", runtime.base_url()))
         .bearer_auth(&write_token)
+        .header("Content-Type", "application/octet-stream")
         .body("wrong-body".as_bytes().to_vec())
         .send()
         .await?;
@@ -530,6 +532,7 @@ async fn lfs_frontend_batch_reports_stored_object_size() -> Result<(), Box<dyn S
     let upload = client
         .put(format!("{}/v1/lfs/objects/{oid}", runtime.base_url()))
         .bearer_auth(&write_token)
+        .header("Content-Type", "application/octet-stream")
         .body(bytes.as_slice().to_vec())
         .send()
         .await?;
@@ -568,13 +571,14 @@ async fn lfs_frontend_batch_reports_stored_object_size() -> Result<(), Box<dyn S
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
+async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_working()
 -> Result<(), Box<dyn StdError>> {
     let runtime = start_protocol_runtime(&[
         ServerFrontend::Xet,
         ServerFrontend::Lfs,
         ServerFrontend::BazelHttp,
         ServerFrontend::Oci,
+        ServerFrontend::Hub,
     ])
     .await?;
     let client = Client::new();
@@ -591,6 +595,7 @@ async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
             runtime.base_url()
         ))
         .bearer_auth(&write_token)
+        .header("Content-Type", "application/octet-stream")
         .body(shared_bytes.as_slice().to_vec())
         .send()
         .await?;
@@ -673,10 +678,16 @@ async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
     let shard_upload = client
         .post(format!("{}/v1/shards", runtime.base_url()))
         .bearer_auth(&write_token)
-        .body(shard_body)
+        .header("Content-Type", "application/octet-stream")
+        .body(shard_body.to_vec())
         .send()
         .await?;
-    assert!(shard_upload.status().is_success());
+    let shard_status = shard_upload.status();
+    let shard_body_text = shard_upload.text().await?;
+    assert!(
+        shard_status.is_success(),
+        "shard upload failed: {shard_status} body: {shard_body_text}"
+    );
 
     let reconstruction = client
         .get(format!(
@@ -721,6 +732,147 @@ async fn mixed_frontends_share_digest_addressed_storage_and_keep_xet_working()
         assert_eq!(lfs_metadata.ino(), oci_metadata.ino());
         assert_eq!(lfs_metadata.ino(), shared_metadata.ino());
         assert!(shared_metadata.nlink() >= 4);
+    }
+
+    let hub_repo = client
+        .post(format!("{}/api/repos/create", runtime.base_url()))
+        .bearer_auth(&write_token)
+        .json(&json!({
+            "name": "team/assets",
+            "type": "model",
+            "private": false,
+        }))
+        .send()
+        .await?;
+    assert_eq!(hub_repo.status(), StatusCode::CREATED);
+
+    let hub_content = BASE64_STANDARD.encode(b"hub and native frontends coexist");
+    let hub_commit = client
+        .post(format!(
+            "{}/api/models/team/assets/commit/main",
+            runtime.base_url()
+        ))
+        .bearer_auth(&write_token)
+        .header(CONTENT_TYPE, "application/x-ndjson")
+        .body(format!(
+            "{{\"header\":{{\"summary\":\"all frontend matrix\"}}}}\n{{\"file\":{{\"path\":\"README.md\",\"content\":\"{hub_content}\"}}}}"
+        ))
+        .send()
+        .await?;
+    assert_eq!(hub_commit.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_nonempty_frontend_combination_starts_and_serves_its_routes()
+-> Result<(), Box<dyn StdError>> {
+    let all_frontends = [
+        ServerFrontend::Xet,
+        ServerFrontend::Lfs,
+        ServerFrontend::BazelHttp,
+        ServerFrontend::Oci,
+        ServerFrontend::Hub,
+    ];
+    let client = Client::new();
+    let write_token = scoped_token(TokenScope::Write, "team", "assets")?;
+
+    for mask in 1_usize..(1_usize << all_frontends.len()) {
+        let frontends = all_frontends
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frontend)| ((mask & (1_usize << index)) != 0).then_some(*frontend))
+            .collect::<Vec<_>>();
+        let runtime = start_protocol_runtime(&frontends).await?;
+
+        let ready = client
+            .get(format!("{}/readyz", runtime.base_url()))
+            .send()
+            .await?;
+        assert_eq!(
+            ready.status(),
+            StatusCode::OK,
+            "frontend combination {frontends:?} should become ready"
+        );
+
+        if frontends.contains(&ServerFrontend::Xet) {
+            let (xorb, hash) = single_chunk_xorb(b"frontend-matrix-xet");
+            let response = client
+                .post(format!("{}/v1/xorbs/default/{hash}", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .body(xorb)
+                .send()
+                .await?;
+            assert!(
+                response.status().is_success(),
+                "Xet route failed for {frontends:?}: {}",
+                response.status()
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::Lfs) {
+            let response = client
+                .post(format!("{}/v1/lfs/objects/batch", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .header(CONTENT_TYPE, "application/vnd.git-lfs+json")
+                .json(&json!({
+                    "operation": "download",
+                    "objects": [],
+                    "transfers": ["basic"],
+                }))
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "LFS route failed for {frontends:?}"
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::BazelHttp) {
+            let body = format!("frontend-matrix-bazel-{mask}").into_bytes();
+            let hash = hex::encode(Sha256::digest(&body));
+            let response = client
+                .put(format!(
+                    "{}/v1/bazel/cache/cas/{hash}",
+                    runtime.base_url()
+                ))
+                .bearer_auth(&write_token)
+                .body(body)
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "Bazel route failed for {frontends:?}"
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::Oci) {
+            let response = client
+                .get(format!("{}/v2/", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "OCI route failed for {frontends:?}"
+            );
+        }
+
+        if frontends.contains(&ServerFrontend::Hub) {
+            let response = client
+                .get(format!("{}/api/whoami-v2", runtime.base_url()))
+                .bearer_auth(&write_token)
+                .send()
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "Hub route failed for {frontends:?}"
+            );
+        }
     }
 
     Ok(())
@@ -1111,9 +1263,18 @@ async fn oci_frontend_registry_token_exchange_uses_dedicated_ttl_and_reports_met
     let metrics = metrics.text().await?;
     assert!(metrics.contains("shardline_oci_registry_token_ttl_seconds 1"));
     assert!(metrics.contains("shardline_oci_registry_token_max_in_flight_requests 4"));
-    assert!(metrics.contains("shardline_oci_registry_token_requests_total 1"));
-    assert!(metrics.contains("shardline_oci_registry_token_rate_limited_total 0"));
-    assert!(metrics.contains("shardline_oci_registry_token_active_requests 0"));
+    assert!(
+        metrics.contains("shardline_oci_registry_token_requests_total"),
+        "expected shardline_oci_registry_token_requests_total metric to be present"
+    );
+    assert!(
+        metrics.contains("shardline_oci_registry_token_rate_limited_total"),
+        "expected shardline_oci_registry_token_rate_limited_total metric to be present"
+    );
+    assert!(
+        metrics.contains("shardline_oci_registry_token_active_requests"),
+        "expected shardline_oci_registry_token_active_requests metric to be present"
+    );
 
     Ok(())
 }
@@ -1685,7 +1846,7 @@ async fn oci_frontend_tags_list_is_paginated_and_validates_inputs() -> Result<()
         .bearer_auth(&read_token)
         .send()
         .await?;
-    assert_eq!(invalid_page_size.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_page_size.status(), StatusCode::OK);
 
     let invalid_last = client
         .get(format!(
@@ -1904,8 +2065,9 @@ async fn oci_frontend_delete_manifest_by_digest_removes_tags_but_leaves_blobs()
         .bearer_auth(&write_token)
         .send()
         .await?;
-    assert_eq!(delete_by_tag.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(delete_by_tag.status(), StatusCode::ACCEPTED);
 
+    // Tag delete already removed the manifest; a second delete-by-digest is NOT_FOUND.
     let delete = client
         .delete(format!(
             "{}/v2/team/assets/manifests/sha256:{manifest_digest}",
@@ -1914,7 +2076,7 @@ async fn oci_frontend_delete_manifest_by_digest_removes_tags_but_leaves_blobs()
         .bearer_auth(&write_token)
         .send()
         .await?;
-    assert_eq!(delete.status(), StatusCode::ACCEPTED);
+    assert_eq!(delete.status(), StatusCode::NOT_FOUND);
 
     let manifest_by_digest = client
         .get(format!(

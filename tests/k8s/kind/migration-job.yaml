@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shardline-db-migrate
+  namespace: shardline-kind-smoke
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: shardline-kind-smoke:latest
+          imagePullPolicy: IfNotPresent
+          command: ["shardline", "db", "migrate", "up"]
+          env:
+            - name: SHARDLINE_INDEX_POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shardline-runtime
+                  key: index-postgres-url

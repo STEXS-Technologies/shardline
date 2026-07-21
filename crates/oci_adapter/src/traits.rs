@@ -8,7 +8,6 @@ use crate::OciAdapterError;
 /// Backend operations required by the OCI adapter.
 ///
 /// Implemented by the server crate for its `ServerBackend` enum.
-#[allow(async_fn_in_trait)]
 pub trait OciBackend: Send + Sync {
     /// Creates a resumable S3 upload, returning an upload ID if S3 is available.
     ///
@@ -35,14 +34,18 @@ pub trait OciBackend: Send + Sync {
 
     /// Completes a resumable S3 multipart upload.
     ///
+    /// `parts` is a vector of `(part_number, etag)` tuples.  Part numbers must be
+    /// consecutive 0..n without gaps or duplicates.
+    ///
     /// # Errors
     ///
-    /// Returns [`OciAdapterError`] on storage backend failures.
+    /// Returns [`OciAdapterError`] on storage backend failures or invalid part
+    /// numbering.
     fn complete_resumable_object_upload(
         &self,
         object_key: &ObjectKey,
         upload_id: &str,
-        part_ids: Vec<String>,
+        parts: Vec<(usize, String)>,
     ) -> impl Future<Output = Result<(), OciAdapterError>> + Send;
 
     /// Aborts a resumable S3 multipart upload.

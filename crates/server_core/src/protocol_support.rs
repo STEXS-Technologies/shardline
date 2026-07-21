@@ -15,6 +15,12 @@ pub trait ProtocolValidation {
     fn invalid_upload_session() -> Self;
 }
 
+/// Parses a `sha256:<hex>` digest string, validating the hex portion.
+///
+/// # Errors
+///
+/// Returns `E::invalid_digest()` when the value is not prefixed with `sha256:`
+/// or the hex portion fails content-hash validation.
 pub fn parse_sha256_digest<E: ProtocolValidation>(value: &str) -> Result<String, E> {
     let Some(hash_hex) = value.strip_prefix("sha256:") else {
         return Err(E::invalid_digest());
@@ -23,6 +29,7 @@ pub fn parse_sha256_digest<E: ProtocolValidation>(value: &str) -> Result<String,
     Ok(hash_hex.to_owned())
 }
 
+#[must_use]
 pub fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> String {
     repository_scope.map_or_else(
         || "global".to_owned(),
@@ -42,15 +49,32 @@ pub fn scope_namespace(repository_scope: Option<&RepositoryScope>) -> String {
     )
 }
 
+/// Parses an object key from a string path.
+///
+/// # Errors
+///
+/// Returns `E::invalid_content_hash()` when the string is not a valid
+/// [`ObjectKey`] (empty, unsafe path, or too long).
 pub fn object_key<E: ProtocolValidation>(value: &str) -> Result<ObjectKey, E> {
     ObjectKey::parse(value).map_err(|_error| E::invalid_content_hash())
 }
 
+/// Builds a shared-namespace object key for a SHA-256 digest.
+///
+/// # Errors
+///
+/// Returns `E::invalid_content_hash()` when the digest hex is malformed.
 pub fn shared_sha256_object_key<E: ProtocolValidation>(digest_hex: &str) -> Result<ObjectKey, E> {
     validate_content_hash(digest_hex).map_err(|_error| E::invalid_content_hash())?;
     object_key(&format!("protocols/shared/sha256/{digest_hex}"))
 }
 
+/// Validates an OCI repository name according to the OCI distribution spec.
+///
+/// # Errors
+///
+/// Returns `E::invalid_repository_name()` when the name is empty, contains
+/// path separators or traversal sequences, or has non-compliant segments.
 pub fn validate_oci_repository_name<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     if value.is_empty() || value.starts_with('/') || value.ends_with('/') || value.contains('\\') {
         return Err(E::invalid_repository_name());
@@ -73,6 +97,14 @@ pub fn validate_oci_repository_name<E: ProtocolValidation>(value: &str) -> Resul
     Ok(())
 }
 
+/// Validates that an OCI repository name falls within a bound repository scope.
+///
+/// When no scope is configured the check is a no-op.
+///
+/// # Errors
+///
+/// Returns `E::not_found()` when the name does not match or extend the
+/// repository scope's `owner/name` prefix.
 pub fn validate_oci_repository_scope<E: ProtocolValidation>(
     value: &str,
     repository_scope: Option<&RepositoryScope>,
@@ -97,6 +129,12 @@ pub fn validate_oci_repository_scope<E: ProtocolValidation>(
     Err(E::not_found())
 }
 
+/// Validates an OCI tag reference according to the OCI distribution spec.
+///
+/// # Errors
+///
+/// Returns `E::invalid_manifest_reference()` when the tag is empty, exceeds
+/// 128 bytes, or contains invalid characters.
 pub fn validate_oci_tag<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     let mut bytes = value.bytes();
     let Some(first) = bytes.next() else {
@@ -114,6 +152,14 @@ pub fn validate_oci_tag<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     Ok(())
 }
 
+/// Validates an upload session identifier.
+///
+/// Must be non-empty, at most 64 bytes, and contain only ASCII hex digits
+/// or hyphens.
+///
+/// # Errors
+///
+/// Returns `E::invalid_upload_session()` when the identifier is malformed.
 pub fn validate_upload_session_id<E: ProtocolValidation>(value: &str) -> Result<(), E> {
     if value.is_empty()
         || value.len() > MAX_UPLOAD_SESSION_ID_BYTES
@@ -209,11 +255,8 @@ mod tests {
     #[test]
     fn oci_repository_scope_validator_accepts_bound_roots_and_nested_namespaces() {
         use shardline_protocol::{RepositoryProvider, RepositoryScope};
-        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None);
-        assert!(scope.is_ok());
-        let Ok(scope) = scope else {
-            return;
-        };
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
 
         assert!(
             validate_oci_repository_scope::<ValidateContentHashError>("team/assets", Some(&scope))
@@ -240,14 +283,179 @@ mod tests {
     fn shared_sha256_key_uses_stable_shared_namespace() {
         let key = shared_sha256_object_key::<ValidateContentHashError>(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        );
-        assert!(key.is_ok());
-        let Ok(key) = key else {
-            return;
-        };
+        )
+        .unwrap();
         assert_eq!(
             key.as_str(),
             "protocols/shared/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
+    }
+
+    #[test]
+    fn scope_namespace_global_when_no_repository_scope() {
+        let ns = scope_namespace(None);
+        assert_eq!(ns, "global");
+    }
+
+    #[test]
+    fn scope_namespace_with_repository_scope() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))
+                .unwrap();
+        let ns = scope_namespace(Some(&scope));
+        // Should be a 64-char hex string (SHA-256)
+        assert_eq!(ns.len(), 64);
+        assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn scope_namespace_without_revision() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let ns = scope_namespace(Some(&scope));
+        assert_eq!(ns.len(), 64);
+    }
+
+    #[test]
+    fn object_key_valid_path() {
+        let key = object_key::<ValidateContentHashError>("aa/abcdef");
+        assert!(key.is_ok());
+        assert_eq!(key.unwrap().as_str(), "aa/abcdef");
+    }
+
+    #[test]
+    fn object_key_invalid_path() {
+        let key = object_key::<ValidateContentHashError>("");
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn shared_sha256_key_rejects_bad_hash() {
+        let key = shared_sha256_object_key::<ValidateContentHashError>("bad");
+        assert!(key.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_scope_no_scope_is_noop() {
+        let result = validate_oci_repository_scope::<ValidateContentHashError>("any/repo", None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_oci_repository_scope_rejects_non_matching() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let result =
+            validate_oci_repository_scope::<ValidateContentHashError>("other/repo", Some(&scope));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_tag_rejects_empty() {
+        let result = validate_oci_tag::<ValidateContentHashError>("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_tag_rejects_invalid_start_char() {
+        let result = validate_oci_tag::<ValidateContentHashError>(".tag");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_tag_rejects_oversized() {
+        let result = validate_oci_tag::<ValidateContentHashError>(&"a".repeat(129));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_upload_session_id_rejects_empty() {
+        let result = validate_upload_session_id::<ValidateContentHashError>("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_upload_session_id_accepts_hex() {
+        let result = validate_upload_session_id::<ValidateContentHashError>("a1b2c3d4e5f6");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_upload_session_id_rejects_special_chars() {
+        let result = validate_upload_session_id::<ValidateContentHashError>("session@123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_empty() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_leading_slash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("/repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_trailing_slash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("repo/");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_backslash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team\\repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_double_slash() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team//repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_dot_segment() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team/./repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_dot_dot() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team/../repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_uppercase() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("Team/Repo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_oci_repository_name_rejects_invalid_chars() {
+        let result = validate_oci_repository_name::<ValidateContentHashError>("team/repo!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_sha256_digest_missing_prefix() {
+        let result = parse_sha256_digest::<ValidateContentHashError>(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_sha256_digest_bad_hex() {
+        let result = parse_sha256_digest::<ValidateContentHashError>(
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        );
+        assert!(result.is_err());
     }
 }

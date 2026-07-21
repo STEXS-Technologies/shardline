@@ -5,12 +5,14 @@ use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
     io::{Error as IoError, ErrorKind, Read},
+    ops::Deref,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
 
 use rusqlite::{
-    Connection, Error as SqliteError, OpenFlags, OptionalExtension, Row, Transaction,
+    Connection, Error as SqliteError, MappedRows, OpenFlags, OptionalExtension, Params,
+    Result as SqliteResult, Row, Transaction,
     config::DbConfig,
     params,
     types::{Type, ValueRef},
@@ -20,15 +22,14 @@ use shardline_protocol::{RepositoryScope, unix_now_seconds_lossy};
 use shardline_storage::{
     DirectoryPathError, ObjectKey, ObjectKeyError,
     ensure_directory_path_components_are_not_symlinked as ensure_directory_path_components_are_not_symlinked_shared,
+    resolve_platform_symlinks,
 };
 
 use super::{
     DedupeShardRecord, FileReconstructionRecord, LEGACY_IMPORT_COMPLETED_KEY,
     LOCAL_SCHEMA_MIGRATIONS_TABLE, LOCAL_SQLITE_MIGRATIONS, LegacyQuarantineCandidateRecord,
     LocalIndexStoreError, LocalRecordKind, LocalRecordLocator, MAX_CONTROL_PLANE_METADATA_BYTES,
-    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, SqliteExecutor,
-    StoredObjectPresenceRecord, i64_to_u64, invalid_metadata_path_error,
-    invalid_record_metadata_path_error, u64_to_i64,
+    MAX_LOCAL_RECORD_METADATA_BYTES, MAX_RECONSTRUCTION_METADATA_BYTES, StoredObjectPresenceRecord,
 };
 use crate::{
     DedupeShardMapping, FileId, FileReconstruction, FileRecord, ProviderRepositoryState,
@@ -37,13 +38,37 @@ use crate::{
     record_key::repository_scope_key as shared_repository_scope_key, xet_hash_hex_string,
 };
 
-pub(super) fn initialize_local_metadata_root(root: &Path) -> Result<(), LocalIndexStoreError> {
+pub(crate) trait SqliteExecutor {
+    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
+    where
+        P: Params;
+}
+
+impl SqliteExecutor for Connection {
+    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
+    where
+        P: Params,
+    {
+        Connection::execute(self, sql, params)
+    }
+}
+
+impl SqliteExecutor for Transaction<'_> {
+    fn execute_sql<P>(&self, sql: &str, params: P) -> SqliteResult<usize>
+    where
+        P: Params,
+    {
+        Deref::deref(self).execute(sql, params)
+    }
+}
+
+pub(crate) fn initialize_local_metadata_root(root: &Path) -> Result<(), LocalIndexStoreError> {
     ensure_directory_path_components_are_not_symlinked(root)?;
     fs::create_dir_all(root)?;
     Ok(())
 }
 
-pub(super) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), LocalIndexStoreError> {
+pub(crate) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), LocalIndexStoreError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(invalid_metadata_path_error()),
         Ok(metadata) if metadata.is_file() => Ok(()),
@@ -53,7 +78,7 @@ pub(super) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), Loc
     }
 }
 
-pub(super) fn prepare_connection(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
+pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
     let _enabled = connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "FULL")?;
@@ -64,7 +89,7 @@ pub(super) fn prepare_connection(connection: &mut Connection) -> Result<(), Loca
     Ok(())
 }
 
-pub(super) const fn sqlite_open_flags() -> OpenFlags {
+pub(crate) const fn sqlite_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE
         .union(OpenFlags::SQLITE_OPEN_CREATE)
         .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
@@ -73,7 +98,7 @@ pub(super) const fn sqlite_open_flags() -> OpenFlags {
         .union(OpenFlags::SQLITE_OPEN_EXRESCODE)
 }
 
-pub(super) fn ensure_local_schema_migrations_table(
+pub(crate) fn ensure_local_schema_migrations_table(
     connection: &Connection,
 ) -> Result<(), LocalIndexStoreError> {
     connection.execute_batch(&format!(
@@ -86,7 +111,7 @@ pub(super) fn ensure_local_schema_migrations_table(
     Ok(())
 }
 
-pub(super) fn apply_pending_local_migrations(
+pub(crate) fn apply_pending_local_migrations(
     connection: &mut Connection,
 ) -> Result<(), LocalIndexStoreError> {
     let mut applied_versions = Vec::new();
@@ -119,7 +144,8 @@ pub(super) fn apply_pending_local_migrations(
                     name,
                     applied_at_unix_seconds
                  )
-                 VALUES (?1, ?2, ?3)"
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT (version) DO NOTHING"
             ),
             params![
                 migration.version,
@@ -133,11 +159,17 @@ pub(super) fn apply_pending_local_migrations(
     Ok(())
 }
 
-pub(super) fn ensure_legacy_import_state(
+pub(crate) fn ensure_legacy_import_state(
     connection: &mut Connection,
     root: &Path,
 ) -> Result<(), LocalIndexStoreError> {
-    let import_completed = connection
+    // Acquire a write lock immediately to prevent TOCTOU between the
+    // existence check and the import.  Two concurrent callers that both
+    // see "not yet imported" will serialize here.
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    let import_completed = transaction
         .query_row(
             "SELECT value
              FROM shardline_local_metadata_meta
@@ -153,16 +185,16 @@ pub(super) fn ensure_legacy_import_state(
         return Err(LocalIndexStoreError::InvalidLegacyImportState);
     }
 
-    if local_metadata_has_rows(connection)? {
+    if local_metadata_has_rows(&transaction)? {
         return Err(LocalIndexStoreError::InvalidLegacyImportState);
     }
 
     if !legacy_layout_exists(root) {
-        mark_legacy_import_completed(connection)?;
+        mark_legacy_import_completed(&transaction)?;
+        transaction.commit()?;
         return Ok(());
     }
 
-    let transaction = connection.transaction()?;
     import_legacy_file_records(&transaction, root, LocalRecordKind::Latest)?;
     import_legacy_file_records(&transaction, root, LocalRecordKind::Version)?;
     import_legacy_reconstructions(&transaction, root)?;
@@ -549,7 +581,7 @@ fn import_legacy_provider_repository_states(
     Ok(())
 }
 
-pub(super) fn upsert_reconstruction_row(
+pub(crate) fn upsert_reconstruction_row(
     connection: &impl SqliteExecutor,
     file_id: &FileId,
     reconstruction: &FileReconstruction,
@@ -580,7 +612,7 @@ pub(super) fn upsert_reconstruction_row(
     Ok(())
 }
 
-pub(super) fn upsert_dedupe_mapping_row(
+pub(crate) fn upsert_dedupe_mapping_row(
     connection: &impl SqliteExecutor,
     mapping: &DedupeShardMapping,
     updated_at_unix_seconds: u64,
@@ -605,7 +637,7 @@ pub(super) fn upsert_dedupe_mapping_row(
     Ok(())
 }
 
-pub(super) fn upsert_file_record_row(
+pub(crate) fn upsert_file_record_row(
     connection: &impl SqliteExecutor,
     locator: &LocalRecordLocator,
     record: &FileRecord,
@@ -648,7 +680,7 @@ pub(super) fn upsert_file_record_row(
     Ok(())
 }
 
-pub(super) fn local_record_locator(
+pub(crate) fn local_record_locator(
     kind: LocalRecordKind,
     record: &FileRecord,
     content_hash: Option<String>,
@@ -669,7 +701,7 @@ pub(super) fn local_record_locator(
     }
 }
 
-pub(super) fn local_record_locator_from_row(
+pub(crate) fn local_record_locator_from_row(
     row: &Row<'_>,
 ) -> Result<LocalRecordLocator, SqliteError> {
     let kind = LocalRecordKind::parse(row.get_ref("record_kind")?.as_str()?)
@@ -687,7 +719,7 @@ pub(super) fn local_record_locator_from_row(
     })
 }
 
-pub(super) fn quarantine_candidate_from_row(
+pub(crate) fn quarantine_candidate_from_row(
     row: &Row<'_>,
 ) -> Result<QuarantineCandidate, SqliteError> {
     let object_key =
@@ -701,7 +733,7 @@ pub(super) fn quarantine_candidate_from_row(
     .map_err(from_sql_error)
 }
 
-pub(super) fn retention_hold_from_row(row: &Row<'_>) -> Result<RetentionHold, SqliteError> {
+pub(crate) fn retention_hold_from_row(row: &Row<'_>) -> Result<RetentionHold, SqliteError> {
     let object_key =
         ObjectKey::parse(&row.get::<_, String>("object_key")?).map_err(from_sql_error)?;
     RetentionHold::new(
@@ -716,9 +748,9 @@ pub(super) fn retention_hold_from_row(row: &Row<'_>) -> Result<RetentionHold, Sq
     .map_err(from_sql_error)
 }
 
-pub(super) fn webhook_delivery_from_row(row: &Row<'_>) -> Result<WebhookDelivery, SqliteError> {
+pub(crate) fn webhook_delivery_from_row(row: &Row<'_>) -> Result<WebhookDelivery, SqliteError> {
     let provider_name = row.get::<_, String>("provider")?;
-    let provider = parse_repository_provider(&provider_name, || {
+    let provider = parse_repository_provider(&provider_name, |_| {
         SqliteError::FromSqlConversionFailure(
             0,
             Type::Text,
@@ -735,15 +767,15 @@ pub(super) fn webhook_delivery_from_row(row: &Row<'_>) -> Result<WebhookDelivery
     .map_err(from_sql_error)
 }
 
-pub(super) fn provider_repository_state_from_row(
+pub(crate) fn provider_repository_state_from_row(
     row: &Row<'_>,
 ) -> Result<ProviderRepositoryState, SqliteError> {
     let provider_name = row.get::<_, String>("provider")?;
-    let provider = parse_repository_provider(&provider_name, || {
+    let provider = parse_repository_provider(&provider_name, |_| {
         SqliteError::FromSqlConversionFailure(
             0,
             Type::Text,
-            Box::new(WebhookDeliveryError::InvalidProvider),
+            Box::new(LocalIndexStoreError::InvalidRepoType(provider_name.clone())),
         )
     })?;
     Ok(ProviderRepositoryState::new(
@@ -776,7 +808,7 @@ pub(super) fn provider_repository_state_from_row(
     ))
 }
 
-pub(super) fn dedupe_shard_mapping_from_row(
+pub(crate) fn dedupe_shard_mapping_from_row(
     row: &Row<'_>,
 ) -> Result<DedupeShardMapping, SqliteError> {
     let chunk_hash =
@@ -786,7 +818,7 @@ pub(super) fn dedupe_shard_mapping_from_row(
     Ok(DedupeShardMapping::new(chunk_hash, object_key))
 }
 
-pub(super) fn parse_reconstruction_json(
+pub(crate) fn parse_reconstruction_json(
     value: &str,
 ) -> Result<FileReconstruction, LocalIndexStoreError> {
     ensure_metadata_size_within_limit(
@@ -885,7 +917,7 @@ fn parse_webhook_delivery_json_bytes(
         processed_at_unix_seconds: u64,
     }
     let record = from_slice::<WebhookDeliveryRecord>(bytes)?;
-    let provider = parse_repository_provider(&record.provider, || {
+    let provider = parse_repository_provider(&record.provider, |_| {
         LocalIndexStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
     })?;
     WebhookDelivery::new(
@@ -921,7 +953,7 @@ fn parse_provider_repository_state_json_bytes(
         last_drift_checked_at_unix_seconds: Option<u64>,
     }
     let record = from_slice::<ProviderRepositoryStateRecord>(bytes)?;
-    let provider = parse_repository_provider(&record.provider, || {
+    let provider = parse_repository_provider(&record.provider, |_| {
         LocalIndexStoreError::WebhookDelivery(WebhookDeliveryError::InvalidProvider)
     })?;
     Ok(ProviderRepositoryState::new(
@@ -1060,7 +1092,7 @@ fn ensure_regular_metadata_file(
     Ok(())
 }
 
-pub(super) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, SqliteError> {
+pub(crate) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, SqliteError> {
     let bytes = match value {
         ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.to_vec(),
         ValueRef::Null | ValueRef::Integer(_) | ValueRef::Real(_) => {
@@ -1100,11 +1132,11 @@ pub(super) fn read_sqlite_record_bytes(value: ValueRef<'_>) -> Result<Vec<u8>, S
         | other @ LocalIndexStoreError::RetentionHold(_)
         | other @ LocalIndexStoreError::QuarantineCandidate(_)
         | other @ LocalIndexStoreError::WebhookDelivery(_)
-        | other @ LocalIndexStoreError::IntegerOutOfRange
+        | other @ LocalIndexStoreError::IntegerOutOfRange(_)
         | other @ LocalIndexStoreError::InvalidRecordKind
         | other @ LocalIndexStoreError::InvalidLegacyImportState
         | other @ LocalIndexStoreError::InvalidRepoType(_)
-        | other @ LocalIndexStoreError::BlockingTask
+        | other @ LocalIndexStoreError::BlockingTask(_)
         | other @ LocalIndexStoreError::InvalidTableName => {
             SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(other))
         }
@@ -1159,7 +1191,7 @@ fn map_directory_path_error(
     }
 }
 
-pub(super) fn legacy_record_path(
+pub(crate) fn legacy_record_path(
     root: &Path,
     kind: LocalRecordKind,
     record: &FileRecord,
@@ -1197,4 +1229,563 @@ fn legacy_quarantine_object_key(hash: &str) -> Result<ObjectKey, LocalIndexStore
 
 fn from_sql_error(error: impl StdError + Send + Sync + 'static) -> SqliteError {
     SqliteError::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+}
+
+// ── Small helpers moved from mod.rs ───────────────────────────────────
+
+pub(crate) fn normalize_local_root(root: PathBuf) -> PathBuf {
+    let mut root = root;
+    if root.file_name() == Some(OsStr::new("gc")) {
+        root = root
+            .parent()
+            .map_or_else(|| root.clone(), Path::to_path_buf);
+    }
+    resolve_platform_symlinks(&root)
+}
+
+pub(crate) fn u64_to_i64(value: u64) -> Result<i64, LocalIndexStoreError> {
+    i64::try_from(value).map_err(|err| LocalIndexStoreError::IntegerOutOfRange(err.to_string()))
+}
+
+pub(crate) fn i64_to_u64(value: i64) -> Result<u64, LocalIndexStoreError> {
+    u64::try_from(value).map_err(|err| LocalIndexStoreError::IntegerOutOfRange(err.to_string()))
+}
+
+pub(crate) fn collect_rows<T>(
+    rows: MappedRows<'_, impl FnMut(&Row<'_>) -> Result<T, SqliteError>>,
+) -> Result<Vec<T>, LocalIndexStoreError> {
+    let mut collected = Vec::new();
+    for row in rows {
+        collected.push(row?);
+    }
+    Ok(collected)
+}
+
+pub(crate) fn record_not_found_error() -> LocalIndexStoreError {
+    LocalIndexStoreError::Io(IoError::from(ErrorKind::NotFound))
+}
+
+pub(crate) fn invalid_metadata_path_error() -> LocalIndexStoreError {
+    LocalIndexStoreError::Io(IoError::new(
+        ErrorKind::InvalidData,
+        "local metadata path must be a regular file and must not be a symlink",
+    ))
+}
+
+pub(crate) fn invalid_record_metadata_path_error() -> LocalIndexStoreError {
+    LocalIndexStoreError::Io(IoError::new(
+        ErrorKind::InvalidData,
+        "local record metadata path must be a regular file and must not be a symlink",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
+    use super::*;
+    use rusqlite::Connection;
+
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+
+    // ── ensure_metadata_size_within_limit ─────────────────────────────────
+
+    #[test]
+    fn metadata_size_within_limit_ok() {
+        ensure_metadata_size_within_limit(100, 200).unwrap();
+    }
+
+    #[test]
+    fn metadata_size_at_limit_ok() {
+        ensure_metadata_size_within_limit(200, 200).unwrap();
+    }
+
+    #[test]
+    fn metadata_size_over_limit_errors() {
+        let err = ensure_metadata_size_within_limit(300, 200).unwrap_err();
+        assert!(matches!(
+            err,
+            LocalIndexStoreError::MetadataTooLarge {
+                observed_bytes: 300,
+                maximum_bytes: 200,
+            }
+        ));
+    }
+
+    // ── u64_to_i64 / i64_to_u64 ──────────────────────────────────────────
+
+    #[test]
+    fn u64_to_i64_normal_value() {
+        assert_eq!(u64_to_i64(42).unwrap(), 42i64);
+    }
+
+    #[test]
+    fn u64_to_i64_max_i64_value() {
+        assert_eq!(u64_to_i64(i64::MAX as u64).unwrap(), i64::MAX);
+    }
+
+    #[test]
+    fn u64_to_i64_overflow_errors() {
+        let too_big = (i64::MAX as u64).saturating_add(1);
+        assert!(matches!(
+            u64_to_i64(too_big),
+            Err(LocalIndexStoreError::IntegerOutOfRange(_))
+        ));
+    }
+
+    #[test]
+    fn i64_to_u64_normal_value() {
+        assert_eq!(i64_to_u64(42).unwrap(), 42u64);
+    }
+
+    #[test]
+    fn i64_to_u64_zero() {
+        assert_eq!(i64_to_u64(0).unwrap(), 0u64);
+    }
+
+    #[test]
+    fn i64_to_u64_negative_errors() {
+        assert!(matches!(
+            i64_to_u64(-1),
+            Err(LocalIndexStoreError::IntegerOutOfRange(_))
+        ));
+    }
+
+    // ── record_not_found_error / invalid_metadata_path_error / invalid_record_metadata_path_error ──
+
+    #[test]
+    fn record_not_found_error_kind() {
+        let err = record_not_found_error();
+        assert!(
+            matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn invalid_metadata_path_error_kind() {
+        let err = invalid_metadata_path_error();
+        assert!(
+            matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn invalid_record_metadata_path_error_kind() {
+        let err = invalid_record_metadata_path_error();
+        assert!(
+            matches!(err, LocalIndexStoreError::Io(ref e) if e.kind() == std::io::ErrorKind::InvalidData)
+        );
+    }
+
+    // ── is_valid_local_table_name ─────────────────────────────────────────
+
+    #[test]
+    fn is_valid_local_table_name_accepts_known_tables() {
+        assert!(is_valid_local_table_name("shardline_file_records"));
+        assert!(is_valid_local_table_name("shardline_file_reconstructions"));
+        assert!(is_valid_local_table_name("shardline_stored_objects"));
+        assert!(is_valid_local_table_name("shardline_dedupe_shards"));
+        assert!(is_valid_local_table_name("shardline_quarantine_candidates"));
+        assert!(is_valid_local_table_name("shardline_retention_holds"));
+        assert!(is_valid_local_table_name("shardline_webhook_deliveries"));
+        assert!(is_valid_local_table_name(
+            "shardline_provider_repository_states"
+        ));
+    }
+
+    #[test]
+    fn is_valid_local_table_name_rejects_unknown() {
+        assert!(!is_valid_local_table_name("shardline_unknown_table"));
+        assert!(!is_valid_local_table_name(""));
+        assert!(!is_valid_local_table_name("sqlite_master"));
+    }
+
+    // ── ensure_sqlite_database_path_is_safe ─────────────────────────────────
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_when_not_exists() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("nonexistent.sqlite3");
+        ensure_sqlite_database_path_is_safe(&path).unwrap();
+    }
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_when_regular_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("test.sqlite3");
+        std::fs::write(&path, b"content").unwrap();
+        ensure_sqlite_database_path_is_safe(&path).unwrap();
+    }
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_rejects_directory() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("adir");
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            ensure_sqlite_database_path_is_safe(&path),
+            Err(LocalIndexStoreError::Io(ref e)) if e.kind() == std::io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[test]
+    fn ensure_sqlite_database_path_is_safe_rejects_symlink() {
+        let storage = shardline_test_support::TempStorage::new();
+        let target = storage.path().join("real.sqlite3");
+        let link = storage.path().join("link.sqlite3");
+        std::fs::write(&target, b"data").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            ensure_sqlite_database_path_is_safe(&link),
+            Err(LocalIndexStoreError::Io(ref e)) if e.kind() == std::io::ErrorKind::InvalidData
+        ));
+    }
+
+    // ── sqlite_open_flags ──────────────────────────────────────────────────
+
+    #[test]
+    fn sqlite_open_flags_includes_no_follow() {
+        let flags = sqlite_open_flags();
+        assert!(
+            flags.contains(rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW),
+            "expected SQLITE_OPEN_NOFOLLOW to be set"
+        );
+        assert!(
+            flags.contains(rusqlite::OpenFlags::SQLITE_OPEN_CREATE),
+            "expected SQLITE_OPEN_CREATE"
+        );
+    }
+
+    // ── collect_rows ───────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_rows_empty_iterator() {
+        let storage = shardline_test_support::TempStorage::new();
+        initialize_local_metadata_root(storage.path()).unwrap();
+        let db_path = storage.path().join("test.sqlite3");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (v TEXT);
+             INSERT INTO t VALUES ('a'), ('b');",
+        )
+        .unwrap();
+        let mut stmt = conn
+            .prepare("SELECT v FROM t WHERE v = 'nonexistent'")
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+        let collected: Vec<String> = collect_rows(rows).unwrap();
+        assert!(collected.is_empty());
+    }
+
+    #[test]
+    fn collect_rows_non_empty_iterator() {
+        let storage = shardline_test_support::TempStorage::new();
+        initialize_local_metadata_root(storage.path()).unwrap();
+        let db_path = storage.path().join("test.sqlite3");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (v TEXT);
+             INSERT INTO t VALUES ('a'), ('b');",
+        )
+        .unwrap();
+        let mut stmt = conn.prepare("SELECT v FROM t ORDER BY v").unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+        let collected: Vec<String> = collect_rows(rows).unwrap();
+        assert_eq!(collected, vec!["a", "b"]);
+    }
+
+    // ── legacy_layout_exists ───────────────────────────────────────────────
+
+    #[test]
+    fn legacy_layout_exists_returns_false_for_empty_dir() {
+        let storage = shardline_test_support::TempStorage::new();
+        assert!(!legacy_layout_exists(storage.path()));
+    }
+
+    #[test]
+    fn legacy_layout_exists_when_files_dir_present() {
+        let storage = shardline_test_support::TempStorage::new();
+        std::fs::create_dir(storage.path().join("files")).unwrap();
+        assert!(legacy_layout_exists(storage.path()));
+    }
+
+    #[test]
+    fn legacy_layout_exists_when_file_versions_dir_present() {
+        let storage = shardline_test_support::TempStorage::new();
+        std::fs::create_dir(storage.path().join("file_versions")).unwrap();
+        assert!(legacy_layout_exists(storage.path()));
+    }
+
+    #[test]
+    fn legacy_layout_exists_when_gc_dir_present() {
+        let storage = shardline_test_support::TempStorage::new();
+        std::fs::create_dir(storage.path().join("gc")).unwrap();
+        assert!(legacy_layout_exists(storage.path()));
+    }
+
+    // ── legacy_record_path ─────────────────────────────────────────────────
+
+    fn sample_scope() -> RepositoryScope {
+        RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main")).unwrap()
+    }
+
+    fn sample_record(scope: Option<RepositoryScope>) -> crate::FileRecord {
+        crate::FileRecord {
+            file_id: "test.bin".into(),
+            content_hash: "c".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: scope,
+            chunks: vec![],
+        }
+    }
+
+    #[test]
+    fn legacy_record_path_latest_no_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let record = sample_record(None);
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Latest, &record);
+        assert!(path.ends_with("test.bin"));
+        assert!(path.starts_with(storage.path().join("files")));
+    }
+
+    #[test]
+    fn legacy_record_path_latest_with_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let scope = sample_scope();
+        let record = sample_record(Some(scope));
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Latest, &record);
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("github"));
+        assert!(path_str.contains("test.bin"));
+    }
+
+    #[test]
+    fn legacy_record_path_version_no_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let record = sample_record(None);
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Version, &record);
+        assert!(path.starts_with(storage.path().join("file_versions")));
+        assert!(path.ends_with(&record.content_hash));
+        assert!(path.to_string_lossy().contains("test.bin"));
+    }
+
+    #[test]
+    fn legacy_record_path_version_with_scope() {
+        let storage = shardline_test_support::TempStorage::new();
+        let scope = sample_scope();
+        let record = sample_record(Some(scope));
+        let path = legacy_record_path(storage.path(), LocalRecordKind::Version, &record);
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("file_versions"));
+        assert!(path_str.contains("github"));
+        assert!(path_str.contains("test.bin"));
+        assert!(path_str.contains(&record.content_hash));
+    }
+
+    // ── legacy_quarantine_object_key ───────────────────────────────────────
+
+    #[test]
+    fn legacy_quarantine_object_key_produces_two_char_prefix() {
+        let hash = "aabbccdd";
+        let ok = legacy_quarantine_object_key(hash).unwrap();
+        assert!(
+            ok.as_str().starts_with("aa/"),
+            "prefix should be first two chars, got: {}",
+            ok.as_str()
+        );
+        assert!(ok.as_str().contains(hash), "hash should be in key");
+    }
+
+    #[test]
+    fn legacy_quarantine_object_key_short_hash_uses_first_two_chars() {
+        let hash = "abcdef1234567890";
+        let ok = legacy_quarantine_object_key(hash).unwrap();
+        assert!(ok.as_str().starts_with("ab/"));
+    }
+
+    // ── file_modified_since_epoch ──────────────────────────────────────────
+
+    #[test]
+    fn file_modified_since_epoch_returns_zero_for_non_existent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("no-such-file");
+        let result = file_modified_since_epoch(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn file_modified_since_epoch_returns_value_for_existing_file() {
+        let storage = shardline_test_support::TempStorage::new();
+        let path = storage.path().join("existing.txt");
+        std::fs::write(&path, b"data").unwrap();
+        let result = file_modified_since_epoch(&path).unwrap();
+        assert!(result > 0, "modified timestamp should be positive");
+    }
+
+    // ── normalize_local_root ───────────────────────────────────────────────
+
+    #[test]
+    fn normalize_local_root_removes_gc_suffix() {
+        let storage = shardline_test_support::TempStorage::new();
+        let gc_path = storage.path().join("gc");
+        std::fs::create_dir_all(&gc_path).unwrap();
+        let normalized = normalize_local_root(gc_path);
+        assert_eq!(normalized, storage.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn normalize_local_root_keeps_non_gc_path() {
+        let storage = shardline_test_support::TempStorage::new();
+        let normalized = normalize_local_root(storage.path().to_path_buf());
+        assert_eq!(normalized, storage.path().canonicalize().unwrap());
+    }
+
+    // ── local_record_locator ───────────────────────────────────────────────
+
+    #[test]
+    fn local_record_locator_latest_has_no_content_hash() {
+        let record = sample_record(None);
+        let locator = local_record_locator(LocalRecordKind::Latest, &record, None);
+        assert_eq!(locator.kind, LocalRecordKind::Latest);
+        assert_eq!(locator.file_id, "test.bin");
+        assert!(locator.content_hash.is_none());
+    }
+
+    #[test]
+    fn local_record_locator_version_has_content_hash() {
+        let record = sample_record(None);
+        let ch = record.content_hash.clone();
+        let locator = local_record_locator(LocalRecordKind::Version, &record, Some(ch.clone()));
+        assert_eq!(locator.kind, LocalRecordKind::Version);
+        assert_eq!(locator.content_hash, Some(ch));
+    }
+
+    // ── from_sql_error ─────────────────────────────────────────────────────
+
+    #[test]
+    fn from_sql_error_wraps_into_sqlite_error() {
+        let io_err = std::io::Error::other("test error");
+        let sql_err = from_sql_error(io_err);
+        assert!(matches!(
+            sql_err,
+            rusqlite::Error::FromSqlConversionFailure(0, _, _)
+        ));
+    }
+
+    // ── initialize_local_metadata_root ─────────────────────────────────────
+
+    #[test]
+    fn initialize_local_metadata_root_creates_directory() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("nested").join("metadata");
+        assert!(!root.exists());
+        initialize_local_metadata_root(&root).expect("should create directory");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn initialize_local_metadata_root_creates_nested_directories() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("metadata");
+        assert!(!root.exists());
+        initialize_local_metadata_root(&root).expect("should create nested directories");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn initialize_local_metadata_root_is_idempotent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path().join("metadata");
+        initialize_local_metadata_root(&root).expect("first call should succeed");
+        initialize_local_metadata_root(&root).expect("second call should succeed");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn ensure_local_schema_migrations_table_creates_table() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let connection = Connection::open(&db_path).unwrap();
+
+        ensure_local_schema_migrations_table(&connection).expect("should create migrations table");
+
+        let exists: bool = connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='{LOCAL_SCHEMA_MIGRATIONS_TABLE}')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists, "migrations table should exist");
+    }
+
+    #[test]
+    fn ensure_local_schema_migrations_table_is_idempotent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let connection = Connection::open(&db_path).unwrap();
+
+        ensure_local_schema_migrations_table(&connection).unwrap();
+        ensure_local_schema_migrations_table(&connection).unwrap();
+
+        let exists: bool = connection
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='{LOCAL_SCHEMA_MIGRATIONS_TABLE}')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            exists,
+            "migrations table should still exist after idempotent calls"
+        );
+    }
+
+    #[test]
+    fn apply_pending_local_migrations_is_idempotent() {
+        let storage = shardline_test_support::TempStorage::new();
+        let root = storage.path();
+        initialize_local_metadata_root(root).unwrap();
+        let db_path = root.join("metadata.sqlite3");
+        let mut connection = Connection::open(&db_path).unwrap();
+        prepare_connection(&mut connection).unwrap();
+        ensure_local_schema_migrations_table(&connection).unwrap();
+
+        apply_pending_local_migrations(&mut connection).expect("first migration should succeed");
+        apply_pending_local_migrations(&mut connection)
+            .expect("second migration should succeed (idempotent)");
+
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {LOCAL_SCHEMA_MIGRATIONS_TABLE}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count > 0, "should have applied at least one migration");
+    }
 }

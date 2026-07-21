@@ -5,10 +5,14 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
         clippy::shadow_unrelated,
         clippy::let_underscore_must_use,
-        clippy::format_push_string
+        clippy::format_push_string,
+        clippy::vec_init_then_push,
+        clippy::useless_format,
+        clippy::same_item_push,
+        clippy::useless_vec,
+        clippy::str_to_string
     )
 )]
 
@@ -23,8 +27,11 @@
 //! ```no_run
 //! use axum::Router;
 //! use shardline_hub_api::hub_routes;
+//! use shardline_hub_api::routes::HubState;
 //!
-//! let app: Router = hub_routes();
+//! # fn example(state: HubState) {
+//! let app: Router = hub_routes(state, true);
+//! # }
 //! ```
 
 pub mod auth;
@@ -44,10 +51,14 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Builds the Hub API router with all registered routes.
 ///
-/// The returned [`Router`] is state-generic and can be merged into any
-/// Axum router. Call [`state::init`] with a [`routes::HubState`] before
-/// serving requests.
-pub fn hub_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
+/// `register_xet_token_routes` controls whether the `xet-read-token` and
+/// `xet-write-token` routes are registered. Set to `false` when the Xet
+/// protocol frontend is already serving these routes.
+///
+/// The returned [`Router`] is stateless (type [`Router<()>`]) and can be merged
+/// into any Axum router. Call this with the [`HubState`](routes::HubState) that
+/// should back all handlers.
+pub fn hub_routes(state: routes::HubState, register_xet_token_routes: bool) -> Router {
     let cors = CorsLayer::new()
         .allow_origin([
             HeaderValue::from_static("http://127.0.0.1:8080"),
@@ -67,15 +78,9 @@ pub fn hub_routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
         axum::http::HeaderValue::from_static("nosniff"),
     );
 
-    routes::router()
+    routes::router(register_xet_token_routes)
+        .with_state(state)
         .route_layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
         .layer(cors)
         .layer(security_headers)
-}
-
-/// Initializes the Hub API with the given state.
-///
-/// This must be called once before the server starts accepting requests.
-pub fn init(state: routes::HubState) {
-    state::init(state);
 }

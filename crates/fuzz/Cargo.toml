@@ -26,10 +26,11 @@ shardline-gc.workspace = true
 shardline-hub-api.workspace = true
 shardline-index.workspace = true
 shardline-protocol.workspace = true
+shardline-protocol-adapters.workspace = true
 shardline-rebuild.workspace = true
-shardline-server.workspace = true
+shardline-server = { workspace = true, features = ["fuzzing"] }
 shardline-server-core.workspace = true
-shardline-storage.workspace = true
+shardline-storage = { workspace = true, features = ["s3"] }
 shardline-vcs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
@@ -86,6 +87,12 @@ doc = false
 [[bin]]
 name = "shardline_lifecycle_repair"
 path = "fuzz_targets/shardline/lifecycle_repair.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_lifecycle_repair_classification"
+path = "fuzz_targets/shardline/lifecycle_repair_classification.rs"
 test = false
 doc = false
 
@@ -180,8 +187,50 @@ test = false
 doc = false
 
 [[bin]]
+name = "shardline_hub_refs"
+path = "fuzz_targets/shardline/hub_refs.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "shardline_rebuild_candidates"
 path = "fuzz_targets/shardline/rebuild_candidates.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_git_pack"
+path = "fuzz_targets/shardline/git_pack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_git_delta"
+path = "fuzz_targets/shardline/git_delta.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_git_commit_parser"
+path = "fuzz_targets/shardline/git_commit_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_git_tree_walker"
+path = "fuzz_targets/shardline/git_tree_walker.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_xorb_reconstruct"
+path = "fuzz_targets/shardline/xorb_reconstruct.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shardline_protocol_lfs_operation"
+path = "fuzz_targets/shardline/protocol_lfs_operation.rs"
 test = false
 doc = false
 

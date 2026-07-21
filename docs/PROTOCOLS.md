@@ -21,7 +21,7 @@ The default is `xet`.
 Start all currently implemented frontends:
 
 ```bash
-shardline serve --role all --frontends xet,lfs,bazel-http,oci
+shardline serve --role all --frontends xet,lfs,bazel-http,oci,hub
 ```
 
 Start only the new non-Xet frontends:

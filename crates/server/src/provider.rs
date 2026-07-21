@@ -154,7 +154,7 @@ impl ProviderTokenService {
         let issued = self.issuer.issue(&grant)?;
 
         Ok(ProviderTokenIssueResponse {
-            token: issued.token().to_owned(),
+            token: SecretString::from_secret(issued.token()),
             issuer: issued.claims().issuer().to_owned(),
             subject: issued.claims().subject().to_owned(),
             provider: issued.claims().repository().provider(),

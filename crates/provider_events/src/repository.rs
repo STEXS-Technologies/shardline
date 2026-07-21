@@ -253,3 +253,252 @@ where
         .map_err(Into::into)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use shardline_index::{
+        FileChunkRecord, MemoryIndexStore, MemoryRecordStore, RecordMutation, RecordTraversal,
+    };
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+    use shardline_vcs::{
+        ProviderKind, RepositoryRef, RepositoryWebhookEvent, RepositoryWebhookEventKind,
+        WebhookDeliveryId,
+    };
+
+    use super::{
+        apply_repository_deleted, apply_repository_renamed, collect_repository_records,
+        delete_repository_records,
+    };
+
+    fn test_record() -> FileChunkRecord {
+        FileChunkRecord {
+            hash: "a".repeat(64),
+            offset: 0,
+            length: 4,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: 4,
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_repository_records_empty() {
+        let store = MemoryRecordStore::new();
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "org", "empty-repo").unwrap();
+        let records = collect_repository_records(&store, &repo).await.unwrap();
+        assert!(records.latest_locators.is_empty());
+        assert!(records.version_locators.is_empty());
+        assert!(records.latest_records.is_empty());
+        assert!(records.version_records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_repository_records_filters_non_matching() {
+        let store = MemoryRecordStore::new();
+        let repo = RepositoryRef::new(ProviderKind::GitHub, "org", "repo").unwrap();
+
+        let matching_scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main")).unwrap();
+        let non_matching_scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "other", "repo", Some("main"))
+                .unwrap();
+
+        let matching = shardline_index::FileRecord {
+            file_id: "matching.bin".to_owned(),
+            content_hash: "b".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: Some(matching_scope),
+            chunks: vec![test_record()],
+        };
+        let non_matching = shardline_index::FileRecord {
+            file_id: "non_matching.bin".to_owned(),
+            content_hash: "c".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: Some(non_matching_scope),
+            chunks: vec![test_record()],
+        };
+
+        RecordMutation::write_version_record(&store, &matching)
+            .await
+            .unwrap();
+        RecordMutation::write_version_record(&store, &non_matching)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &matching)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &non_matching)
+            .await
+            .unwrap();
+
+        let records = collect_repository_records(&store, &repo).await.unwrap();
+        assert_eq!(records.version_records.len(), 1);
+        assert_eq!(records.latest_records.len(), 1);
+        assert_eq!(records.version_records[0].file_id, "matching.bin");
+        assert_eq!(records.latest_records[0].file_id, "matching.bin");
+    }
+
+    #[tokio::test]
+    async fn delete_repository_records_empty_vecs_is_ok() {
+        let store = MemoryRecordStore::new();
+        let result = delete_repository_records::<MemoryRecordStore>(&store, vec![], vec![]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_repository_records_removes_specified_locators() {
+        let store = MemoryRecordStore::new();
+        let record = shardline_index::FileRecord {
+            file_id: "delete-me.bin".to_owned(),
+            content_hash: "d".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: Some(
+                RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
+                    .unwrap(),
+            ),
+            chunks: vec![test_record()],
+        };
+
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let latest_loc = RecordTraversal::latest_record_locator(&store, &record);
+        let version_loc = RecordTraversal::version_record_locator(&store, &record);
+
+        let result = delete_repository_records::<MemoryRecordStore>(
+            &store,
+            vec![latest_loc],
+            vec![version_loc],
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // Verify locators are gone
+        let latest_loc2 = RecordTraversal::latest_record_locator(&store, &record);
+        let version_loc2 = RecordTraversal::version_record_locator(&store, &record);
+        assert!(
+            !RecordTraversal::record_locator_exists(&store, &latest_loc2)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !RecordTraversal::record_locator_exists(&store, &version_loc2)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_repository_records_only_latest() {
+        let store = MemoryRecordStore::new();
+        let record = shardline_index::FileRecord {
+            file_id: "only-latest.bin".to_owned(),
+            content_hash: "e".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: Some(
+                RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
+                    .unwrap(),
+            ),
+            chunks: vec![test_record()],
+        };
+
+        RecordMutation::write_latest_record(&store, &record)
+            .await
+            .unwrap();
+
+        let latest_loc = RecordTraversal::latest_record_locator(&store, &record);
+        let result =
+            delete_repository_records::<MemoryRecordStore>(&store, vec![latest_loc], vec![]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_repository_records_only_version() {
+        let store = MemoryRecordStore::new();
+        let record = shardline_index::FileRecord {
+            file_id: "only-version.bin".to_owned(),
+            content_hash: "f".repeat(64),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: Some(
+                RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
+                    .unwrap(),
+            ),
+            chunks: vec![test_record()],
+        };
+
+        RecordMutation::write_version_record(&store, &record)
+            .await
+            .unwrap();
+
+        let version_loc = RecordTraversal::version_record_locator(&store, &record);
+        let result =
+            delete_repository_records::<MemoryRecordStore>(&store, vec![], vec![version_loc]).await;
+        assert!(result.is_ok());
+    }
+
+    // ── apply_repository_deleted with empty records ───────────────────────
+
+    #[tokio::test]
+    async fn apply_repository_deleted_empty_repo_returns_zero_counts() {
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let tempdir = tempfile::tempdir().unwrap();
+        let object_store =
+            shardline_server_core::ServerObjectStore::local(tempdir.path().join("chunks")).unwrap();
+        let event = RepositoryWebhookEvent::new(
+            RepositoryRef::new(ProviderKind::GitHub, "team", "empty-repo").unwrap(),
+            WebhookDeliveryId::new("delivery-empty-1").unwrap(),
+            RepositoryWebhookEventKind::RepositoryDeleted,
+        );
+
+        let outcome = apply_repository_deleted(&record_store, &index_store, &object_store, &event)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.affected_file_versions, 0);
+        assert_eq!(outcome.affected_chunks, 0);
+        assert_eq!(outcome.applied_holds, 0);
+        assert_eq!(outcome.provider, ProviderKind::GitHub);
+        assert_eq!(outcome.owner, "team");
+        assert_eq!(outcome.repo, "empty-repo");
+    }
+
+    // ── apply_repository_renamed with empty records ───────────────────────
+
+    #[tokio::test]
+    async fn apply_repository_renamed_empty_repo_returns_zero_counts() {
+        let record_store = MemoryRecordStore::new();
+        let index_store = MemoryIndexStore::new();
+        let new_repository =
+            RepositoryRef::new(ProviderKind::GitHub, "team", "renamed-repo").unwrap();
+        let event = RepositoryWebhookEvent::new(
+            RepositoryRef::new(ProviderKind::GitHub, "team", "empty-repo").unwrap(),
+            WebhookDeliveryId::new("delivery-rename-empty-1").unwrap(),
+            RepositoryWebhookEventKind::RepositoryRenamed {
+                new_repository: new_repository.clone(),
+            },
+        );
+
+        let outcome =
+            apply_repository_renamed(&record_store, &index_store, &event, &new_repository)
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.affected_file_versions, 0);
+        assert_eq!(outcome.affected_chunks, 0);
+        assert_eq!(outcome.applied_holds, 0);
+        assert_eq!(outcome.provider, ProviderKind::GitHub);
+        assert_eq!(outcome.owner, "team");
+        assert_eq!(outcome.repo, "empty-repo");
+    }
+}

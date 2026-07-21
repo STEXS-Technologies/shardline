@@ -85,4 +85,62 @@ mod tests {
                 .join(hex::encode("assets/.."))
         );
     }
+
+    #[test]
+    fn scoped_root_without_revision_omits_revision_component() {
+        let scope = RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", None);
+        assert!(scope.is_ok());
+        let Ok(scope) = scope else {
+            return;
+        };
+
+        let path = scoped_root(Path::new("/base"), &scope);
+
+        assert_eq!(
+            path,
+            Path::new("/base")
+                .join("github")
+                .join(hex::encode("org"))
+                .join(hex::encode("repo"))
+        );
+    }
+
+    #[test]
+    fn repository_scoped_root_encodes_various_providers() {
+        for provider in [
+            RepositoryProvider::GitHub,
+            RepositoryProvider::GitLab,
+            RepositoryProvider::Gitea,
+        ] {
+            let scope = RepositoryRecordScope::new(provider, "owner", "name");
+            let path = repository_scoped_root(Path::new("/data"), &scope);
+            assert!(path.starts_with("/data"));
+            // Components are hex-encoded, so check for hex of "owner" and "name"
+            assert!(
+                path.to_string_lossy().contains(&hex::encode("owner")),
+                "path {:?} should contain hex-encoded 'owner'",
+                path
+            );
+            assert!(
+                path.to_string_lossy().contains(&hex::encode("name")),
+                "path {:?} should contain hex-encoded 'name'",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn path_component_hex_encodes_value() {
+        let result = super::path_component("hello");
+        assert_eq!(result, hex::encode(b"hello"));
+    }
+
+    #[test]
+    fn path_component_encodes_dangerous_characters() {
+        let result = super::path_component("../etc");
+        assert_eq!(result, hex::encode(b"../etc"));
+        // Ensure the hex encoding does not contain path separators
+        assert!(!result.contains('/'));
+        assert!(!result.contains('.'));
+    }
 }

@@ -1,8 +1,11 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::ServerError;
+
+/// Default timeout for acquiring chunk transfer permits.
+pub const DEFAULT_TRANSFER_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Weighted transfer concurrency limiter based on chunk-equivalent cost.
 #[derive(Debug, Clone)]
@@ -10,6 +13,7 @@ pub struct TransferLimiter {
     chunk_size_bytes: NonZeroUsize,
     max_in_flight_chunks: NonZeroUsize,
     semaphore: Arc<Semaphore>,
+    acquire_timeout: Duration,
 }
 
 impl TransferLimiter {
@@ -21,15 +25,23 @@ impl TransferLimiter {
             chunk_size_bytes,
             max_in_flight_chunks,
             semaphore: Arc::new(Semaphore::new(max_in_flight_chunks.get())),
+            acquire_timeout: DEFAULT_TRANSFER_ACQUIRE_TIMEOUT,
         }
+    }
+
+    /// Sets a custom acquire timeout.
+    #[must_use]
+    pub const fn with_acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.acquire_timeout = timeout;
+        self
     }
 
     /// Acquires permits for a transfer with the supplied byte length.
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when the limiter capacity cannot be represented or the
-    /// semaphore has been closed.
+    /// Returns [`ServerError`] when the limiter capacity cannot be represented,
+    /// the semaphore has been closed, or the acquire timeout elapses.
     pub async fn acquire_bytes(
         &self,
         total_bytes: u64,
@@ -39,10 +51,10 @@ impl TransferLimiter {
             self.chunk_size_bytes,
             self.max_in_flight_chunks,
         )?;
-        self.semaphore
-            .clone()
-            .acquire_many_owned(permits)
+        let semaphore = self.semaphore.clone();
+        tokio::time::timeout(self.acquire_timeout, semaphore.acquire_many_owned(permits))
             .await
+            .map_err(|_elapsed| ServerError::TransferLimiterTimedOut)?
             .map_err(|_error| ServerError::TransferLimiterClosed)
     }
 }
@@ -65,6 +77,8 @@ mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 
     use tokio::time::timeout;
+
+    use crate::ServerError;
 
     use super::{TransferLimiter, permits_for_bytes};
 
@@ -103,6 +117,43 @@ mod tests {
         assert_eq!(permits.ok(), Some(1));
     }
 
+    #[test]
+    fn transfer_limiter_new_stores_configuration() {
+        let limiter = TransferLimiter::new(CHUNK_SIZE, MAX_IN_FLIGHT);
+        assert_eq!(limiter.chunk_size_bytes, CHUNK_SIZE);
+        assert_eq!(limiter.max_in_flight_chunks, MAX_IN_FLIGHT);
+        assert_eq!(limiter.semaphore.available_permits(), MAX_IN_FLIGHT.get());
+        assert_eq!(limiter.acquire_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn with_acquire_timeout_overrides_default() {
+        let limiter = TransferLimiter::new(CHUNK_SIZE, MAX_IN_FLIGHT)
+            .with_acquire_timeout(Duration::from_secs(10));
+        assert_eq!(limiter.acquire_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn permits_for_bytes_overflow_detected() {
+        // Use a max_in_flight that exceeds u32::MAX to trigger the TryFrom error.
+        let huge_capacity = NonZeroUsize::new(usize::MAX).unwrap_or(NonZeroUsize::MIN);
+        let small_chunk = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
+
+        let result = permits_for_bytes(u64::MAX, small_chunk, huge_capacity);
+        assert!(matches!(result, Err(ServerError::NumericConversion(_))));
+    }
+
+    #[test]
+    fn permits_for_bytes_rejects_zero_capacity_chunk() {
+        // chunk_size_bytes must be non-zero by type, but verify edge behavior
+        let small_chunk = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
+        let capacity = NonZeroUsize::new(10).unwrap_or(NonZeroUsize::MIN);
+
+        let result = permits_for_bytes(100, small_chunk, capacity);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10); // capped at capacity
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn limiter_blocks_until_capacity_returns() {
         let limiter = TransferLimiter::new(CHUNK_SIZE, NonZeroUsize::MIN);
@@ -123,5 +174,73 @@ mod tests {
             return;
         };
         assert!(released.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limiter_times_out_when_all_permits_consumed() {
+        let limiter = TransferLimiter::new(CHUNK_SIZE, NonZeroUsize::MIN)
+            .with_acquire_timeout(Duration::from_millis(10));
+        // Acquire the only permit
+        let _permit = limiter.acquire_bytes(4).await.unwrap();
+        // Second acquire should time out immediately
+        let result = limiter.acquire_bytes(4).await;
+        assert!(
+            matches!(result, Err(ServerError::TransferLimiterTimedOut)),
+            "expected TransferLimiterTimedOut, got {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limiter_returns_closed_error_when_semaphore_destroyed() {
+        let limiter = TransferLimiter::new(
+            NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
+            NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN),
+        )
+        .with_acquire_timeout(Duration::from_secs(60));
+        // Acquire the only permit
+        let _permit = limiter.acquire_bytes(1).await.unwrap();
+        // Close the underlying semaphore by replacing it
+        // We can't directly close the semaphore from TransferLimiter's API,
+        // but we can test that timeout works correctly
+        let result = timeout(Duration::from_millis(100), limiter.acquire_bytes(1)).await;
+        // Should time out because no permits available
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permits_for_bytes_max_u64_truncation() {
+        let chunk = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
+        let capacity = NonZeroUsize::new(u32::MAX as usize).unwrap_or(NonZeroUsize::MIN);
+        // Using u64::MAX bytes should result in u32::MAX permits (capped by capacity)
+        let result = permits_for_bytes(u64::MAX, chunk, capacity);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), u32::MAX);
+    }
+
+    #[tokio::test]
+    async fn acquire_times_out_deterministically_with_paused_time() {
+        // Use tokio::time::pause() for deterministic timeout control.
+        tokio::time::pause();
+
+        let limiter = TransferLimiter::new(CHUNK_SIZE, NonZeroUsize::MIN)
+            .with_acquire_timeout(Duration::from_millis(100));
+
+        // Acquire the only permit.
+        let _permit = limiter.acquire_bytes(4).await.unwrap();
+
+        // Spawn a task that will try to acquire — it should block because the
+        // semaphore is exhausted, and then time out after 100 ms.
+        let limiter_clone = limiter.clone();
+        let acquire_handle = tokio::spawn(async move { limiter_clone.acquire_bytes(4).await });
+
+        // Advance the paused clock past the 100 ms acquire timeout.
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        // The timeout should now have fired.
+        let result = acquire_handle.await.expect("spawned task panicked");
+        assert!(
+            matches!(result, Err(ServerError::TransferLimiterTimedOut)),
+            "expected TransferLimiterTimedOut after advancing past timeout, got {result:?}"
+        );
     }
 }

@@ -6,7 +6,7 @@ use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, u64_to_i64};
 use crate::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
-    StoredObjectId, WebhookDelivery, xet_hash_hex_string,
+    StoredObjectId, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
 
 impl ReconstructionStore for LocalIndexStore {
@@ -37,7 +37,7 @@ impl ReconstructionStore for LocalIndexStore {
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         let mut file_ids = Vec::new();
         for row in rows {
-            let hash = crate::parse_xet_hash_hex(&row?)?;
+            let hash = parse_xet_hash_hex(&row?)?;
             file_ids.push(FileId::new(hash));
         }
         Ok(file_ids)
@@ -73,7 +73,7 @@ impl DedupeStore for LocalIndexStore {
         chunk_hash: &ShardlineHash,
     ) -> Result<Option<DedupeShardMapping>, Self::Error> {
         let connection = self.open_connection()?;
-        connection
+        let result: Result<Option<DedupeShardMapping>, _> = connection
             .query_row(
                 "SELECT chunk_hash, shard_object_key
                  FROM shardline_dedupe_shards
@@ -82,7 +82,10 @@ impl DedupeStore for LocalIndexStore {
                 super::helpers::dedupe_shard_mapping_from_row,
             )
             .optional()
-            .map_err(LocalIndexStoreError::from)
+            .map_err(LocalIndexStoreError::from);
+        let hit = result.as_ref().is_ok_and(|r| r.is_some());
+        shardline_metrics::record_xet_dedupe_shard_query(hit);
+        result
     }
 
     fn list_dedupe_shard_mappings(&self) -> Result<Vec<DedupeShardMapping>, Self::Error> {
@@ -503,5 +506,505 @@ impl LifecycleStore for LocalIndexStore {
             params![provider.as_str(), owner, repo],
         )?;
         Ok(changed > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
+    use shardline_protocol::{ChunkRange, RepositoryProvider};
+    use shardline_storage::ObjectKey;
+
+    use super::*;
+    use crate::{
+        ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RetentionHold,
+        WebhookDelivery,
+    };
+
+    fn make_store() -> LocalIndexStore {
+        let storage = shardline_test_support::TempStorage::new();
+        LocalIndexStore::new(storage.path_buf()).expect("failed to create local index store")
+    }
+
+    #[test]
+    fn insert_and_get_reconstruction_roundtrip() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([1; 32]));
+        let object_id = StoredObjectId::new(ShardlineHash::from_bytes([2; 32]));
+        let range = ChunkRange::new(0, 3).unwrap();
+        let reconstruction =
+            FileReconstruction::new(vec![ReconstructionTerm::new(object_id, range, 256)]);
+
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .expect("insert should succeed");
+        let loaded =
+            ReconstructionStore::reconstruction(&store, &file_id).expect("lookup should succeed");
+        assert_eq!(loaded, Some(reconstruction));
+    }
+
+    #[test]
+    fn reconstruction_returns_none_for_missing_file_id() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([99; 32]));
+        let loaded =
+            ReconstructionStore::reconstruction(&store, &file_id).expect("lookup should succeed");
+        assert_eq!(loaded, None);
+    }
+
+    #[test]
+    fn delete_reconstruction_returns_true_then_false() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([3; 32]));
+        let reconstruction = FileReconstruction::new(vec![]);
+
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .expect("insert should succeed");
+        let deleted = ReconstructionStore::delete_reconstruction(&store, &file_id)
+            .expect("delete should succeed");
+        assert!(deleted);
+        let deleted_again = ReconstructionStore::delete_reconstruction(&store, &file_id)
+            .expect("second delete should succeed");
+        assert!(!deleted_again);
+    }
+
+    #[test]
+    fn list_reconstruction_file_ids_empty_initially() {
+        let store = make_store();
+        let ids =
+            ReconstructionStore::list_reconstruction_file_ids(&store).expect("list should succeed");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn list_reconstruction_file_ids_after_insert() {
+        let store = make_store();
+        let file_id = FileId::new(ShardlineHash::from_bytes([10; 32]));
+        let reconstruction = FileReconstruction::new(vec![]);
+
+        store
+            .insert_reconstruction(&file_id, &reconstruction)
+            .expect("insert should succeed");
+        let ids =
+            ReconstructionStore::list_reconstruction_file_ids(&store).expect("list should succeed");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], file_id);
+    }
+
+    #[test]
+    fn insert_object_and_contains_object_roundtrip() {
+        let store = make_store();
+        let object_id = StoredObjectId::new(ShardlineHash::from_bytes([5; 32]));
+
+        assert!(
+            !ReconstructionStore::contains_object(&store, &object_id)
+                .expect("check should succeed")
+        );
+        store
+            .insert_object(&object_id)
+            .expect("insert should succeed");
+        assert!(
+            ReconstructionStore::contains_object(&store, &object_id).expect("check should succeed")
+        );
+    }
+
+    #[test]
+    fn upsert_and_get_dedupe_shard_mapping_roundtrip() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([7; 32]);
+        let object_key = ObjectKey::parse("shards/aa/test.shard").unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, object_key);
+
+        store
+            .upsert_dedupe_shard_mapping(&mapping)
+            .expect("upsert should succeed");
+        let loaded =
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).expect("lookup should succeed");
+        assert_eq!(loaded, Some(mapping));
+    }
+
+    #[test]
+    fn dedupe_shard_mapping_returns_none_for_missing_hash() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([99; 32]);
+        let loaded =
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).expect("lookup should succeed");
+        assert_eq!(loaded, None);
+    }
+
+    #[test]
+    fn delete_dedupe_shard_mapping_returns_true() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([8; 32]);
+        let object_key = ObjectKey::parse("shards/bb/test.shard").unwrap();
+        let mapping = DedupeShardMapping::new(chunk_hash, object_key);
+
+        store
+            .upsert_dedupe_shard_mapping(&mapping)
+            .expect("upsert should succeed");
+        let deleted = DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash)
+            .expect("delete should succeed");
+        assert!(deleted);
+        let loaded =
+            DedupeStore::dedupe_shard_mapping(&store, &chunk_hash).expect("lookup should succeed");
+        assert_eq!(loaded, None);
+    }
+
+    #[test]
+    fn delete_dedupe_shard_mapping_returns_false_when_missing() {
+        let store = make_store();
+        let chunk_hash = ShardlineHash::from_bytes([99; 32]);
+        let deleted = DedupeStore::delete_dedupe_shard_mapping(&store, &chunk_hash)
+            .expect("delete should succeed");
+        assert!(!deleted);
+    }
+
+    // ── LifecycleStore: quarantine candidate ───────────────────────────────
+
+    #[test]
+    fn quarantine_candidate_returns_none_for_missing_key() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/aa/missing").unwrap();
+        let loaded =
+            LifecycleStore::quarantine_candidate(&store, &key).expect("lookup should succeed");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn quarantine_candidate_upsert_and_read_roundtrip() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/aa/test-candidate").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 100, 1000, 2000).unwrap();
+
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
+            .expect("upsert should succeed");
+        let loaded =
+            LifecycleStore::quarantine_candidate(&store, &key).expect("lookup should succeed");
+        assert_eq!(loaded, Some(candidate));
+    }
+
+    #[test]
+    fn quarantine_candidate_list_includes_upserted() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/bb/list-candidate").unwrap();
+        let candidate = QuarantineCandidate::new(key, 200, 2000, 3000).unwrap();
+
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
+            .expect("upsert should succeed");
+        let candidates =
+            LifecycleStore::list_quarantine_candidates(&store).expect("list should succeed");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].observed_length(), 200);
+    }
+
+    #[test]
+    fn quarantine_candidate_delete_returns_true_then_false() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/cc/del-candidate").unwrap();
+        let candidate = QuarantineCandidate::new(key.clone(), 300, 3000, 4000).unwrap();
+
+        LifecycleStore::upsert_quarantine_candidate(&store, &candidate)
+            .expect("upsert should succeed");
+        assert!(
+            LifecycleStore::delete_quarantine_candidate(&store, &key)
+                .expect("first delete should succeed")
+        );
+        assert!(
+            !LifecycleStore::delete_quarantine_candidate(&store, &key)
+                .expect("second delete should succeed")
+        );
+    }
+
+    // ── LifecycleStore: retention hold ─────────────────────────────────────
+
+    #[test]
+    fn retention_hold_returns_none_for_missing_key() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/aa/missing-hold").unwrap();
+        let loaded = LifecycleStore::retention_hold(&store, &key).expect("lookup should succeed");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn retention_hold_upsert_and_read_roundtrip() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/aa/test-hold").unwrap();
+        let hold = RetentionHold::new(key.clone(), "test reason".into(), 100, Some(200)).unwrap();
+
+        LifecycleStore::upsert_retention_hold(&store, &hold).expect("upsert should succeed");
+        let loaded = LifecycleStore::retention_hold(&store, &key).expect("lookup should succeed");
+        assert_eq!(loaded, Some(hold));
+    }
+
+    #[test]
+    fn retention_hold_list_includes_upserted() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/bb/list-hold").unwrap();
+        let hold = RetentionHold::new(key, "retain".into(), 300, None).unwrap();
+
+        LifecycleStore::upsert_retention_hold(&store, &hold).expect("upsert should succeed");
+        let holds = LifecycleStore::list_retention_holds(&store).expect("list should succeed");
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].reason(), "retain");
+    }
+
+    #[test]
+    fn retention_hold_delete_returns_true_then_false() {
+        let store = make_store();
+        let key = ObjectKey::parse("chunks/cc/del-hold").unwrap();
+        let hold = RetentionHold::new(key.clone(), "delete me".into(), 400, None).unwrap();
+
+        LifecycleStore::upsert_retention_hold(&store, &hold).expect("upsert should succeed");
+        assert!(
+            LifecycleStore::delete_retention_hold(&store, &key)
+                .expect("first delete should succeed")
+        );
+        assert!(
+            !LifecycleStore::delete_retention_hold(&store, &key)
+                .expect("second delete should succeed")
+        );
+    }
+
+    // ── LifecycleStore: webhook delivery ───────────────────────────────────
+
+    #[test]
+    fn webhook_delivery_record_returns_true_for_new() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-1".into(),
+            1000,
+        )
+        .unwrap();
+
+        let recorded = LifecycleStore::record_webhook_delivery(&store, &delivery)
+            .expect("record should succeed");
+        assert!(recorded, "first record should return true");
+    }
+
+    #[test]
+    fn webhook_delivery_record_returns_false_for_duplicate() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-dup".into(),
+            1000,
+        )
+        .unwrap();
+
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+        let repeated = LifecycleStore::record_webhook_delivery(&store, &delivery)
+            .expect("duplicate record should succeed");
+        assert!(!repeated, "duplicate record should return false");
+    }
+
+    #[test]
+    fn webhook_delivery_list_includes_recorded() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-list".into(),
+            2000,
+        )
+        .unwrap();
+
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+        let deliveries =
+            LifecycleStore::list_webhook_deliveries(&store).expect("list should succeed");
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].delivery_id(), "delivery-list");
+    }
+
+    #[test]
+    fn webhook_delivery_delete_returns_true_then_false() {
+        let store = make_store();
+        let delivery = WebhookDelivery::new(
+            RepositoryProvider::GitHub,
+            "owner".into(),
+            "repo".into(),
+            "delivery-del".into(),
+            3000,
+        )
+        .unwrap();
+
+        LifecycleStore::record_webhook_delivery(&store, &delivery).unwrap();
+        assert!(
+            LifecycleStore::delete_webhook_delivery(&store, &delivery)
+                .expect("delete should succeed")
+        );
+        assert!(
+            !LifecycleStore::delete_webhook_delivery(&store, &delivery)
+                .expect("second delete should succeed")
+        );
+    }
+
+    // ── LifecycleStore: provider repository state ──────────────────────────
+
+    #[test]
+    fn provider_repository_state_returns_none_for_missing() {
+        let store = make_store();
+        let loaded = LifecycleStore::provider_repository_state(
+            &store,
+            RepositoryProvider::GitHub,
+            "no-owner",
+            "no-repo",
+        )
+        .expect("lookup should succeed");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn provider_repository_state_upsert_and_read_roundtrip() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "assets".into(),
+            Some(100),
+            Some(200),
+            Some("refs/heads/main".into()),
+        );
+
+        LifecycleStore::upsert_provider_repository_state(&store, &state)
+            .expect("upsert should succeed");
+        let loaded = LifecycleStore::provider_repository_state(
+            &store,
+            RepositoryProvider::GitHub,
+            "team",
+            "assets",
+        )
+        .expect("lookup should succeed");
+        assert_eq!(loaded, Some(state));
+    }
+
+    #[test]
+    fn provider_repository_state_list_includes_upserted() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "other".into(),
+            Some(300),
+            None,
+            None,
+        );
+
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        let states = LifecycleStore::list_provider_repository_states(&store).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].repo(), "other");
+    }
+
+    #[test]
+    fn provider_repository_state_delete_returns_true_then_false() {
+        let store = make_store();
+        let state = ProviderRepositoryState::new(
+            RepositoryProvider::GitHub,
+            "team".into(),
+            "del-repo".into(),
+            None,
+            None,
+            None,
+        );
+
+        LifecycleStore::upsert_provider_repository_state(&store, &state).unwrap();
+        assert!(
+            LifecycleStore::delete_provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "del-repo",
+            )
+            .expect("delete should succeed")
+        );
+        assert!(
+            !LifecycleStore::delete_provider_repository_state(
+                &store,
+                RepositoryProvider::GitHub,
+                "team",
+                "del-repo",
+            )
+            .expect("second delete should succeed")
+        );
+    }
+
+    // ── LifecycleStore: visit methods ──────────────────────────────────────
+
+    #[test]
+    fn visit_quarantine_candidates_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut count = 0u32;
+        LifecycleStore::visit_quarantine_candidates(&store, |_| {
+            count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn visit_retention_holds_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut count = 0u32;
+        LifecycleStore::visit_retention_holds(&store, |_| {
+            count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn visit_webhook_deliveries_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut count = 0u32;
+        LifecycleStore::visit_webhook_deliveries(&store, |_| {
+            count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn visit_provider_repository_states_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut count = 0u32;
+        LifecycleStore::visit_provider_repository_states(&store, |_| {
+            count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn visit_dedupe_shard_mappings_empty_store_does_not_call_visitor() {
+        let store = make_store();
+        let mut count = 0u32;
+        DedupeStore::visit_dedupe_shard_mappings(&store, |_| {
+            count += 1;
+            Ok::<(), LocalIndexStoreError>(())
+        })
+        .unwrap();
+        assert_eq!(count, 0);
     }
 }

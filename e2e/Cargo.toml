@@ -47,11 +47,28 @@ name = "k8s_cluster_protocol_e2e"
 path = "k8s_cluster_protocol_e2e.rs"
 
 [[test]]
+name = "kind_deployment_smoke"
+path = "kind_deployment_smoke.rs"
+
+[[test]]
 name = "data_integrity"
 path = "data_integrity.rs"
 
+[[test]]
+name = "hub_api_e2e"
+path = "hub_api_e2e.rs"
+
+[[test]]
+name = "native_huggingface_cli_e2e"
+path = "native_huggingface_cli_e2e.rs"
+
+[[test]]
+name = "mixed_protocol_soak"
+path = "mixed_protocol_soak.rs"
+
 [dependencies]
-shardline-server = { path = "../crates/server" }
+shardline-server = { path = "../crates/server", features = ["test-utils"] }
+shardline-hub-api = { path = "../crates/hub_api" }
 shardline-server-core = { path = "../crates/server_core" }
 shardline-protocol = { path = "../crates/protocol" }
 shardline-index = { path = "../crates/index" }
@@ -75,6 +92,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = { version = "0.10", features = ["compress"] }
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
 tokio = { version = "1.48.0", features = ["full"] }
 tempfile = "3.15"
 tracing = "0.1"

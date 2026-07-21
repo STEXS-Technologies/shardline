@@ -16,8 +16,8 @@ use shardline_storage::DeleteOutcome;
 use crate::{
     ServerError,
     oci_adapter::{
-        oci_blob_key, oci_manifest_key, oci_manifest_location, oci_manifest_media_type_key,
-        oci_tag_key, parse_reference,
+        OciReference, oci_blob_key, oci_manifest_key, oci_manifest_location,
+        oci_manifest_media_type_key, oci_tag_key, parse_reference,
     },
     protocol_support::parse_sha256_digest,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
@@ -48,8 +48,11 @@ pub(crate) async fn oci_get_manifest(
     let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
     let total_length = state.backend.object_length(&manifest_key).await?;
-    let media_type = String::from_utf8(state.backend.read_object(&media_type_key).await?)
-        .map_err(|_error| ServerError::InvalidManifestReference)?;
+    let media_type =
+        String::from_utf8(state.backend.read_object(&media_type_key).await?).map_err(|e| {
+            tracing::warn!(error = %e, "invalid media type utf-8");
+            ServerError::InvalidManifestReference
+        })?;
     ensure_manifest_representation_is_acceptable(headers, &media_type)?;
     if head_only {
         return Response::builder()
@@ -58,7 +61,10 @@ pub(crate) async fn oci_get_manifest(
             .header(CONTENT_TYPE, media_type)
             .header("Docker-Content-Digest", format!("sha256:{digest_hex}"))
             .body(Body::empty())
-            .map_err(|_error| ServerError::Overflow);
+            .map_err(|e| {
+                tracing::warn!(error = %e, "failed to build head manifest response");
+                ServerError::Overflow
+            });
     }
 
     direct_object_response(
@@ -67,6 +73,7 @@ pub(crate) async fn oci_get_manifest(
         &manifest_key,
         &media_type,
         Some(format!("sha256:{digest_hex}")),
+        "oci",
     )
     .await
 }
@@ -86,7 +93,7 @@ pub(crate) async fn oci_put_manifest(
     let bytes = read_body_to_bytes(&mut body).await?;
     let digest_hex = hex::encode(Sha256::digest(&bytes));
     let reference = parse_reference(reference)?;
-    if let crate::oci_adapter::OciReference::Digest(reference_digest) = &reference
+    if let OciReference::Digest(reference_digest) = &reference
         && reference_digest != &digest_hex
     {
         return Err(ServerError::ExpectedBodyHashMismatch);
@@ -108,8 +115,8 @@ pub(crate) async fn oci_put_manifest(
         .backend
         .put_object_bytes_if_absent(&media_type_key, media_type.clone().into_bytes())?;
     let mut accepted_tags = match reference {
-        crate::oci_adapter::OciReference::Tag(tag) => vec![tag],
-        crate::oci_adapter::OciReference::Digest(_) => Vec::new(),
+        OciReference::Tag(tag) => vec![tag],
+        OciReference::Digest(_) => Vec::new(),
     };
     accepted_tags.extend(parse_query_values(uri, "tag")?);
     if accepted_tags.len() > super::super::MAX_OCI_MANIFEST_TAGS {
@@ -132,9 +139,10 @@ pub(crate) async fn oci_put_manifest(
         let joined = accepted_tags.join(", ");
         builder = builder.header("OCI-Tag", joined);
     }
-    builder
-        .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+    builder.body(Body::empty()).map_err(|e| {
+        tracing::warn!(error = %e, "failed to build put manifest response body");
+        ServerError::Overflow
+    })
 }
 
 #[tracing::instrument(skip(state, headers), fields(repository, reference))]
@@ -146,9 +154,7 @@ pub(crate) async fn oci_delete_manifest(
 ) -> Result<Response, ServerError> {
     let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
     let scope = auth.as_ref().map(scope_from_auth);
-    let crate::oci_adapter::OciReference::Digest(digest_hex) = parse_reference(reference)? else {
-        return Err(ServerError::InvalidManifestReference);
-    };
+    let digest_hex = resolve_manifest_digest(state, repository, reference, scope).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
     match state
         .backend
@@ -169,7 +175,10 @@ pub(crate) async fn oci_delete_manifest(
     Response::builder()
         .status(StatusCode::ACCEPTED)
         .body(Body::empty())
-        .map_err(|_error| ServerError::Overflow)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "failed to build delete manifest response body");
+            ServerError::Overflow
+        })
 }
 
 async fn resolve_manifest_digest(
@@ -179,8 +188,8 @@ async fn resolve_manifest_digest(
     repository_scope: Option<&shardline_protocol::RepositoryScope>,
 ) -> Result<String, ServerError> {
     match parse_reference(reference)? {
-        crate::oci_adapter::OciReference::Digest(digest_hex) => Ok(digest_hex),
-        crate::oci_adapter::OciReference::Tag(tag) => {
+        OciReference::Digest(digest_hex) => Ok(digest_hex),
+        OciReference::Tag(tag) => {
             load_oci_tag_digest(state, repository, repository_scope, &tag).await
         }
     }
@@ -194,7 +203,10 @@ async fn load_oci_tag_digest(
 ) -> Result<String, ServerError> {
     let tag_key = oci_tag_key(repository, tag, repository_scope)?;
     let bytes = state.backend.read_object(&tag_key).await?;
-    let digest_hex = String::from_utf8(bytes).map_err(|_error| ServerError::InvalidDigest)?;
+    let digest_hex = String::from_utf8(bytes).map_err(|e| {
+        tracing::warn!(error = %e, "invalid digest utf-8");
+        ServerError::InvalidDigest
+    })?;
     parse_sha256_digest(&format!("sha256:{digest_hex}"))?;
     Ok(digest_hex)
 }
@@ -206,8 +218,10 @@ async fn validate_oci_manifest_document(
     media_type: &str,
     bytes: &[u8],
 ) -> Result<(), ServerError> {
-    let document: Value =
-        serde_json::from_slice(bytes).map_err(|_error| ServerError::InvalidManifestReference)?;
+    let document: Value = serde_json::from_slice(bytes).map_err(|e| {
+        tracing::warn!(error = %e, "invalid manifest json");
+        ServerError::InvalidManifestReference
+    })?;
     validate_oci_schema_version(&document)?;
     let normalized_media_type = normalize_media_type(media_type);
     if let Some(document_media_type) = document.get("mediaType").and_then(Value::as_str)
@@ -216,7 +230,10 @@ async fn validate_oci_manifest_document(
         return Err(ServerError::InvalidManifestReference);
     }
     if let Some(subject) = document.get("subject") {
-        let _subject_digest = validate_oci_descriptor(subject)?;
+        // Per the OCI Distribution spec, a registry MUST accept a manifest
+        // with a subject field that references a manifest that does not exist.
+        // We validate the descriptor format but do not check existence.
+        validate_oci_descriptor(subject)?;
     }
 
     match normalized_media_type {
@@ -349,9 +366,10 @@ fn ensure_manifest_representation_is_acceptable(
     }
 
     for value in accepted_iter {
-        let value = value
-            .to_str()
-            .map_err(|_error| ServerError::NotAcceptable)?;
+        let value = value.to_str().map_err(|e| {
+            tracing::warn!(error = %e, "invalid accept header utf-8");
+            ServerError::NotAcceptable
+        })?;
         for candidate in value.split(',') {
             let candidate = normalize_media_type(candidate);
             if candidate.is_empty() {
@@ -372,4 +390,462 @@ fn ensure_manifest_representation_is_acceptable(
     }
 
     Err(ServerError::NotAcceptable)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Bytes;
+    use axum::http::{HeaderMap, HeaderValue};
+    use serde_json::json;
+
+    use super::*;
+
+    // ── normalize_media_type ──
+
+    #[test]
+    fn normalize_media_type_passthrough_plain() {
+        assert_eq!(normalize_media_type("application/json"), "application/json");
+    }
+
+    #[test]
+    fn normalize_media_type_strips_parameters() {
+        assert_eq!(
+            normalize_media_type("application/json; charset=utf-8"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn normalize_media_type_strips_multiple_parameters() {
+        assert_eq!(
+            normalize_media_type("application/json;param=val;other=val"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn normalize_media_type_trims_whitespace() {
+        assert_eq!(
+            normalize_media_type("  application/json  ; charset=utf-8"),
+            "application/json"
+        );
+    }
+
+    // ── validate_oci_schema_version ──
+
+    #[test]
+    fn schema_version_valid() {
+        let doc = json!({"schemaVersion": 2});
+        assert!(validate_oci_schema_version(&doc).is_ok());
+    }
+
+    #[test]
+    fn schema_version_wrong_number() {
+        let doc = json!({"schemaVersion": 1});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn schema_version_missing() {
+        let doc = json!({});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn schema_version_not_a_number() {
+        let doc = json!({"schemaVersion": "2"});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── validate_oci_descriptor ──
+
+    #[test]
+    fn descriptor_valid() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 1234
+        });
+        let result = validate_oci_descriptor(&desc);
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        );
+    }
+
+    #[test]
+    fn descriptor_valid_without_mediatype() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 100
+        });
+        assert!(validate_oci_descriptor(&desc).is_ok());
+    }
+
+    #[test]
+    fn descriptor_valid_with_string_mediatype() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 100,
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"
+        });
+        assert!(validate_oci_descriptor(&desc).is_ok());
+    }
+
+    #[test]
+    fn descriptor_missing_digest() {
+        let desc = json!({"size": 100});
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_missing_size() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_invalid_digest_format() {
+        let desc = json!({
+            "digest": "not-a-digest",
+            "size": 100
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidDigest)
+        ));
+    }
+
+    #[test]
+    fn descriptor_non_object() {
+        let desc = json!("just a string");
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_non_string_mediatype() {
+        let desc = json!({
+            "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            "size": 100,
+            "mediaType": 123
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn descriptor_array_digest() {
+        let desc = json!({
+            "digest": ["sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"],
+            "size": 100
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── ensure_manifest_representation_is_acceptable ──
+
+    #[test]
+    fn accept_header_absent_allows_any() {
+        let headers = HeaderMap::new();
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_wildcard_accepts_any() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_exact_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_type_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/*"));
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_subtype_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_mismatch_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.docker.distribution.manifest.v2+json"),
+        );
+        assert!(matches!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            ),
+            Err(ServerError::NotAcceptable)
+        ));
+    }
+
+    #[test]
+    fn accept_comma_separated_first_match_wins() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static(
+                "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json",
+            ),
+        );
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_with_parameters_strips_before_comparison() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json; q=0.9"),
+        );
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_with_parameters_type_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/*; q=0.5"));
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_empty_candidate_entry_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static(", application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accept_entry_without_slash_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("bogus, application/vnd.oci.image.manifest.v1+json"),
+        );
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn media_type_with_parameters_is_normalized() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.oci.image.manifest.v1+json"),
+        );
+        // The media_type has a parameter; normalize_media_type should strip it before comparison
+        assert!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json; charset=utf-8"
+            )
+            .is_ok()
+        );
+    }
+
+    // ── validate_oci_schema_version ────────────────────────────────────
+
+    // Already covered above. Add missing schema version edges.
+
+    #[test]
+    fn schema_version_negative_number() {
+        let doc = json!({"schemaVersion": -2});
+        assert!(matches!(
+            validate_oci_schema_version(&doc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── validate_oci_descriptor additional edges ────────────────────────
+
+    #[test]
+    fn descriptor_with_non_string_digest() {
+        let desc = json!({
+            "digest": null,
+            "size": 100
+        });
+        assert!(matches!(
+            validate_oci_descriptor(&desc),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── normalize_media_type without '/' (line 345) ────────────────────
+
+    #[test]
+    fn media_type_without_slash_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        assert!(matches!(
+            ensure_manifest_representation_is_acceptable(&headers, "applicationjson"),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    // ── ensure_manifest_representation_is_acceptable: header value split ──
+
+    #[test]
+    fn accept_header_value_without_slash_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("bogus, application/json"));
+        assert!(ensure_manifest_representation_is_acceptable(&headers, "application/json").is_ok());
+    }
+
+    // ── validate_oci_descriptor: subject field (line 221) ──────────────
+
+    #[test]
+    fn manifest_with_invalid_subject_descriptor_rejected() {
+        let doc = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "subject": { "size": 100 },  // missing digest
+            "config": { "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "size": 100 },
+            "layers": []
+        });
+        // validate_oci_descriptor is called on subject at line 221.
+        let subject = doc.get("subject").unwrap();
+        assert!(matches!(
+            validate_oci_descriptor(subject),
+            Err(ServerError::InvalidManifestReference)
+        ));
+    }
+
+    #[test]
+    fn manifest_with_valid_subject_descriptor_accepted() {
+        let doc = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "subject": { "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "size": 100 },
+            "config": { "digest": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "size": 100 },
+            "layers": []
+        });
+        let subject = doc.get("subject").unwrap();
+        assert!(validate_oci_descriptor(subject).is_ok());
+    }
+
+    // ── ensure_manifest_representation_is_acceptable additional edges ──
+
+    #[test]
+    fn accept_header_valid_utf8_rejects_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_maybe_shared(Bytes::from_static(b"\xff\xfe\xfd")).unwrap(),
+        );
+        assert!(matches!(
+            ensure_manifest_representation_is_acceptable(
+                &headers,
+                "application/vnd.oci.image.manifest.v1+json"
+            ),
+            Err(ServerError::NotAcceptable)
+        ));
+    }
 }

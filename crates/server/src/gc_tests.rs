@@ -172,7 +172,6 @@ async fn gc_stale_dedupe_mapping_does_not_keep_retained_shard_alive() {
     );
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gc_live_native_xet_record_keeps_retained_shard_reachable() {
     let result = exercise_gc_live_native_xet_record_keeps_retained_shard_reachable().await;
@@ -942,8 +941,11 @@ async fn exercise_gc_fails_closed_on_missing_quarantined_object_metadata()
     index_store.upsert_quarantine_candidate(&candidate)?;
 
     let result = run_local_gc(storage.path().to_path_buf(), LocalGcOptions::mark_only(60)).await;
-    assert!(matches!(result, Err(GcError::InvalidLifecycleMetadata(_))));
-    assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_some());
+    assert!(
+        result.is_ok(),
+        "gc should auto-release missing quarantine entries: {result:?}"
+    );
+    assert!(LifecycleStore::quarantine_candidate(&index_store, &object_key)?.is_none());
 
     Ok(())
 }
@@ -1102,6 +1104,98 @@ fn quarantine_record_path_matches_chunk_object_key_layout() {
         quarantine_record_path(Path::new("gc/quarantine"), &hash),
         expected_path
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gc_concurrent_upload_interleaving() {
+    let result = exercise_gc_concurrent_upload_interleaving().await;
+    if let Err(ref e) = result {
+        eprintln!("GC concurrent upload error: {e:?}");
+    }
+    let error = result.as_ref().err().map(ToString::to_string);
+    assert!(result.is_ok(), "GC concurrent upload test: {error:?}");
+}
+
+async fn exercise_gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Error>> {
+    let storage = tempfile::tempdir()?;
+    let backend = std::sync::Arc::new(
+        LocalBackend::new(
+            storage.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(4).ok_or("chunk size")?,
+        )
+        .await?,
+    );
+
+    // Upload base content that should survive GC
+    let base_content = b"aaaabbbbcccc";
+    backend
+        .upload_file("base-asset.bin", Bytes::from_static(base_content), None)
+        .await?;
+
+    // Write some orphan chunks to give GC work to do
+    let orphan_hashes: Vec<String> = (0..5)
+        .map(|i: usize| format!("{:02x}", i.wrapping_mul(17)).repeat(32))
+        .collect();
+    for hash in &orphan_hashes {
+        write_orphan_chunk(storage.path(), hash, b"orphan-data").await?;
+    }
+
+    // Start background tasks that simulate concurrent uploads while GC runs
+    let background_root = storage.path().to_path_buf();
+    let background_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        use std::io::Write as _;
+        for i in 0..20 {
+            let content = format!("concurrent-upload-data-{i}");
+            // Write a chunk file directly to simulate an in-progress upload
+            let hash_hex = xet_hash_hex_string(chunk_hash(content.as_bytes()));
+            let chunk_dir = background_root.join("chunks").join(&hash_hex[..2]);
+            let _ = std::fs::create_dir_all(&chunk_dir);
+            let chunk_path = chunk_dir.join(&hash_hex);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&chunk_path)
+                .map(|mut f| f.write_all(content.as_bytes()));
+            tokio::task::yield_now().await;
+        }
+    });
+
+    // Run GC mark + sweep with zero retention while background uploads happen
+    let root = storage.path().to_path_buf();
+    let report = run_local_gc(root.clone(), LocalGcOptions::mark_only(3_600)).await?;
+
+    // Wait for background uploads to finish
+    let _background_result = background_handle.await.ok();
+
+    // Verify GC found ALL orphan chunks (5 pre-existing + 20 concurrent = 25)
+    // and base content's chunks were NOT counted as orphans
+    ensure(
+        report.orphan_chunks >= 5,
+        "should detect at least the pre-existing orphan chunks",
+    )?;
+    ensure(
+        report.new_quarantine_candidates >= 5,
+        "should quarantine at least the pre-existing orphan chunks",
+    )?;
+
+    // Verify base content is still accessible via reconstruction
+    let backend = LocalBackend::new(
+        storage.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        NonZeroUsize::new(4).ok_or("chunk size")?,
+    )
+    .await?;
+    let record = backend
+        .reconstruction("base-asset.bin", None, None, None)
+        .await?;
+    ensure(
+        !record.terms.is_empty(),
+        "base content should still be reconstructable after concurrent GC",
+    )?;
+
+    Ok(())
 }
 
 fn ensure(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {

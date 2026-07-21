@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shardline-config
+data:
+  SHARDLINE_PUBLIC_BASE_URL: http://shardline-api:8080
+  SHARDLINE_S3_ENDPOINT: http://minio:9000
+  SHARDLINE_S3_ALLOW_HTTP: "true"
+  SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST: "false"

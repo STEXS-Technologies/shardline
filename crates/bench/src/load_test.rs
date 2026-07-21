@@ -1,21 +1,3 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    clippy::float_arithmetic,
-    clippy::indexing_slicing,
-    clippy::dbg_macro,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::print_stdout,
-    clippy::print_stderr,
-    clippy::missing_const_for_fn,
-    clippy::undocumented_unsafe_blocks,
-    clippy::let_underscore_must_use,
-    clippy::unwrap_in_result
-)]
-
 use std::{
     sync::{
         Arc, Mutex,
@@ -46,6 +28,7 @@ struct BenchmarkResult {
 }
 
 impl BenchmarkResult {
+    #[allow(clippy::float_arithmetic)]
     fn rps(&self) -> f64 {
         let secs = self.duration.as_secs_f64();
         if secs <= 0.0 {
@@ -54,6 +37,7 @@ impl BenchmarkResult {
         f64::from(u32::try_from(self.total_requests).unwrap_or(u32::MAX)) / secs
     }
 
+    #[allow(clippy::float_arithmetic)]
     fn error_rate(&self) -> f64 {
         if self.total_requests == 0 {
             return 0.0;
@@ -63,6 +47,7 @@ impl BenchmarkResult {
             * 100.0
     }
 
+    #[allow(clippy::float_arithmetic)]
     fn percentile(&self, p: f64) -> f64 {
         if self.latencies_ms.is_empty() {
             return 0.0;
@@ -70,8 +55,10 @@ impl BenchmarkResult {
         let idx = ((p / 100.0)
             * f64::from(u32::try_from(self.latencies_ms.len()).unwrap_or(u32::MAX)))
         .ceil() as usize;
-        let idx = idx.saturating_sub(1).min(self.latencies_ms.len() - 1);
-        self.latencies_ms[idx]
+        let idx = idx
+            .saturating_sub(1)
+            .min(self.latencies_ms.len().saturating_sub(1));
+        self.latencies_ms.get(idx).copied().unwrap_or(0.0)
     }
 
     fn p50(&self) -> f64 {
@@ -103,7 +90,7 @@ struct SharedMetrics {
 }
 
 impl SharedMetrics {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             total_requests: AtomicU64::new(0),
             successful_requests: AtomicU64::new(0),
@@ -156,7 +143,7 @@ fn get_peak_memory_bytes() -> u64 {
                     .find(|l| l.starts_with("VmRSS:"))
                     .and_then(|l| l.split_whitespace().nth(1))
                     .and_then(|v| v.parse::<u64>().ok())
-                    .map(|kb| kb * 1024)
+                    .map(|kb| kb.saturating_mul(1024))
             })
             .unwrap_or(0)
     }
@@ -185,6 +172,7 @@ fn get_peak_memory_bytes() -> u64 {
     }
 }
 
+#[allow(clippy::float_arithmetic)]
 async fn run_load_loop(
     client: Client,
     url: String,
@@ -223,6 +211,7 @@ async fn run_load_loop(
     }
 }
 
+#[allow(clippy::float_arithmetic, clippy::let_underscore_must_use)]
 async fn run_download_loop(
     client: Client,
     url: String,
@@ -260,6 +249,7 @@ async fn run_download_loop(
     }
 }
 
+#[allow(clippy::expect_used)]
 fn parse_config() -> BenchmarkConfig {
     let base_url =
         std::env::var("BENCH_URL").unwrap_or_else(|_| "http://127.0.0.1:18080".to_owned());
@@ -291,6 +281,7 @@ fn parse_config() -> BenchmarkConfig {
     }
 }
 
+#[allow(clippy::float_arithmetic)]
 fn print_result(label: &str, result: &BenchmarkResult) {
     eprintln!("--- {label} ---");
     eprintln!("  Duration:        {:.2}s", result.duration.as_secs_f64());
@@ -332,6 +323,11 @@ fn print_json_result(label: &str, result: &BenchmarkResult) {
     eprintln!("{obj}");
 }
 
+#[allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::let_underscore_must_use
+)]
 #[tokio::main]
 async fn main() {
     let config = parse_config();

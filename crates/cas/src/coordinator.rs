@@ -53,11 +53,40 @@ mod tests {
 
     #[test]
     fn coordinator_keeps_adapters_and_limits() {
-        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
+        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
         let coordinator = CasCoordinator::new(IndexProbe, ObjectStoreProbe, limits);
 
         assert_eq!(coordinator.index(), &IndexProbe);
         assert_eq!(coordinator.object_store(), &ObjectStoreProbe);
         assert_eq!(coordinator.limits(), limits);
+    }
+
+    #[test]
+    fn coordinator_debug_format() {
+        let limits = CasLimits::new(NonZeroU64::new(1).unwrap(), NonZeroU64::new(2).unwrap());
+        let coordinator = CasCoordinator::new(IndexProbe, ObjectStoreProbe, limits);
+        let debug = format!("{coordinator:?}");
+        assert!(debug.contains("CasCoordinator"));
+        assert!(debug.contains("IndexProbe"));
+        assert!(debug.contains("ObjectStoreProbe"));
+        assert!(debug.contains("CasLimits"));
+    }
+
+    #[test]
+    fn coordinator_with_different_type_combinations() {
+        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
+        let coordinator = CasCoordinator::new(42_usize, String::from("store"), limits);
+        assert_eq!(coordinator.index(), &42_usize);
+        assert_eq!(coordinator.object_store(), &"store");
+        assert_eq!(coordinator.limits(), limits);
+    }
+
+    #[test]
+    fn coordinator_limits_are_independent_of_adapters() {
+        let limits_a = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
+        let limits_b = CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX);
+        let coord_a = CasCoordinator::new((), (), limits_a);
+        let coord_b = CasCoordinator::new((), (), limits_b);
+        assert_ne!(coord_a.limits(), coord_b.limits());
     }
 }

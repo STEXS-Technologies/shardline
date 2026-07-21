@@ -1,15 +1,4 @@
-#![allow(clippy::all)]
 #![deny(unsafe_code)]
-#![cfg_attr(
-    test,
-    allow(
-        unused_imports,
-        unused_variables,
-        unused_mut,
-        non_snake_case,
-        dead_code,
-    )
-)]
 
 pub mod error;
 pub mod merklehash;

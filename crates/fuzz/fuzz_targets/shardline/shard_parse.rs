@@ -73,11 +73,11 @@ fn summarize_shard(data: &[u8]) -> Result<ShardSummary, String> {
     let shard = MDBShardInfo::load_from_reader(&mut reader).map_err(|error| format!("{error}"))?;
     let mut file_reader = Cursor::new(data);
     let files = shard
-        .read_all_file_info_sections(&mut file_reader)
+        .read_all_file_info_sections(&mut file_reader, 3)
         .map_err(|error| format!("{error}"))?;
     let mut xorb_reader = Cursor::new(data);
     let xorbs = shard
-        .read_all_xorb_blocks_full(&mut xorb_reader)
+        .read_all_xorb_blocks_full(&mut xorb_reader, 3)
         .map_err(|error| format!("{error}"))?;
 
     for file in &files {
@@ -89,7 +89,7 @@ fn summarize_shard(data: &[u8]) -> Result<ShardSummary, String> {
         }
         let file_size = file.file_size();
         let summed = file.segments.iter().try_fold(0_u64, |total, segment| {
-            total.checked_add(u64::from(segment.unpacked_segment_bytes))
+            total.checked_add(segment.unpacked_segment_bytes)
         });
         if summed != Some(file_size) {
             return Err("file segment lengths disagreed with file size".to_owned());

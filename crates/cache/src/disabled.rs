@@ -39,3 +39,111 @@ impl AsyncReconstructionCache for DisabledReconstructionCache {
         Box::pin(async { Ok(false) })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{AsyncReconstructionCache, ReconstructionCacheKey};
+
+    use super::*;
+
+    #[test]
+    fn new_constructs_without_panic() {
+        let _cache = DisabledReconstructionCache::new();
+    }
+
+    #[test]
+    fn default_constructs_without_panic() {
+        let _cache = DisabledReconstructionCache;
+    }
+
+    #[tokio::test]
+    async fn ready_returns_ok() {
+        let cache = DisabledReconstructionCache::new();
+        let result = cache.ready().await;
+        assert!(result.is_ok());
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn get_returns_none() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::latest("test", None);
+        let result = cache.get(&key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn put_returns_ok() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::latest("test", None);
+        let result = cache.put(&key, b"payload").await;
+        assert!(result.is_ok());
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn delete_returns_false() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::latest("test", None);
+        let result = cache.delete(&key).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn new_is_const_fn() {
+        const _CACHE: DisabledReconstructionCache = DisabledReconstructionCache::new();
+    }
+
+    #[test]
+    fn default_trait_produces_same_as_new() {
+        let a = DisabledReconstructionCache::new();
+        // Both are unit structs — both impl AsyncReconstructionCache
+        let _: &dyn crate::AsyncReconstructionCache = &a;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn get_with_scope_returns_none() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let cache = DisabledReconstructionCache::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main")).unwrap();
+        let key = ReconstructionCacheKey::latest("scoped-file", Some(&scope));
+        let result = cache.get(&key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn get_with_version_key_returns_none() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::version("file.bin", "hash123", None);
+        let result = cache.get(&key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn put_with_empty_payload_returns_ok() {
+        let cache = DisabledReconstructionCache::new();
+        let key = ReconstructionCacheKey::latest("empty", None);
+        let result = cache.put(&key, b"").await;
+        assert!(result.is_ok());
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn delete_with_scoped_key_returns_false() {
+        use shardline_protocol::{RepositoryProvider, RepositoryScope};
+        let cache = DisabledReconstructionCache::new();
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "group", "proj", None).unwrap();
+        let key = ReconstructionCacheKey::latest("scoped", Some(&scope));
+        let result = cache.delete(&key).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+}

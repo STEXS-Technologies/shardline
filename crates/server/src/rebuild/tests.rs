@@ -1,4 +1,4 @@
-use std::{error::Error, num::NonZeroUsize, time::Duration};
+use std::{error::Error, num::NonZeroUsize, path::PathBuf, time::Duration};
 
 use axum::body::Bytes;
 use rusqlite::{Connection, params};
@@ -574,7 +574,6 @@ async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
     assert!(matches!(latest, Err(ServerError::NotFound)));
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects() {
     let storage = tempfile::tempdir();
@@ -633,7 +632,6 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     assert!(report.is_clean());
 }
 
-#[ignore = "pre-existing failure — xet core shim compatibility"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_corrupt() {
     let storage = tempfile::tempdir();
@@ -704,4 +702,40 @@ async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_co
             .iter()
             .any(|issue| { issue.kind == LocalIndexRebuildIssueKind::InvalidRetainedShard })
     );
+}
+
+// ── Top-level run_index_rebuild error propagation ───────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_index_rebuild_succeeds_with_valid_local_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = crate::config::ServerConfig::new(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(4096).unwrap_or(NonZeroUsize::MIN),
+    );
+    let result = super::run_index_rebuild(config).await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_local_index_rebuild_succeeds_on_empty_directory_with_chunks_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    tokio::fs::create_dir_all(tmp.path().join("chunks"))
+        .await
+        .unwrap();
+    let result = super::run_local_index_rebuild(tmp.path().to_path_buf()).await;
+    assert!(result.is_ok());
+    let report = result.unwrap();
+    assert!(report.is_clean());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_local_index_rebuild_fails_on_nonexistent_directory() {
+    let result = super::run_local_index_rebuild(PathBuf::from(
+        "/nonexistent-shardline-path-for-testing-xyz",
+    ))
+    .await;
+    assert!(result.is_err());
 }

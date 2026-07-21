@@ -3,16 +3,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// End-exclusive chunk index range within one xorb.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconstructionChunkRange {
     /// First chunk index included by this range.
-    pub start: u32,
+    pub start: u64,
     /// End-exclusive chunk index.
-    pub end: u32,
+    pub end: u64,
 }
 
 /// Inclusive byte range for a ranged fetch URL.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconstructionUrlRange {
     /// First byte offset.
     pub start: u64,
@@ -32,7 +32,7 @@ pub struct ReconstructionTerm {
 }
 
 /// Fetch information for downloading one xorb range.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconstructionFetchInfo {
     /// Chunk range provided by this fetch URL.
     pub range: ReconstructionChunkRange,

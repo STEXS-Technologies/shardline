@@ -72,6 +72,18 @@ impl FileReconstruction {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
     use shardline_protocol::{ChunkRange, ShardlineHash};
 
     use super::{FileReconstruction, ReconstructionTerm};
@@ -114,5 +126,42 @@ mod tests {
         assert_eq!(term.xorb_id(), xorb_id);
         assert_eq!(term.chunk_range(), range);
         assert_eq!(term.unpacked_length(), 512);
+    }
+
+    #[test]
+    fn reconstruction_term_accessors() {
+        let hash = ShardlineHash::from_bytes([9; 32]);
+        let xorb_id = XorbId::new(hash);
+        let range = ChunkRange::new(0, 10).unwrap();
+        let term = ReconstructionTerm::new(xorb_id, range, 1024);
+
+        assert_eq!(term.object_id(), StoredObjectId::new(hash));
+        assert_eq!(term.xorb_id(), xorb_id);
+        assert_eq!(term.xorb_id(), term.object_id());
+        assert_eq!(term.chunk_range(), range);
+        assert_eq!(term.chunk_range().start(), 0);
+        assert_eq!(term.chunk_range().end_exclusive(), 10);
+        assert_eq!(term.unpacked_length(), 1024);
+    }
+
+    #[test]
+    fn file_reconstruction_new_roundtrips() {
+        let hash = ShardlineHash::from_bytes([10; 32]);
+        let range = ChunkRange::new(3, 7).unwrap();
+        let term = ReconstructionTerm::new(XorbId::new(hash), range, 256);
+        let terms = vec![term];
+        let reconstruction = FileReconstruction::new(terms);
+
+        assert_eq!(reconstruction.terms().len(), 1);
+        assert_eq!(reconstruction.terms()[0], term);
+    }
+
+    #[test]
+    fn reconstruction_term_debug_format() {
+        let hash = ShardlineHash::from_bytes([0; 32]);
+        let range = ChunkRange::new(1, 2).unwrap();
+        let term = ReconstructionTerm::new(XorbId::new(hash), range, 0);
+        let debug = format!("{term:?}");
+        assert!(debug.contains("ReconstructionTerm"));
     }
 }

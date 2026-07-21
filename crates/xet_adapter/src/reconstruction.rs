@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use shardline_index::FileRecord;
 use shardline_protocol::ByteRange;
@@ -51,6 +51,7 @@ pub fn build_reconstruction_response(
     let mut first_term = true;
     let mut terms = Vec::with_capacity(record.chunks.len());
     let mut fetch_info = BTreeMap::new();
+    let mut dedup: HashSet<ReconstructionFetchInfo> = HashSet::new();
     for chunk in &record.chunks {
         let Some(chunk_end_inclusive) = chunk
             .offset
@@ -97,7 +98,8 @@ pub fn build_reconstruction_response(
         let fetch_entries = fetch_info
             .entry(chunk.hash.clone())
             .or_insert_with(Vec::new);
-        if !fetch_entries.iter().any(|entry| entry == &fetch_entry) {
+        // Use a global dedup set to avoid O(n²) scans per hash group
+        if dedup.insert(fetch_entry.clone()) {
             fetch_entries.push(fetch_entry);
         }
     }
@@ -415,6 +417,226 @@ mod tests {
                     entry.bytes.end
                 )),
             Some((0, 1, 0, 3))
+        );
+    }
+
+    #[test]
+    fn zero_byte_record_without_range_returns_empty_response() {
+        let record = FileRecord {
+            file_id: "empty.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 0,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: Vec::new(),
+        };
+
+        let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
+
+        assert!(response.is_ok());
+        let Ok(response) = response else {
+            return;
+        };
+        assert!(response.terms.is_empty());
+        assert!(response.fetch_info.is_empty());
+        assert_eq!(response.offset_into_first_range, 0);
+    }
+
+    #[test]
+    fn response_with_metrics_delegates_to_build_reconstruction_response() {
+        let record = FileRecord {
+            file_id: "metrics-test.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+
+        let response = super::build_reconstruction_response_with_metrics(
+            "http://127.0.0.1:8080",
+            &record,
+            None,
+        );
+
+        assert!(response.is_ok());
+        let Ok(response) = response else {
+            return;
+        };
+        assert_eq!(response.terms.len(), 1);
+    }
+
+    #[test]
+    fn response_rejects_invalid_reconstruction_plan() {
+        let record = FileRecord {
+            file_id: "bad.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 4,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 1, // inverted range (start > end by default since range_end defaults to 1)
+                range_end: 0,
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+
+        let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
+
+        assert!(matches!(
+            response,
+            Err(XetAdapterError::FileRecordInvariant(_))
+        ));
+    }
+
+    #[test]
+    fn response_deduplicates_fetch_entries_for_same_hash() {
+        let record = FileRecord {
+            file_id: "dedup.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 8,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: vec![
+                FileChunkRecord {
+                    hash: "a".repeat(64),
+                    offset: 0,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 4,
+                },
+                // Same hash, overlapping range => should deduplicate
+                FileChunkRecord {
+                    hash: "a".repeat(64),
+                    offset: 4,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 4,
+                },
+            ],
+        };
+
+        let response = build_reconstruction_response("http://127.0.0.1:8080", &record, None);
+
+        assert!(response.is_ok());
+        let Ok(response) = response else {
+            return;
+        };
+        // Both chunks reference the same hash and same range -> one fetch entry
+        assert_eq!(
+            response.fetch_info.get(&"a".repeat(64)).map(Vec::len),
+            Some(1),
+            "duplicate fetch entries should be deduplicated"
+        );
+    }
+
+    #[test]
+    fn response_with_metrics_propagates_validation_error() {
+        let record = FileRecord {
+            file_id: "bad-metrics.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 4,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: "a".repeat(64),
+                offset: 0,
+                length: 4,
+                range_start: 1,
+                range_end: 0, // inverted => invariant error
+                packed_start: 0,
+                packed_end: 4,
+            }],
+        };
+
+        let response = super::build_reconstruction_response_with_metrics(
+            "http://127.0.0.1:8080",
+            &record,
+            None,
+        );
+
+        assert!(matches!(
+            response,
+            Err(XetAdapterError::FileRecordInvariant(_))
+        ));
+    }
+
+    #[test]
+    fn response_skips_chunks_outside_requested_range() {
+        // File with chunks at offsets 0-3 and 12-15, but range 4-11 covers
+        // an empty space between them (the middle chunk is missing).
+        // Actually, the range must be contiguous in FileRecord validation.
+        // Instead, test a range that covers only some chunks.
+        let record = FileRecord {
+            file_id: "partial.bin".to_owned(),
+            content_hash: "deadbeef".repeat(8),
+            total_bytes: 12,
+            chunk_size: 4,
+            repository_scope: None,
+            chunks: vec![
+                FileChunkRecord {
+                    hash: "a".repeat(64),
+                    offset: 0,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 0,
+                    packed_end: 4,
+                },
+                FileChunkRecord {
+                    hash: "b".repeat(64),
+                    offset: 4,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 4,
+                    packed_end: 8,
+                },
+                FileChunkRecord {
+                    hash: "c".repeat(64),
+                    offset: 8,
+                    length: 4,
+                    range_start: 0,
+                    range_end: 1,
+                    packed_start: 8,
+                    packed_end: 12,
+                },
+            ],
+        };
+        // Range covering only the middle chunk (byte 4-7).
+        let range = ByteRange::new(4, 7);
+        assert!(range.is_ok());
+        let Ok(range) = range else {
+            return;
+        };
+
+        let response = build_reconstruction_response("http://127.0.0.1:8080", &record, Some(range));
+
+        assert!(response.is_ok());
+        let Ok(response) = response else {
+            return;
+        };
+        assert_eq!(response.terms.len(), 1);
+        assert_eq!(response.offset_into_first_range, 0);
+        assert_eq!(
+            response.terms.first().map(|t| t.hash.as_str()),
+            Some("b".repeat(64).as_str())
         );
     }
 

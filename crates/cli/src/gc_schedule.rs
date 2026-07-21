@@ -18,7 +18,7 @@ use std::{
 use thiserror::Error;
 
 #[cfg(any(target_os = "linux", test))]
-use shardline_storage::local_path::resolve_platform_symlinks;
+use shardline_storage::resolve_platform_symlinks;
 
 #[cfg(not(target_os = "linux"))]
 use crate::local_output::remove_output_file_if_present;
@@ -78,6 +78,8 @@ pub struct GcScheduleInstallOptions {
     pub user: String,
     /// Service group.
     pub group: String,
+    /// When true, print generated unit files to stdout instead of writing to disk.
+    pub dry_run: bool,
 }
 
 impl Default for GcScheduleInstallOptions {
@@ -92,6 +94,7 @@ impl Default for GcScheduleInstallOptions {
             working_directory: PathBuf::from(DEFAULT_WORKING_DIRECTORY),
             user: DEFAULT_SERVICE_USER.to_owned(),
             group: DEFAULT_SERVICE_GROUP.to_owned(),
+            dry_run: false,
         }
     }
 }
@@ -267,12 +270,6 @@ pub fn install_gc_schedule(
     {
         let resolved = resolve_install_options(options)?;
 
-        ensure_output_directory(&resolved.output_dir)?;
-        if !resolved.output_dir.is_dir() {
-            return Err(GcScheduleError::InvalidOutputDirectory(resolved.output_dir));
-        }
-        ensure_output_directory(&resolved.working_directory)?;
-
         let service_path = resolved
             .output_dir
             .join(format!("{}.service", resolved.unit_prefix));
@@ -282,8 +279,29 @@ pub fn install_gc_schedule(
 
         let service_unit = render_service_unit(&resolved);
         let timer_unit = render_timer_unit(&resolved);
-        write_output_bytes(&service_path, service_unit.as_bytes(), true)?;
-        write_output_bytes(&timer_path, timer_unit.as_bytes(), true)?;
+
+        if resolved.dry_run {
+            println!(
+                "Would write {} ({} bytes):\n{}\n",
+                service_path.display(),
+                service_unit.len(),
+                service_unit
+            );
+            println!(
+                "Would write {} ({} bytes):\n{}\n",
+                timer_path.display(),
+                timer_unit.len(),
+                timer_unit
+            );
+        } else {
+            ensure_output_directory(&resolved.output_dir)?;
+            if !resolved.output_dir.is_dir() {
+                return Err(GcScheduleError::InvalidOutputDirectory(resolved.output_dir));
+            }
+            ensure_output_directory(&resolved.working_directory)?;
+            write_output_bytes(&service_path, service_unit.as_bytes(), true)?;
+            write_output_bytes(&timer_path, timer_unit.as_bytes(), true)?;
+        }
 
         Ok(GcScheduleInstallReport {
             service_path,
@@ -387,6 +405,7 @@ fn resolve_install_options(
         working_directory,
         user: options.user.clone(),
         group: options.group.clone(),
+        dry_run: options.dry_run,
     })
 }
 
@@ -722,7 +741,7 @@ mod tests {
     use std::{
         fs::{OpenOptions, write as write_file},
         io::Write,
-        path::Path,
+        path::{Path, PathBuf},
     };
 
     use super::{
@@ -984,6 +1003,22 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_binary_path_returns_valid_path() {
+        // When a non-default path is supplied, it should be returned as-is.
+        let custom = Path::new("/opt/shardline/bin/shardline");
+        let result = super::resolve_binary_path(custom);
+        assert_eq!(result, custom);
+
+        // When the default path is supplied, resolve_binary_path attempts
+        // current_exe() first, falling back to the default. Either way
+        // the returned path should be non-empty.
+        let default = Path::new("/usr/local/bin/shardline");
+        let result = super::resolve_binary_path(default);
+        assert!(!result.as_os_str().is_empty());
+    }
+
     #[test]
     fn read_text_file_with_limit_rejects_growth_after_validation() {
         let sandbox = tempfile::tempdir();
@@ -1095,6 +1130,517 @@ mod tests {
         assert!(matches!(
             result,
             Err(GcScheduleError::Io(error)) if error.kind() == ErrorKind::InvalidInput
+        ));
+    }
+
+    // ── GcScheduleError Display ───────────────────────────────────────────
+
+    #[test]
+    fn gc_schedule_error_empty_value_display() {
+        let err = GcScheduleError::EmptyValue {
+            field: "unit-prefix",
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid unit-prefix: value must not be empty"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_control_characters_display() {
+        let err = GcScheduleError::ControlCharacters { field: "calendar" };
+        assert_eq!(
+            err.to_string(),
+            "invalid calendar: control characters are not allowed"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_invalid_output_directory_display() {
+        let err = GcScheduleError::InvalidOutputDirectory(PathBuf::from("/bad/dir"));
+        assert_eq!(err.to_string(), "invalid output directory: /bad/dir");
+    }
+
+    #[test]
+    fn gc_schedule_error_non_absolute_path_display() {
+        let err = GcScheduleError::NonAbsolutePath {
+            field: "env-file",
+            path: PathBuf::from("relative.env"),
+        };
+        assert_eq!(
+            err.to_string(),
+            "env-file must be an absolute path: relative.env"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_binary_display() {
+        let err = GcScheduleError::MissingBinary(PathBuf::from("/usr/local/bin/shardline"));
+        assert_eq!(
+            err.to_string(),
+            "shardline binary was not found at /usr/local/bin/shardline"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_env_file_display() {
+        let err = GcScheduleError::MissingEnvFile(PathBuf::from("/etc/shardline/shardline.env"));
+        assert!(err.to_string().contains("environment file was not found"));
+    }
+
+    #[test]
+    fn gc_schedule_error_local_file_too_large_display() {
+        let err = GcScheduleError::LocalFileTooLarge {
+            field: "environment file",
+            path: PathBuf::from("/env"),
+            observed_bytes: 70000,
+            maximum_bytes: 65536,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("exceeded supported size"));
+        assert!(msg.contains("environment file"));
+    }
+
+    #[test]
+    fn gc_schedule_error_local_file_length_mismatch_display() {
+        let err = GcScheduleError::LocalFileLengthMismatch {
+            field: "environment file",
+            path: PathBuf::from("/env"),
+            expected_bytes: 100,
+            observed_bytes: 105,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("changed during bounded read"));
+    }
+
+    #[test]
+    fn gc_schedule_error_invalid_env_file_line_display() {
+        let err = GcScheduleError::InvalidEnvFileLine {
+            line: 5,
+            detail: "expected KEY=VALUE",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("line 5"));
+        assert!(msg.contains("expected KEY=VALUE"));
+    }
+
+    #[test]
+    fn gc_schedule_error_root_directory_conflict_display() {
+        let err = GcScheduleError::RootDirectoryConflict {
+            working_directory: "/var/lib/shardline".to_owned(),
+            configured_root: "/opt/shardline".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/var/lib/shardline"));
+        assert!(msg.contains("/opt/shardline"));
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_referenced_path_display() {
+        let err = GcScheduleError::MissingReferencedPath {
+            field: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+            path: PathBuf::from("/run/secrets/token.key"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("points to a missing path"));
+        assert!(msg.contains("SHARDLINE_TOKEN_SIGNING_KEY_FILE"));
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_user_display() {
+        let err = GcScheduleError::MissingUser("nobody".to_owned());
+        assert_eq!(
+            err.to_string(),
+            "service user was not found on the host: nobody"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_missing_group_display() {
+        let err = GcScheduleError::MissingGroup("nogroup".to_owned());
+        assert_eq!(
+            err.to_string(),
+            "service group was not found on the host: nogroup"
+        );
+    }
+
+    #[test]
+    fn gc_schedule_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+        let err = GcScheduleError::Io(io_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn gc_schedule_error_debug() {
+        let err = GcScheduleError::EmptyValue { field: "test" };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("EmptyValue"));
+    }
+
+    // ── render_service_unit / render_timer_unit (non-linux) ──────────────
+
+    #[test]
+    fn install_gc_schedule_on_non_linux_returns_unsupported_error() {
+        // On non-Linux platforms, install_gc_schedule returns an Unsupported Io error.
+        let options = super::GcScheduleInstallOptions::default();
+        let result = super::install_gc_schedule(&options);
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(result.is_err());
+            let Err(err) = result else { return };
+            assert!(
+                matches!(err, GcScheduleError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::Unsupported)
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // On Linux, it will try to validate paths which don't exist.
+            let _ = result;
+        }
+    }
+
+    // ── validate_text_field ────────────────────────────────────────────────
+
+    #[test]
+    fn validate_text_field_accepts_valid_value() {
+        let result = super::validate_text_field("test", "valid-value");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_text_field_rejects_empty_value() {
+        let result = super::validate_text_field("unit-prefix", "");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::EmptyValue {
+                field: "unit-prefix"
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_whitespace_only() {
+        let result = super::validate_text_field("calendar", "   ");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::EmptyValue { field: "calendar" })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_control_characters() {
+        let result = super::validate_text_field("user", "user\nname");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "user" })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_tab_character() {
+        let result = super::validate_text_field("group", "my\tgroup");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "group" })
+        ));
+    }
+
+    // ── GcScheduleInstallReport::print_summary ──────────────────────────
+
+    #[test]
+    fn install_report_print_summary() {
+        let report = super::GcScheduleInstallReport {
+            service_path: PathBuf::from("/etc/systemd/system/shardline-gc.service"),
+            timer_path: PathBuf::from("/etc/systemd/system/shardline-gc.timer"),
+            binary_path: PathBuf::from("/usr/local/bin/shardline"),
+            env_file: PathBuf::from("/etc/shardline/shardline.env"),
+            working_directory: PathBuf::from("/var/lib/shardline"),
+            calendar: "daily".to_owned(),
+            retention_seconds: 86400,
+        };
+        report.print_summary();
+        assert_eq!(report.retention_seconds, 86400);
+        assert_eq!(report.calendar, "daily");
+    }
+
+    // ── GcScheduleUninstallReport::print_summary ────────────────────────
+
+    #[test]
+    fn uninstall_report_print_summary() {
+        let report = super::GcScheduleUninstallReport {
+            service_path: PathBuf::from("/etc/systemd/system/test.service"),
+            timer_path: PathBuf::from("/etc/systemd/system/test.timer"),
+            removed_service: true,
+            removed_timer: false,
+        };
+        report.print_summary();
+        assert!(report.removed_service);
+        assert!(!report.removed_timer);
+    }
+
+    #[test]
+    fn uninstall_report_both_removed() {
+        let report = super::GcScheduleUninstallReport {
+            service_path: PathBuf::from("/etc/systemd/system/a.service"),
+            timer_path: PathBuf::from("/etc/systemd/system/a.timer"),
+            removed_service: true,
+            removed_timer: true,
+        };
+        report.print_summary();
+        assert!(report.removed_service);
+        assert!(report.removed_timer);
+    }
+
+    // ── GcScheduleInstallOptions Default ────────────────────────────────
+
+    #[test]
+    fn install_options_defaults() {
+        let opts = super::GcScheduleInstallOptions::default();
+        assert_eq!(opts.unit_prefix, "shardline-gc");
+        assert_eq!(opts.retention_seconds, 86_400);
+        assert_eq!(opts.calendar, "*-*-* 03:17:00");
+        assert!(!opts.dry_run);
+    }
+
+    // ── strip_wrapping_quotes (linux only) ───────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_double_quotes() {
+        assert_eq!(super::strip_wrapping_quotes("\"value\""), "value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_single_quotes() {
+        assert_eq!(super::strip_wrapping_quotes("'value'"), "value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_no_quotes() {
+        assert_eq!(super::strip_wrapping_quotes("value"), "value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_empty_string() {
+        assert_eq!(super::strip_wrapping_quotes(""), "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strip_wrapping_quotes_single_char() {
+        assert_eq!(super::strip_wrapping_quotes("a"), "a");
+    }
+
+    // ── remove_if_present (the local_output wrapper) ─────────────────────
+
+    #[test]
+    fn remove_if_present_absent_file_returns_ok_false() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("nonexistent");
+        // remove_if_present delegates to remove_output_file_if_present
+        let result = super::remove_if_present(&path);
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    // ── GcScheduleInstallOptions Default ────────────────────────────────
+
+    #[test]
+    fn install_options_default_values() {
+        let opts = super::GcScheduleInstallOptions::default();
+        assert_eq!(opts.output_dir, PathBuf::from("/etc/systemd/system"));
+        assert_eq!(opts.unit_prefix, "shardline-gc");
+        assert_eq!(opts.calendar, "*-*-* 03:17:00");
+        assert_eq!(opts.retention_seconds, 86_400);
+        assert_eq!(opts.binary_path, PathBuf::from("/usr/local/bin/shardline"));
+        assert_eq!(opts.env_file, PathBuf::from("/etc/shardline/shardline.env"));
+        assert_eq!(opts.working_directory, PathBuf::from("/var/lib/shardline"));
+        assert_eq!(opts.user, "shardline");
+        assert_eq!(opts.group, "shardline");
+        assert!(!opts.dry_run);
+    }
+
+    // ── uninstall_gc_schedule validation ────────────────────────────────
+
+    #[test]
+    fn uninstall_gc_schedule_rejects_empty_prefix() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::uninstall_gc_schedule(sandbox.path(), "");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::EmptyValue {
+                field: "unit-prefix"
+            })
+        ));
+    }
+
+    #[test]
+    fn uninstall_gc_schedule_rejects_control_chars_in_prefix() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::uninstall_gc_schedule(sandbox.path(), "test\nunit");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters {
+                field: "unit-prefix"
+            })
+        ));
+    }
+
+    #[test]
+    fn uninstall_gc_schedule_removes_existing_files() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let svc = sandbox.path().join("test.service");
+        let tim = sandbox.path().join("test.timer");
+        std::fs::write(&svc, b"service").unwrap();
+        std::fs::write(&tim, b"timer").unwrap();
+
+        let result = super::uninstall_gc_schedule(sandbox.path(), "test");
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert!(report.removed_service);
+        assert!(report.removed_timer);
+        assert!(!svc.exists());
+        assert!(!tim.exists());
+    }
+
+    // ── ensure_local_file_size_within_limit ─────────────────────────────
+
+    #[test]
+    fn ensure_local_file_size_within_limit_accepts_exact_max() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("test.txt");
+        let result = super::ensure_local_file_size_within_limit(
+            "test",
+            &path,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_local_file_size_within_limit_rejects_oversized() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("oversized.txt");
+        let result = super::ensure_local_file_size_within_limit(
+            "test",
+            &path,
+            100_000,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::LocalFileTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn ensure_local_file_size_within_limit_accepts_small() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("small.txt");
+        let result = super::ensure_local_file_size_within_limit(
+            "test",
+            &path,
+            100,
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── ensure_regular_local_file_path ──────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_regular_local_file_path_rejects_directory() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let result = super::ensure_regular_local_file_path(sandbox.path());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_regular_local_file_path_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+        let sandbox = tempfile::tempdir().unwrap();
+        let target = sandbox.path().join("real.txt");
+        std::fs::write(&target, b"content").unwrap();
+        let link = sandbox.path().join("link.txt");
+        symlink(&target, &link).unwrap();
+
+        let result = super::ensure_regular_local_file_path(&link);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_regular_local_file_path_accepts_regular_file() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("regular.txt");
+        std::fs::write(&path, b"content").unwrap();
+
+        let result = super::ensure_regular_local_file_path(&path);
+        assert!(result.is_ok());
+    }
+
+    // ── read_bounded_local_text_file with trailing data ─────────────────
+
+    #[test]
+    fn read_bounded_local_text_file_rejects_trailing_data() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let path = sandbox.path().join("trailing.txt");
+        let mut content = b"KEY=VALUE".to_vec();
+        content.push(b'\n');
+        std::fs::write(&path, &content).unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let result = super::read_bounded_local_text_file(
+            "test",
+            &path,
+            &mut file,
+            content.len() as u64 - 1, // expect 1 less byte
+        );
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::LocalFileLengthMismatch { .. })
+        ));
+    }
+
+    // ── read_text_file_with_limit rejects missing file ──────────────────
+
+    #[test]
+    fn read_text_file_with_limit_rejects_missing_file() {
+        let result = super::read_text_file_with_limit(
+            "test",
+            Path::new("/nonexistent-gc-test-file"),
+            super::MAX_SYSTEMD_ENV_FILE_BYTES,
+        );
+        assert!(result.is_err());
+    }
+
+    // ── validate_text_field with edge values ────────────────────────────
+
+    #[test]
+    fn validate_text_field_rejects_newline() {
+        let result = super::validate_text_field("test", "line1\nline2");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "test" })
+        ));
+    }
+
+    #[test]
+    fn validate_text_field_rejects_tab() {
+        let result = super::validate_text_field("test", "col1\tcol2");
+        assert!(matches!(
+            result,
+            Err(GcScheduleError::ControlCharacters { field: "test" })
         ));
     }
 }

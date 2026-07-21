@@ -165,9 +165,9 @@ mod tests {
 
     use super::GiteaAdapter;
     use crate::{
-        BuiltInProviderCatalog, BuiltInProviderError, ProviderAdapter, ProviderKind,
-        ProviderSubject, RepositoryRef, RepositoryVisibility, RepositoryWebhookEventKind,
-        RevisionRef, WebhookRequest,
+        AuthorizationDecision, AuthorizationRequest, BuiltInProviderCatalog, BuiltInProviderError,
+        ProviderAdapter, ProviderKind, ProviderSubject, RepositoryAccess, RepositoryRef,
+        RepositoryVisibility, RepositoryWebhookEventKind, RevisionRef, WebhookRequest,
         builtin::{ProviderRepositoryPolicy, configured_metadata},
     };
 
@@ -346,5 +346,523 @@ mod tests {
             event,
             Err(BuiltInProviderError::InvalidWebhookAuthentication)
         );
+    }
+
+    #[test]
+    fn gitea_adapter_no_webhook_secret_skips_verification() {
+        let mut catalog = BuiltInProviderCatalog::new("gitea-system").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://gitea.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        let adapter = GiteaAdapter::new(catalog, None);
+
+        let body = br#"{"ref":"refs/heads/main","repository":{"full_name":"team/assets"}}"#;
+        let request = WebhookRequest::new("push", "delivery-1", None, body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn gitea_adapter_ping_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("ping", "delivery-ping", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitea_adapter_unknown_event_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{}"#;
+        let request = WebhookRequest::new("unknown", "delivery-unk", None, body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::MissingWebhookAuthentication)
+        ));
+    }
+
+    #[test]
+    fn gitea_adapter_push_without_ref_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{"repository":{"full_name":"team/assets"}}"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-noref", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRevisionPayload)
+        ));
+    }
+
+    #[test]
+    fn gitea_adapter_repository_edited_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"edited",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-edit", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else {
+            return;
+        };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn gitea_adapter_repository_archived_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"archived",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-arch", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else {
+            return;
+        };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn gitea_adapter_repository_unarchived_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"unarchived",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-unarch", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else {
+            return;
+        };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn gitea_adapter_repository_unknown_action_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"unknown",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-unk", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitea_repository_uses_name_without_full_name_and_owner_from_username() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{
+                "name":"assets",
+                "owner":{"username":"team"}
+            }
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-name", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else {
+            return;
+        };
+        assert_eq!(event.repository().owner(), "team");
+        assert_eq!(event.repository().name(), "assets");
+    }
+
+    #[test]
+    fn gitea_repository_uses_owner_login_fallback() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{
+                "name":"assets",
+                "owner":{"login":"team"}
+            }
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-login", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else {
+            return;
+        };
+        assert_eq!(event.repository().owner(), "team");
+    }
+
+    #[test]
+    fn gitea_repository_name_only_missing_owner_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"name":"assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-noowner", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn gitea_repository_missing_full_name_and_name_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"owner":{"username":"team"}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-noname", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn gitea_repository_rename_with_changes_name_fallback() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"renamed",
+            "repository":{"full_name":"team/new-assets"},
+            "changes":{"name":{"from":"assets"}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-alt", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else {
+            return;
+        };
+        assert_eq!(event.repository().name(), "assets");
+    }
+
+    #[test]
+    fn gitea_secret_required_when_configured() {
+        let adapter = adapter().unwrap();
+        let request = WebhookRequest::new("push", "delivery-1", None, br#"{}"#);
+        let event = adapter.parse_webhook(request);
+        assert_eq!(
+            event,
+            Err(BuiltInProviderError::MissingWebhookAuthentication)
+        );
+    }
+
+    #[test]
+    fn gitea_adapter_kind_returns_gitea() {
+        let adapter = adapter().unwrap();
+        assert_eq!(adapter.kind(), ProviderKind::Gitea);
+    }
+
+    #[test]
+    fn gitea_adapter_check_access_allows_authorized_subject() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("gitea-user-1").unwrap();
+        let request = AuthorizationRequest::new(
+            subject.clone(),
+            repository,
+            revision,
+            RepositoryAccess::Read,
+        );
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Allow(subject));
+    }
+
+    #[test]
+    fn gitea_adapter_check_access_denies_unauthorized_subject() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "team", "assets").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("unknown-user").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Deny);
+    }
+
+    #[test]
+    fn gitea_adapter_check_access_rejects_unknown_repository() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "unknown", "repo").unwrap();
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let subject = ProviderSubject::new("gitea-user-1").unwrap();
+        let request =
+            AuthorizationRequest::new(subject, repository, revision, RepositoryAccess::Read);
+        let result = adapter.check_access(&request);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn gitea_adapter_repository_metadata_returns_metadata() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "team", "assets").unwrap();
+        let metadata = adapter.repository_metadata(&repository).unwrap();
+        assert_eq!(metadata.repository(), &repository);
+        assert_eq!(metadata.visibility(), RepositoryVisibility::Private);
+        assert_eq!(
+            metadata.clone_url().as_str(),
+            "https://gitea.example/team/assets.git"
+        );
+    }
+
+    #[test]
+    fn gitea_adapter_repository_metadata_unknown_repo_errors() {
+        let adapter = adapter().unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "unknown", "repo").unwrap();
+        let result = adapter.repository_metadata(&repository);
+        assert_eq!(result, Err(BuiltInProviderError::UnknownRepository));
+    }
+
+    #[test]
+    fn gitea_adapter_repository_privatized_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"privatized",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-priv", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn gitea_adapter_repository_publicized_as_access_change() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"publicized",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-pub", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.kind(), &RepositoryWebhookEventKind::AccessChanged);
+    }
+
+    #[test]
+    fn gitea_repository_renamed_without_changes_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"renamed",
+            "repository":{"full_name":"team/new-assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-ren", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitea_repository_missing_owner_fields_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"name":"assets","owner":{}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-nofields", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn gitea_adapter_push_with_ref_but_no_repository_name_errors() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "ref":"refs/heads/main",
+            "repository":{"owner":{"username":"team"}}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("push", "delivery-norepo", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidRepositoryPayload)
+        ));
+    }
+
+    #[test]
+    fn gitea_adapter_unknown_repository_event_action_returns_none() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"some_unknown_action",
+            "repository":{"full_name":"team/assets"}
+        }"#;
+        let signature = signature(body);
+        let request = WebhookRequest::new("repository", "delivery-unk", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitea_adapter_invalid_json_payload_errors() {
+        let mut catalog = BuiltInProviderCatalog::new("gitea-system").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://gitea.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        let adapter = GiteaAdapter::new(catalog, None);
+        let body = b"not-json";
+        let request = WebhookRequest::new("push", "delivery-bad", None, body);
+        let event = adapter.parse_webhook(request);
+        assert!(matches!(
+            event,
+            Err(BuiltInProviderError::InvalidWebhookPayload)
+        ));
+    }
+
+    #[test]
+    fn gitea_adapter_parses_repository_renamed_event_with_updates() {
+        let adapter = adapter().unwrap();
+        let body = br#"{
+            "action":"renamed",
+            "repository":{"full_name":"team/newname"},
+            "changes":{"repository":{"name":{"from":"oldname"}}}
+        }"#;
+        let signature = signature(body);
+        let request =
+            WebhookRequest::new("repository", "delivery-ren2", signature.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        let Some(event) = event else { return };
+        assert_eq!(event.repository().name(), "oldname");
+        assert!(
+            matches!(event.kind(), RepositoryWebhookEventKind::RepositoryRenamed { new_repository } if new_repository.name() == "newname"),
+            "expected RepositoryRenamed(new_repo=newname)"
+        );
+    }
+
+    #[test]
+    fn gitea_adapter_check_allows_write_access() {
+        let mut catalog = BuiltInProviderCatalog::new("gitea-system").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("gitea-writer").unwrap();
+        let metadata = configured_metadata(
+            repository.clone(),
+            RepositoryVisibility::Private,
+            "main",
+            "https://gitea.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::new(),
+                HashSet::from([subject.clone()]),
+            ))
+            .unwrap();
+        let adapter = GiteaAdapter::new(catalog, None);
+        let revision = RevisionRef::new("refs/heads/main").unwrap();
+        let request = AuthorizationRequest::new(
+            subject.clone(),
+            repository,
+            revision,
+            RepositoryAccess::Write,
+        );
+        let decision = adapter.check_access(&request).unwrap();
+        assert_eq!(decision, AuthorizationDecision::Allow(subject));
+    }
+
+    #[test]
+    fn gitea_adapter_new_is_const() {
+        let catalog = BuiltInProviderCatalog::new("gitea-system").unwrap();
+        let adapter = GiteaAdapter::new(catalog, None);
+        assert_eq!(adapter.kind(), ProviderKind::Gitea);
+    }
+
+    #[test]
+    fn gitea_adapter_debug_format() {
+        let catalog = BuiltInProviderCatalog::new("gitea-system").unwrap();
+        let adapter = GiteaAdapter::new(catalog, None);
+        let debug = format!("{adapter:?}");
+        assert!(debug.contains("GiteaAdapter"));
+    }
+
+    #[test]
+    fn gitea_adapter_clone_eq() {
+        let adapter = adapter().unwrap();
+        let cloned = adapter.clone();
+        assert_eq!(adapter, cloned);
+    }
+
+    #[test]
+    fn gitea_unknown_event_with_valid_signature_reaches_match_arm() {
+        let adapter = adapter().unwrap();
+        let body = b"{}";
+        let sig = signature(body);
+        let request =
+            WebhookRequest::new("unknown_event_name", "delivery-unk", sig.as_deref(), body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn gitea_repository_event_with_unknown_action_and_no_signature_check() {
+        let mut catalog = BuiltInProviderCatalog::new("gitea-system").unwrap();
+        let repository = RepositoryRef::new(ProviderKind::Gitea, "team", "assets").unwrap();
+        let subject = ProviderSubject::new("user-1").unwrap();
+        let metadata = configured_metadata(
+            repository,
+            RepositoryVisibility::Private,
+            "main",
+            "https://gitea.example/team/assets.git",
+        )
+        .unwrap();
+        catalog
+            .register(ProviderRepositoryPolicy::new(
+                metadata,
+                HashSet::from([subject]),
+                HashSet::new(),
+            ))
+            .unwrap();
+        let adapter = GiteaAdapter::new(catalog, None);
+        let body = br#"{"action":"completely_unknown","repository":{"full_name":"team/assets"}}"#;
+        let request = WebhookRequest::new("repository", "delivery-unk2", None, body);
+        let event = adapter.parse_webhook(request).unwrap();
+        assert!(event.is_none());
     }
 }

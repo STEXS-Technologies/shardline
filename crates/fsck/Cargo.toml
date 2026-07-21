@@ -21,5 +21,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+rusqlite.workspace = true
+shardline-test-support.workspace = true
+shardline-xet-core.workspace = true
+tempfile.workspace = true
+
 [lints]
 workspace = true

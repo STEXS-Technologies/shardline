@@ -220,17 +220,23 @@ impl super::PostgresRecordStore {
         repository: &RepositoryRecordScope,
     ) -> Result<Vec<PostgresRecordLocator>, PostgresMetadataStoreError> {
         let scope_key = shared_repository_record_scope_key(repository);
-        let scope_prefix = format!("{scope_key}%");
+        let escaped_prefix = format!(
+            "{}%",
+            scope_key
+                .replace('\\', "\\\\")
+                .replace('_', "\\_")
+                .replace('%', "\\%")
+        );
         let rows = query(
             "SELECT record_key, record_kind, scope_key, file_id, content_hash
              FROM shardline_file_records
              WHERE record_kind = $1
-               AND (scope_key = $2 OR scope_key LIKE $3)
+               AND (scope_key = $2 OR scope_key LIKE $3 ESCAPE '\\')
              ORDER BY record_key",
         )
         .bind(kind.as_str())
         .bind(&scope_key)
-        .bind(&scope_prefix)
+        .bind(&escaped_prefix)
         .fetch_all(&self.pool)
         .await?;
 
@@ -250,7 +256,13 @@ impl super::PostgresRecordStore {
         Visitor: FnMut(StoredRecord<PostgresRecordLocator>) -> Result<(), VisitorError>,
     {
         let scope_key = shared_repository_record_scope_key(repository);
-        let scope_prefix = format!("{scope_key}%");
+        let escaped_prefix = format!(
+            "{}%",
+            scope_key
+                .replace('\\', "\\\\")
+                .replace('_', "\\_")
+                .replace('%', "\\%")
+        );
         let mut rows = query(
             "SELECT record_key,
                     record_kind,
@@ -261,12 +273,12 @@ impl super::PostgresRecordStore {
                     FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT AS modified_since_epoch
              FROM shardline_file_records
              WHERE record_kind = $1
-               AND (scope_key = $2 OR scope_key LIKE $3)
+               AND (scope_key = $2 OR scope_key LIKE $3 ESCAPE '\\')
              ORDER BY record_key",
         )
         .bind(kind.as_str())
         .bind(&scope_key)
-        .bind(&scope_prefix)
+        .bind(&escaped_prefix)
         .fetch(&self.pool);
 
         while let Some(row) = rows
@@ -637,5 +649,110 @@ pub(super) fn record_locator(
         scope_key,
         file_id: record.file_id.clone(),
         content_hash,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_in_result,
+        clippy::arithmetic_side_effects,
+        clippy::option_if_let_else,
+        clippy::unreachable,
+        clippy::shadow_unrelated,
+        clippy::let_underscore_must_use
+    )]
+    use shardline_protocol::{RepositoryProvider, RepositoryScope};
+
+    use super::PostgresRecordKind;
+    use super::record_locator;
+    use crate::{FileChunkRecord, FileRecord};
+
+    fn sample_record(repo_scope: Option<RepositoryScope>) -> FileRecord {
+        FileRecord {
+            file_id: "test.bin".to_owned(),
+            content_hash: "a".repeat(64),
+            total_bytes: 100,
+            chunk_size: 50,
+            repository_scope: repo_scope,
+            chunks: vec![FileChunkRecord {
+                hash: "b".repeat(64),
+                offset: 0,
+                length: 50,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: 50,
+            }],
+        }
+    }
+
+    #[test]
+    fn record_locator_produces_latest_locator_without_content_hash() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "repo", Some("main")).unwrap();
+        let record = sample_record(Some(scope));
+        let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+
+        assert_eq!(locator.file_id(), "test.bin");
+        assert!(locator.content_hash().is_none());
+        // Latest locator key should not include content hash
+        assert!(!locator.record_key().contains(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn record_locator_produces_version_locator_with_content_hash() {
+        let record = sample_record(None);
+        let locator = record_locator(
+            PostgresRecordKind::Version,
+            &record,
+            Some(record.content_hash.clone()),
+        );
+
+        assert_eq!(locator.file_id(), "test.bin");
+        assert_eq!(locator.content_hash(), Some(record.content_hash.as_str()));
+        // Version locator key should include content hash
+        assert!(locator.record_key().contains(&record.content_hash));
+    }
+
+    #[test]
+    fn record_locator_latest_and_version_have_different_keys() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitLab, "team", "assets", None).unwrap();
+        let record = sample_record(Some(scope));
+        let latest = record_locator(PostgresRecordKind::Latest, &record, None);
+        let version = record_locator(
+            PostgresRecordKind::Version,
+            &record,
+            Some(record.content_hash.clone()),
+        );
+
+        assert_ne!(latest.record_key(), version.record_key());
+        assert_eq!(latest.file_id(), version.file_id());
+    }
+
+    #[test]
+    fn record_locator_uses_repository_scope_key() {
+        let scope =
+            RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", None).unwrap();
+        let record = sample_record(Some(scope));
+        let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+
+        // The locator key should contain scope information
+        assert!(locator.record_key().contains("github"));
+    }
+
+    #[test]
+    fn record_locator_without_repository_scope() {
+        let record = sample_record(None);
+        let locator = record_locator(PostgresRecordKind::Latest, &record, None);
+
+        // Without scope, the key should still be valid
+        assert!(!locator.record_key().is_empty());
+        assert_eq!(locator.file_id(), "test.bin");
     }
 }

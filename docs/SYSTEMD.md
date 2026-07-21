@@ -127,4 +127,10 @@ SHARDLINE_PROVIDER_CONFIG_FILE=/etc/shardline/providers.json
 SHARDLINE_PROVIDER_API_KEY_FILE=/etc/shardline/provider-api-key
 ```
 
+Use `rediss://` and mount PEM files for a TLS-protected Redis cache. The optional
+CA file is `SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CA_FILE`; mTLS additionally
+requires both `SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE` and
+`SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_KEY_FILE`. See
+[Cache adapters](CACHE_ADAPTERS.md#tls-and-mtls) for the complete configuration.
+
 Run `shardline config check` under the same environment before enabling the service.

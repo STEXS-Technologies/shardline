@@ -1,5 +1,7 @@
 use prometheus::{IntCounter, IntGauge, Registry};
 
+use crate::{must_counter, must_gauge};
+
 pub struct StorageMetrics {
     pub objects_total: IntGauge,
     pub objects_bytes_total: IntCounter,
@@ -12,36 +14,24 @@ pub struct StorageMetrics {
 }
 
 impl StorageMetrics {
-    /// # Panics
-    ///
-    /// Panics if prometheus metric registration fails (should not happen with static names).
     #[must_use]
-    #[allow(clippy::expect_used)]
     pub fn new(registry: &Registry) -> Self {
-        let objects_total = IntGauge::new("shardline_objects_total", "Total objects stored")
-            .expect("prometheus metric names are static constants");
-        let objects_bytes_total = IntCounter::new(
+        let objects_total = must_gauge("shardline_objects_total", "Total objects stored");
+        let objects_bytes_total = must_counter(
             "shardline_objects_bytes_total",
             "Total bytes stored across all objects",
-        )
-        .expect("prometheus metric names are static constants");
-        let chunks_total = IntGauge::new("shardline_chunks_total", "Total chunks stored")
-            .expect("prometheus metric names are static constants");
+        );
+        let chunks_total = must_gauge("shardline_chunks_total", "Total chunks stored");
         let chunks_bytes_total =
-            IntCounter::new("shardline_chunks_bytes_total", "Total chunk bytes stored")
-                .expect("prometheus metric names are static constants");
-        let xorbs_total = IntGauge::new("shardline_xorbs_total", "Total xorbs stored")
-            .expect("prometheus metric names are static constants");
+            must_counter("shardline_chunks_bytes_total", "Total chunk bytes stored");
+        let xorbs_total = must_gauge("shardline_xorbs_total", "Total xorbs stored");
         let xorbs_bytes_total =
-            IntCounter::new("shardline_xorbs_bytes_total", "Total xorb bytes stored")
-                .expect("prometheus metric names are static constants");
-        let shards_total = IntGauge::new("shardline_shards_total", "Total shards stored")
-            .expect("prometheus metric names are static constants");
-        let dedup_saves_bytes_total = IntCounter::new(
+            must_counter("shardline_xorbs_bytes_total", "Total xorb bytes stored");
+        let shards_total = must_gauge("shardline_shards_total", "Total shards stored");
+        let dedup_saves_bytes_total = must_counter(
             "shardline_dedup_saves_bytes_total",
             "Bytes saved by deduplication",
-        )
-        .expect("prometheus metric names are static constants");
+        );
 
         registry.register(Box::new(objects_total.clone())).ok();
         registry
@@ -89,5 +79,83 @@ impl StorageMetrics {
 
     pub fn record_dedup_saves(&self, bytes: u64) {
         self.dedup_saves_bytes_total.inc_by(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prometheus::Registry;
+
+    use super::*;
+
+    #[test]
+    fn storage_metrics_record_object_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.objects_total.get(), 0);
+        assert_eq!(metrics.objects_bytes_total.get(), 0);
+
+        metrics.record_object_stored(100);
+        assert_eq!(metrics.objects_total.get(), 1);
+        assert_eq!(metrics.objects_bytes_total.get(), 100);
+
+        metrics.record_object_stored(200);
+        assert_eq!(metrics.objects_total.get(), 2);
+        assert_eq!(metrics.objects_bytes_total.get(), 300);
+    }
+
+    #[test]
+    fn storage_metrics_record_chunk_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.chunks_total.get(), 0);
+        assert_eq!(metrics.chunks_bytes_total.get(), 0);
+
+        metrics.record_chunk_stored(1024);
+        assert_eq!(metrics.chunks_total.get(), 1);
+        assert_eq!(metrics.chunks_bytes_total.get(), 1024);
+    }
+
+    #[test]
+    fn storage_metrics_record_xorb_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.xorbs_total.get(), 0);
+        assert_eq!(metrics.xorbs_bytes_total.get(), 0);
+
+        metrics.record_xorb_stored(4096);
+        assert_eq!(metrics.xorbs_total.get(), 1);
+        assert_eq!(metrics.xorbs_bytes_total.get(), 4096);
+    }
+
+    #[test]
+    fn storage_metrics_record_shard_stored() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.shards_total.get(), 0);
+
+        metrics.record_shard_stored();
+        assert_eq!(metrics.shards_total.get(), 1);
+
+        metrics.record_shard_stored();
+        assert_eq!(metrics.shards_total.get(), 2);
+    }
+
+    #[test]
+    fn storage_metrics_record_dedup_saves() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.dedup_saves_bytes_total.get(), 0);
+
+        metrics.record_dedup_saves(500);
+        assert_eq!(metrics.dedup_saves_bytes_total.get(), 500);
+
+        metrics.record_dedup_saves(300);
+        assert_eq!(metrics.dedup_saves_bytes_total.get(), 800);
     }
 }

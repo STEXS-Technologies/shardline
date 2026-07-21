@@ -63,12 +63,24 @@ command = "cargo"
 args = ["check", "--workspace", "--all-targets", "--all-features", "${@}"]
 
 [tasks.test]
-description = "Run shardline tests using cargo-nextest"
+description = "Run workspace lib tests (fast, no external infrastructure needed)"
+workspace = false
+command = "cargo"
+args = ["test", "--workspace", "--lib", "${@}"]
+
+[tasks.test-integration]
+description = "Run integration tests (requires Docker: Postgres, MinIO, Redis)"
 workspace = false
 install_crate = "cargo-nextest@0.9.123"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "${@}"]
+args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
+
+[tasks.test-postgres]
+description = "Run Postgres-gated tests (requires DATABASE_URL env var)"
+workspace = false
+command = "bash"
+args = ["-c", "cargo test -p shardline-index -- hub_postgres && cargo test -p shardline-server -- postgres_backend::tests database_migration lifecycle_repair::tests && cargo test -p shardline-cli --test db_migrate_e2e"]
 
 [tasks.test-e2e]
 description = "Run e2e integration tests from the e2e/ folder"
@@ -78,6 +90,26 @@ install_crate_args = ["--locked"]
 command = "cargo"
 args = ["nextest", "run", "--all-features", "--no-tests=pass", "${@}"]
 cwd = "e2e"
+
+[tasks.test-docker]
+description = "Run Docker-backed server integration and end-to-end tests"
+workspace = false
+install_crate = "cargo-nextest@0.9.123"
+install_crate_args = ["--locked"]
+command = "bash"
+args = ["-c", "docker version >/dev/null && cargo nextest run -p shardline-server --features docker --no-tests=pass && (cd e2e && cargo nextest run --all-features --no-tests=pass)"]
+
+[tasks.test-kubernetes]
+description = "Run the disposable kind deployment smoke test"
+workspace = false
+command = "bash"
+args = ["scripts/k8s/kind-smoke.sh"]
+
+[tasks.test-infrastructure]
+description = "Run Docker-backed tests followed by the disposable Kubernetes smoke test"
+workspace = false
+command = "bash"
+args = ["-c", "cargo make test-docker && cargo make test-kubernetes"]
 
 [tasks.verify-release-binary]
 description = "Build the release shardline binary and smoke-test the packaged entrypoint"
@@ -190,6 +222,12 @@ workspace = false
 command = "bash"
 args = ["scripts/shardline/fuzz.sh", "smoke", "${@}"]
 
+[tasks.shardline-fuzz-regression]
+description = "Replay each checked-in Shardline fuzz corpus"
+workspace = false
+command = "bash"
+args = ["scripts/shardline/fuzz.sh", "regression", "${@}"]
+
 [tasks.deny]
 description = "Check licenses and security advisories"
 workspace = false
@@ -198,38 +236,76 @@ command = "cargo"
 args = ["deny", "check"]
 
 [tasks.coverage]
-description = "Generate test coverage report using cargo-tarpaulin"
+description = "Print LLVM source-based workspace coverage summary"
 workspace = false
-install_crate = "cargo-tarpaulin"
+install_crate = "cargo-llvm-cov"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Stdout", "--skip", "shardline-fuzz", "${@}"]
+args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--summary-only", "${@}"]
 
 [tasks.coverage-html]
-description = "Generate HTML test coverage report using cargo-tarpaulin"
+description = "Generate an LLVM source-based HTML coverage report"
 workspace = false
-install_crate = "cargo-tarpaulin"
+install_crate = "cargo-llvm-cov"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Html", "--skip", "shardline-fuzz", "${@}"]
+args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--html", "${@}"]
 
 [tasks.coverage-json]
-description = "Generate JSON test coverage report using cargo-tarpaulin"
+description = "Write an LLVM source-based JSON coverage summary to target/coverage.json"
 workspace = false
-install_crate = "cargo-tarpaulin"
+install_crate = "cargo-llvm-cov"
 install_crate_args = ["--locked"]
 command = "cargo"
-args = ["tarpaulin", "--workspace", "--all-features", "--skip-clean", "--out", "Json", "--skip", "shardline-fuzz", "${@}"]
+args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--json", "--summary-only", "--output-path", "target/coverage.json", "${@}"]
+
+[tasks.coverage-check]
+description = "Generate coverage and enforce the checked-in line-coverage ratchet"
+workspace = false
+dependencies = ["coverage-json"]
+command = "bash"
+args = ["scripts/check_coverage_ratchet.sh"]
 
 [tasks.ci]
 description = "Run the core contributor CI checks"
 workspace = false
-dependencies = ["format-check", "clippy", "test", "verify-release-binary", "check-migration-sync"]
+dependencies = ["format-check", "clippy", "deny", "test", "verify-release-binary", "check-migration-sync"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"
 workspace = false
-dependencies = ["ci", "deny"]
+dependencies = ["ci"]
+
+[tasks.ci-hardening]
+description = "Run full CI plus hardening checks (overflow detection, MIRI, ASan, loom)"
+workspace = false
+dependencies = ["ci-full", "test-overflow", "test-miri", "test-asan", "test-loom"]
+
+[tasks.test-loom]
+description = "Run Loom concurrency model-checking tests"
+workspace = false
+command = "bash"
+args = ["-c", "RUSTFLAGS='--cfg loom' cargo test -p shardline-loom-tests"]
+
+[tasks.test-overflow]
+description = "Run tests with integer overflow detection enabled"
+workspace = false
+command = "cargo"
+args = ["test", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--lib"]
+env = { RUSTFLAGS = "-C overflow-checks=on" }
+
+[tasks.test-miri]
+description = "Run MIRI on crates with unsafe code to detect undefined behavior"
+workspace = false
+install_crate = "cargo-miri"
+command = "bash"
+args = ["-c", "echo 'MIRI: checking config/secrets.rs unsafe blocks...' && cargo +nightly miri test -p shardline-server --lib -- config::secrets 2>&1 || { if [ \"${CI:-}\" = \"true\" ]; then exit 1; else echo 'MIRI skipped (requires nightly + specific target)'; fi; }"]
+
+[tasks.test-asan]
+description = "Run tests with AddressSanitizer to detect memory errors"
+workspace = false
+command = "bash"
+args = ["-c", "echo 'ASan: checking server-core validation...' && RUSTFLAGS='-Zsanitizer=address' cargo +nightly test -p shardline-server-core --lib -Zbuild-std --target x86_64-unknown-linux-gnu -- validation 2>&1 || { if [ \"${CI:-}\" = \"true\" ]; then exit 1; else echo 'ASan skipped (requires nightly + build-std + target)'; fi; }"]
 
 [tasks.check-migration-sync]
 description = "Verify Postgres and SQLite migration versions are in sync"

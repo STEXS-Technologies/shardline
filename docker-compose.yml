@@ -1,20 +1,45 @@
+# WARNING: This docker-compose.yml is intended for DEVELOPMENT only.
+# The default passwords below are NOT suitable for production use.
+# For production, override POSTGRES_PASSWORD, MINIO_ROOT_PASSWORD, and any other
+# secrets via environment variables or a .env file.
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    network_mode: host
     environment:
       POSTGRES_USER: shardline
-      POSTGRES_PASSWORD: shardline-dev-password
+      POSTGRES_PASSWORD: shardline-dev-password  # CHANGE for production
       POSTGRES_DB: shardline
-    ports:
-      - "127.0.0.1:5532:5432"
     volumes:
       - shardline_postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U shardline"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+
+  minio:
+    image: quay.io/minio/minio:latest
+    restart: unless-stopped
+    network_mode: host
+    command: server /data --console-address ":9001" --address ":19000"
+    environment:
+      MINIO_ROOT_USER: shardline
+      MINIO_ROOT_PASSWORD: shardline-dev-password  # CHANGE for production
+    volumes:
+      - shardline_minio:/data
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    network_mode: host
+    depends_on:
+      - minio
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 5
+        until mc alias set local http://127.0.0.1:19000 shardline shardline-dev-password; do
+          sleep 1
+        done
+        mc mb --ignore-existing local/shardline
 
   shardline:
     build:
@@ -24,60 +49,55 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
-    ports:
-      - "127.0.0.1:18080:8080"
+    network_mode: host
+    depends_on:
+      - postgres
+      - minio-init
     environment:
-      SHARDLINE_BIND_ADDR: 0.0.0.0:8080
+      SHARDLINE_BIND_ADDR: 0.0.0.0:18080
       SHARDLINE_SERVER_ROLE: all
+      SHARDLINE_SERVER_FRONTENDS: xet,lfs,bazel-http,oci,hub
       SHARDLINE_PUBLIC_BASE_URL: http://127.0.0.1:18080
       SHARDLINE_ROOT_DIR: /var/lib/shardline
-      SHARDLINE_OBJECT_STORAGE_ADAPTER: local
+      # --- Storage: S3 (MinIO) ---
+      SHARDLINE_OBJECT_STORAGE_ADAPTER: s3
+      SHARDLINE_S3_BUCKET: shardline
+      SHARDLINE_S3_REGION: us-east-1
+      SHARDLINE_S3_ENDPOINT: http://127.0.0.1:19000
+      SHARDLINE_S3_ACCESS_KEY_ID: shardline
+      SHARDLINE_S3_SECRET_ACCESS_KEY: shardline-dev-password
+      SHARDLINE_S3_ALLOW_HTTP: "true"
+      # --- Metadata: Postgres ---
+      SHARDLINE_INDEX_POSTGRES_URL: postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline
+      # --- Chunking / shard limits ---
       SHARDLINE_CHUNK_SIZE_BYTES: "65536"
       SHARDLINE_MAX_SHARD_FILES: "16384"
       SHARDLINE_MAX_SHARD_XORBS: "16384"
       SHARDLINE_MAX_SHARD_RECONSTRUCTION_TERMS: "65536"
       SHARDLINE_MAX_SHARD_XORB_CHUNKS: "65536"
+      # --- Reconstruction cache ---
       SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER: memory
       SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS: "30"
       SHARDLINE_RECONSTRUCTION_CACHE_MEMORY_MAX_ENTRIES: "4096"
+      # --- Transfer limits ---
       SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS: "64"
-      SHARDLINE_TOKEN_SIGNING_KEY: ${SHARDLINE_TOKEN_SIGNING_KEY:-}
+      # --- Auth ---
+      SHARDLINE_TOKEN_SIGNING_KEY: ${SHARDLINE_TOKEN_SIGNING_KEY:-test-signing-key-32-bytes-long!!}
+      SHARDLINE_AUTH_PROVIDER: local
     volumes:
       - shardline_data:/var/lib/shardline
-    healthcheck:
-      test: [ "CMD", "shardline", "health", "--server", "http://127.0.0.1:8080" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  minio:
-    image: quay.io/minio/minio:latest
-    profiles:
-      - s3
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: shardline
-      MINIO_ROOT_PASSWORD: shardline-dev-password
-    ports:
-      - "127.0.0.1:19000:9000"
-      - "127.0.0.1:19001:9001"
-    volumes:
-      - shardline_minio:/data
-
-  minio-init:
-    image: quay.io/minio/mc:latest
-    profiles:
-      - s3
+  # One-shot migration runner — applies DB schema before shardline starts.
+  db-migrate:
+    image: shardline:local
+    network_mode: host
     depends_on:
-      - minio
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        until mc alias set local http://minio:9000 shardline shardline-dev-password; do
-          sleep 1
-        done
-        mc mb --ignore-existing local/shardline
+      - postgres
+    environment:
+      SHARDLINE_INDEX_POSTGRES_URL: postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline
+      SHARDLINE_TOKEN_SIGNING_KEY: ${SHARDLINE_TOKEN_SIGNING_KEY:-test-signing-key-32-bytes-long!!}
+    command: ["db", "migrate", "up", "--database-url", "postgres://shardline:shardline-dev-password@127.0.0.1:5432/shardline"]
+    restart: "no"
 
 volumes:
   shardline_data:

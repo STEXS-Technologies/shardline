@@ -1,13 +1,3 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    clippy::shadow_unrelated,
-    clippy::let_underscore_must_use,
-    clippy::format_push_string
-)]
-
 //! Test support utilities shared by Shardline workspace crates.
 //!
 //! This crate only contains helpers that are useful across crate boundaries. It
@@ -84,11 +74,12 @@ impl TempStorage {
     /// never happen in practice).
     #[must_use]
     pub fn new() -> Self {
+        #[allow(clippy::expect_used)]
         let temp = tempfile::tempdir().expect("failed to create temporary directory");
+        #[allow(clippy::expect_used)]
         let chunk_size = NonZeroUsize::new(4).expect("NonZeroUsize::new(4) should always succeed");
         Self { temp, chunk_size }
     }
-
     /// Returns the temporary directory path.
     #[must_use]
     pub fn path(&self) -> &Path {

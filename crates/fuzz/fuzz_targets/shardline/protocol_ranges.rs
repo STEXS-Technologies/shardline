@@ -61,7 +61,9 @@ fuzz_target!(|data: (u64, u64, u32, u32, u64, String)| {
         assert_eq!(first_parse.is_ok(), second_parse.is_ok());
         match (&first_parse, &second_parse) {
             (Ok(left), Ok(right)) => assert_eq!(left, right),
-            (Err(left), Err(right)) => assert_eq!(left, right),
+            (Err(left), Err(right)) => {
+                assert_eq!(format!("{left:?}"), format!("{right:?}"))
+            }
             _ => return,
         }
 
@@ -81,10 +83,8 @@ fuzz_target!(|data: (u64, u64, u32, u32, u64, String)| {
         }
 
         let canonical_header = format!("bytes={}-{}", range.start(), range.end_inclusive());
-        assert_eq!(
-            parse_http_byte_range(&canonical_header, resource_length),
-            Ok(range)
-        );
+        let reparsed = parse_http_byte_range(&canonical_header, resource_length);
+        assert!(matches!(reparsed, Ok(r) if r == range));
 
         let Some(last_byte) = resource_length.checked_sub(1) else {
             continue;
@@ -96,6 +96,6 @@ fuzz_target!(|data: (u64, u64, u32, u32, u64, String)| {
         let Ok(expected_open_ended) = expected_open_ended else {
             continue;
         };
-        assert_eq!(open_ended_range, Ok(expected_open_ended));
+        assert!(matches!(open_ended_range, Ok(r) if r == expected_open_ended));
     }
 });
