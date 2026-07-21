@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shardline-validation"
+readme = "../../README.md"
+description = "Validation utilities for Shardline storage and protocol types."
 publish = true
 
 [dependencies]

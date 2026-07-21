@@ -33,6 +33,7 @@ jobs:
         shardline-xet-core
         shardline-metrics
         shardline-auth
+        shardline-validation
         shardline-test-support
         shardline-storage
         shardline-cache
