@@ -3,6 +3,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use reqwest::Client;
 use sha2::Digest;
+use shardline_protocol::SecretString;
 use shardline_server::{ServerConfig, ServerFrontend, ServerRole, serve_with_listener};
 use tokio::net::TcpListener;
 
@@ -7331,7 +7332,7 @@ async fn s3_backend_lfs_round_trip() {
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
     let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
@@ -7397,7 +7398,7 @@ async fn s3_backend_dedup_cross_frontend() {
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
     let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
@@ -9696,7 +9697,7 @@ async fn s3_backend_oci_session_upload() {
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
     let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
@@ -9780,7 +9781,7 @@ async fn s3_backend_oci_session_abort() {
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key, s3.secret_key, s3.session_token)
+        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
     let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())

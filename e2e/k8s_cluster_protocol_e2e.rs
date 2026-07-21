@@ -29,6 +29,7 @@ use shardline_server::{
     ServerError, ServerStatsResponse, XetCasTokenResponse, apply_database_migrations,
     serve_with_listener,
 };
+use shardline_protocol::SecretString;
 use shardline_storage::{
     ObjectPrefix, ObjectStore, S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
 };
@@ -102,7 +103,7 @@ impl ClusterConfig {
             redis_url: var("SHARDLINE_K8S_E2E_REDIS_URL").ok()?,
             s3_config: S3ObjectStoreConfig::new(bucket, region)
                 .with_endpoint(endpoint)
-                .with_credentials(access_key_id, secret_access_key, None)
+                .with_credentials(access_key_id.map(SecretString::new), secret_access_key.map(SecretString::new), None)
                 .with_allow_http(allow_http),
         })
     }
@@ -141,7 +142,7 @@ async fn start_local_cluster_runtime() -> Result<Option<LocalClusterRuntime>, Te
         .ok_or_else(|| ServerE2eInvariantError::new("minio s3 config was unavailable"))?;
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
-        .with_credentials(raw.access_key, raw.secret_key, raw.session_token)
+        .with_credentials(raw.access_key.map(SecretString::new), raw.secret_key.map(SecretString::new), raw.session_token.map(SecretString::new))
         .with_key_prefix(raw.key_prefix.as_deref())
         .with_allow_http(raw.allow_http);
     let metrics_token = b"metrics-token".to_vec();
