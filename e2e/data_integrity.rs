@@ -9473,36 +9473,10 @@ async fn oci_blob_upload_rejects_non_sha256_digest_algorithm() {
     server.abort();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Gap 2: LFS PUT Content-Type rejection
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lfs_put_rejects_wrong_content_type() {
-    let (base_url, server) = start_server().await.unwrap();
-    let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
-    let client = Client::new();
-
-    let content = b"some content";
-    let oid = hex::encode(sha2::Sha256::digest(content));
-
-    let resp = client
-        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "text/plain")
-        .body(content.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        415,
-        "LFS PUT with wrong Content-Type should return 415, got {}",
-        resp.status()
-    );
-
-    server.abort();
-}
+// Gap 2 was: LFS PUT Content-Type rejection
+// Removed because lfs_put_object now explicitly accepts any Content-Type
+// (see the comment in lfs.rs: "The LFS specification does not require a
+// specific Content-Type for object upload").
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Gap 3: LFS multi-chunk PATCH
