@@ -16,7 +16,7 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri,
         header::{CONTENT_LENGTH, CONTENT_TYPE, HOST},
@@ -103,7 +103,7 @@ async fn exercise_git_xet_push_flow() -> Result<(), TestError> {
         b"provider-bootstrap".to_vec(),
         "generic-bridge".to_owned(),
         NonZeroU64::new(300).ok_or("token ttl")?,
-    )?;
+    )?.with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
     let shardline_server =
         spawn(async move { serve_with_listener(shardline_config, shardline_listener).await });
 
@@ -121,6 +121,7 @@ async fn exercise_git_xet_push_flow() -> Result<(), TestError> {
     let cas_proxy_base_url = format!("http://{cas_proxy_addr}");
     let cas_proxy_router = Router::new()
         .fallback(any(handle_cas_proxy))
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(cas_proxy_state.clone());
     let cas_proxy_server =
         spawn(async move { serve_http(cas_proxy_listener, cas_proxy_router).await });
@@ -358,7 +359,7 @@ async fn exercise_git_xet_clone_flow() -> Result<(), TestError> {
         b"provider-bootstrap".to_vec(),
         "generic-bridge".to_owned(),
         NonZeroU64::new(300).ok_or("token ttl")?,
-    )?;
+    )?.with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
     let shardline_server =
         spawn(async move { serve_with_listener(shardline_config, shardline_listener).await });
 
@@ -376,6 +377,7 @@ async fn exercise_git_xet_clone_flow() -> Result<(), TestError> {
     let cas_proxy_base_url = format!("http://{cas_proxy_addr}");
     let cas_proxy_router = Router::new()
         .fallback(any(handle_cas_proxy))
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(cas_proxy_state.clone());
     let cas_proxy_server =
         spawn(async move { serve_http(cas_proxy_listener, cas_proxy_router).await });
@@ -773,7 +775,7 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
         b"provider-bootstrap".to_vec(),
         "generic-bridge".to_owned(),
         NonZeroU64::new(300).ok_or("token ttl")?,
-    )?;
+    )?.with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
     let shardline_server =
         spawn(async move { serve_with_listener(shardline_config, shardline_listener).await });
 
@@ -791,6 +793,7 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
     let cas_proxy_base_url = format!("http://{cas_proxy_addr}");
     let cas_proxy_router = Router::new()
         .fallback(any(handle_cas_proxy))
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(cas_proxy_state.clone());
     let cas_proxy_server =
         spawn(async move { serve_http(cas_proxy_listener, cas_proxy_router).await });

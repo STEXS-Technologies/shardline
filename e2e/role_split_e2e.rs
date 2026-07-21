@@ -13,7 +13,7 @@ use std::{
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, Response, StatusCode, Uri},
     routing::any,
     serve as serve_http,
@@ -342,6 +342,7 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     let proxy_router =
         Router::new()
             .fallback(any(handle_split_proxy))
+            .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
             .with_state(SplitProxyState {
                 access_token: write_token.clone(),
                 api_base_url,
