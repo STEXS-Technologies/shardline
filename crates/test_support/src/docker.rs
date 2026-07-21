@@ -713,6 +713,13 @@ fn generate_redis_tls_identity(
     let request = directory.join(format!("{identity}.csr"));
     let cert = directory.join(format!("{identity}-cert.pem"));
     let subject = format!("/CN=shardline-redis-test-{identity}");
+    let ext_file = directory.join(format!("{identity}.ext"));
+    fs::write(
+        &ext_file,
+        format!(
+            "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n"
+        ),
+    )?;
     let mut request_command = Command::new("openssl");
     request_command
         .arg("req")
@@ -751,6 +758,8 @@ fn generate_redis_tls_identity(
             .arg("-sha256")
             .arg("-copy_extensions")
             .arg("copy")
+            .arg("-extfile")
+            .arg(&ext_file)
             .arg("-out")
             .arg(cert),
         "sign redis TLS certificate",
