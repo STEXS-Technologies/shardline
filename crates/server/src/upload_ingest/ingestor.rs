@@ -1,3 +1,4 @@
+use std::mem;
 use std::num::NonZeroUsize;
 
 use bytes::BytesMut;
@@ -233,7 +234,7 @@ impl FileUploadIngestor {
         object_store: &ServerObjectStore,
     ) -> Result<(), ServerError> {
         let replacement = self.take_pending_buffer();
-        let chunk = std::mem::replace(&mut self.pending, replacement);
+        let chunk = mem::replace(&mut self.pending, replacement);
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -344,7 +345,7 @@ impl FileUploadIngestor {
                 .sort_unstable_by_key(|outcome| outcome.sequence);
         }
         let mut expected_offset = 0_u64;
-        let completed_chunks = std::mem::take(&mut self.completed_chunks);
+        let completed_chunks = mem::take(&mut self.completed_chunks);
         for outcome in completed_chunks {
             if outcome.offset != expected_offset {
                 return Err(ServerError::Overflow);

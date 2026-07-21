@@ -1,10 +1,10 @@
 use std::{
     str::FromStr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
@@ -36,7 +36,7 @@ pub struct OidcProvider {
     /// on synchronous mutexes in async code for details.
     cached_keys: Arc<Mutex<Option<CachedJwks>>>,
     jwks_url: String,
-    _background_handle: Arc<std::sync::OnceLock<tokio::task::JoinHandle<()>>>,
+    _background_handle: Arc<OnceLock<tokio::task::JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -150,7 +150,7 @@ impl OidcProvider {
             audience,
             cached_keys,
             jwks_url,
-            _background_handle: Arc::new(std::sync::OnceLock::new()),
+            _background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
 
@@ -262,8 +262,8 @@ impl OidcProvider {
 
         let payload = token_data.claims;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
@@ -767,7 +767,7 @@ mod tests {
             audience,
             cached_keys: Arc::new(Mutex::new(cached)),
             jwks_url: format!("{issuer}/.well-known/jwks"),
-            _background_handle: Arc::new(std::sync::OnceLock::new()),
+            _background_handle: Arc::new(OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }

@@ -274,7 +274,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     // Validate Hub frontend requires auth configuration.
     if config
         .server_frontends()
-        .contains(&crate::server_frontend::ServerFrontend::Hub)
+        .contains(&ServerFrontend::Hub)
         && config.token_signing_key().is_none()
         && auth_provider == AuthProviderKind::Local
     {

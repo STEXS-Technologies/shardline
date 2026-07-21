@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, path::PathBuf};
+use std::{io::{Error, ErrorKind}, num::NonZeroUsize, path::{Path, PathBuf}};
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
@@ -99,8 +99,8 @@ impl ServerBackend {
             // Probe Postgres metadata — fail startup if unreachable (metadata is critical)
             backend.probe_metadata().await.map_err(|e| {
                 tracing::error!(reason = %e, "startup probe: postgres metadata FAILED");
-                ServerError::Io(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionRefused,
+                ServerError::Io(Error::new(
+                    ErrorKind::ConnectionRefused,
                     e,
                 ))
             })?;
@@ -123,7 +123,7 @@ impl ServerBackend {
         backend.probe_metadata().map_err(|e| {
             tracing::error!(reason = %e, "startup probe: sqlite metadata FAILED");
             ServerError::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
+                ErrorKind::ConnectionRefused,
                 e,
             ))
         })?;
@@ -393,7 +393,7 @@ impl ServerBackend {
         &self,
         object_key: &ObjectKey,
         digest_hex: &str,
-        path: &std::path::Path,
+        path: &Path,
         integrity: &shardline_storage::ObjectIntegrity,
     ) -> Result<PutOutcome, ServerError> {
         match self {
@@ -704,7 +704,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::TransferLimiterClosed
         | ServerError::TransferLimiterTimedOut
         | ServerError::SigningKeyError(_)) => {
-            OciAdapterError::Io(std::io::Error::other(other.to_string()))
+            OciAdapterError::Io(Error::other(other.to_string()))
         }
     }
 }

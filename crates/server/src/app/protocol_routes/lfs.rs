@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 
 use axum::{
     Json,
@@ -313,7 +315,7 @@ pub(crate) async fn lfs_put_object(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let _stored = state
         .backend
@@ -412,7 +414,7 @@ pub(crate) async fn lfs_patch_object(
             .into_response());
     }
 
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let mut body_reader =
         RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let chunk_bytes: Vec<u8> = read_body_to_bytes(&mut body_reader).await?;
@@ -451,10 +453,10 @@ pub(crate) async fn lfs_patch_object(
         let _lock = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = root_dir.join("tmp").join("lfs-patch");
-        std::fs::create_dir_all(&tmp_dir).ok();
+        fs::create_dir_all(&tmp_dir).ok();
         let tmp_path = tmp_dir.join(&oid_for_closure);
         {
-            let mut file = std::fs::OpenOptions::new()
+            let mut file = fs::OpenOptions::new()
                 .create(true)
                 .truncate(false)
                 .read(true)
@@ -465,8 +467,8 @@ pub(crate) async fn lfs_patch_object(
         }
 
         if is_final {
-            let assembled: Vec<u8> = std::fs::read(&tmp_path)?;
-            drop(std::fs::remove_file(&tmp_path));
+            let assembled: Vec<u8> = fs::read(&tmp_path)?;
+            drop(fs::remove_file(&tmp_path));
             let _stored = backend.put_sha256_addressed_object_bytes_if_absent(
                 &object_key_for_closure,
                 &oid_for_closure,

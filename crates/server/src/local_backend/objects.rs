@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use shardline_protocol::ByteRange;
 use shardline_storage::{
     DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix,
@@ -83,7 +85,7 @@ impl LocalBackend {
         &self,
         object_key: &ObjectKey,
         digest_hex: &str,
-        path: &std::path::Path,
+        path: &Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, ServerError> {
         tokio::task::block_in_place(|| {

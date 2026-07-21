@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use axum::body::Bytes;
 use shardline_protocol::RepositoryScope;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
@@ -139,7 +141,7 @@ impl super::PostgresBackend {
         &self,
         object_key: &ObjectKey,
         digest_hex: &str,
-        path: &std::path::Path,
+        path: &Path,
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, ServerError> {
         let canonical_key = shared_sha256_object_key(digest_hex)?;

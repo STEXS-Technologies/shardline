@@ -3,6 +3,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     thread::available_parallelism,
+    time::Duration,
 };
 
 use shardline_cache::RedisTlsConfig;
@@ -58,7 +59,7 @@ pub struct ServerConfig {
     pub(crate) oci: OciConfig,
     pub(crate) cache: CacheConfig,
     pub(crate) provider: ProviderConfig,
-    pub(crate) shutdown_timeout: Option<std::time::Duration>,
+    pub(crate) shutdown_timeout: Option<Duration>,
 }
 
 impl ServerConfig {
@@ -516,7 +517,7 @@ impl ServerConfig {
     /// connections to finish after a shutdown signal before force-closing.
     /// `None` means wait indefinitely.
     #[must_use]
-    pub const fn shutdown_timeout(&self) -> Option<std::time::Duration> {
+    pub const fn shutdown_timeout(&self) -> Option<Duration> {
         self.shutdown_timeout
     }
 
@@ -526,7 +527,7 @@ impl ServerConfig {
     /// connections and waits up to `timeout` for in-flight requests to
     /// complete.  Connections that outlive the timeout are force-closed.
     #[must_use]
-    pub const fn with_shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
+    pub const fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = Some(timeout);
         self
     }

@@ -1,3 +1,6 @@
+use std::fmt;
+use std::sync::Arc;
+
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use shardline_protocol::{TokenClaims, TokenCodecError, TokenScope};
 use shardline_server_core::{AuthError, AuthProvider};
@@ -30,7 +33,7 @@ impl AuthContext {
 /// Bearer-token verifier backed by a pluggable [`AuthProvider`].
 #[derive(Clone)]
 pub struct ServerAuth {
-    provider: std::sync::Arc<dyn AuthProvider>,
+    provider: Arc<dyn AuthProvider>,
 }
 
 impl ServerAuth {
@@ -43,7 +46,7 @@ impl ServerAuth {
     pub fn new(signing_key: &[u8]) -> Result<Self, ServerError> {
         let provider = shardline_server_core::auth::LocalHmacProvider::new(signing_key)?;
         Ok(Self {
-            provider: std::sync::Arc::new(provider),
+            provider: Arc::new(provider),
         })
     }
 
@@ -51,7 +54,7 @@ impl ServerAuth {
     #[must_use]
     pub fn from_provider(provider: Box<dyn AuthProvider>) -> Self {
         Self {
-            provider: std::sync::Arc::from(provider),
+            provider: Arc::from(provider),
         }
     }
 
@@ -63,7 +66,7 @@ impl ServerAuth {
 
     /// Returns a clone of the underlying [`AuthProvider`] as an [`Arc`].
     #[must_use]
-    pub fn provider_arc(&self) -> std::sync::Arc<dyn AuthProvider> {
+    pub fn provider_arc(&self) -> Arc<dyn AuthProvider> {
         self.provider.clone()
     }
 
@@ -94,8 +97,8 @@ impl ServerAuth {
     }
 }
 
-impl std::fmt::Debug for ServerAuth {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ServerAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServerAuth")
             .field("provider", &"<dyn AuthProvider>")
             .finish()

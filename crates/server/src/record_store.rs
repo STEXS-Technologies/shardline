@@ -1,8 +1,10 @@
+use crate::ServerError;
+
 pub(crate) use shardline_index::LocalRecordStore;
 
 pub(crate) fn parse_stored_file_record_bytes(
     bytes: &[u8],
-) -> Result<shardline_index::FileRecord, crate::ServerError> {
+) -> Result<shardline_index::FileRecord, ServerError> {
     Ok(shardline_server_core::parse_stored_file_record_bytes(
         bytes,
     )?)
