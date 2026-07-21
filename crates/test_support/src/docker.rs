@@ -716,9 +716,7 @@ fn generate_redis_tls_identity(
     let ext_file = directory.join(format!("{identity}.ext"));
     fs::write(
         &ext_file,
-        format!(
-            "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n"
-        ),
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n",
     )?;
     let mut request_command = Command::new("openssl");
     request_command
