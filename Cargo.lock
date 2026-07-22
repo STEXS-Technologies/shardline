@@ -3174,6 +3174,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "dotenvy",
  "hex",
  "libc",
  "reqwest 0.12.28",

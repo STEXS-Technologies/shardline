@@ -1,6 +1,7 @@
-use std::{ffi::OsString, num::NonZeroUsize};
+use std::{ffi::OsString, num::NonZeroUsize, path::Path};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
+use dotenvy::from_filename;
 use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
@@ -34,6 +35,17 @@ impl CliCommand {
         }
 
         let definition = CliDefinition::try_parse_from(args).map_err(CliParseError::from)?;
+
+        // Load the --env-file into the process environment before any
+        // configuration resolution, so env vars referenced in config files
+        // or by the server are available.
+        if let Some(env_path) = &definition.env_file {
+            let env_path = env_path.as_os_str();
+            if Path::new(env_path).is_file() {
+                let _ignored = from_filename(env_path);
+            }
+        }
+
         Self::try_from(definition)
     }
 
