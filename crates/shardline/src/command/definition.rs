@@ -30,6 +30,11 @@ pub(crate) struct CliDefinition {
     /// available to the server and all subcommands.
     #[arg(long = "env-file", value_name = "PATH", global = true)]
     pub(crate) env_file: Option<PathBuf>,
+    /// Path to a shardline.toml configuration file.
+    /// When omitted, shardline.toml is auto-detected from the current
+    /// directory, ~/.config/shardline/, and /etc/shardline/.
+    #[arg(short = 'c', long = "config", value_name = "FILE", global = true)]
+    pub(crate) config: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: CliDefinitionCommand,
 }
