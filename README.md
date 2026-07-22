@@ -7,7 +7,7 @@
 
 Shardline is a self-hostable content-addressed storage (CAS) server. It accepts immutable object uploads, deduplicates content, and serves range-aware downloads. Run it standalone or pair it with GitHub, GitLab, or Gitea for repository-scoped storage.
 
-The first open-source, production-ready, multi-protocol CAS server with a Xet frontend. Other Xet-compatible implementations exist as proof-of-concepts or single-protocol servers. Shardline combines Xet with Git LFS, Bazel HTTP remote cache, and OCI Distribution in a self-hostable, Kubernetes-ready deployment with full operational tooling.
+Shardline combines a Xet CAS frontend with Git LFS, Bazel HTTP remote cache, OCI Distribution, and HuggingFace Hub API support in a self-hostable, Kubernetes-ready deployment with full operational tooling.
 
 ## What it does
 
