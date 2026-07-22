@@ -14,7 +14,7 @@ The first open-source, production-ready, multi-protocol CAS server with a Xet fr
 - **Store and deduplicate** any binary content — datasets, model weights, build artifacts, media
 - **Multiple protocols** — Xet (default), Git LFS, Bazel HTTP remote cache, OCI Distribution
 - **HuggingFace Hub API** — drop-in alternative for `huggingface-cli` uploads and downloads
-- **Pluggable auth** — local Ed25519, OIDC, JWKS, or passthrough provider adapters
+- **Pluggable auth** — local HMAC, OIDC, JWKS, or passthrough provider adapters
 - **Self-hosted or cloud** — local filesystem, S3-compatible storage, Postgres metadata
 - **Production-ready** — health checks, migrations, integrity verification, garbage collection, backups
 - **Provider integration** — optional webhooks and token issuance for GitHub, GitLab, Gitea, Codeberg
@@ -69,7 +69,7 @@ All profiles run providerless by default. Provider integration is optional.
 | Guide | Description |
 |-------|-------------|
 | [Deployment](docs/DEPLOYMENT.md) | Installation and configuration |
-| [Authentication](docs/AUTHENTICATION.md) | Pluggable auth providers (Ed25519, OIDC, JWKS, passthrough) |
+| [Authentication](docs/AUTHENTICATION.md) | Pluggable auth providers (HMAC, OIDC, JWKS, passthrough) |
 | [HuggingFace Hub API](docs/HUGGINGFACE_HUB_API.md) | Hub API compatibility for huggingface-cli |
 | [Operations](docs/OPERATIONS.md) | Day-to-day operations runbook |
 | [CLI Reference](docs/CLI.md) | All commands and flags |

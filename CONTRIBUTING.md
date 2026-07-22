@@ -5,7 +5,7 @@ reliability, and release standards intact.
 
 ## Scope
 
-This repository is a Rust workspace with the main CLI crate at `crates/cli` (published
+This repository is a Rust workspace with the main CLI crate at `crates/shardline` (published
 as `shardline`).
 
 Primary references:
@@ -108,7 +108,7 @@ PRs must include:
 
 For cross-crate, protocol, or deployment-impacting changes:
 
-- Explicitly list affected crates (`protocol`, `storage`, `index`, `cas`, `cache`, `vcs`, `server`, `cli`).
+- Explicitly list affected crates (`shardline-protocol`, `shardline-storage`, `shardline-index`, `shardline-cas`, `shardline-cache`, `shardline-vcs`, `shardline-server`, `shardline`).
 - Explain cross-crate interaction changes.
 - Note protocol, migration, or rollback implications if any.
 - Call out security or operator impact when behavior changes at runtime boundaries.
@@ -211,8 +211,8 @@ Use `cargo make coverage-html` for the local HTML report.
 
 Follow the current project constraints:
 
-- Keep crate boundaries intentional: `protocol`, `storage`, `index`, `cache`, `cas`,
-  `vcs`, `server`, and `cli` should keep their current responsibilities clear.
+- Keep crate boundaries intentional: `shardline-protocol`, `shardline-storage`, `shardline-index`, `shardline-cache`, `shardline-cas`,
+  `shardline-vcs`, `shardline-server`, and `shardline` should keep their current responsibilities clear.
 - Keep public contracts explicit and type-driven.
 - Prefer validated constructors and domain newtypes for invariants.
 - Use typed enum errors (`thiserror`) instead of stringly error categories.
