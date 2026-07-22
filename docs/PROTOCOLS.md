@@ -15,19 +15,19 @@ are shared, while each client-facing protocol lives behind a bounded frontend su
 
 ## Starting the Server
 
-Shardline enables protocol frontends through the `--frontends` CLI flag.
+Shardline enables protocol frontends through the `--frontend` CLI flag.
 The default is `xet`.
 
 Start all currently implemented frontends:
 
 ```bash
-shardline serve --role all --frontends xet,lfs,bazel-http,oci,hub
+shardline serve --role all --frontend xet,lfs,bazel-http,oci,hub
 ```
 
 Start only the new non-Xet frontends:
 
 ```bash
-shardline serve --role all --frontends lfs,bazel-http,oci
+shardline serve --role all --frontend lfs,bazel-http,oci
 ```
 
 When bearer-token auth is enabled, all enabled frontends use the same repository-scoped
