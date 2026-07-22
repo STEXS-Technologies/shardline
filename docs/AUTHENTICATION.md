@@ -23,7 +23,7 @@ pub trait AuthProvider: Send + Sync {
 
 | Adapter | Value | Description |
 |---------|-------|-------------|
-| **Local Ed25519** | `local` | Default. Signs and verifies tokens using a shared HMAC-SHA256 signing key (`SHARDLINE_TOKEN_SIGNING_KEY` or `_FILE`). Supports both verification and minting. |
+| **Local HMAC** | `local` | Default. Signs and verifies tokens using a shared HMAC-SHA256 signing key (`SHARDLINE_TOKEN_SIGNING_KEY` or `_FILE`). Supports both verification and minting. |
 | **OIDC** | `oidc` | Validates tokens against an OpenID Connect issuer. Fetches signing keys from the issuer's discovery endpoint. Verification only; does not support token minting. |
 | **JWKS** | `jwks` | Validates tokens against a static JWKS endpoint. Keys are cached with a configurable TTL. Verification only; does not support token minting. |
 | **Passthrough** | `passthrough` | Trust-all provider for development. Any non-empty token is accepted with full write scope. Does not support token minting. **Do not use in production.** |
@@ -38,7 +38,7 @@ SHARDLINE_AUTH_OIDC_ISSUER=https://accounts.google.com   # required when provide
 SHARDLINE_AUTH_JWKS_URL=https://example.com/.well-known/jwks.json  # required when provider=jwks
 ```
 
-### Local Ed25519
+### Local HMAC
 
 The default provider. Requires a signing key for token verification and minting:
 

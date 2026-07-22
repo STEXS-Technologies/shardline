@@ -5,7 +5,7 @@ reliability, and release standards intact.
 
 ## Scope
 
-This repository is a Rust workspace with the main CLI crate at `crates/cli` (published
+This repository is a Rust workspace with the main CLI crate at `crates/shardline` (published
 as `shardline`).
 
 Primary references:

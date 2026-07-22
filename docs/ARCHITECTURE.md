@@ -196,7 +196,7 @@ object upload, blob transfer, cache object transfer, and Xet xorb range transfer
 
 ## Source Layout
 
-The workspace contains 20 crates organized in a layered dependency graph.
+The workspace contains 22 product crates organized in a layered dependency graph.
 
 ```mermaid
 flowchart TD
@@ -357,14 +357,14 @@ model on the data plane.
 
 ## Authentication
 
-The `AuthProvider` trait in `server-core` defines the authorization boundary:
+The `AuthProvider` trait (defined in `shardline-auth`, re-exported from `shardline-server-core`) defines the authorization boundary:
 
 - `verify(token) -> AuthContext` — validate a bearer token and extract identity
 - `mint(context, repo_scope, ttl) -> String` — sign a new scoped token
 
 Four adapter implementations are bundled:
 
-- **Ed25519**: local key pair for providerless deployments
+- **LocalHmacProvider**: local HMAC-SHA256 signing key for providerless deployments
 - **OIDC**: OpenID Connect discovery for cloud identity providers
 - **JWKS**: JSON Web Key Set for multi-issuer environments
 - **Passthrough**: trusts an upstream proxy's `Authorization` header
@@ -408,7 +408,7 @@ Token-gated in production via `SHARDLINE_METRICS_TOKEN_FILE`.
 
 ## Database Migrations
 
-Shardline ships 7 bundled migrations applied via `shardline db migrate up`:
+Shardline ships 13 bundled migrations applied via `shardline db migrate up`:
 
 1. `metadata_store` — core index and record tables
 2. `retention_holds` — GC retention hold tracking
@@ -417,6 +417,12 @@ Shardline ships 7 bundled migrations applied via `shardline db migrate up`:
 5. `provider_repository_states` — provider repo lifecycle state
 6. `provider_repository_reconciliation` — provider reconciliation tracking
 7. `hub_api` — Hub API metadata (repos, revisions, file entries, LFS objects)
+8. `hub_inline_content` — Hub inline content storage
+9. `hub_webhooks` — Hub webhook delivery tracking
+10. `hub_refs` — Hub reference management (branches, tags)
+11. `drop_inline_content` — remove inline content column
+12. `drop_lfs_objects` — remove legacy LFS objects table
+13. `fix_indexes` — database index optimizations
 
 SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`.
 Migrations are stored in `migrations/` (Postgres) and

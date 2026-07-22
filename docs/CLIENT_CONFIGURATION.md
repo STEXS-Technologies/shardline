@@ -44,7 +44,7 @@ Quick verification:
 
 ## Token Delivery
 
-Shardline CLI commands read the bearer token from `SHARDLINE_BEARER_TOKEN`.
+Shardline CLI commands read the bearer token from `SHARDLINE_TOKEN`.
 
 Hosted provider integrations should inject repository-scoped tokens without requiring
 users to mint them manually.
