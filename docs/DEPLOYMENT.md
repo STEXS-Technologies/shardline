@@ -655,7 +655,7 @@ huggingface-cli download my-org/my-model
 ### Hub API Authentication
 
 Hub API routes use the same `AuthProvider` trait as CAS routes. When an auth provider
-is configured (OIDC, JWKS, or Ed25519), Hub API bearer tokens are validated against it.
+is configured (OIDC, JWKS, or Local HMAC), Hub API bearer tokens are validated against it.
 
 When no auth provider is configured (providerless mode), Hub API routes accept all
 requests anonymously.
@@ -665,15 +665,15 @@ requests anonymously.
 Shardline supports pluggable authentication via the `SHARDLINE_AUTH_PROVIDER` variable:
 
 ```text
-SHARDLINE_AUTH_PROVIDER=local          # Ed25519 key pair (default)
+SHARDLINE_AUTH_PROVIDER=local          # HMAC-SHA256 signing key (default)
 SHARDLINE_AUTH_PROVIDER=oidc           # OpenID Connect
 SHARDLINE_AUTH_PROVIDER=jwks           # JSON Web Key Set
 SHARDLINE_AUTH_PROVIDER=passthrough    # Trust upstream proxy
 ```
 
-### Local (Ed25519)
+### Local (HMAC)
 
-Default for providerless deployments. Tokens are signed with a local key pair.
+Default for providerless deployments. Tokens are signed with a local HMAC-SHA256 signing key.
 
 ```text
 SHARDLINE_TOKEN_SIGNING_KEY=change-me-for-local-only
