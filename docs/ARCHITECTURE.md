@@ -154,13 +154,22 @@ flowchart TD
     Root --> Rebuild[index rebuild]
     Root --> Gc[gc]
     Root --> Bench[bench]
+    Root --> Repair[repair]
+    Root --> Backup[backup]
+    Root --> Storage[storage migrate]
+    Root --> Db[db migrate]
+    Root --> Hold[hold]
+    Root --> Health[health]
+    Root --> Providerless[providerless setup]
+    Root --> Completion[completion]
+    Root --> Manpage[manpage]
   end
 
   style Canvas fill:#f8f4ec,stroke:#d7c9b2,color:#1f2937;
-  classDef root fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
-  classDef command fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
+  style root fill:#f6efe8,stroke:#c7b8a3,color:#1f2937;
+  style command fill:#dcecf8,stroke:#8db7d8,color:#1f2937;
   class Root root;
-  class Serve,Check,Admin,Fsck,Rebuild,Gc,Bench command;
+  class Serve,Check,Admin,Fsck,Rebuild,Gc,Bench,Repair,Backup,Storage,Db,Hold,Health,Providerless,Completion,Manpage command;
   linkStyle default stroke:#111827,stroke-width:1.5px;
 ```
 
@@ -237,43 +246,43 @@ flowchart TD
 
 ### Layer 0 — Leaf crates (no workspace deps)
 
-- `protocol`: wire-level types — `ShardlineHash`, `ByteRange`, `TokenSigner`,
+- `shardline-protocol`: wire-level types — `ShardlineHash`, `ByteRange`, `TokenSigner`,
   `RepositoryScope`, `SecretBytes`
-- `metrics`: shared Prometheus metrics registry (`CasMetrics`) with global singleton
+- `shardline-metrics`: shared Prometheus metrics registry (`CasMetrics`) with global singleton
 
 ### Layer 1 — Foundation
 
-- `storage`: content-addressed `ObjectStore` trait + `LocalObjectStore` and `S3ObjectStore`
-- `vcs`: provider adapters (`ProviderAdapter` trait) for GitHub, GitLab, Gitea, Codeberg
-- `cache`: reconstruction-cache trait + memory, Redis, and disabled adapters
-- `test_support`: shared test helpers (`DockerLocalStack`)
+- `shardline-storage`: content-addressed `ObjectStore` trait + `LocalObjectStore` and `S3ObjectStore`
+- `shardline-vcs`: provider adapters (`ProviderAdapter` trait) for GitHub, GitLab, Gitea, Codeberg
+- `shardline-cache`: reconstruction-cache trait + memory, Redis, and disabled adapters
+- `shardline-test-support`: shared test helpers (`DockerLocalStack`)
 
 ### Layer 2 — Metadata and mapping
 
-- `index`: metadata index and record-storage contracts + SQLite, Postgres, and memory
+- `shardline-index`: metadata index and record-storage contracts + SQLite, Postgres, and memory
   adapters; Hub API tables (`HubStore` trait)
-- `protocol_adapters`: LFS and Bazel object-key mapping functions
-- `server_core`: shared server types — `AuthProvider` trait, `ServerObjectStore`,
+- `shardline-protocol-adapters`: LFS and Bazel object-key mapping functions
+- `shardline-server-core`: shared server types — `AuthProvider` trait, `ServerObjectStore`,
   `ShardMetadataLimits`
-- `cas`: CAS coordinator composition tying index + object store together
+- `shardline-cas`: CAS coordinator composition tying index + object store together
 
 ### Layer 3 — Protocol adapters
 
-- `xet_adapter`: xorb/shard parsing, reconstruction response building, upload storage
-- `hub_api`: HuggingFace Hub API compatibility — 15 REST routes + Git Smart HTTP protocol
-- `oci_adapter`: OCI Distribution protocol — upload sessions, manifest/blob keys
+- `shardline-xet-adapter`: xorb/shard parsing, reconstruction response building, upload storage
+- `shardline-hub-api`: HuggingFace Hub API compatibility — 15 REST routes + Git Smart HTTP protocol
+- `shardline-oci-adapter`: OCI Distribution protocol — upload sessions, manifest/blob keys
 
 ### Layer 4 — Lifecycle services
 
-- `fsck`: storage integrity checking (lifecycle, records, shards, orphans)
-- `gc`: garbage collection with quarantine, retention, and sweep
-- `rebuild`: metadata index rebuild from stored objects
-- `provider_events`: webhook event processing and metadata mutations
+- `shardline-fsck`: storage integrity checking (lifecycle, records, shards, orphans)
+- `shardline-gc`: garbage collection with quarantine, retention, and sweep
+- `shardline-rebuild`: metadata index rebuild from stored objects
+- `shardline-provider-events`: webhook event processing and metadata mutations
 
 ### Layer 5 — Integration surface
 
-- `server`: HTTP server, frontend routing, migrations, all protocol frontends
-- `cli`: operator binary (`shardline serve`, `fsck`, `gc`, `rebuild`, `bench`)
+- `shardline-server`: HTTP server, frontend routing, migrations, all protocol frontends
+- `shardline`: operator binary (serve, admin, fsck, gc, rebuild, repair, backup, storage migrate, bench, health, and more)
 
 ### Layer 6 — Test infrastructure
 

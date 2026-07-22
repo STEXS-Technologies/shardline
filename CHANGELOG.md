@@ -53,7 +53,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 
 ### Changed
 
-- **Modularized `local_backend`**: split `crates/server/src/local_backend.rs` into focused domain modules (`b62ec09`)
+- **Modularized `local_backend`**: split `crates/shardline-server/src/local_backend/` into focused domain modules (`b62ec09`)
 - **LLVM source-based coverage** via `cargo-llvm-cov` with CI enforcement and a line-coverage ratchet (`0997dea`)
 - **Trait splits**: `RecordStore` / `HubStore` and `IndexStore` god traits split into focused sub-traits (parallel read/write, metadata, lifecycle) (`a19cbb9`)
 - **Split `ServerConfig`**: removed dual-impl pattern, cleaned public re-exports (`3d0d72a`)
