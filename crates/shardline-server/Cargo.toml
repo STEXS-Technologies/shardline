@@ -62,6 +62,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+dotenvy.workspace = true
 criterion = { workspace = true, features = ["async_tokio", "cargo_bench_support"] }
 hmac.workspace = true
 redis = { workspace = true, features = ["tokio-rustls-comp"] }
