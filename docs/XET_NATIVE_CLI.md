@@ -424,7 +424,7 @@ deduplicates at the chunk level automatically.
 
 ## Crate Impact
 
-The `xet` subcommand lives in `crates/cli/src/command/xet.rs` alongside the existing
+The `xet` subcommand lives in `crates/shardline/src/command/xet.rs` alongside the existing
 operator commands. No new crate is needed. The implementation draws on existing
 workspace crates as libraries:
 
@@ -508,7 +508,7 @@ separate binary.
 A minimal working implementation follows these phases:
 
 **Phase 1 — Read-only CLI (download)**
-- Add `xet` subcommand to `crates/cli/src/command/` with clap command tree.
+- Add `xet` subcommand to `crates/shardline/src/command/` with clap command tree.
 - Implement token issuance (read token from server).
 - Implement xorb download and chunk reconstruction.
 - Implement `cat` (stream reconstructed file to stdout).

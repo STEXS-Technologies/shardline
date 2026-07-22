@@ -206,7 +206,7 @@ flowchart TD
     Leaf["<b>Leaf crates</b><br/>crates/protocol<br/>crates/metrics"]
     Foundation["<b>Foundation</b><br/>crates/storage<br/>crates/vcs<br/>crates/cache<br/>crates/test_support"]
     Middle["<b>Metadata and mapping</b><br/>crates/index<br/>crates/protocol_adapters<br/>crates/server_core<br/>crates/cas"]
-    Adapters["<b>Protocol adapters</b><br/>crates/xet_adapter<br/>crates/hub_api<br/>crates/oci_adapter"]
+    Adapters["<b>Protocol adapters</b><br/>crates/shardline-xet-adapter<br/>crates/shardline-hub-api<br/>crates/shardline-oci-adapter"]
     Lifecycle["<b>Lifecycle services</b><br/>crates/fsck<br/>crates/gc<br/>crates/rebuild<br/>crates/provider_events"]
     Integration["<b>Integration surface</b><br/>crates/server<br/>crates/cli"]
   end
@@ -421,4 +421,4 @@ Shardline ships 7 bundled migrations applied via `shardline db migrate up`:
 
 SQLite uses `BLOB`/`INTEGER`; Postgres uses `BYTEA`/`BOOLEAN`/`BIGINT`.
 Migrations are stored in `migrations/` (Postgres) and
-`crates/index/migrations/` (SQLite).
+`crates/shardline-index/migrations/` (SQLite).
