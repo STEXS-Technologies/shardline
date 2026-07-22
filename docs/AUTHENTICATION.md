@@ -98,7 +98,7 @@ SHARDLINE_AUTH_PROVIDER=passthrough
 ```
 
 Any non-empty bearer token is accepted with full write scope to all repositories.
-This is useful for快速 local testing without minting tokens, but must never be
+This is useful for quick local testing without minting tokens, but must never be
 used in production.
 
 ## Migration Guide

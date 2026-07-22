@@ -1,12 +1,17 @@
 # Xet-Native File Management CLI
 
+> **Status:** Design proposal. The `shardx` CLI described here is not yet implemented.
+> See [issue #19](https://github.com/STEXS-Technologies/shardline/issues/19) for the
+> current tracking issue.
+
 The shardline server implements the Xet CAS protocol for chunk-level deduplicated object
-storage. Existing Xet-compatible clients (`pyxet`, `git-xet`) are deprecated and
-hardcoded to `xethub.com`. There is no maintained standalone CLI for uploading and
-downloading files to and from a generic Xet-protocol server.
+storage. The Hugging Face maintained `git-xet` (huggingface/xet-core) provides a Git LFS
+custom transfer agent that works with any server supporting the Xet protocol, including
+shardline. However, there is no standalone CLI for uploading and downloading files
+outside of a Git workflow.
 
 This document describes a file-transfer entrypoint `shardx` that provides native file
-management against any Xet-compatible server — including shardline itself.
+management against any Xet-compatible server, including shardline itself.
 
 ## Goals
 
@@ -424,7 +429,7 @@ deduplicates at the chunk level automatically.
 
 ## Crate Impact
 
-The `xet` subcommand lives in `crates/shardline/src/command/xet.rs` alongside the existing
+The `xet` subcommand will live in `crates/shardline/src/command/xet.rs` alongside the existing
 operator commands. No new crate is needed. The implementation draws on existing
 workspace crates as libraries:
 

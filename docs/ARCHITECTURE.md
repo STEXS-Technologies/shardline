@@ -215,6 +215,7 @@ flowchart TD
     Leaf["<b>Leaf crates</b><br/>crates/shardline-protocol<br/>crates/shardline-metrics"]
     Foundation["<b>Foundation</b><br/>crates/shardline-storage<br/>crates/shardline-vcs<br/>crates/shardline-cache<br/>crates/shardline-test-support"]
     Middle["<b>Metadata and mapping</b><br/>crates/shardline-index<br/>crates/shardline-protocol-adapters<br/>crates/shardline-server-core<br/>crates/shardline-cas"]
+    Adapters["<b>Protocol adapters</b><br/>crates/shardline-xet-adapter<br/>crates/shardline-hub-api<br/>crates/shardline-oci-adapter"]
     Lifecycle["<b>Lifecycle services</b><br/>crates/shardline-fsck<br/>crates/shardline-gc<br/>crates/shardline-rebuild<br/>crates/shardline-provider-events"]
     Integration["<b>Integration surface</b><br/>crates/shardline-server<br/>crates/shardline"]
   end
@@ -248,6 +249,9 @@ flowchart TD
 
 - `shardline-protocol`: wire-level types — `ShardlineHash`, `ByteRange`, `TokenSigner`,
   `RepositoryScope`, `SecretBytes`
+- `shardline-xet-core`: Merkle hash trees, metadata shard format, xorb object serialization
+- `shardline-auth`: `AuthProvider` trait with `LocalHmacProvider`, `PassthroughProvider`
+- `shardline-validation`: content hash and identifier validation utilities
 - `shardline-metrics`: shared Prometheus metrics registry (`CasMetrics`) with global singleton
 
 ### Layer 1 — Foundation
