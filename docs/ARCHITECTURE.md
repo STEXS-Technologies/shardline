@@ -203,12 +203,11 @@ flowchart TD
   subgraph Canvas[ ]
     direction TD
     Workspace[Workspace]
-    Leaf["<b>Leaf crates</b><br/>crates/protocol<br/>crates/metrics"]
-    Foundation["<b>Foundation</b><br/>crates/storage<br/>crates/vcs<br/>crates/cache<br/>crates/test_support"]
-    Middle["<b>Metadata and mapping</b><br/>crates/index<br/>crates/protocol_adapters<br/>crates/server_core<br/>crates/cas"]
-    Adapters["<b>Protocol adapters</b><br/>crates/shardline-xet-adapter<br/>crates/shardline-hub-api<br/>crates/shardline-oci-adapter"]
-    Lifecycle["<b>Lifecycle services</b><br/>crates/fsck<br/>crates/gc<br/>crates/rebuild<br/>crates/provider_events"]
-    Integration["<b>Integration surface</b><br/>crates/server<br/>crates/cli"]
+    Leaf["<b>Leaf crates</b><br/>crates/shardline-protocol<br/>crates/shardline-metrics"]
+    Foundation["<b>Foundation</b><br/>crates/shardline-storage<br/>crates/shardline-vcs<br/>crates/shardline-cache<br/>crates/shardline-test-support"]
+    Middle["<b>Metadata and mapping</b><br/>crates/shardline-index<br/>crates/shardline-protocol-adapters<br/>crates/shardline-server-core<br/>crates/shardline-cas"]
+    Lifecycle["<b>Lifecycle services</b><br/>crates/shardline-fsck<br/>crates/shardline-gc<br/>crates/shardline-rebuild<br/>crates/shardline-provider-events"]
+    Integration["<b>Integration surface</b><br/>crates/shardline-server<br/>crates/shardline"]
   end
 
   Workspace --> Leaf
