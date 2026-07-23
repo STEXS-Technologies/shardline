@@ -300,6 +300,9 @@ pub enum ServerConfigError {
     /// The public base URL is not a valid URL.
     #[error("SHARDLINE_PUBLIC_BASE_URL is not a valid URL: {0}")]
     InvalidPublicBaseUrl(String),
+    /// A configuration file could not be loaded.
+    #[error("configuration file error: {0}")]
+    ConfigFileError(String),
     /// OIDC auth provider requires an issuer URL.
     #[error("oidc auth provider requires SHARDLINE_AUTH_OIDC_ISSUER")]
     MissingOidcIssuer,

@@ -384,7 +384,8 @@ pub fn load_server_config_from_env_with_toml(
         if let Some(value) = value
             && var(key).is_err()
         {
-            let _ignored = writeln!(buf, "{key}={value}");
+            let interpolated = interpolate_env_vars(&value);
+            let _ignored = writeln!(buf, "{key}={interpolated}");
         }
     };
 
@@ -484,6 +485,31 @@ pub fn load_server_config_from_env_with_toml(
     }
 
     load_server_config_from_env()
+}
+
+/// Interpolates `${VAR_NAME}` patterns in `value` using the current process
+/// environment. Returns the original value when no patterns are found.
+fn interpolate_env_vars(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' && chars.peek() == Some(&'{') {
+            chars.next(); // consume '{'
+            let mut var_name = String::new();
+            for c in chars.by_ref() {
+                if c == '}' {
+                    break;
+                }
+                var_name.push(c);
+            }
+            let resolved = var(&var_name).unwrap_or_else(|_| format!("${{{var_name}}}"));
+            result.push_str(&resolved);
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

@@ -142,7 +142,7 @@ pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
 pub use config::{
     AuthProviderKind, ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
-    file::load_toml_config, file::load_toml_env_overrides, load_server_config_from_env_with_toml,
+    file::load_toml_config, load_server_config_from_env_with_toml,
 };
 pub use database_migration::{
     DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,
