@@ -31,6 +31,10 @@ Minor release adding config file support (shardline.toml + .env), governance doc
 - **Native Xet E2E timeout**: prevented by fixing the split-role e2e test setup (`5eaa444`)
 - **Clippy warnings**: `shadow-unrelated` and other lint warnings resolved (`a71745d`)
 
+### Performance
+
+- No intentional performance changes in this release (focus was config file support and documentation).
+
 ### Documentation
 
 - `CLI.md`: global `--env-file` and `--config` flags documented (`c2977ff`)
