@@ -676,10 +676,12 @@ impl ServerConfig {
     /// # Errors
     ///
     /// Returns [`ServerConfigError::MissingTokenSigningKeyForServedRoutes`] when the
-    /// selected role would expose authenticated CAS routes without a signing key.
+    /// selected role uses the local HMAC provider and would expose authenticated
+    /// CAS routes without a signing key.
     pub const fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
         if self.auth.token_signing_key.is_none()
             && (self.server_role.serves_api() || self.server_role.serves_transfer())
+            && matches!(self.auth.auth_provider, AuthProviderKind::Local)
         {
             return Err(ServerConfigError::MissingTokenSigningKeyForServedRoutes);
         }

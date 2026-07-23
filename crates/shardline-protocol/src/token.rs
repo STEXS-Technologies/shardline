@@ -11,7 +11,7 @@ use crate::{SecretBytes, unix_now_seconds_lossy};
 type TokenMac = Hmac<sha2::Sha256>;
 
 const MAX_TOKEN_COMPONENT_BYTES: usize = 512;
-const MAX_TOKEN_STRING_BYTES: usize = 8192;
+const MAX_TOKEN_STRING_BYTES: usize = 16384;
 const TOKEN_SIGNATURE_HEX_BYTES: usize = 64;
 const MAX_TOKEN_PAYLOAD_HEX_BYTES: usize = MAX_TOKEN_STRING_BYTES - TOKEN_SIGNATURE_HEX_BYTES - 1;
 

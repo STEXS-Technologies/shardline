@@ -257,7 +257,8 @@ pub enum ServerConfigError {
         /// Observed secret file length in bytes after bounded read.
         observed_bytes: u64,
     },
-    /// The selected role would expose CAS routes without bearer-token verification.
+    /// The selected role uses the local HMAC provider and would expose CAS routes
+    /// without bearer-token verification.
     #[error("served shardline routes require shardline token signing key configuration")]
     MissingTokenSigningKeyForServedRoutes,
     /// The provider bootstrap key was empty.
