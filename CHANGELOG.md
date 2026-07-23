@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-23
+
+Minor release adding config file support (shardline.toml + .env), governance documentation, documentation drift fixes, and CI/publish pipeline hardening. There are no intentional breaking API or configuration changes from `1.0.1`.
+
+### Added
+
+- **Config file support**: `--env-file` flag for `.env` file loading (`ab351f3`), `--config` flag for `shardline.toml` with auto-detection at `/etc/shardline/shardline.toml` (`2271e90`, `57c74e6`)
+- **TOML config with `${VAR}` interpolation**: `load_server_config_from_env_with_toml` deserializes TOML directly into `ServerConfig`, supporting shell env > `.env` file > `shardline.toml` > defaults precedence (`8749068`, `897ef14`)
+- **Config test suite**: 25 unit tests for TOML config loader (`67eae9b`), 17 integration tests for config parsing and validation (`57b0892`), plus CLI e2e tests for `--env-file` and `--config` flags (`4d511d1`)
+- **Governance docs**: `SECURITY.md`, `CODE_OF_CONDUCT.md`, blank issue creation enabled (`1e9c3ce`, `adcd3b2`)
+
+### Changed
+
+- **K8s ConfigMap**: converted from 20 separate env vars to a single `shardline.toml` mounted at `/etc/shardline/` (`dcc3cd2`, `57c74e6`)
+- **K8s deployments**: `api-deployment.yaml` and `transfer-deployment.yaml` updated to auto-detect config at `/etc/shardline/` — `--config` flag removed (`57c74e6`)
+- **Docker deployment**: updated for config file usage in `DEPLOYMENT.md` (`dcc3cd2`)
+
+### Fixed
+
+- **Documentation drift**: 31 doc files audited 4x — stale crate paths, Ed25519/HMAC references, wrong env vars, and include_str paths corrected (`078aeb4`, `a44494b`, `b453645`, `9ab4ac4`, `1e9c3ce`, `adcd3b2`)
+- **Publish pipeline**: missing crates (`shardline-auth`, `shardline-validation`) added to release publish list, version extraction sed pattern fixed, migrations directory restored in release packaging
+- **Audit findings**: env var name mismatches, dead config fields, and test gaps resolved (`067b582`)
+- **Native Xet E2E timeout**: prevented by fixing the split-role e2e test setup (`5eaa444`)
+- **Clippy warnings**: `shadow-unrelated` and other lint warnings resolved (`a71745d`)
+
+### Documentation
+
+- `CLI.md`: global `--env-file` and `--config` flags documented (`c2977ff`)
+- `DEPLOYMENT.md`: config file usage, Docker examples, K8s ConfigMap documentation (`dcc3cd2`, `c2977ff`)
+- K8s manifests reviewed and simplified for config file auto-detection (`57c74e6`)
+- README cleaned up: removed "first" and "production ready" claims (`b700927`)
+- Architecture, protocol, and ops docs audited for accuracy (`9ab4ac4`, `a44494b`)
+
 ## [1.0.1] - 2026-07-21
 
 Patch release focused on correctness, security hardening, test coverage, and regression protection.
@@ -194,6 +227,7 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/STEXS-Technologies/shardline/releases/tag/v1.0.0
