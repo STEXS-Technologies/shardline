@@ -451,11 +451,11 @@ pub fn load_server_config_from_env_with_toml(
     if let Some(auth) = &toml.auth {
         set_if_unset("SHARDLINE_AUTH_PROVIDER", auth.provider.clone());
         set_if_unset(
-            "SHARDLINE_TOKEN_SIGNING_KEY_PATH",
+            "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
             auth.token_signing_key_path.clone(),
         );
         set_if_unset(
-            "SHARDLINE_PROVIDER_API_KEY_PATH",
+            "SHARDLINE_PROVIDER_API_KEY_FILE",
             auth.provider_api_key_path.clone(),
         );
         set_if_unset(
@@ -468,14 +468,9 @@ pub fn load_server_config_from_env_with_toml(
         );
         if let Some(jwks) = &auth.jwks {
             set_if_unset("SHARDLINE_AUTH_JWKS_URL", jwks.url.clone());
-            set_if_unset(
-                "SHARDLINE_AUTH_JWKS_REFRESH_INTERVAL_SECONDS",
-                jwks.refresh_interval_seconds.map(|v| v.to_string()),
-            );
         }
         if let Some(oidc) = &auth.oidc {
-            set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER_URL", oidc.issuer_url.clone());
-            set_if_unset("SHARDLINE_AUTH_OIDC_CLIENT_ID", oidc.client_id.clone());
+            set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER", oidc.issuer_url.clone());
         }
     }
 
@@ -493,23 +488,106 @@ fn interpolate_env_vars(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    'outer: while let Some(ch) = chars.next() {
         if ch == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
             let mut var_name = String::new();
-            for c in chars.by_ref() {
-                if c == '}' {
-                    break;
+            loop {
+                match chars.next() {
+                    Some('}') => {
+                        let resolved =
+                            var(&var_name).unwrap_or_else(|_| format!("${{{var_name}}}"));
+                        result.push_str(&resolved);
+                        break;
+                    }
+                    Some(c) => var_name.push(c),
+                    None => {
+                        // Unclosed ${ — preserve original text
+                        result.push('$');
+                        result.push('{');
+                        result.push_str(&var_name);
+                        break 'outer;
+                    }
                 }
-                var_name.push(c);
             }
-            let resolved = var(&var_name).unwrap_or_else(|_| format!("${{{var_name}}}"));
-            result.push_str(&resolved);
         } else {
             result.push(ch);
         }
     }
     result
+}
+
+#[cfg(test)]
+mod interpolate_tests {
+    use super::interpolate_env_vars;
+
+    #[test]
+    fn test_no_vars() {
+        assert_eq!(interpolate_env_vars("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_known_var() {
+        let content = "_TEST_INTERP_VAR=resolved".to_owned();
+        let _ = dotenvy::from_read(std::io::Cursor::new(content.as_bytes()));
+        assert_eq!(
+            interpolate_env_vars("prefix-${_TEST_INTERP_VAR}-suffix"),
+            "prefix-resolved-suffix"
+        );
+    }
+
+    #[test]
+    fn test_missing_var() {
+        assert_eq!(
+            interpolate_env_vars("${_NONEXISTENT_VAR_XYZ}"),
+            "${_NONEXISTENT_VAR_XYZ}"
+        );
+    }
+
+    #[test]
+    fn test_empty_var_name() {
+        assert_eq!(interpolate_env_vars("${}"), "${}");
+    }
+
+    #[test]
+    fn test_dollar_without_brace() {
+        assert_eq!(interpolate_env_vars("$VAR"), "$VAR");
+        assert_eq!(interpolate_env_vars("$$"), "$$");
+    }
+
+    #[test]
+    fn test_multiple_vars() {
+        let content = "_TEST_A=hello\n_TEST_B=world";
+        let _ = dotenvy::from_read(std::io::Cursor::new(content.as_bytes()));
+        let result = interpolate_env_vars("${_TEST_A} ${_TEST_B}");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_unclosed_brace_preserves_text() {
+        // Malformed input without closing } should be preserved
+        assert_eq!(interpolate_env_vars("${HOST"), "${HOST");
+    }
+
+    #[test]
+    fn test_unclosed_brace_at_end() {
+        assert_eq!(interpolate_env_vars("prefix-${VAR"), "prefix-${VAR");
+    }
+
+    #[test]
+    fn test_nested_dollar_signs() {
+        assert_eq!(interpolate_env_vars("$${VAR}"), "$${VAR}");
+    }
+
+    #[test]
+    fn test_empty_input() {
+        assert_eq!(interpolate_env_vars(""), "");
+    }
+
+    #[test]
+    fn test_only_brace_no_var() {
+        assert_eq!(interpolate_env_vars("${}"), "${}");
+    }
 }
 
 #[cfg(test)]
