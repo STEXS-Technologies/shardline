@@ -149,7 +149,7 @@ pub async fn run_lifecycle_repair(
     let options = LifecycleRepairOptions {
         webhook_retention_seconds,
     };
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     Ok(run_server_lifecycle_repair(config, options).await?)
 }
 
@@ -168,7 +168,7 @@ pub async fn run_repair(
     let options = LifecycleRepairOptions {
         webhook_retention_seconds,
     };
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     let index_rebuild = run_server_index_rebuild(config.clone()).await?;
     let lifecycle_repair = run_server_lifecycle_repair(config.clone(), options).await?;
     let fsck = run_server_fsck(config).await?;

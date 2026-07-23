@@ -24,7 +24,7 @@ pub enum FsckRuntimeError {
 ///
 /// Returns [`FsckRuntimeError`] when the configured deployment cannot be scanned.
 pub async fn run_fsck(root: Option<&Path>) -> Result<LocalFsckReport, FsckRuntimeError> {
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     Ok(run_server_fsck(config).await?)
 }
 

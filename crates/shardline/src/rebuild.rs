@@ -27,7 +27,7 @@ pub enum RebuildRuntimeError {
 pub async fn run_index_rebuild(
     root: Option<&Path>,
 ) -> Result<LocalIndexRebuildReport, RebuildRuntimeError> {
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     Ok(run_server_index_rebuild(config).await?)
 }
 

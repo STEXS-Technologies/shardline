@@ -56,12 +56,27 @@ Write it to a file for packaging or system installation:
 shardline manpage --output ./shardline.1
 ```
 
+## Global Flags
+
+These flags are available on every command and must be placed before the
+subcommand:
+
+```text
+--env-file <PATH>   Load a .env file into the process environment before
+                    resolving configuration. Use for secrets and credentials.
+-c, --config <FILE> Path to a shardline.toml configuration file. When omitted,
+                    shardline.toml is auto-detected from the current directory,
+                    ~/.config/shardline/, and /etc/shardline/.
+```
+
 ## Common Commands
 
 Start the server:
 
 ```bash
 shardline serve
+shardline serve --env-file .env.production
+shardline serve --config /etc/shardline/shardline.toml
 shardline serve --role api
 shardline serve --role transfer
 ```
@@ -70,6 +85,7 @@ Validate configuration:
 
 ```bash
 shardline config check
+shardline config check --env-file .env.production --config shardline.toml
 ```
 
 Bootstrap a local providerless source-checkout deployment:

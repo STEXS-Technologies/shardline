@@ -69,6 +69,27 @@ TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
 curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:18080/v1/stats
 ```
 
+For deployments using a `shardline.toml` config file, mount it and use the
+`--config` flag:
+
+```bash
+docker run -v /path/to/shardline.toml:/etc/shardline/shardline.toml:ro \
+  registry.example.com/shardline:latest \
+  --config /etc/shardline/shardline.toml serve
+```
+
+For Docker Compose, bind-mount the config file and add `--config` to the
+command in your `docker-compose.yml`:
+
+```yaml
+services:
+  shardline:
+    image: registry.example.com/shardline:latest
+    command: ["--config", "/etc/shardline/shardline.toml", "serve"]
+    volumes:
+      - ./shardline.toml:/etc/shardline/shardline.toml:ro
+```
+
 If you want to mint tokens on the host for the Compose server, pass the same signing key
 as an environment variable:
 
@@ -241,7 +262,81 @@ cargo run -p shardline --bin shardline -- health --server http://127.0.0.1:18080
 
 ## Configuration
 
-Configuration supports a file plus environment overrides.
+Configuration supports a TOML file with environment variable overrides.
+Secrets and credentials belong in a `.env` file, not in the TOML config
+or in environment variables.
+
+### Configuration file (shardline.toml)
+
+Server settings can be declared in a `shardline.toml` file. The file is
+auto-detected from these locations (first found wins):
+
+1. `./shardline.toml` (current directory)
+2. `~/.config/shardline/shardline.toml` (user config)
+3. `/etc/shardline/shardline.toml` (global config)
+
+Use the `--config` flag to point at a specific path:
+
+```bash
+shardline serve --config /etc/shardline/shardline.toml
+```
+
+Values with `${VAR}` syntax are resolved from the process environment
+or from a `.env` file loaded with `--env-file`:
+
+```toml
+[server]
+bind_addr = "0.0.0.0:8080"
+public_base_url = "https://cas.example.com"
+server_role = "all"
+frontends = ["xet", "oci", "hub"]
+root_dir = "/var/lib/shardline"
+chunk_size_bytes = 65536
+
+[storage]
+adapter = "s3"
+
+[storage.s3]
+endpoint = "https://s3.example.com"
+region = "us-east-1"
+bucket = "shardline-data"
+
+[index]
+postgres_url = "${DATABASE_URL}"
+
+[cache]
+adapter = "memory"
+ttl_seconds = 30
+
+[auth]
+provider = "local-hmac"
+provider_token_issuer = "shardline"
+provider_token_ttl_seconds = 300
+```
+
+Place credentials in a separate `.env` file:
+
+```bash
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+DATABASE_URL=postgres://shardline:change-me@postgres:5432/shardline
+SHARDLINE_TOKEN_SIGNING_KEY=change-me-for-local-only
+```
+
+Load both together:
+
+```bash
+shardline serve --env-file .env.production --config shardline.toml
+```
+
+Environment variables already set in the shell take precedence over values
+in `shardline.toml`. The `.env` file is loaded before the TOML file is
+parsed, so `${VAR}` references resolve correctly.
+
+### Environment variables
+
+Configuration through environment variables remains fully supported and
+always takes precedence over TOML file values.
 
 Initial environment variables:
 

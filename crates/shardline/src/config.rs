@@ -4,7 +4,8 @@ use std::{
 };
 
 use shardline_server::{
-    ConfigCheckReport, ServerConfig, ServerConfigError, ServerError, run_config_check,
+    ConfigCheckReport, ServerConfig, ServerConfigError, ServerError,
+    load_server_config_from_env_with_toml, load_toml_config, run_config_check,
 };
 use thiserror::Error;
 
@@ -43,11 +44,29 @@ pub async fn run_config_check_from_env() -> Result<ConfigCheckReport, ConfigRunt
 
 /// Loads the active Shardline server configuration and applies an optional deployment-root override.
 ///
+/// When a `shardline.toml` file is found (either auto-detected or explicitly
+/// provided via `--config`), its values are deserialized directly and merged
+/// with environment variables. Environment variables take precedence over TOML.
+///
+/// The `config_override` parameter specifies an explicit path to `shardline.toml`.
+/// When `None`, the file is auto-detected from standard paths.
+///
 /// # Errors
 ///
 /// Returns [`ServerConfigError`] when environment configuration cannot be parsed.
-pub fn load_server_config(root_override: Option<&Path>) -> Result<ServerConfig, ServerConfigError> {
-    let config = ServerConfig::from_env()?;
+pub fn load_server_config(
+    root_override: Option<&Path>,
+    config_override: Option<&Path>,
+) -> Result<ServerConfig, ServerConfigError> {
+    let cli_config_override = var_os("SHARDLINE_CLI_CONFIG_FILE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let config_override = config_override.or(cli_config_override.as_deref());
+    let config =
+        match load_toml_config(config_override).map_err(ServerConfigError::ConfigFileError)? {
+            Some(toml) => load_server_config_from_env_with_toml(&toml)?,
+            None => ServerConfig::from_env()?,
+        };
     let root_dir = resolve_root_dir(root_override, config.root_dir());
     ensure_directory_path_components_are_not_symlinked(&root_dir)
         .map_err(ServerConfigError::RootDir)?;
@@ -60,7 +79,7 @@ pub fn load_server_config(root_override: Option<&Path>) -> Result<ServerConfig, 
 ///
 /// Returns [`ServerConfigError`] when environment configuration cannot be parsed.
 pub fn effective_root(root_override: Option<&Path>) -> Result<PathBuf, ServerConfigError> {
-    let config = load_server_config(root_override)?;
+    let config = load_server_config(root_override, None)?;
     Ok(config.root_dir().to_path_buf())
 }
 
@@ -250,7 +269,7 @@ mod tests {
         let linked = symlink(&target, &override_root);
         assert!(linked.is_ok());
 
-        let loaded = super::load_server_config(Some(&override_root));
+        let loaded = super::load_server_config(Some(&override_root), None);
 
         assert!(matches!(loaded, Err(ServerConfigError::RootDir(_))));
     }
@@ -259,7 +278,7 @@ mod tests {
     fn load_server_config_accepts_non_existent_root_override() {
         // A non-existent path with a real parent should succeed.
         let loaded =
-            super::load_server_config(Some(&PathBuf::from("/tmp/__shardline_test_void__")));
+            super::load_server_config(Some(&PathBuf::from("/tmp/__shardline_test_void__")), None);
         assert!(loaded.is_ok());
     }
 
