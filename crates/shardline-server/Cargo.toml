@@ -69,7 +69,7 @@ hmac.workspace = true
 redis = { workspace = true, features = ["tokio-rustls-comp"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { workspace = true, features = ["bundled"] }
-serial_test = "3"
+serial_test.workspace = true
 shardline-test-support.workspace = true
 tempfile.workspace = true
 wiremock = "0.6"

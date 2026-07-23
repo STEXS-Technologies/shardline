@@ -12,10 +12,18 @@
     clippy::panic
 )]
 
-use std::num::NonZeroUsize;
+use std::{
+    io::Write,
+    num::NonZeroUsize,
+    path::Path,
+};
+
 
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server::{ServerConfig, ServerConfigError, ServerFrontend, ServerRole, app};
+use shardline_server::{
+    ServerConfig, ServerConfigError, ServerFrontend, ServerRole, app,
+    load_server_config_from_env_with_toml, load_toml_config,
+};
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -133,4 +141,80 @@ fn test_server_with_no_frontends() {
         matches!(err, ServerConfigError::MissingServerFrontends),
         "expected MissingServerFrontends error, got: {err:?}"
     );
+}
+
+// ── TOML config file tests ──────────────────────────────────────────
+
+fn write_toml(dir: &Path, content: &str) -> std::path::PathBuf {
+    let path = dir.join("shardline.toml");
+    let mut file = std::fs::File::create(&path).unwrap();
+    write!(file, "{content}").unwrap();
+    path
+}
+
+#[test]
+fn test_load_toml_config_found() {
+    let dir = TempDir::new().unwrap();
+    write_toml(dir.path(), r#"[server]
+bind_addr = "127.0.0.1:9090"
+server_role = "api"
+frontends = ["xet", "oci"]
+"#);
+    let config_path = dir.path().join("shardline.toml");
+    let result = load_toml_config(Some(&config_path));
+    assert!(result.is_ok(), "should parse valid TOML: {:?}", result.err());
+    let toml = result.unwrap().unwrap();
+    let srv = toml.server.expect("server section should be present");
+    assert_eq!(srv.bind_addr.unwrap(), "127.0.0.1:9090");
+    assert_eq!(srv.server_role.unwrap(), "api");
+    assert_eq!(srv.frontends.unwrap(), vec!["xet", "oci"]);
+}
+
+#[test]
+fn test_load_toml_config_not_found() {
+    let result = load_toml_config(Some(Path::new("/nonexistent/path/shardline.toml")));
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_none());
+}
+
+#[test]
+fn test_load_toml_config_invalid_syntax() {
+    let dir = TempDir::new().unwrap();
+    write_toml(dir.path(), "[[[invalid]]]");
+    let config_path = dir.path().join("shardline.toml");
+    let result = load_toml_config(Some(&config_path));
+    assert!(result.is_err(), "invalid TOML should fail");
+}
+
+#[test]
+fn test_load_server_config_from_env_with_toml_integration() {
+    let dir = TempDir::new().unwrap();
+    write_toml(dir.path(), r#"
+[server]
+bind_addr = "0.0.0.0:8080"
+public_base_url = "https://cas.example.com"
+server_role = "all"
+frontends = ["xet"]
+root_dir = "/tmp/shardline-test"
+
+[storage]
+adapter = "local"
+
+[cache]
+adapter = "memory"
+ttl_seconds = 60
+
+[auth]
+provider = "local"
+provider_token_issuer = "test-issuer"
+provider_token_ttl_seconds = 600
+"#);
+    let config_path = dir.path().join("shardline.toml");
+    let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
+    let config = load_server_config_from_env_with_toml(&toml)
+        .unwrap_or_else(|e| panic!("config should load: {e:?}"));
+    assert_eq!(config.bind_addr().to_string(), "0.0.0.0:8080");
+    assert_eq!(config.public_base_url(), "https://cas.example.com");
+    assert_eq!(config.server_role().as_str(), "all");
+    assert!(!config.server_frontends().is_empty());
 }
