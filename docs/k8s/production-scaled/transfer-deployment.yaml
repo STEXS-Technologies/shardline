@@ -43,10 +43,13 @@ spec:
         - name: config-check
           image: registry.example.com/shardline:1.0.1
           imagePullPolicy: IfNotPresent
-          command: ["shardline", "config", "check"]
+          command:
+            - shardline
+            - --config
+            - /etc/shardline/config/shardline.toml
+            - config
+            - check
           env:
-            - name: SHARDLINE_SERVER_ROLE
-              value: transfer
             - name: SHARDLINE_INDEX_POSTGRES_URL
               valueFrom:
                 secretKeyRef:
@@ -65,10 +68,10 @@ spec:
               value: /run/secrets/shardline/token-signing-key
             - name: SHARDLINE_METRICS_TOKEN_FILE
               value: /run/secrets/shardline/metrics-token
-          envFrom:
-            - configMapRef:
-                name: shardline-config
           volumeMounts:
+            - name: config
+              mountPath: /etc/shardline/config
+              readOnly: true
             - name: root
               mountPath: /data/shardline
             - name: tmp
@@ -85,7 +88,12 @@ spec:
         - name: shardline
           image: registry.example.com/shardline:1.0.1
           imagePullPolicy: IfNotPresent
-          args: ["serve", "--role", "transfer"]
+          args:
+            - --config
+            - /etc/shardline/config/shardline.toml
+            - serve
+            - "--role"
+            - transfer
           ports:
             - name: http
               containerPort: 8080
@@ -110,10 +118,10 @@ spec:
               value: /run/secrets/shardline/token-signing-key
             - name: SHARDLINE_METRICS_TOKEN_FILE
               value: /run/secrets/shardline/metrics-token
-          envFrom:
-            - configMapRef:
-                name: shardline-config
           volumeMounts:
+            - name: config
+              mountPath: /etc/shardline/config
+              readOnly: true
             - name: root
               mountPath: /data/shardline
             - name: tmp
@@ -152,6 +160,9 @@ spec:
               drop: ["ALL"]
             readOnlyRootFilesystem: true
       volumes:
+        - name: config
+          configMap:
+            name: shardline-config
         - name: root
           emptyDir: {}
         - name: tmp

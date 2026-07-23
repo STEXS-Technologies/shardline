@@ -69,6 +69,27 @@ TOKEN="$(docker compose -f docker-compose.yml exec -T shardline \
 curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:18080/v1/stats
 ```
 
+For deployments using a `shardline.toml` config file, mount it and use the
+`--config` flag:
+
+```bash
+docker run -v /path/to/shardline.toml:/etc/shardline/shardline.toml:ro \
+  registry.example.com/shardline:latest \
+  --config /etc/shardline/shardline.toml serve
+```
+
+For Docker Compose, bind-mount the config file and add `--config` to the
+command in your `docker-compose.yml`:
+
+```yaml
+services:
+  shardline:
+    image: registry.example.com/shardline:latest
+    command: ["--config", "/etc/shardline/shardline.toml", "serve"]
+    volumes:
+      - ./shardline.toml:/etc/shardline/shardline.toml:ro
+```
+
 If you want to mint tokens on the host for the Compose server, pass the same signing key
 as an environment variable:
 
