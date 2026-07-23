@@ -42,8 +42,8 @@ docs/k8s/production-scaled/
 ## Configuration
 
 Server settings are defined in `configmap.yaml` as a `shardline.toml` file
-mounted at `/etc/shardline/config/shardline.toml`. This replaces the previous
-approach of setting each `SHARDLINE_*` variable individually. Credentials and
+mounted at `/etc/shardline/shardline.toml`. Shardline automatically detects
+this path, so no `--config` flag is needed. Credentials and
 secrets remain in the runtime secret as env vars or mounted files.
 
 ```bash

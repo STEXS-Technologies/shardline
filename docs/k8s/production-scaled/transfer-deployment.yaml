@@ -46,7 +46,7 @@ spec:
           command:
             - shardline
             - --config
-            - /etc/shardline/config/shardline.toml
+            - /etc/shardline/shardline.toml
             - config
             - check
           env:
@@ -70,7 +70,7 @@ spec:
               value: /run/secrets/shardline/metrics-token
           volumeMounts:
             - name: config
-              mountPath: /etc/shardline/config
+              mountPath: /etc/shardline
               readOnly: true
             - name: root
               mountPath: /data/shardline
@@ -90,7 +90,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --config
-            - /etc/shardline/config/shardline.toml
+            - /etc/shardline/shardline.toml
             - serve
             - "--role"
             - transfer
@@ -120,7 +120,7 @@ spec:
               value: /run/secrets/shardline/metrics-token
           volumeMounts:
             - name: config
-              mountPath: /etc/shardline/config
+              mountPath: /etc/shardline
               readOnly: true
             - name: root
               mountPath: /data/shardline
