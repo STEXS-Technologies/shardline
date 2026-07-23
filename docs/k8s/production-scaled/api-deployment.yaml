@@ -43,10 +43,13 @@ spec:
         - name: config-check
           image: registry.example.com/shardline:1.0.1
           imagePullPolicy: IfNotPresent
-          command: ["shardline", "config", "check"]
+          command:
+            - shardline
+            - --config
+            - /etc/shardline/config/shardline.toml
+            - config
+            - check
           env:
-            - name: SHARDLINE_SERVER_ROLE
-              value: api
             - name: SHARDLINE_INDEX_POSTGRES_URL
               valueFrom:
                 secretKeyRef:
@@ -69,19 +72,16 @@ spec:
               value: /run/secrets/shardline/provider-api-key
             - name: SHARDLINE_PROVIDER_CONFIG_FILE
               value: /etc/shardline/providers/providers.json
-          envFrom:
-            - configMapRef:
-                name: shardline-config
           volumeMounts:
+            - name: config
+              mountPath: /etc/shardline/config
+              readOnly: true
             - name: root
               mountPath: /data/shardline
             - name: tmp
               mountPath: /tmp
             - name: runtime-secrets
               mountPath: /run/secrets/shardline
-              readOnly: true
-            - name: provider-catalog
-              mountPath: /etc/shardline/providers
               readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
@@ -92,13 +92,16 @@ spec:
         - name: shardline
           image: registry.example.com/shardline:1.0.1
           imagePullPolicy: IfNotPresent
-          args: ["serve", "--role", "api"]
+          args:
+            - --config
+            - /etc/shardline/config/shardline.toml
+            - serve
+            - "--role"
+            - api
           ports:
             - name: http
               containerPort: 8080
           env:
-            - name: SHARDLINE_SERVER_ROLE
-              value: api
             - name: SHARDLINE_INDEX_POSTGRES_URL
               valueFrom:
                 secretKeyRef:
@@ -121,10 +124,10 @@ spec:
               value: /run/secrets/shardline/provider-api-key
             - name: SHARDLINE_PROVIDER_CONFIG_FILE
               value: /etc/shardline/providers/providers.json
-          envFrom:
-            - configMapRef:
-                name: shardline-config
           volumeMounts:
+            - name: config
+              mountPath: /etc/shardline/config
+              readOnly: true
             - name: root
               mountPath: /data/shardline
             - name: tmp
@@ -166,6 +169,9 @@ spec:
               drop: ["ALL"]
             readOnlyRootFilesystem: true
       volumes:
+        - name: config
+          configMap:
+            name: shardline-config
         - name: root
           emptyDir: {}
         - name: tmp

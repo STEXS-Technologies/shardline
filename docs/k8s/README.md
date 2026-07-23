@@ -39,6 +39,24 @@ docs/k8s/production-scaled/
   kustomization.yaml
 ```
 
+## Configuration
+
+Server settings are defined in `configmap.yaml` as a `shardline.toml` file
+mounted at `/etc/shardline/config/shardline.toml`. This replaces the previous
+approach of setting each `SHARDLINE_*` variable individually. Credentials and
+secrets remain in the runtime secret as env vars or mounted files.
+
+```bash
+kubectl apply -f docs/k8s/production-scaled/configmap.yaml
+```
+
+Use `--config` and `--env-file` with the CLI locally to match the production
+configuration during development:
+
+```bash
+shardline --config docs/k8s/production-scaled/configmap.yaml serve
+```
+
 ## Prerequisites
 
 - a Kubernetes cluster with the `autoscaling/v2` API enabled
