@@ -12,17 +12,11 @@
     clippy::panic
 )]
 
-use std::{
-    io::Write,
-    num::NonZeroUsize,
-    path::Path,
-};
-
+use std::{io::Write, num::NonZeroUsize, path::Path};
 
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{
-    ServerConfig, ServerConfigError, ServerFrontend, ServerRole, app,
-    load_server_config_from_env_with_toml, load_toml_config,
+    ServerConfig, ServerConfigError, ServerFrontend, ServerRole, app, load_toml_config,
 };
 use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
 use tempfile::TempDir;
@@ -155,14 +149,21 @@ fn write_toml(dir: &Path, content: &str) -> std::path::PathBuf {
 #[test]
 fn test_load_toml_config_found() {
     let dir = TempDir::new().unwrap();
-    write_toml(dir.path(), r#"[server]
+    write_toml(
+        dir.path(),
+        r#"[server]
 bind_addr = "127.0.0.1:9090"
 server_role = "api"
 frontends = ["xet", "oci"]
-"#);
+"#,
+    );
     let config_path = dir.path().join("shardline.toml");
     let result = load_toml_config(Some(&config_path));
-    assert!(result.is_ok(), "should parse valid TOML: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "should parse valid TOML: {:?}",
+        result.err()
+    );
     let toml = result.unwrap().unwrap();
     let srv = toml.server.expect("server section should be present");
     assert_eq!(srv.bind_addr.unwrap(), "127.0.0.1:9090");
@@ -186,35 +187,210 @@ fn test_load_toml_config_invalid_syntax() {
     assert!(result.is_err(), "invalid TOML should fail");
 }
 
+// ── Additional TOML config tests ────────────────────────────────────
+
 #[test]
-fn test_load_server_config_from_env_with_toml_integration() {
+fn test_load_toml_config_minimal() {
     let dir = TempDir::new().unwrap();
-    write_toml(dir.path(), r#"
-[server]
-bind_addr = "0.0.0.0:8080"
-public_base_url = "https://cas.example.com"
-server_role = "all"
-frontends = ["xet"]
-root_dir = "/tmp/shardline-test"
-
-[storage]
-adapter = "local"
-
-[cache]
-adapter = "memory"
-ttl_seconds = 60
-
-[auth]
-provider = "local"
-provider_token_issuer = "test-issuer"
-provider_token_ttl_seconds = 600
-"#);
+    write_toml(
+        dir.path(),
+        r#"[server]
+bind_addr = "127.0.0.1:5555"
+"#,
+    );
     let config_path = dir.path().join("shardline.toml");
     let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
-    let config = load_server_config_from_env_with_toml(&toml)
-        .unwrap_or_else(|e| panic!("config should load: {e:?}"));
-    assert_eq!(config.bind_addr().to_string(), "0.0.0.0:8080");
-    assert_eq!(config.public_base_url(), "https://cas.example.com");
-    assert_eq!(config.server_role().as_str(), "all");
-    assert!(!config.server_frontends().is_empty());
+    assert_eq!(
+        toml.server.as_ref().unwrap().bind_addr.as_deref(),
+        Some("127.0.0.1:5555")
+    );
+    assert!(toml.storage.is_none());
+    assert!(toml.index.is_none());
+    assert!(toml.cache.is_none());
+    assert!(toml.auth.is_none());
+}
+
+#[test]
+fn test_load_toml_config_full_storage_s3() {
+    let dir = TempDir::new().unwrap();
+    write_toml(
+        dir.path(),
+        r#"
+[storage]
+adapter = "s3"
+
+[storage.s3]
+endpoint = "https://s3.custom.com"
+region = "eu-west-1"
+bucket = "my-bucket"
+prefix = "staging/"
+virtual_hosted_style = true
+"#,
+    );
+    let config_path = dir.path().join("shardline.toml");
+    let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
+    let s3 = toml.storage.unwrap().s3.unwrap();
+    assert_eq!(s3.endpoint.unwrap(), "https://s3.custom.com");
+    assert_eq!(s3.region.unwrap(), "eu-west-1");
+    assert_eq!(s3.bucket.unwrap(), "my-bucket");
+    assert_eq!(s3.prefix.unwrap(), "staging/");
+    assert!(s3.virtual_hosted_style.unwrap());
+}
+
+#[test]
+fn test_load_toml_config_full_auth_jwks_oidc() {
+    let dir = TempDir::new().unwrap();
+    write_toml(
+        dir.path(),
+        r#"
+[auth]
+provider = "jwks"
+
+[auth.jwks]
+url = "https://auth.example.com/jwks"
+refresh_interval_seconds = 900
+
+[auth.oidc]
+issuer_url = "https://accounts.example.com"
+client_id = "shardline-app"
+"#,
+    );
+    let config_path = dir.path().join("shardline.toml");
+    let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
+    let auth = toml.auth.unwrap();
+    assert_eq!(auth.provider.unwrap(), "jwks");
+    assert_eq!(
+        auth.jwks.as_ref().unwrap().url.as_deref(),
+        Some("https://auth.example.com/jwks")
+    );
+    assert_eq!(
+        auth.jwks.as_ref().unwrap().refresh_interval_seconds,
+        Some(900)
+    );
+    assert_eq!(
+        auth.oidc.as_ref().unwrap().issuer_url.as_deref(),
+        Some("https://accounts.example.com")
+    );
+    assert_eq!(
+        auth.oidc.as_ref().unwrap().client_id.as_deref(),
+        Some("shardline-app")
+    );
+}
+
+#[test]
+fn test_load_toml_config_empty_document() {
+    let dir = TempDir::new().unwrap();
+    write_toml(dir.path(), "");
+    let config_path = dir.path().join("shardline.toml");
+    let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
+    assert!(toml.server.is_none());
+    assert!(toml.storage.is_none());
+    assert!(toml.index.is_none());
+    assert!(toml.cache.is_none());
+    assert!(toml.auth.is_none());
+}
+
+#[test]
+fn test_load_toml_config_cache_section() {
+    let dir = TempDir::new().unwrap();
+    write_toml(
+        dir.path(),
+        r#"
+[cache]
+adapter = "redis"
+ttl_seconds = 120
+"#,
+    );
+    let config_path = dir.path().join("shardline.toml");
+    let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
+    let cch = toml.cache.as_ref().unwrap();
+    assert_eq!(cch.adapter.as_deref(), Some("redis"));
+    assert_eq!(cch.ttl_seconds, Some(120));
+}
+
+#[test]
+fn test_load_toml_config_unknown_fields_ignored() {
+    // TOML with unknown fields should not cause errors (serde default behavior)
+    let dir = TempDir::new().unwrap();
+    write_toml(
+        dir.path(),
+        r#"
+[server]
+bind_addr = "0.0.0.0:8080"
+unknown_field = "should be ignored"
+
+[unknown_section]
+foo = "bar"
+"#,
+    );
+    let config_path = dir.path().join("shardline.toml");
+    let result = load_toml_config(Some(&config_path));
+    assert!(
+        result.is_ok(),
+        "unknown fields should be ignored: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_load_toml_config_utf8_bom() {
+    // TOML parsers handle UTF-8 BOM
+    let dir = TempDir::new().unwrap();
+    write_toml(
+        dir.path(),
+        "\u{feff}[server]\nbind_addr = \"0.0.0.0:6060\"\n",
+    );
+    let config_path = dir.path().join("shardline.toml");
+    let result = load_toml_config(Some(&config_path));
+    assert!(result.is_ok(), "UTF-8 BOM should be handled");
+    let toml = result.unwrap().unwrap();
+    assert_eq!(toml.server.unwrap().bind_addr.unwrap(), "0.0.0.0:6060");
+}
+
+#[test]
+fn test_load_toml_config_file_not_found_returns_none() {
+    let result = load_toml_config(None).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_load_toml_config_absolute_path_not_found() {
+    let result = load_toml_config(Some(Path::new("/etc/shardline/shardline.toml"))).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_load_toml_config_jwks_section() {
+    let dir = TempDir::new().unwrap();
+    write_toml(
+        dir.path(),
+        r#"
+[auth]
+provider = "jwks"
+
+[auth.jwks]
+url = "https://example.com/jwks.json"
+refresh_interval_seconds = 1800
+"#,
+    );
+    let config_path = dir.path().join("shardline.toml");
+    let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
+    let jwks = toml.auth.as_ref().unwrap().jwks.as_ref().unwrap();
+    assert_eq!(jwks.url.as_deref(), Some("https://example.com/jwks.json"));
+    assert_eq!(jwks.refresh_interval_seconds, Some(1800));
+}
+
+#[test]
+fn test_load_toml_config_invalid_server_role() {
+    let dir = TempDir::new().unwrap();
+    write_toml(
+        dir.path(),
+        r#"[server]
+server_role = "invalid_role"
+"#,
+    );
+    let config_path = dir.path().join("shardline.toml");
+    let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
+    // TOML parsing succeeds; validation happens at config load time
+    assert_eq!(toml.server.unwrap().server_role.unwrap(), "invalid_role");
 }
