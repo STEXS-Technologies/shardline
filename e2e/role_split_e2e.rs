@@ -26,7 +26,11 @@ use shardline_server::{
     ReadyResponse, ServerConfig, ServerError, ServerFrontend, ServerRole, serve_with_listener,
 };
 use support::ServerE2eInvariantError;
-use tokio::{net::TcpListener, spawn, time::sleep};
+use tokio::{
+    net::TcpListener,
+    spawn,
+    time::{sleep, timeout},
+};
 use xet_client::cas_client::auth::AuthConfig;
 use xet_data::processing::{
     FileDownloadSession, FileUploadSession, Sha256Policy, XetFileInfo,
@@ -86,12 +90,13 @@ async fn transfer_role_serves_transfer_routes_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_roles_support_native_xet_through_path_routed_proxy() {
-    let result = exercise_split_role_native_xet_flow().await;
-    let error = result.as_ref().err().map(ToString::to_string);
-    assert!(
-        result.is_ok(),
-        "split role native xet e2e failed: {error:?}"
-    );
+    match timeout(Duration::from_secs(60), exercise_split_role_native_xet_flow()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("split role native xet e2e failed: {error}"),
+        Err(_elapsed) => panic!(
+            "split role native xet e2e exceeded 60 seconds; the native client or proxy flow stalled"
+        ),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -167,6 +172,19 @@ async fn wait_for_health(client: &Client, base_url: &str) -> Result<(), Box<dyn 
     }
 
     Err(ServerE2eInvariantError::new("server did not become healthy").into())
+}
+
+async fn wait_for_ready(client: &Client, base_url: &str) -> Result<(), Box<dyn Error>> {
+    for _attempt in 0..100 {
+        if let Ok(response) = client.get(format!("{base_url}/readyz")).send().await
+            && response.status().is_success()
+        {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    Err(ServerE2eInvariantError::new("server did not become ready").into())
 }
 
 async fn start_frontend_role_runtime(
@@ -312,6 +330,12 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
     let api_server = spawn(async move { serve_with_listener(api_config, api_listener).await });
 
+    // Both roles initialize the same local SQLite metadata store. Complete
+    // API readiness before Transfer opens it to avoid racing first-use setup.
+    let client = Client::new();
+    wait_for_health(&client, &api_base_url).await?;
+    wait_for_ready(&client, &api_base_url).await?;
+
     let transfer_listener =
         TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let transfer_addr = transfer_listener.local_addr()?;
@@ -327,9 +351,8 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
     let transfer_server =
         spawn(async move { serve_with_listener(transfer_config, transfer_listener).await });
 
-    let client = Client::new();
-    wait_for_health(&client, &api_base_url).await?;
     wait_for_health(&client, &transfer_base_url).await?;
+    wait_for_ready(&client, &transfer_base_url).await?;
     let write_token = bearer_token(
         "operator-1",
         TokenScope::Write,
