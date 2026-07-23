@@ -58,10 +58,11 @@ pub fn load_server_config(
     root_override: Option<&Path>,
     config_override: Option<&Path>,
 ) -> Result<ServerConfig, ServerConfigError> {
-    let config = match load_toml_config(config_override).unwrap_or(None) {
-        Some(toml) => load_server_config_from_env_with_toml(&toml)?,
-        None => ServerConfig::from_env()?,
-    };
+    let config =
+        match load_toml_config(config_override).map_err(ServerConfigError::ConfigFileError)? {
+            Some(toml) => load_server_config_from_env_with_toml(&toml)?,
+            None => ServerConfig::from_env()?,
+        };
     let root_dir = resolve_root_dir(root_override, config.root_dir());
     ensure_directory_path_components_are_not_symlinked(&root_dir)
         .map_err(ServerConfigError::RootDir)?;
