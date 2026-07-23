@@ -16,6 +16,9 @@ pub const MDB_FILE_FLAG_METADATA_EXT_MASK: u32 = 1 << 30;
 
 pub type Sha256 = MerkleHash;
 
+const MDB_SHARD_FORMAT_V3: u64 = 3;
+const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[repr(C)]
 pub struct FileDataSequenceHeader {
@@ -82,11 +85,23 @@ impl FileDataSequenceHeader {
         Ok(size_of::<FileDataSequenceHeader>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
+        if version < MDB_SHARD_FORMAT_V3 {
+            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
+            reader.read_exact(&mut v)?;
+            let reader = &mut Cursor::new(v);
+            return Ok(Self {
+                file_hash: read_hash(reader)?,
+                file_flags: read_u32(reader)?,
+                num_entries: u64::from(read_u32(reader)?),
+                _unused: read_u64(reader)?,
+                _pad: 0,
+            });
+        }
+
         let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v[..])?;
-        let mut reader_curs = Cursor::new(&v);
-        let reader = &mut reader_curs;
+        reader.read_exact(&mut v)?;
+        let reader = &mut Cursor::new(v);
         Ok(Self {
             file_hash: read_hash(reader)?,
             file_flags: read_u32(reader)?,
@@ -173,11 +188,23 @@ impl FileDataSequenceEntry {
         Ok(size_of::<FileDataSequenceEntry>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
+        if version < MDB_SHARD_FORMAT_V3 {
+            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
+            reader.read_exact(&mut v)?;
+            let reader = &mut Cursor::new(v);
+            return Ok(Self {
+                xorb_hash: read_hash(reader)?,
+                xorb_flags: read_u32(reader)?,
+                unpacked_segment_bytes: u64::from(read_u32(reader)?),
+                chunk_index_start: u64::from(read_u32(reader)?),
+                chunk_index_end: u64::from(read_u32(reader)?),
+            });
+        }
+
         let mut v = [0u8; size_of::<FileDataSequenceEntry>()];
-        reader.read_exact(&mut v[..])?;
-        let mut reader_curs = Cursor::new(&v);
-        let reader = &mut reader_curs;
+        reader.read_exact(&mut v)?;
+        let reader = &mut Cursor::new(v);
         Ok(Self {
             xorb_hash: read_hash(reader)?,
             xorb_flags: read_u32(reader)?,
@@ -215,11 +242,25 @@ impl FileVerificationEntry {
         Ok(size_of::<Self>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
+        if version < MDB_SHARD_FORMAT_V3 {
+            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
+            reader.read_exact(&mut v)?;
+            let reader = &mut Cursor::new(v);
+            let mut unused = [0u64; 2];
+            return Ok(Self {
+                range_hash: read_hash(reader)?,
+                _unused: {
+                    read_u64s(reader, &mut unused)?;
+                    unused
+                },
+                _pad: [0; 2],
+            });
+        }
+
         let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v[..])?;
-        let mut reader_curs = Cursor::new(&v);
-        let reader = &mut reader_curs;
+        reader.read_exact(&mut v)?;
+        let reader = &mut Cursor::new(v);
         let mut unused = [0u64; 2];
         let mut pad = [0u64; 2];
         Ok(Self {
@@ -264,11 +305,25 @@ impl FileMetadataExt {
         Ok(size_of::<Self>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
+        if version < MDB_SHARD_FORMAT_V3 {
+            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
+            reader.read_exact(&mut v)?;
+            let reader = &mut Cursor::new(v);
+            let mut unused = [0u64; 2];
+            return Ok(Self {
+                sha256: read_hash(reader)?,
+                _unused: {
+                    read_u64s(reader, &mut unused)?;
+                    unused
+                },
+                _pad: [0; 2],
+            });
+        }
+
         let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v[..])?;
-        let mut reader_curs = Cursor::new(&v);
-        let reader = &mut reader_curs;
+        reader.read_exact(&mut v)?;
+        let reader = &mut Cursor::new(v);
         let mut unused = [0u64; 2];
         let mut pad = [0u64; 2];
         Ok(Self {
@@ -550,6 +605,39 @@ mod tests {
         assert_eq!(h.file_hash, h2.file_hash);
         assert_eq!(h.file_flags, h2.file_flags);
         assert_eq!(h.num_entries, h2.num_entries);
+    }
+
+    #[test]
+    fn file_info_deserializes_v2_32_bit_layout() {
+        let file_hash = compute_data_hash(b"v2-file");
+        let xorb_hash = compute_data_hash(b"v2-xorb");
+        let mut bytes = Vec::new();
+        write_hash(&mut bytes, &file_hash).unwrap();
+        write_u32(&mut bytes, MDB_DEFAULT_FILE_FLAG).unwrap();
+        write_u32(&mut bytes, 1).unwrap();
+        write_u64(&mut bytes, 0).unwrap();
+        write_hash(&mut bytes, &xorb_hash).unwrap();
+        write_u32(&mut bytes, MDB_DEFAULT_FILE_FLAG).unwrap();
+        write_u32(&mut bytes, 123_456).unwrap();
+        write_u32(&mut bytes, 7).unwrap();
+        write_u32(&mut bytes, 11).unwrap();
+        write_hash(&mut bytes, &[!0_u64; 4].into()).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u64(&mut bytes, 0).unwrap();
+
+        let mut reader = Cursor::new(bytes);
+        let info = MDBFileInfo::deserialize(&mut reader, 2)
+            .unwrap()
+            .expect("v2 file info");
+        assert_eq!(info.metadata.file_hash, file_hash);
+        assert_eq!(info.metadata.num_entries, 1);
+        assert_eq!(info.segments[0].xorb_hash, xorb_hash);
+        assert_eq!(info.segments[0].unpacked_segment_bytes, 123_456);
+        assert_eq!(info.segments[0].chunk_index_start, 7);
+        assert_eq!(info.segments[0].chunk_index_end, 11);
+        assert!(MDBFileInfo::deserialize(&mut reader, 2).unwrap().is_none());
+        assert_eq!(reader.position(), 3 * MDB_V2_INFO_ENTRY_SIZE as u64);
     }
 
     #[test]
