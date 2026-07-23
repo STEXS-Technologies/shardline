@@ -1,11 +1,8 @@
 use std::{ffi::OsString, num::NonZeroUsize, path::Path};
 
-use std::io::Write;
-
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use dotenvy::{from_filename, from_read};
+use dotenvy::from_filename;
 use shardline_protocol::{RepositoryProvider, TokenScope};
-use shardline_server::load_toml_env_overrides;
 use shardline_server::{
     DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
 };
@@ -49,20 +46,9 @@ impl CliCommand {
             }
         }
 
-        // Load shardline.toml (--config or auto-detected) and apply its
-        // values as env vars. Already-set env vars take precedence.
-        if let Ok(Some(overrides)) = load_toml_env_overrides(definition.config.as_deref()) {
-            let mut env_content = Vec::new();
-            for (key, value) in &overrides {
-                if std::env::var(key).is_err() {
-                    writeln!(env_content, "{key}={value}").ok();
-                }
-            }
-            if !env_content.is_empty() {
-                let _ignored = from_read(std::io::Cursor::new(env_content));
-            }
-        }
-
+        // Load shardline.toml (--config or auto-detected) for direct
+        // struct deserialization. The TOML values are applied via
+        // load_server_config_from_env_with_toml later during config resolution.
         Self::try_from(definition)
     }
 

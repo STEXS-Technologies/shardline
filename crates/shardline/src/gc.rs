@@ -82,7 +82,7 @@ pub async fn run_gc_diagnostics(
         // chunks on disk but not yet committed file records need a grace period.
         retention_seconds: retention_seconds.max(MINIMUM_GC_RETENTION_SECONDS),
     };
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     let diagnostics = run_server_gc_diagnostics(config, options).await?;
     write_optional_artifact(retention_report_path, &diagnostics.retention_report)?;
     write_optional_artifact(orphan_inventory_path, &diagnostics.orphan_inventory)?;
