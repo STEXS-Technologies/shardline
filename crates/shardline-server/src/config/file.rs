@@ -74,13 +74,11 @@ pub struct AuthSection {
 #[derive(Debug, Deserialize)]
 pub struct JwksSection {
     pub url: Option<String>,
-    pub refresh_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct OidcSection {
     pub issuer_url: Option<String>,
-    pub client_id: Option<String>,
 }
 
 /// Standard paths checked for shardline.toml, in priority order (first found wins).

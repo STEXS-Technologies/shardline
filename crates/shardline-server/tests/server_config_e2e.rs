@@ -248,11 +248,9 @@ provider = "jwks"
 
 [auth.jwks]
 url = "https://auth.example.com/jwks"
-refresh_interval_seconds = 900
 
 [auth.oidc]
 issuer_url = "https://accounts.example.com"
-client_id = "shardline-app"
 "#,
     );
     let config_path = dir.path().join("shardline.toml");
@@ -264,16 +262,8 @@ client_id = "shardline-app"
         Some("https://auth.example.com/jwks")
     );
     assert_eq!(
-        auth.jwks.as_ref().unwrap().refresh_interval_seconds,
-        Some(900)
-    );
-    assert_eq!(
         auth.oidc.as_ref().unwrap().issuer_url.as_deref(),
         Some("https://accounts.example.com")
-    );
-    assert_eq!(
-        auth.oidc.as_ref().unwrap().client_id.as_deref(),
-        Some("shardline-app")
     );
 }
 
@@ -370,14 +360,12 @@ provider = "jwks"
 
 [auth.jwks]
 url = "https://example.com/jwks.json"
-refresh_interval_seconds = 1800
 "#,
     );
     let config_path = dir.path().join("shardline.toml");
     let toml = load_toml_config(Some(&config_path)).unwrap().unwrap();
     let jwks = toml.auth.as_ref().unwrap().jwks.as_ref().unwrap();
     assert_eq!(jwks.url.as_deref(), Some("https://example.com/jwks.json"));
-    assert_eq!(jwks.refresh_interval_seconds, Some(1800));
 }
 
 #[test]

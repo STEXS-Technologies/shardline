@@ -279,8 +279,6 @@ adapter = "s3"
 endpoint = "https://s3.example.com"
 region = "us-east-1"
 bucket = "shardline-data"
-access_key = "${S3_ACCESS_KEY}"
-secret_key = "${S3_SECRET_KEY}"
 
 [index]
 postgres_url = "${DATABASE_URL}"

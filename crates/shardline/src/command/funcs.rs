@@ -39,11 +39,11 @@ impl CliCommand {
         // Load the --env-file into the process environment before any
         // configuration resolution, so env vars referenced in config files
         // or by the server are available.
-        if let Some(env_path) = &definition.env_file {
-            let env_path = env_path.as_os_str();
-            if Path::new(env_path).is_file() {
-                let _ignored = from_filename(env_path);
-            }
+        if let Some(env_path) = &definition.env_file
+            && Path::new(env_path).is_file()
+            && let Err(error) = from_filename(env_path)
+        {
+            tracing::warn!(path = %env_path.display(), error = %error, "failed to load env file");
         }
 
         // Load shardline.toml (--config or auto-detected) for direct
