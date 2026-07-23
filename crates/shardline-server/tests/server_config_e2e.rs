@@ -174,8 +174,7 @@ frontends = ["xet", "oci"]
 #[test]
 fn test_load_toml_config_not_found() {
     let result = load_toml_config(Some(Path::new("/nonexistent/path/shardline.toml")));
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none());
+    assert!(result.is_err());
 }
 
 #[test]
@@ -224,6 +223,7 @@ endpoint = "https://s3.custom.com"
 region = "eu-west-1"
 bucket = "my-bucket"
 prefix = "staging/"
+allow_http = true
 virtual_hosted_style = true
 "#,
     );
@@ -234,6 +234,7 @@ virtual_hosted_style = true
     assert_eq!(s3.region.unwrap(), "eu-west-1");
     assert_eq!(s3.bucket.unwrap(), "my-bucket");
     assert_eq!(s3.prefix.unwrap(), "staging/");
+    assert_eq!(s3.allow_http, Some(true));
     assert!(s3.virtual_hosted_style.unwrap());
 }
 
@@ -299,8 +300,7 @@ ttl_seconds = 120
 }
 
 #[test]
-fn test_load_toml_config_unknown_fields_ignored() {
-    // TOML with unknown fields should not cause errors (serde default behavior)
+fn test_load_toml_config_unknown_fields_rejected() {
     let dir = TempDir::new().unwrap();
     write_toml(
         dir.path(),
@@ -315,11 +315,7 @@ foo = "bar"
     );
     let config_path = dir.path().join("shardline.toml");
     let result = load_toml_config(Some(&config_path));
-    assert!(
-        result.is_ok(),
-        "unknown fields should be ignored: {:?}",
-        result.err()
-    );
+    assert!(result.is_err(), "unknown fields must be rejected");
 }
 
 #[test]
@@ -345,8 +341,8 @@ fn test_load_toml_config_file_not_found_returns_none() {
 
 #[test]
 fn test_load_toml_config_absolute_path_not_found() {
-    let result = load_toml_config(Some(Path::new("/etc/shardline/shardline.toml"))).unwrap();
-    assert!(result.is_none());
+    let result = load_toml_config(Some(Path::new("/etc/shardline/shardline.toml")));
+    assert!(result.is_err());
 }
 
 #[test]

@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 /// Top-level TOML configuration document.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShardlineTomlConfig {
     #[serde(default)]
     pub server: Option<ServerSection>,
@@ -21,6 +22,7 @@ pub struct ShardlineTomlConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerSection {
     pub bind_addr: Option<String>,
     pub public_base_url: Option<String>,
@@ -34,26 +36,31 @@ pub struct ServerSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StorageSection {
     pub adapter: Option<String>,
     pub s3: Option<S3Section>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct S3Section {
     pub endpoint: Option<String>,
     pub region: Option<String>,
     pub bucket: Option<String>,
     pub prefix: Option<String>,
+    pub allow_http: Option<bool>,
     pub virtual_hosted_style: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndexSection {
     pub postgres_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheSection {
     pub redis_url: Option<String>,
     pub adapter: Option<String>,
@@ -61,6 +68,7 @@ pub struct CacheSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthSection {
     pub provider: Option<String>,
     pub token_signing_key_path: Option<String>,
@@ -72,6 +80,7 @@ pub struct AuthSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwksSection {
     pub url: Option<String>,
 }
@@ -104,14 +113,21 @@ fn expand_tilde(path: &str) -> PathBuf {
 /// Resolves the active shardline.toml content as a string.
 /// Returns `None` when neither an explicit `--config` path nor any
 /// auto-detected candidate exists.
-pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Option<String> {
+pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Result<Option<String>, String> {
     if let Some(path) = explicit {
-        return fs::read_to_string(path).ok();
+        return fs::read_to_string(path)
+            .map(Some)
+            .map_err(|error| format!("failed to read config file {}: {error}", path.display()));
     }
-    CONFIG_FILE_CANDIDATES.iter().find_map(|candidate| {
+    for candidate in CONFIG_FILE_CANDIDATES {
         let expanded = expand_tilde(candidate);
-        fs::read_to_string(&expanded).ok()
-    })
+        if expanded.exists() {
+            return fs::read_to_string(&expanded).map(Some).map_err(|error| {
+                format!("failed to read config file {}: {error}", expanded.display())
+            });
+        }
+    }
+    Ok(None)
 }
 
 /// Parses a shardline.toml file at the given path (or auto-detected) and
@@ -122,7 +138,7 @@ pub(crate) fn resolve_config_content(explicit: Option<&Path>) -> Option<String> 
 /// Returns an error message string when the file exists but cannot be
 /// read or parsed as valid TOML.
 pub fn load_toml_config(config_path: Option<&Path>) -> Result<Option<ShardlineTomlConfig>, String> {
-    let Some(content) = resolve_config_content(config_path) else {
+    let Some(content) = resolve_config_content(config_path)? else {
         return Ok(None);
     };
     let config: ShardlineTomlConfig =
@@ -156,7 +172,7 @@ mod tests {
     fn test_resolve_config_content_explicit() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "[server]\nbind_addr = \"0.0.0.0:9999\"").unwrap();
-        let content = resolve_config_content(Some(file.path()));
+        let content = resolve_config_content(Some(file.path())).unwrap();
         assert!(content.is_some());
         assert!(content.unwrap().contains("0.0.0.0:9999"));
     }
@@ -164,14 +180,14 @@ mod tests {
     #[test]
     fn test_resolve_config_content_nonexistent() {
         let content = resolve_config_content(Some(Path::new("/nonexistent/path/shardline.toml")));
-        assert!(content.is_none());
+        assert!(content.is_err());
     }
 
     #[test]
     fn test_resolve_config_content_auto_detect() {
         // When no explicit path is given, auto-detection tries candidates.
         // In a test environment none should exist, so returns None.
-        let content = resolve_config_content(None);
+        let content = resolve_config_content(None).unwrap();
         assert!(content.is_none());
     }
 }

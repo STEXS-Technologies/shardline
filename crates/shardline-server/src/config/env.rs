@@ -377,7 +377,9 @@ pub fn load_server_config_from_env_with_toml(
 ) -> Result<ServerConfig, ServerConfigError> {
     use std::io::Write;
 
-    // Collect TOML values into a buffer as KEY=VALUE lines.
+    // Collect TOML values into a buffer as quoted dotenv assignments. Quoting
+    // keeps TOML strings containing whitespace, `#`, quotes, or newlines from
+    // being interpreted as dotenv syntax or additional assignments.
     let mut buf = Vec::new();
 
     let mut set_if_unset = |key: &str, value: Option<String>| {
@@ -385,7 +387,7 @@ pub fn load_server_config_from_env_with_toml(
             && var(key).is_err()
         {
             let interpolated = interpolate_env_vars(&value);
-            let _ignored = writeln!(buf, "{key}={interpolated}");
+            let _ignored = writeln!(buf, "{key}={interpolated:?}");
         }
     };
 
@@ -421,9 +423,13 @@ pub fn load_server_config_from_env_with_toml(
             set_if_unset("SHARDLINE_S3_ENDPOINT", s3.endpoint.clone());
             set_if_unset("SHARDLINE_S3_REGION", s3.region.clone());
             set_if_unset("SHARDLINE_S3_BUCKET", s3.bucket.clone());
-            set_if_unset("SHARDLINE_S3_PREFIX", s3.prefix.clone());
+            set_if_unset("SHARDLINE_S3_KEY_PREFIX", s3.prefix.clone());
             set_if_unset(
-                "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE",
+                "SHARDLINE_S3_ALLOW_HTTP",
+                s3.allow_http.map(|v| v.to_string()),
+            );
+            set_if_unset(
+                "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
                 s3.virtual_hosted_style.map(|v| v.to_string()),
             );
         }
@@ -476,7 +482,11 @@ pub fn load_server_config_from_env_with_toml(
 
     // Apply TOML values to the process environment for keys not already set.
     if !buf.is_empty() {
-        drop(dotenvy::from_read(std::io::Cursor::new(buf)));
+        dotenvy::from_read(std::io::Cursor::new(buf)).map_err(|_error| {
+            ServerConfigError::ConfigFileError(
+                "failed to apply validated TOML configuration values".to_owned(),
+            )
+        })?;
     }
 
     load_server_config_from_env()
@@ -596,8 +606,8 @@ mod tests {
     use crate::ServerFrontend;
 
     use super::{
-        load_non_zero_usize_env, optional_token_signing_key_from_sources,
-        parse_server_frontends_env,
+        load_non_zero_usize_env, load_server_config_from_env_with_toml,
+        optional_token_signing_key_from_sources, parse_server_frontends_env,
     };
 
     fn set_env_var(key: &str, value: &str) {
@@ -609,6 +619,81 @@ mod tests {
     fn remove_env_var(key: &str) {
         // SAFETY: Same threading constraints as `set_env_var`.
         unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn toml_s3_values_use_the_runtime_environment_keys() {
+        const S3_KEYS: &[&str] = &[
+            "SHARDLINE_OBJECT_STORAGE_ADAPTER",
+            "SHARDLINE_S3_BUCKET",
+            "SHARDLINE_S3_REGION",
+            "SHARDLINE_S3_ENDPOINT",
+            "SHARDLINE_S3_KEY_PREFIX",
+            "SHARDLINE_S3_PREFIX",
+            "SHARDLINE_S3_ALLOW_HTTP",
+            "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
+            "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE",
+        ];
+        for key in S3_KEYS {
+            remove_env_var(key);
+        }
+
+        let toml: super::ShardlineTomlConfig = toml::from_str(
+            r#"
+[storage]
+adapter = "s3"
+[storage.s3]
+bucket = "test-bucket"
+region = "eu-west-1"
+endpoint = "http://localhost:9000"
+prefix = "toml-prefix/"
+allow_http = true
+virtual_hosted_style = true
+"#,
+        )
+        .unwrap();
+        let config = load_server_config_from_env_with_toml(&toml).unwrap();
+        let rendered = format!("{:?}", config.s3_object_store_config().unwrap());
+        assert!(rendered.contains("key_prefix: Some(\"toml-prefix\")"));
+        assert!(rendered.contains("allow_http: true"));
+        assert!(rendered.contains("virtual_hosted_style_request: true"));
+
+        for key in S3_KEYS {
+            remove_env_var(key);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn toml_values_with_dotenv_syntax_are_applied_as_single_values() {
+        const KEYS: &[&str] = &[
+            "SHARDLINE_ROOT_DIR",
+            "SHARDLINE_AUTH_PROVIDER",
+            "SHARDLINE_INJECTED_VALUE",
+        ];
+        for key in KEYS {
+            remove_env_var(key);
+        }
+
+        let toml: super::ShardlineTomlConfig = toml::from_str(
+            r#"
+[server]
+root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
+"#,
+        )
+        .unwrap();
+        let config = load_server_config_from_env_with_toml(&toml).unwrap();
+        assert_eq!(
+            config.root_dir(),
+            std::path::Path::new("runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected")
+        );
+        assert_eq!(config.auth_provider(), super::AuthProviderKind::Local);
+        assert!(std::env::var("SHARDLINE_INJECTED_VALUE").is_err());
+
+        for key in KEYS {
+            remove_env_var(key);
+        }
     }
 
     // ── parse_server_frontends_env ─────────────────────────────────────────

@@ -3,7 +3,31 @@ kind: ConfigMap
 metadata:
   name: shardline-config
 data:
-  SHARDLINE_PUBLIC_BASE_URL: http://shardline-api:8080
-  SHARDLINE_S3_ENDPOINT: http://minio:9000
-  SHARDLINE_S3_ALLOW_HTTP: "true"
-  SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST: "false"
+  shardline.toml: |
+    [server]
+    bind_addr = "0.0.0.0:8080"
+    public_base_url = "http://shardline-api:8080"
+    root_dir = "/data/shardline"
+    chunk_size_bytes = 65536
+    max_request_body_bytes = 67108864
+    upload_max_in_flight_chunks = 64
+    transfer_max_in_flight_chunks = 64
+
+    [storage]
+    adapter = "s3"
+
+    [storage.s3]
+    endpoint = "http://minio:9000"
+    region = "us-east-1"
+    bucket = "shardline"
+    allow_http = true
+    virtual_hosted_style = false
+
+    [cache]
+    adapter = "redis"
+    ttl_seconds = 30
+
+    [auth]
+    provider = "local-hmac"
+    provider_token_issuer = "shardline-provider"
+    provider_token_ttl_seconds = 300
