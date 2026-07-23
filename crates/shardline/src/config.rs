@@ -58,6 +58,10 @@ pub fn load_server_config(
     root_override: Option<&Path>,
     config_override: Option<&Path>,
 ) -> Result<ServerConfig, ServerConfigError> {
+    let cli_config_override = var_os("SHARDLINE_CLI_CONFIG_FILE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let config_override = config_override.or(cli_config_override.as_deref());
     let config =
         match load_toml_config(config_override).map_err(ServerConfigError::ConfigFileError)? {
             Some(toml) => load_server_config_from_env_with_toml(&toml)?,

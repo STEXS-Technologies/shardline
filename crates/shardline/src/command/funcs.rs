@@ -1,7 +1,7 @@
-use std::{ffi::OsString, num::NonZeroUsize, path::Path};
+use std::{ffi::OsString, num::NonZeroUsize};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use dotenvy::from_filename;
+use dotenvy::{from_filename, from_read_override};
 use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     DatabaseMigrationCommand, ObjectStorageAdapter, ServerFrontend, ServerRole,
@@ -39,11 +39,47 @@ impl CliCommand {
         // Load the --env-file into the process environment before any
         // configuration resolution, so env vars referenced in config files
         // or by the server are available.
+        // `gc schedule install --env-file` names the EnvironmentFile to emit
+        // into the unit; it is not an input dotenv file for this invocation.
+        let gc_schedule_install = matches!(
+            &definition.command,
+            CliDefinitionCommand::Gc(gc_args)
+                if matches!(gc_args.command, Some(GcSubcommand::Schedule(_)))
+        );
         if let Some(env_path) = &definition.env_file
-            && Path::new(env_path).is_file()
-            && let Err(error) = from_filename(env_path)
+            && !gc_schedule_install
         {
-            tracing::warn!(path = %env_path.display(), error = %error, "failed to load env file");
+            from_filename(env_path).map_err(|error| {
+                CliParseError::validation(
+                    ErrorKind::InvalidValue,
+                    format!("failed to load env file {}: {error}", env_path.display()),
+                )
+            })?;
+        }
+
+        // Preserve the explicit path for every configuration-consuming command.
+        // `load_server_config` consumes this internal marker before auto-detection.
+        // Clear a marker left by an earlier in-process parse before applying
+        // this invocation's optional override.
+        from_read_override(std::io::Cursor::new("SHARDLINE_CLI_CONFIG_FILE=\n")).map_err(
+            |error| {
+                CliParseError::validation(
+                    ErrorKind::InvalidValue,
+                    format!("failed to clear selected config file: {error}"),
+                )
+            },
+        )?;
+        if let Some(config_path) = &definition.config {
+            let encoded = format!("SHARDLINE_CLI_CONFIG_FILE={:?}\n", config_path);
+            from_read_override(std::io::Cursor::new(encoded)).map_err(|error| {
+                CliParseError::validation(
+                    ErrorKind::InvalidValue,
+                    format!(
+                        "failed to select config file {}: {error}",
+                        config_path.display()
+                    ),
+                )
+            })?;
         }
 
         // Load shardline.toml (--config or auto-detected) for direct
