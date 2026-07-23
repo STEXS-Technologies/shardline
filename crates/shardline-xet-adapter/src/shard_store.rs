@@ -1,10 +1,8 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     io::{Cursor, Read},
-    mem::size_of,
 };
 
-use axum::body::Bytes;
 use shardline_index::{
     AsyncIndexStore, DedupeShardMapping, FileChunkRecord, FileRecord, parse_xet_hash_hex,
 };
@@ -19,12 +17,14 @@ use shardline_xet_core::{
     merklehash::{MerkleHash, compute_data_hash},
     metadata_shard::{
         MDBShardFileHeader,
-        file_structs::{FileDataSequenceHeader, MDBFileInfo, MDBFileInfoView},
+        file_structs::{
+            FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt, FileVerificationEntry,
+            MDBFileInfo,
+        },
         hash_is_global_dedup_eligible,
-        shard_file::MDB_FILE_INFO_ENTRY_SIZE,
         shard_in_memory::MDBInMemoryShard,
         xorb_structs::{
-            MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, MDBXorbInfo, MDBXorbInfoView, XorbChunkSequenceEntry,
+            MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, MDBXorbInfo, XorbChunkSequenceEntry,
             XorbChunkSequenceHeader,
         },
     },
@@ -255,12 +255,33 @@ fn read_bounded_file_sections<R: Read>(
             limits.max_reconstruction_terms().get(),
         )?;
 
-        let followed_entries = file_section_followed_entries(&header, segment_count)?;
-        let followed_bytes = checked_mul(followed_entries, MDB_FILE_INFO_ENTRY_SIZE)?;
-        let file_view = read_file_info_view(reader, header, followed_bytes)?;
+        file_section_followed_entries(&header, segment_count)?;
+        let mut segments = Vec::with_capacity(segment_count);
+        for _ in 0..segment_count {
+            segments.push(
+                FileDataSequenceEntry::deserialize(reader, version)
+                    .map_err(|error| invalid_serialized_shard(&error))?,
+            );
+        }
+        let mut verification = Vec::with_capacity(segment_count);
+        if header.contains_verification() {
+            for _ in 0..segment_count {
+                verification.push(
+                    FileVerificationEntry::deserialize(reader, version)
+                        .map_err(|error| invalid_serialized_shard(&error))?,
+                );
+            }
+        }
+        let metadata_ext = header
+            .contains_metadata_ext()
+            .then(|| FileMetadataExt::deserialize(reader, version))
+            .transpose()
+            .map_err(|error| invalid_serialized_shard(&error))?;
 
         if segment_count > 0 {
-            let first_segment = file_view.entry(0);
+            let first_segment = segments
+                .first()
+                .ok_or(InvalidSerializedShardError::ParserRejectedMetadata)?;
             let first_index = usize::try_from(first_segment.chunk_index_start)?;
             file_start_entries
                 .entry(first_segment.xorb_hash)
@@ -268,7 +289,12 @@ fn read_bounded_file_sections<R: Read>(
                 .insert(first_index);
         }
 
-        file_infos.push(MDBFileInfo::from(&file_view));
+        file_infos.push(MDBFileInfo {
+            metadata: header,
+            segments,
+            verification,
+            metadata_ext,
+        });
     }
 }
 
@@ -296,11 +322,20 @@ fn read_bounded_xorb_sections<R: Read>(
 
         let chunk_count = usize::try_from(header.num_entries)?;
         xorb_chunks = checked_add_limit(xorb_chunks, chunk_count, limits.max_xorb_chunks().get())?;
-        let followed_bytes = checked_mul(chunk_count, size_of::<XorbChunkSequenceEntry>())?;
-        let xorb_view = read_xorb_info_view(reader, header, followed_bytes)?;
+        let mut chunks = Vec::with_capacity(chunk_count);
+        for _ in 0..chunk_count {
+            chunks.push(
+                XorbChunkSequenceEntry::deserialize(reader, version)
+                    .map_err(|error| invalid_serialized_shard(&error))?,
+            );
+        }
+        let xorb_info = MDBXorbInfo {
+            metadata: header,
+            chunks,
+        };
 
-        collect_dedupe_chunk_hashes(&xorb_view, file_start_entries, &mut dedupe_chunk_hashes);
-        xorb_infos.push(MDBXorbInfo::from(&xorb_view));
+        collect_dedupe_chunk_hashes(&xorb_info, file_start_entries, &mut dedupe_chunk_hashes);
+        xorb_infos.push(xorb_info);
     }
 }
 
@@ -321,64 +356,13 @@ fn file_section_followed_entries(
     )
 }
 
-fn read_file_info_view<R: Read>(
-    reader: &mut R,
-    header: FileDataSequenceHeader,
-    followed_bytes: usize,
-) -> Result<MDBFileInfoView, XetAdapterError> {
-    let total_bytes = checked_add(MDB_FILE_INFO_ENTRY_SIZE, followed_bytes)?;
-    let mut data = Vec::new();
-    data.try_reserve_exact(total_bytes)
-        .map_err(|_reserve_error| XetAdapterError::TooManyShardTerms)?;
-    header
-        .serialize(&mut data)
-        .map_err(|error| invalid_serialized_shard(&error))?;
-    read_exact_section(reader, followed_bytes, &mut data)?;
-    MDBFileInfoView::from_data_and_header(header, Bytes::from(data))
-        .map_err(|error| invalid_serialized_shard(&error))
-}
-
-fn read_xorb_info_view<R: Read>(
-    reader: &mut R,
-    header: XorbChunkSequenceHeader,
-    followed_bytes: usize,
-) -> Result<MDBXorbInfoView, XetAdapterError> {
-    let total_bytes = checked_add(size_of::<XorbChunkSequenceHeader>(), followed_bytes)?;
-    let mut data = Vec::new();
-    data.try_reserve_exact(total_bytes)
-        .map_err(|_reserve_error| XetAdapterError::TooManyShardTerms)?;
-    header
-        .serialize(&mut data)
-        .map_err(|error| invalid_serialized_shard(&error))?;
-    read_exact_section(reader, followed_bytes, &mut data)?;
-    MDBXorbInfoView::from_data_and_header(header, Bytes::from(data))
-        .map_err(|error| invalid_serialized_shard(&error))
-}
-
-fn read_exact_section<R: Read>(
-    reader: &mut R,
-    byte_count: usize,
-    output: &mut Vec<u8>,
-) -> Result<(), XetAdapterError> {
-    let start = output.len();
-    let end = checked_add(start, byte_count)?;
-    output.resize(end, 0);
-    let section = output
-        .get_mut(start..end)
-        .ok_or(XetAdapterError::Overflow)?;
-    reader
-        .read_exact(section)
-        .map_err(|error| invalid_serialized_shard(&error))
-}
-
 fn collect_dedupe_chunk_hashes(
-    xorb_view: &MDBXorbInfoView,
+    xorb_info: &MDBXorbInfo,
     file_start_entries: &HashMap<MerkleHash, HashSet<usize>>,
     dedupe_chunk_hashes: &mut BTreeSet<String>,
 ) {
-    let start_entries = file_start_entries.get(&xorb_view.xorb_hash());
-    for chunk_index in 0..xorb_view.num_entries() {
-        let chunk = xorb_view.chunk(chunk_index);
+    let start_entries = file_start_entries.get(&xorb_info.metadata.xorb_hash);
+    for (chunk_index, chunk) in xorb_info.chunks.iter().enumerate() {
         let is_file_start = start_entries.is_some_and(|entries| entries.contains(&chunk_index));
         if is_file_start
             || hash_is_global_dedup_eligible(&chunk.chunk_hash)
@@ -395,10 +379,6 @@ fn checked_add(left: usize, right: usize) -> Result<usize, XetAdapterError> {
 
 fn checked_increment(value: usize) -> Result<usize, XetAdapterError> {
     checked_add(value, 1)
-}
-
-fn checked_mul(left: usize, right: usize) -> Result<usize, XetAdapterError> {
-    left.checked_mul(right).ok_or(XetAdapterError::Overflow)
 }
 
 fn checked_add_limit(left: usize, right: usize, limit: usize) -> Result<usize, XetAdapterError> {
@@ -625,13 +605,18 @@ mod tests {
     use shardline_xet_core::{
         merklehash::{MerkleHash, compute_data_hash, file_hash, xorb_hash},
         metadata_shard::{
+            MDBShardFileHeader,
             file_structs::{
                 FileDataSequenceEntry, FileDataSequenceHeader, FileVerificationEntry, MDBFileInfo,
             },
             shard_format::MDBShardInfo,
             shard_in_memory::MDBInMemoryShard,
-            xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+            xorb_structs::{
+                MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG, MDBXorbInfo, XorbChunkSequenceEntry,
+                XorbChunkSequenceHeader,
+            },
         },
+        utils::serialization_utils::{write_hash, write_u32, write_u64},
     };
 
     use super::{
@@ -895,6 +880,65 @@ mod tests {
         serialized
     }
 
+    fn serialize_v2_test_shard() -> (Vec<u8>, MerkleHash, MerkleHash) {
+        let first_chunk = compute_data_hash(b"v2-native-first");
+        let second_chunk = compute_data_hash(b"v2-native-second");
+        let xorb_hash = xorb_hash(&[(first_chunk, 8_u64), (second_chunk, 8_u64)]);
+        let file_hash = file_hash(&[(first_chunk, 8_u64), (second_chunk, 8_u64)]);
+        let mut bytes = Vec::new();
+        let shard_header = MDBShardFileHeader {
+            version: 2,
+            footer_size: 0,
+            ..MDBShardFileHeader::default()
+        };
+        shard_header.serialize(&mut bytes).unwrap();
+
+        write_hash(&mut bytes, &file_hash).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u32(&mut bytes, 1).unwrap();
+        write_u64(&mut bytes, 0).unwrap();
+        write_hash(&mut bytes, &xorb_hash).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u32(&mut bytes, 16).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u32(&mut bytes, 2).unwrap();
+        write_hash(&mut bytes, &[!0_u64; 4].into()).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u64(&mut bytes, 0).unwrap();
+
+        write_hash(&mut bytes, &xorb_hash).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_u32(&mut bytes, 2).unwrap();
+        write_u32(&mut bytes, 16).unwrap();
+        write_u32(&mut bytes, 16).unwrap();
+        for (hash, start, flags) in [
+            (first_chunk, 0, 0),
+            (second_chunk, 8, MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG),
+        ] {
+            write_hash(&mut bytes, &hash).unwrap();
+            write_u32(&mut bytes, start).unwrap();
+            write_u32(&mut bytes, 8).unwrap();
+            write_u32(&mut bytes, flags).unwrap();
+            write_u32(&mut bytes, 0).unwrap();
+        }
+        write_hash(&mut bytes, &[!0_u64; 4].into()).unwrap();
+        for _ in 0..4 {
+            write_u32(&mut bytes, 0).unwrap();
+        }
+
+        (bytes, first_chunk, second_chunk)
+    }
+
+    #[test]
+    fn bounded_parser_accepts_native_v2_shard_layout() {
+        let (shard, first_chunk, second_chunk) = serialize_v2_test_shard();
+        let hashes = retained_shard_chunk_hashes(&shard, DEFAULT_SHARD_METADATA_LIMITS).unwrap();
+
+        assert!(hashes.contains(&first_chunk.hex()));
+        assert!(hashes.contains(&second_chunk.hex()));
+    }
+
     // ── shard_hash_from_object_key_if_present edge cases ─────────────────
 
     #[test]
@@ -1125,16 +1169,6 @@ mod tests {
     #[test]
     fn checked_increment_overflow() {
         assert!(super::checked_increment(usize::MAX).is_err());
-    }
-
-    #[test]
-    fn checked_mul_ok() {
-        assert_eq!(super::checked_mul(7, 8).unwrap(), 56);
-    }
-
-    #[test]
-    fn checked_mul_overflow() {
-        assert!(super::checked_mul(usize::MAX, 2).is_err());
     }
 
     #[test]
@@ -1622,11 +1656,6 @@ mod tests {
     #[test]
     fn checked_increment_zero_works() {
         assert_eq!(super::checked_increment(0).unwrap(), 1);
-    }
-
-    #[test]
-    fn checked_mul_zero_works() {
-        assert_eq!(super::checked_mul(0, 100).unwrap(), 0);
     }
 
     #[test]

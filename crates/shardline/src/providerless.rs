@@ -85,7 +85,7 @@ pub fn run_providerless_setup(
 pub fn load_runtime_server_config(
     root_override: Option<&Path>,
 ) -> Result<ServerConfig, ProviderlessRuntimeError> {
-    let config = load_server_config(root_override)?;
+    let config = load_server_config(root_override, None)?;
     apply_providerless_source_checkout_defaults(config)
 }
 

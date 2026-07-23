@@ -6,6 +6,7 @@ use std::{
 
 use shardline_protocol::{SecretBytes, SecretString};
 
+use super::file::ShardlineTomlConfig;
 use super::secrets::{
     configure_provider_runtime_from_paths, load_redis_tls_config_from_env,
     load_s3_object_store_config_from_env, read_secret_file_bytes,
@@ -359,14 +360,254 @@ fn load_non_zero_usize_env(
     NonZeroUsize::new(raw).ok_or_else(zero_error)
 }
 
+/// Loads server configuration from environment variables, applying optional
+/// TOML config file values as defaults. Environment variables already set in
+/// the process take precedence over TOML values.
+///
+/// This is a thin wrapper around [`load_server_config_from_env`] that pre-fills
+/// environment variables from a parsed `shardline.toml` before delegating to
+/// the standard env-based loader.
+///
+/// # Errors
+///
+/// Returns [`ServerConfigError`] when required configuration is missing or
+/// invalid.
+pub fn load_server_config_from_env_with_toml(
+    toml: &ShardlineTomlConfig,
+) -> Result<ServerConfig, ServerConfigError> {
+    use std::io::Write;
+
+    // Collect TOML values into a buffer as quoted dotenv assignments. Quoting
+    // keeps TOML strings containing whitespace, `#`, quotes, or newlines from
+    // being interpreted as dotenv syntax or additional assignments.
+    let mut buf = Vec::new();
+
+    let mut set_if_unset = |key: &str, value: Option<String>| {
+        if let Some(value) = value
+            && var(key).is_err()
+        {
+            let interpolated = interpolate_env_vars(&value);
+            let _ignored = writeln!(buf, "{key}={interpolated:?}");
+        }
+    };
+
+    if let Some(srv) = &toml.server {
+        set_if_unset("SHARDLINE_BIND_ADDR", srv.bind_addr.clone());
+        set_if_unset("SHARDLINE_PUBLIC_BASE_URL", srv.public_base_url.clone());
+        set_if_unset("SHARDLINE_SERVER_ROLE", srv.server_role.clone());
+        if let Some(frontends) = &srv.frontends {
+            set_if_unset("SHARDLINE_SERVER_FRONTENDS", Some(frontends.join(",")));
+        }
+        set_if_unset("SHARDLINE_ROOT_DIR", srv.root_dir.clone());
+        set_if_unset(
+            "SHARDLINE_MAX_REQUEST_BODY_BYTES",
+            srv.max_request_body_bytes.map(|v| v.to_string()),
+        );
+        set_if_unset(
+            "SHARDLINE_CHUNK_SIZE_BYTES",
+            srv.chunk_size_bytes.map(|v| v.to_string()),
+        );
+        set_if_unset(
+            "SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS",
+            srv.upload_max_in_flight_chunks.map(|v| v.to_string()),
+        );
+        set_if_unset(
+            "SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS",
+            srv.transfer_max_in_flight_chunks.map(|v| v.to_string()),
+        );
+    }
+
+    if let Some(stg) = &toml.storage {
+        set_if_unset("SHARDLINE_OBJECT_STORAGE_ADAPTER", stg.adapter.clone());
+        if let Some(s3) = &stg.s3 {
+            set_if_unset("SHARDLINE_S3_ENDPOINT", s3.endpoint.clone());
+            set_if_unset("SHARDLINE_S3_REGION", s3.region.clone());
+            set_if_unset("SHARDLINE_S3_BUCKET", s3.bucket.clone());
+            set_if_unset("SHARDLINE_S3_KEY_PREFIX", s3.prefix.clone());
+            set_if_unset(
+                "SHARDLINE_S3_ALLOW_HTTP",
+                s3.allow_http.map(|v| v.to_string()),
+            );
+            set_if_unset(
+                "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
+                s3.virtual_hosted_style.map(|v| v.to_string()),
+            );
+        }
+    }
+
+    if let Some(idx) = &toml.index {
+        set_if_unset("SHARDLINE_INDEX_POSTGRES_URL", idx.postgres_url.clone());
+    }
+
+    if let Some(cch) = &toml.cache {
+        set_if_unset(
+            "SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER",
+            cch.adapter.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL",
+            cch.redis_url.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS",
+            cch.ttl_seconds.map(|v| v.to_string()),
+        );
+    }
+
+    if let Some(auth) = &toml.auth {
+        set_if_unset("SHARDLINE_AUTH_PROVIDER", auth.provider.clone());
+        set_if_unset(
+            "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+            auth.token_signing_key_path.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_PROVIDER_API_KEY_FILE",
+            auth.provider_api_key_path.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_PROVIDER_TOKEN_ISSUER",
+            auth.provider_token_issuer.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS",
+            auth.provider_token_ttl_seconds.map(|v| v.to_string()),
+        );
+        if let Some(jwks) = &auth.jwks {
+            set_if_unset("SHARDLINE_AUTH_JWKS_URL", jwks.url.clone());
+        }
+        if let Some(oidc) = &auth.oidc {
+            set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER", oidc.issuer_url.clone());
+        }
+    }
+
+    // Apply TOML values to the process environment for keys not already set.
+    if !buf.is_empty() {
+        dotenvy::from_read(std::io::Cursor::new(buf)).map_err(|_error| {
+            ServerConfigError::ConfigFileError(
+                "failed to apply validated TOML configuration values".to_owned(),
+            )
+        })?;
+    }
+
+    load_server_config_from_env()
+}
+
+/// Interpolates `${VAR_NAME}` patterns in `value` using the current process
+/// environment. Returns the original value when no patterns are found.
+fn interpolate_env_vars(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    'outer: while let Some(ch) = chars.next() {
+        if ch == '$' && chars.peek() == Some(&'{') {
+            chars.next(); // consume '{'
+            let mut var_name = String::new();
+            loop {
+                match chars.next() {
+                    Some('}') => {
+                        let resolved =
+                            var(&var_name).unwrap_or_else(|_| format!("${{{var_name}}}"));
+                        result.push_str(&resolved);
+                        break;
+                    }
+                    Some(c) => var_name.push(c),
+                    None => {
+                        // Unclosed ${ — preserve original text
+                        result.push('$');
+                        result.push('{');
+                        result.push_str(&var_name);
+                        break 'outer;
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod interpolate_tests {
+    use super::interpolate_env_vars;
+
+    #[test]
+    fn test_no_vars() {
+        assert_eq!(interpolate_env_vars("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_known_var() {
+        let content = "_TEST_INTERP_VAR=resolved".to_owned();
+        let _ = dotenvy::from_read(std::io::Cursor::new(content.as_bytes()));
+        assert_eq!(
+            interpolate_env_vars("prefix-${_TEST_INTERP_VAR}-suffix"),
+            "prefix-resolved-suffix"
+        );
+    }
+
+    #[test]
+    fn test_missing_var() {
+        assert_eq!(
+            interpolate_env_vars("${_NONEXISTENT_VAR_XYZ}"),
+            "${_NONEXISTENT_VAR_XYZ}"
+        );
+    }
+
+    #[test]
+    fn test_empty_var_name() {
+        assert_eq!(interpolate_env_vars("${}"), "${}");
+    }
+
+    #[test]
+    fn test_dollar_without_brace() {
+        assert_eq!(interpolate_env_vars("$VAR"), "$VAR");
+        assert_eq!(interpolate_env_vars("$$"), "$$");
+    }
+
+    #[test]
+    fn test_multiple_vars() {
+        let content = "_TEST_A=hello\n_TEST_B=world";
+        let _ = dotenvy::from_read(std::io::Cursor::new(content.as_bytes()));
+        let result = interpolate_env_vars("${_TEST_A} ${_TEST_B}");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_unclosed_brace_preserves_text() {
+        // Malformed input without closing } should be preserved
+        assert_eq!(interpolate_env_vars("${HOST"), "${HOST");
+    }
+
+    #[test]
+    fn test_unclosed_brace_at_end() {
+        assert_eq!(interpolate_env_vars("prefix-${VAR"), "prefix-${VAR");
+    }
+
+    #[test]
+    fn test_nested_dollar_signs() {
+        assert_eq!(interpolate_env_vars("$${VAR}"), "$${VAR}");
+    }
+
+    #[test]
+    fn test_empty_input() {
+        assert_eq!(interpolate_env_vars(""), "");
+    }
+
+    #[test]
+    fn test_only_brace_no_var() {
+        assert_eq!(interpolate_env_vars("${}"), "${}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(unsafe_code)]
     use crate::ServerFrontend;
 
     use super::{
-        load_non_zero_usize_env, optional_token_signing_key_from_sources,
-        parse_server_frontends_env,
+        load_non_zero_usize_env, load_server_config_from_env_with_toml,
+        optional_token_signing_key_from_sources, parse_server_frontends_env,
     };
 
     fn set_env_var(key: &str, value: &str) {
@@ -378,6 +619,81 @@ mod tests {
     fn remove_env_var(key: &str) {
         // SAFETY: Same threading constraints as `set_env_var`.
         unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn toml_s3_values_use_the_runtime_environment_keys() {
+        const S3_KEYS: &[&str] = &[
+            "SHARDLINE_OBJECT_STORAGE_ADAPTER",
+            "SHARDLINE_S3_BUCKET",
+            "SHARDLINE_S3_REGION",
+            "SHARDLINE_S3_ENDPOINT",
+            "SHARDLINE_S3_KEY_PREFIX",
+            "SHARDLINE_S3_PREFIX",
+            "SHARDLINE_S3_ALLOW_HTTP",
+            "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
+            "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE",
+        ];
+        for key in S3_KEYS {
+            remove_env_var(key);
+        }
+
+        let toml: super::ShardlineTomlConfig = toml::from_str(
+            r#"
+[storage]
+adapter = "s3"
+[storage.s3]
+bucket = "test-bucket"
+region = "eu-west-1"
+endpoint = "http://localhost:9000"
+prefix = "toml-prefix/"
+allow_http = true
+virtual_hosted_style = true
+"#,
+        )
+        .unwrap();
+        let config = load_server_config_from_env_with_toml(&toml).unwrap();
+        let rendered = format!("{:?}", config.s3_object_store_config().unwrap());
+        assert!(rendered.contains("key_prefix: Some(\"toml-prefix\")"));
+        assert!(rendered.contains("allow_http: true"));
+        assert!(rendered.contains("virtual_hosted_style_request: true"));
+
+        for key in S3_KEYS {
+            remove_env_var(key);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn toml_values_with_dotenv_syntax_are_applied_as_single_values() {
+        const KEYS: &[&str] = &[
+            "SHARDLINE_ROOT_DIR",
+            "SHARDLINE_AUTH_PROVIDER",
+            "SHARDLINE_INJECTED_VALUE",
+        ];
+        for key in KEYS {
+            remove_env_var(key);
+        }
+
+        let toml: super::ShardlineTomlConfig = toml::from_str(
+            r#"
+[server]
+root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
+"#,
+        )
+        .unwrap();
+        let config = load_server_config_from_env_with_toml(&toml).unwrap();
+        assert_eq!(
+            config.root_dir(),
+            std::path::Path::new("runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected")
+        );
+        assert_eq!(config.auth_provider(), super::AuthProviderKind::Local);
+        assert!(std::env::var("SHARDLINE_INJECTED_VALUE").is_err());
+
+        for key in KEYS {
+            remove_env_var(key);
+        }
     }
 
     // ── parse_server_frontends_env ─────────────────────────────────────────

@@ -9,6 +9,9 @@ use crate::{merklehash::MerkleHash, utils::serialization_utils::*};
 pub const MDB_DEFAULT_XORB_FLAG: u32 = 0;
 pub const MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG: u32 = 1 << 31;
 
+const MDB_SHARD_FORMAT_V3: u64 = 3;
+const MDB_V2_INFO_ENTRY_SIZE: usize = 48;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XorbChunkSequenceHeader {
     pub xorb_hash: MerkleHash,
@@ -55,11 +58,23 @@ impl XorbChunkSequenceHeader {
         Ok(size_of::<Self>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
+        if version < MDB_SHARD_FORMAT_V3 {
+            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
+            reader.read_exact(&mut v)?;
+            let reader = &mut Cursor::new(v);
+            return Ok(Self {
+                xorb_hash: read_hash(reader)?,
+                xorb_flags: read_u32(reader)?,
+                num_entries: u64::from(read_u32(reader)?),
+                num_bytes_in_xorb: u64::from(read_u32(reader)?),
+                num_bytes_on_disk: u64::from(read_u32(reader)?),
+            });
+        }
+
         let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v[..])?;
-        let mut reader_curs = Cursor::new(&v);
-        let reader = &mut reader_curs;
+        reader.read_exact(&mut v)?;
+        let reader = &mut Cursor::new(v);
         Ok(Self {
             xorb_hash: read_hash(reader)?,
             xorb_flags: read_u32(reader)?,
@@ -128,11 +143,23 @@ impl XorbChunkSequenceEntry {
         Ok(size_of::<XorbChunkSequenceEntry>())
     }
 
-    pub fn deserialize<R: Read>(reader: &mut R, _version: u64) -> Result<Self, std::io::Error> {
+    pub fn deserialize<R: Read>(reader: &mut R, version: u64) -> Result<Self, std::io::Error> {
+        if version < MDB_SHARD_FORMAT_V3 {
+            let mut v = [0u8; MDB_V2_INFO_ENTRY_SIZE];
+            reader.read_exact(&mut v)?;
+            let reader = &mut Cursor::new(v);
+            return Ok(Self {
+                chunk_hash: read_hash(reader)?,
+                chunk_byte_range_start: u64::from(read_u32(reader)?),
+                unpacked_segment_bytes: u64::from(read_u32(reader)?),
+                flags: read_u32(reader)?,
+                _unused: u64::from(read_u32(reader)?),
+            });
+        }
+
         let mut v = [0u8; size_of::<Self>()];
-        reader.read_exact(&mut v[..])?;
-        let mut reader_curs = Cursor::new(&v);
-        let reader = &mut reader_curs;
+        reader.read_exact(&mut v)?;
+        let reader = &mut Cursor::new(v);
         Ok(Self {
             chunk_hash: read_hash(reader)?,
             chunk_byte_range_start: read_u64(reader)?,
@@ -333,6 +360,42 @@ mod tests {
         assert_eq!(h.num_entries, h2.num_entries);
         assert_eq!(h.num_bytes_in_xorb, h2.num_bytes_in_xorb);
         assert_eq!(h.num_bytes_on_disk, h2.num_bytes_on_disk);
+    }
+
+    #[test]
+    fn xorb_info_deserializes_v2_32_bit_layout() {
+        let xorb_hash = compute_data_hash(b"v2-xorb");
+        let chunk_hash = compute_data_hash(b"v2-chunk");
+        let mut bytes = Vec::new();
+        write_hash(&mut bytes, &xorb_hash).unwrap();
+        write_u32(&mut bytes, MDB_DEFAULT_XORB_FLAG).unwrap();
+        write_u32(&mut bytes, 1).unwrap();
+        write_u32(&mut bytes, 65_536).unwrap();
+        write_u32(&mut bytes, 32_768).unwrap();
+        write_hash(&mut bytes, &chunk_hash).unwrap();
+        write_u32(&mut bytes, 4_096).unwrap();
+        write_u32(&mut bytes, 8_192).unwrap();
+        write_u32(&mut bytes, MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG).unwrap();
+        write_u32(&mut bytes, 0).unwrap();
+        write_hash(&mut bytes, &[!0_u64; 4].into()).unwrap();
+        for _ in 0..4 {
+            write_u32(&mut bytes, 0).unwrap();
+        }
+
+        let mut reader = Cursor::new(bytes);
+        let info = MDBXorbInfo::deserialize(&mut reader, 2)
+            .unwrap()
+            .expect("v2 xorb info");
+        assert_eq!(info.metadata.xorb_hash, xorb_hash);
+        assert_eq!(info.metadata.num_entries, 1);
+        assert_eq!(info.metadata.num_bytes_in_xorb, 65_536);
+        assert_eq!(info.metadata.num_bytes_on_disk, 32_768);
+        assert_eq!(info.chunks[0].chunk_hash, chunk_hash);
+        assert_eq!(info.chunks[0].chunk_byte_range_start, 4_096);
+        assert_eq!(info.chunks[0].unpacked_segment_bytes, 8_192);
+        assert_eq!(info.chunks[0].flags, MDB_CHUNK_WITH_GLOBAL_DEDUP_FLAG);
+        assert!(MDBXorbInfo::deserialize(&mut reader, 2).unwrap().is_none());
+        assert_eq!(reader.position(), 3 * MDB_V2_INFO_ENTRY_SIZE as u64);
     }
 
     #[test]
