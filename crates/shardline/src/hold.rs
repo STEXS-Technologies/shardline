@@ -88,7 +88,7 @@ pub async fn run_hold_set(
     reason: &str,
     ttl_seconds: Option<u64>,
 ) -> Result<RetentionHold, HoldRuntimeError> {
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     let object_key = ObjectKey::parse(object_key)?;
     let held_at_unix_seconds = unix_now_seconds_lossy();
     let release_after_unix_seconds = ttl_seconds
@@ -125,7 +125,7 @@ pub async fn run_hold_list(
     root: Option<&Path>,
     active_only: bool,
 ) -> Result<Vec<RetentionHold>, HoldRuntimeError> {
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     let mut holds = if let Some(index_postgres_url) = config.index_postgres_url() {
         let store = postgres_index_store(index_postgres_url)?;
         store.list_retention_holds().await?
@@ -152,7 +152,7 @@ pub async fn run_hold_release(
     root: Option<&Path>,
     object_key: &str,
 ) -> Result<bool, HoldRuntimeError> {
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     let object_key = ObjectKey::parse(object_key)?;
 
     if let Some(index_postgres_url) = config.index_postgres_url() {

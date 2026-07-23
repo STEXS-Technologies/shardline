@@ -32,7 +32,7 @@ pub async fn run_backup_manifest(
     root: Option<&Path>,
     output: &Path,
 ) -> Result<BackupManifestReport, BackupRuntimeError> {
-    let config = load_server_config(root)?;
+    let config = load_server_config(root, None)?;
     let mut manifest = Vec::new();
     let report = write_server_backup_manifest(config, &mut manifest).await?;
     write_output_bytes(output, &manifest, false)?;

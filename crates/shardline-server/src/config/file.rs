@@ -8,80 +8,80 @@ use serde::Deserialize;
 
 /// Top-level TOML configuration document.
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct ShardlineTomlConfig {
+pub struct ShardlineTomlConfig {
     #[serde(default)]
-    server: Option<ServerSection>,
+    pub server: Option<ServerSection>,
     #[serde(default)]
-    storage: Option<StorageSection>,
+    pub storage: Option<StorageSection>,
     #[serde(default)]
-    index: Option<IndexSection>,
+    pub index: Option<IndexSection>,
     #[serde(default)]
-    cache: Option<CacheSection>,
+    pub cache: Option<CacheSection>,
     #[serde(default)]
-    auth: Option<AuthSection>,
+    pub auth: Option<AuthSection>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ServerSection {
-    bind_addr: Option<String>,
-    public_base_url: Option<String>,
-    server_role: Option<String>,
-    frontends: Option<Vec<String>>,
-    root_dir: Option<String>,
-    max_request_body_bytes: Option<u64>,
-    chunk_size_bytes: Option<u64>,
-    upload_max_in_flight_chunks: Option<u64>,
-    transfer_max_in_flight_chunks: Option<u64>,
+pub struct ServerSection {
+    pub bind_addr: Option<String>,
+    pub public_base_url: Option<String>,
+    pub server_role: Option<String>,
+    pub frontends: Option<Vec<String>>,
+    pub root_dir: Option<String>,
+    pub max_request_body_bytes: Option<u64>,
+    pub chunk_size_bytes: Option<u64>,
+    pub upload_max_in_flight_chunks: Option<u64>,
+    pub transfer_max_in_flight_chunks: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
-struct StorageSection {
-    adapter: Option<String>,
-    s3: Option<S3Section>,
+pub struct StorageSection {
+    pub adapter: Option<String>,
+    pub s3: Option<S3Section>,
 }
 
 #[derive(Debug, Deserialize)]
-struct S3Section {
-    endpoint: Option<String>,
-    region: Option<String>,
-    bucket: Option<String>,
-    prefix: Option<String>,
-    virtual_hosted_style: Option<bool>,
+pub struct S3Section {
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+    pub bucket: Option<String>,
+    pub prefix: Option<String>,
+    pub virtual_hosted_style: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IndexSection {
-    postgres_url: Option<String>,
+pub struct IndexSection {
+    pub postgres_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CacheSection {
-    redis_url: Option<String>,
-    adapter: Option<String>,
-    ttl_seconds: Option<u64>,
+pub struct CacheSection {
+    pub redis_url: Option<String>,
+    pub adapter: Option<String>,
+    pub ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthSection {
-    provider: Option<String>,
-    token_signing_key_path: Option<String>,
-    provider_api_key_path: Option<String>,
-    provider_token_issuer: Option<String>,
-    provider_token_ttl_seconds: Option<u64>,
-    jwks: Option<JwksSection>,
-    oidc: Option<OidcSection>,
+pub struct AuthSection {
+    pub provider: Option<String>,
+    pub token_signing_key_path: Option<String>,
+    pub provider_api_key_path: Option<String>,
+    pub provider_token_issuer: Option<String>,
+    pub provider_token_ttl_seconds: Option<u64>,
+    pub jwks: Option<JwksSection>,
+    pub oidc: Option<OidcSection>,
 }
 
 #[derive(Debug, Deserialize)]
-struct JwksSection {
-    url: Option<String>,
-    refresh_interval_seconds: Option<u64>,
+pub struct JwksSection {
+    pub url: Option<String>,
+    pub refresh_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OidcSection {
-    issuer_url: Option<String>,
-    client_id: Option<String>,
+pub struct OidcSection {
+    pub issuer_url: Option<String>,
+    pub client_id: Option<String>,
 }
 
 /// Standard paths checked for shardline.toml, in priority order (first found wins).
@@ -262,6 +262,22 @@ pub fn load_toml_env_overrides(
     config_path: Option<&Path>,
 ) -> Result<Option<HashMap<String, String>>, String> {
     resolve_config_path(config_path).map_or(Ok(None), |bytes| toml_to_env_map(&bytes).map(Some))
+}
+
+/// Parses a shardline.toml file at the given path (or auto-detected) and
+/// returns the deserialized config struct.
+///
+/// # Errors
+///
+/// Returns an error message when the file exists but cannot be read or parsed.
+pub fn load_toml_config(config_path: Option<&Path>) -> Result<Option<ShardlineTomlConfig>, String> {
+    let Some(content) = resolve_config_path(config_path) else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(&content).map_err(|e| format!("TOML encoding error: {e}"))?;
+    let config: ShardlineTomlConfig =
+        toml::from_str(text).map_err(|e| format!("TOML parse error: {e}"))?;
+    Ok(Some(config))
 }
 
 #[cfg(test)]

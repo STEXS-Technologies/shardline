@@ -6,6 +6,7 @@ use std::{
 
 use shardline_protocol::{SecretBytes, SecretString};
 
+use super::file::ShardlineTomlConfig;
 use super::secrets::{
     configure_provider_runtime_from_paths, load_redis_tls_config_from_env,
     load_s3_object_store_config_from_env, read_secret_file_bytes,
@@ -357,6 +358,132 @@ fn load_non_zero_usize_env(
         .parse::<usize>()
         .map_err(parse_error)?;
     NonZeroUsize::new(raw).ok_or_else(zero_error)
+}
+
+/// Loads server configuration from environment variables, applying optional
+/// TOML config file values as defaults. Environment variables already set in
+/// the process take precedence over TOML values.
+///
+/// This is a thin wrapper around [`load_server_config_from_env`] that pre-fills
+/// environment variables from a parsed `shardline.toml` before delegating to
+/// the standard env-based loader.
+///
+/// # Errors
+///
+/// Returns [`ServerConfigError`] when required configuration is missing or
+/// invalid.
+pub fn load_server_config_from_env_with_toml(
+    toml: &ShardlineTomlConfig,
+) -> Result<ServerConfig, ServerConfigError> {
+    use std::io::Write;
+
+    // Collect TOML values into a buffer as KEY=VALUE lines.
+    let mut buf = Vec::new();
+
+    let mut set_if_unset = |key: &str, value: Option<String>| {
+        if let Some(value) = value
+            && var(key).is_err()
+        {
+            let _ignored = writeln!(buf, "{key}={value}");
+        }
+    };
+
+    if let Some(srv) = &toml.server {
+        set_if_unset("SHARDLINE_BIND_ADDR", srv.bind_addr.clone());
+        set_if_unset("SHARDLINE_PUBLIC_BASE_URL", srv.public_base_url.clone());
+        set_if_unset("SHARDLINE_SERVER_ROLE", srv.server_role.clone());
+        if let Some(frontends) = &srv.frontends {
+            set_if_unset("SHARDLINE_SERVER_FRONTENDS", Some(frontends.join(",")));
+        }
+        set_if_unset("SHARDLINE_ROOT_DIR", srv.root_dir.clone());
+        set_if_unset(
+            "SHARDLINE_MAX_REQUEST_BODY_BYTES",
+            srv.max_request_body_bytes.map(|v| v.to_string()),
+        );
+        set_if_unset(
+            "SHARDLINE_CHUNK_SIZE_BYTES",
+            srv.chunk_size_bytes.map(|v| v.to_string()),
+        );
+        set_if_unset(
+            "SHARDLINE_UPLOAD_MAX_IN_FLIGHT_CHUNKS",
+            srv.upload_max_in_flight_chunks.map(|v| v.to_string()),
+        );
+        set_if_unset(
+            "SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS",
+            srv.transfer_max_in_flight_chunks.map(|v| v.to_string()),
+        );
+    }
+
+    if let Some(stg) = &toml.storage {
+        set_if_unset("SHARDLINE_OBJECT_STORAGE_ADAPTER", stg.adapter.clone());
+        if let Some(s3) = &stg.s3 {
+            set_if_unset("SHARDLINE_S3_ENDPOINT", s3.endpoint.clone());
+            set_if_unset("SHARDLINE_S3_REGION", s3.region.clone());
+            set_if_unset("SHARDLINE_S3_BUCKET", s3.bucket.clone());
+            set_if_unset("SHARDLINE_S3_PREFIX", s3.prefix.clone());
+            set_if_unset(
+                "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE",
+                s3.virtual_hosted_style.map(|v| v.to_string()),
+            );
+        }
+    }
+
+    if let Some(idx) = &toml.index {
+        set_if_unset("SHARDLINE_INDEX_POSTGRES_URL", idx.postgres_url.clone());
+    }
+
+    if let Some(cch) = &toml.cache {
+        set_if_unset(
+            "SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER",
+            cch.adapter.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL",
+            cch.redis_url.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS",
+            cch.ttl_seconds.map(|v| v.to_string()),
+        );
+    }
+
+    if let Some(auth) = &toml.auth {
+        set_if_unset("SHARDLINE_AUTH_PROVIDER", auth.provider.clone());
+        set_if_unset(
+            "SHARDLINE_TOKEN_SIGNING_KEY_PATH",
+            auth.token_signing_key_path.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_PROVIDER_API_KEY_PATH",
+            auth.provider_api_key_path.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_PROVIDER_TOKEN_ISSUER",
+            auth.provider_token_issuer.clone(),
+        );
+        set_if_unset(
+            "SHARDLINE_PROVIDER_TOKEN_TTL_SECONDS",
+            auth.provider_token_ttl_seconds.map(|v| v.to_string()),
+        );
+        if let Some(jwks) = &auth.jwks {
+            set_if_unset("SHARDLINE_AUTH_JWKS_URL", jwks.url.clone());
+            set_if_unset(
+                "SHARDLINE_AUTH_JWKS_REFRESH_INTERVAL_SECONDS",
+                jwks.refresh_interval_seconds.map(|v| v.to_string()),
+            );
+        }
+        if let Some(oidc) = &auth.oidc {
+            set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER_URL", oidc.issuer_url.clone());
+            set_if_unset("SHARDLINE_AUTH_OIDC_CLIENT_ID", oidc.client_id.clone());
+        }
+    }
+
+    // Apply TOML values to the process environment for keys not already set.
+    if !buf.is_empty() {
+        drop(dotenvy::from_read(std::io::Cursor::new(buf)));
+    }
+
+    load_server_config_from_env()
 }
 
 #[cfg(test)]
