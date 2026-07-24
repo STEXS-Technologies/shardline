@@ -125,7 +125,7 @@ impl PostgresBackend {
         self.index_store.probe().await
     }
 
-    pub(crate) fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
+    pub(crate) async fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
         use shardline_index::{UploadIntentState, UploadIntentStore};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -136,7 +136,7 @@ impl PostgresBackend {
             UploadIntentState::Stored,
             UploadIntentState::MetadataCommitted,
         ] {
-            let intents = match self.index_store.intents_by_state(*state) {
+            let intents = match self.index_store.intents_by_state(*state).await {
                 Ok(intents) => intents,
                 Err(e) => {
                     // If the intents table does not exist yet (no migration has created it),
@@ -162,6 +162,7 @@ impl PostgresBackend {
                 if let Err(e) = self
                     .index_store
                     .transition_intent(intent.intent_id(), UploadIntentState::Failed)
+                    .await
                 {
                     tracing::warn!(intent_id = %intent.intent_id(), error = %e, "intent transition failed, skipping");
                 } else {

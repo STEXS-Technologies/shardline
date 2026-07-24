@@ -103,7 +103,7 @@ impl ServerBackend {
             tracing::info!("startup probe: postgres metadata OK");
 
             // Reconcile any stuck upload intents from a previous crash
-            backend.reconcile_stuck_upload_intents()?;
+            backend.reconcile_stuck_upload_intents().await?;
 
             return Ok(Self::Postgres(backend));
         }
@@ -126,7 +126,7 @@ impl ServerBackend {
         tracing::info!("startup probe: sqlite metadata OK");
 
         // Reconcile any stuck upload intents from a previous crash
-        backend.reconcile_stuck_upload_intents()?;
+        backend.reconcile_stuck_upload_intents().await?;
 
         Ok(Self::Local(backend))
     }
@@ -310,10 +310,10 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
+    pub(crate) async fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
         match self {
-            Self::Local(backend) => backend.reconcile_stuck_upload_intents(),
-            Self::Postgres(backend) => backend.reconcile_stuck_upload_intents(),
+            Self::Local(backend) => backend.reconcile_stuck_upload_intents().await,
+            Self::Postgres(backend) => backend.reconcile_stuck_upload_intents().await,
         }
     }
 

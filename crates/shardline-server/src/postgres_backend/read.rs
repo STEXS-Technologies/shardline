@@ -417,7 +417,8 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         |         PostgresMetadataStoreError::IntegerOutOfRange(_)
         | PostgresMetadataStoreError::InvalidRecordKind
         | PostgresMetadataStoreError::InvalidRepoType(_)
-        | PostgresMetadataStoreError::Unsupported(_) => {
+        | PostgresMetadataStoreError::Unsupported(_)
+        | PostgresMetadataStoreError::InvalidUploadIntentState(_) => {
             ServerError::Index(IndexError::PostgresMetadata(error))
         }
     }

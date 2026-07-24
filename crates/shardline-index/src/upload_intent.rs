@@ -149,16 +149,17 @@ impl UploadIntent {
 }
 
 /// Durable storage for upload intent records.
-pub trait UploadIntentStore {
+#[async_trait::async_trait]
+pub trait UploadIntentStore: Send + Sync {
     /// Adapter-specific error type.
-    type Error;
+    type Error: Send + Sync;
 
     /// Persists a new upload intent in `Created` state.
     ///
     /// # Errors
     ///
     /// Returns the adapter error when the persistence operation fails.
-    fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error>;
+    async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error>;
 
     /// Transitions an intent to a new state.
     ///
@@ -167,7 +168,7 @@ pub trait UploadIntentStore {
     /// # Errors
     ///
     /// Returns the adapter error when the persistence operation fails.
-    fn transition_intent(
+    async fn transition_intent(
         &self,
         intent_id: &str,
         new_state: UploadIntentState,
@@ -178,14 +179,14 @@ pub trait UploadIntentStore {
     /// # Errors
     ///
     /// Returns the adapter error when the lookup fails.
-    fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error>;
+    async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error>;
 
     /// Lists all intents in a given state.
     ///
     /// # Errors
     ///
     /// Returns the adapter error when the query fails.
-    fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error>;
+    async fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error>;
 
     /// Lists all intents that have been in a non-terminal state for longer than
     /// the given duration.
@@ -193,7 +194,7 @@ pub trait UploadIntentStore {
     /// # Errors
     ///
     /// Returns the adapter error when the query fails.
-    fn stale_intents(
+    async fn stale_intents(
         &self,
         state: UploadIntentState,
         older_than: Duration,

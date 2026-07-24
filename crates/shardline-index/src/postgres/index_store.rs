@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
-use std::time::Duration;
 
 use super::{PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
@@ -670,37 +669,90 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     }
 }
 
+#[async_trait::async_trait]
 impl UploadIntentStore for super::PostgresIndexStore {
     type Error = PostgresMetadataStoreError;
 
-    fn create_intent(&self, _intent: &UploadIntent) -> Result<(), Self::Error> {
-        Err(PostgresMetadataStoreError::Unsupported(
-            "sync UploadIntentStore not available for Postgres; use the local SQLite path".into(),
-        ))
+    async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        sqlx::query(
+            "INSERT INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, now(), now())"
+        )
+        .bind(intent.intent_id())
+        .bind(intent.object_key())
+        .bind(intent.object_hash())
+        .bind(intent.object_length() as i64)
+        .bind(intent.state().as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
-    fn transition_intent(&self, _intent_id: &str, _new_state: UploadIntentState) -> Result<bool, Self::Error> {
-        Err(PostgresMetadataStoreError::Unsupported(
-            "sync UploadIntentStore not available for Postgres".into(),
-        ))
+    async fn transition_intent(&self, intent_id: &str, new_state: UploadIntentState) -> Result<bool, Self::Error> {
+        let rows = sqlx::query(
+            "UPDATE shardline_upload_intents SET state = $1, updated_at = now() WHERE intent_id = $2"
+        )
+        .bind(new_state.as_str())
+        .bind(intent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(rows.rows_affected() > 0)
     }
 
-    fn intent_by_id(&self, _intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
-        Err(PostgresMetadataStoreError::Unsupported(
-            "sync UploadIntentStore not available for Postgres".into(),
-        ))
+    async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
+        let row = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE intent_id = $1"
+        )
+        .bind(intent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some((id, key, hash, length, state_str, created, updated)) => {
+                let state = UploadIntentState::from_str(&state_str)
+                    .ok_or_else(|| PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone()))?;
+                let created_dur = std::time::Duration::from_secs(created.timestamp() as u64);
+                let updated_dur = std::time::Duration::from_secs(updated.timestamp() as u64);
+                Ok(Some(UploadIntent::from_parts(id, key, hash, length as u64, state, created_dur, updated_dur)))
+            }
+            None => Ok(None),
+        }
     }
 
-    fn intents_by_state(&self, _state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
-        Err(PostgresMetadataStoreError::Unsupported(
-            "sync UploadIntentStore not available for Postgres".into(),
-        ))
+    async fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
+        let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 ORDER BY created_at"
+        )
+        .bind(state.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        let intents = rows.into_iter().map(|(id, key, hash, length, state_str, created, updated)| {
+            let s = UploadIntentState::from_str(&state_str)
+                .ok_or_else(|| PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone()))?;
+            Ok(UploadIntent::from_parts(id, key, hash, length as u64, s,
+                std::time::Duration::from_secs(created.timestamp() as u64),
+                std::time::Duration::from_secs(updated.timestamp() as u64)))
+        }).collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        Ok(intents)
     }
 
-    fn stale_intents(&self, _state: UploadIntentState, _older_than: Duration) -> Result<Vec<UploadIntent>, Self::Error> {
-        Err(PostgresMetadataStoreError::Unsupported(
-            "sync UploadIntentStore not available for Postgres".into(),
-        ))
+    async fn stale_intents(&self, state: UploadIntentState, older_than: std::time::Duration) -> Result<Vec<UploadIntent>, Self::Error> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::from_std(older_than).map_err(|_e| {
+            PostgresMetadataStoreError::InvalidUploadIntentState("invalid duration".into())
+        })?;
+        let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 AND created_at < $2 ORDER BY created_at"
+        )
+        .bind(state.as_str())
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+        let intents = rows.into_iter().map(|(id, key, hash, length, state_str, created, updated)| {
+            let s = UploadIntentState::from_str(&state_str)
+                .ok_or_else(|| PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone()))?;
+            Ok(UploadIntent::from_parts(id, key, hash, length as u64, s,
+                std::time::Duration::from_secs(created.timestamp() as u64),
+                std::time::Duration::from_secs(updated.timestamp() as u64)))
+        }).collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        Ok(intents)
     }
 }
 

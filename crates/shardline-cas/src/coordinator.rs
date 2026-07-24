@@ -68,17 +68,20 @@ where
     {
         intent_store
             .create_intent(intent)
+            .await
             .map_err(|e| CasError::from_record(e))?;
         match work().await {
             Ok(result) => {
                 intent_store
                     .transition_intent(intent.intent_id(), shardline_index::UploadIntentState::Visible)
+                    .await
                     .map_err(|e| CasError::from_record(e))?;
                 Ok(result)
             }
             Err(e) => {
                 intent_store
                     .transition_intent(intent.intent_id(), shardline_index::UploadIntentState::Failed)
+                    .await
                     .ok();
                 Err(e)
             }

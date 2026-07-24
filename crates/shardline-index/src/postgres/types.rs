@@ -159,6 +159,9 @@ pub enum PostgresMetadataStoreError {
     /// The requested operation is not supported by this backend.
     #[error("operation not supported: {0}")]
     Unsupported(String),
+    /// A stored upload intent state value was invalid.
+    #[error("invalid upload intent state: {0}")]
+    InvalidUploadIntentState(String),
 }
 
 impl From<SqlxError> for PostgresMetadataStoreError {
