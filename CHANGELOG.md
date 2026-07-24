@@ -21,6 +21,10 @@ configuration changes from `1.1.0`.
 
 ### Fixed
 
+- **Authentication provider validation**: require an HMAC signing key only for the local
+  authentication provider, allowing externally validated token providers to serve routes
+  without an unused local key; increased the accepted token-string size limit for
+  asymmetric tokens.
 - **Postgres CI stability**: isolated integration-test repository state and applied database
   migrations in PostgreSQL-backed end-to-end tests.
 - **S3 and GC coverage stability**: removed timing-sensitive outage assertions and corrected
