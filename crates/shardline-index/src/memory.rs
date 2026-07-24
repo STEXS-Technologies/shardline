@@ -370,17 +370,18 @@ impl LifecycleStore for MemoryIndexStore {
     }
 }
 
+#[async_trait::async_trait]
 impl UploadIntentStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
-    fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+    async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
         self.lock_state()?
             .upload_intents
             .insert(intent.intent_id().to_owned(), intent.clone());
         Ok(())
     }
 
-    fn transition_intent(&self, intent_id: &str, new_state: UploadIntentState) -> Result<bool, Self::Error> {
+    async fn transition_intent(&self, intent_id: &str, new_state: UploadIntentState) -> Result<bool, Self::Error> {
         let mut state = self.lock_state()?;
         if let Some(intent) = state.upload_intents.get(intent_id) {
             let updated = UploadIntent::from_parts(
@@ -399,11 +400,11 @@ impl UploadIntentStore for MemoryIndexStore {
         }
     }
 
-    fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
+    async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
         Ok(self.lock_state()?.upload_intents.get(intent_id).cloned())
     }
 
-    fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
+    async fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
         Ok(self
             .lock_state()?
             .upload_intents
@@ -413,7 +414,7 @@ impl UploadIntentStore for MemoryIndexStore {
             .collect())
     }
 
-    fn stale_intents(&self, state: UploadIntentState, older_than: Duration) -> Result<Vec<UploadIntent>, Self::Error> {
+    async fn stale_intents(&self, state: UploadIntentState, older_than: Duration) -> Result<Vec<UploadIntent>, Self::Error> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);
