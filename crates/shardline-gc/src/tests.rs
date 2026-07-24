@@ -789,7 +789,7 @@ fn validate_integrity_missing_quarantine_object_auto_released() {
         let index_store = MemoryIndexStore::new();
 
         let key =
-            ObjectKey::parse("ab/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            ObjectKey::parse("aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .unwrap();
         let candidate = QuarantineCandidate::new(key, 100, 1_000_000, 2_000_000).unwrap();
         index_store
