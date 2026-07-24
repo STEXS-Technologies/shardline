@@ -16,8 +16,9 @@ use super::defaults::{
     DEFAULT_OCI_REGISTRY_TOKEN_TTL_SECONDS, DEFAULT_OCI_UPLOAD_MAX_ACTIVE_SESSIONS,
     DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS, DEFAULT_PARALLELISM_FALLBACK,
     MAX_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MAX_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-    MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
-    MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS, MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
+    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_PROVIDER_API_KEY_BYTES,
+    MAX_TOKEN_SIGNING_KEY_BYTES, MIN_DEFAULT_TRANSFER_MAX_IN_FLIGHT_CHUNKS,
+    MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
 };
 use super::enums::{
     AuthConfig, AuthProviderKind, CacheConfig, ObjectStorageAdapter, OciConfig, ProviderConfig,
@@ -92,6 +93,8 @@ impl ServerConfig {
                 auth_oidc_issuer: None,
                 auth_jwks_url: None,
                 auth_jwks_issuer: None,
+                ed25519_private_key: None,
+                ed25519_public_key: None,
             },
             oci: OciConfig {
                 upload_session_ttl_seconds: DEFAULT_OCI_UPLOAD_SESSION_TTL_SECONDS,
@@ -478,6 +481,24 @@ impl ServerConfig {
             .map(SecretBytes::expose_secret)
     }
 
+    /// Returns the optional Ed25519 private key.
+    #[must_use]
+    pub fn ed25519_private_key(&self) -> Option<&[u8]> {
+        self.auth
+            .ed25519_private_key
+            .as_ref()
+            .map(SecretBytes::expose_secret)
+    }
+
+    /// Returns the optional Ed25519 public key.
+    #[must_use]
+    pub fn ed25519_public_key(&self) -> Option<&[u8]> {
+        self.auth
+            .ed25519_public_key
+            .as_ref()
+            .map(SecretBytes::expose_secret)
+    }
+
     /// Returns the optional metrics bearer token.
     #[must_use]
     pub fn metrics_token(&self) -> Option<&[u8]> {
@@ -574,6 +595,56 @@ impl ServerConfig {
         )?;
 
         self.auth.token_signing_key = Some(token_signing_key);
+        Ok(self)
+    }
+
+    /// Sets the Ed25519 private key for asymmetric token signing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::EmptyEd25519PrivateKey`] when the key is empty.
+    pub fn with_ed25519_private_key(
+        mut self,
+        private_key: impl Into<SecretBytes>,
+    ) -> Result<Self, ServerConfigError> {
+        let private_key = private_key.into();
+        if private_key.expose_secret().is_empty() {
+            return Err(ServerConfigError::EmptyEd25519PrivateKey);
+        }
+        ensure_secret_size_within_limit(
+            u64::try_from(private_key.len()).unwrap_or(u64::MAX),
+            MAX_ED25519_KEY_BYTES,
+            |observed_bytes, maximum_bytes| ServerConfigError::Ed25519PrivateKeyTooLarge {
+                observed_bytes,
+                maximum_bytes,
+            },
+        )?;
+        self.auth.ed25519_private_key = Some(private_key);
+        Ok(self)
+    }
+
+    /// Sets the Ed25519 public key for token verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerConfigError::EmptyEd25519PublicKey`] when the key is empty.
+    pub fn with_ed25519_public_key(
+        mut self,
+        public_key: impl Into<SecretBytes>,
+    ) -> Result<Self, ServerConfigError> {
+        let public_key = public_key.into();
+        if public_key.expose_secret().is_empty() {
+            return Err(ServerConfigError::EmptyEd25519PublicKey);
+        }
+        ensure_secret_size_within_limit(
+            u64::try_from(public_key.len()).unwrap_or(u64::MAX),
+            MAX_ED25519_KEY_BYTES,
+            |observed_bytes, maximum_bytes| ServerConfigError::Ed25519PublicKeyTooLarge {
+                observed_bytes,
+                maximum_bytes,
+            },
+        )?;
+        self.auth.ed25519_public_key = Some(public_key);
         Ok(self)
     }
 
@@ -676,10 +747,12 @@ impl ServerConfig {
     /// # Errors
     ///
     /// Returns [`ServerConfigError::MissingTokenSigningKeyForServedRoutes`] when the
-    /// selected role would expose authenticated CAS routes without a signing key.
+    /// selected role uses the local HMAC provider and would expose authenticated
+    /// CAS routes without a signing key.
     pub const fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
         if self.auth.token_signing_key.is_none()
             && (self.server_role.serves_api() || self.server_role.serves_transfer())
+            && matches!(self.auth.auth_provider, AuthProviderKind::Local)
         {
             return Err(ServerConfigError::MissingTokenSigningKeyForServedRoutes);
         }
@@ -692,6 +765,17 @@ impl ServerConfig {
             return Err(ServerConfigError::PassthroughProviderRequiresLoopbackBind {
                 bind_addr: self.bind_addr,
             });
+        }
+
+        if matches!(self.auth.auth_provider, AuthProviderKind::Ed25519) {
+            match (
+                self.auth.ed25519_private_key.is_some(),
+                self.auth.ed25519_public_key.is_some(),
+            ) {
+                (false, false) => return Err(ServerConfigError::MissingEd25519Key),
+                (true, true) => return Err(ServerConfigError::ConflictingEd25519Keys),
+                (true, false) | (false, true) => {}
+            }
         }
 
         Ok(())

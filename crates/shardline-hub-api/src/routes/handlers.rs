@@ -14,11 +14,13 @@ pub(crate) async fn whoami(
     State(state): State<HubState>,
     headers: HeaderMap,
 ) -> Result<Json<WhoamiResponse>, HubApiError> {
-    let name = state
-        .auth
-        .as_ref()
-        .and_then(|auth| auth.authorize(&headers, TokenScope::Read).ok())
-        .map_or_else(|| "anonymous".to_owned(), |ctx| ctx.subject().to_owned());
+    let name = if let Some(auth) = &state.auth {
+        auth.authorize(&headers, TokenScope::Read)?
+            .subject()
+            .to_owned()
+    } else {
+        "anonymous".to_owned()
+    };
     shardline_metrics::record_hub_api_request("whoami", "GET", 200);
     Ok(Json(WhoamiResponse {
         name: name.clone(),

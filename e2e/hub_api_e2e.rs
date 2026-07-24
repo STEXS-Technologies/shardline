@@ -295,7 +295,7 @@ async fn whoami_returns_authenticated_user() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn whoami_returns_anonymous_without_token() {
+async fn whoami_rejects_missing_token_when_auth_is_configured() {
     let srv = start_hub_server().await; let base_url = srv.base_url();
     let client = Client::new();
     let resp = client
@@ -303,9 +303,11 @@ async fn whoami_returns_anonymous_without_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "whoami without token failed: {}", resp.status());
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["name"], "anonymous", "unauthenticated whoami should return anonymous");
+    assert_eq!(
+        resp.status(),
+        401,
+        "whoami without a token must fail closed when auth is configured"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2543,30 +2545,6 @@ async fn hub_whoami_includes_hf_fields() {
         account["name"], "test-subject",
         "account name should match user name"
     );
-}
-
-// ---------------------------------------------------------------------------
-// 31. HF API spec fields: whoami anonymous includes auth details
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hub_whoami_anonymous_includes_hf_fields() {
-    let srv = start_hub_server().await;
-    let base_url = srv.base_url();
-
-    let client = Client::new();
-    let resp = client
-        .get(format!("{base_url}/api/whoami-v2"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-
-    assert_eq!(body["name"], "anonymous");
-    assert_eq!(body["type"], "user");
-    assert_eq!(body["auth"]["type"], "token");
-    assert_eq!(body["auth"]["identity"]["account"]["name"], "anonymous");
 }
 
 // ---------------------------------------------------------------------------

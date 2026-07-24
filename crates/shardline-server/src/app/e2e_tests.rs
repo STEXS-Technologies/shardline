@@ -36,7 +36,7 @@ use crate::{
     xet_adapter::{XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE},
 };
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
-use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
+use shardline_server_core::{AuthProvider, auth::Ed25519AuthProvider, auth::LocalHmacProvider};
 use shardline_xet_core::merklehash::compute_data_hash;
 
 // ---------------------------------------------------------------------------
@@ -7874,8 +7874,8 @@ async fn request_with_malformed_authorization_header() {
         "empty Bearer token should return 401"
     );
 
-    // Too-long Bearer token (above MAX_BEARER_TOKEN_BYTES)
-    let long_token = "x".repeat(8193);
+    // Too-long Bearer token (above the shared token envelope limit).
+    let long_token = "x".repeat(shardline_protocol::MAX_TOKEN_STRING_BYTES + 1);
     let response = app
         .oneshot(
             Request::builder()
@@ -9497,4 +9497,353 @@ async fn bazel_request_with_wrong_repo_scope() {
         StatusCode::NOT_FOUND,
         "Bazel CAS data stored with one repo scope should NOT be accessible with a different scope"
     );
+}
+
+// ── Ed25519 auth provider e2e ──────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ed25519_auth_token_successful_request() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+
+    let seed = [0u8; 32];
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_auth_provider(crate::config::AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(seed.to_vec())
+    .unwrap();
+
+    let app = crate::app::router(config).await;
+    assert!(app.is_ok(), "router should build with Ed25519 auth");
+    let app = app.unwrap();
+
+    // Mint an Ed25519-signed token using the same seed.
+    let provider = Ed25519AuthProvider::new(&seed).expect("valid Ed25519 provider");
+    let repo =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
+    let claims = TokenClaims::new("shardline", "test", TokenScope::Write, repo, u64::MAX).unwrap();
+    let token = provider.mint_token(&claims).unwrap();
+
+    // Exercise a route that actually enforces authentication.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ed25519_public_key_only_authenticates_private_key_token() {
+    let tmp = TempDir::new().unwrap();
+    let seed =
+        hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").unwrap();
+    let public_key =
+        hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a").unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_auth_provider(crate::config::AuthProviderKind::Ed25519)
+    .with_ed25519_public_key(public_key)
+    .unwrap();
+    let app = crate::app::router(config).await.unwrap();
+
+    let provider = Ed25519AuthProvider::new(&seed).unwrap();
+    let repository =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", None).unwrap();
+    let claims =
+        TokenClaims::new("issuer", "subject", TokenScope::Read, repository, u64::MAX).unwrap();
+    let token = provider.mint_token(&claims).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ed25519_oci_registry_token_exchange_mints_usable_ed25519_token() {
+    let tmp = TempDir::new().unwrap();
+    let seed = [4_u8; 32];
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_server_frontends([ServerFrontend::Oci])
+    .unwrap()
+    .with_auth_provider(crate::config::AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(seed.to_vec())
+    .unwrap();
+    let app = crate::app::router(config).await.unwrap();
+
+    let provider = Ed25519AuthProvider::new(&seed).unwrap();
+    let repository =
+        RepositoryScope::new(RepositoryProvider::Generic, "team", "assets", None).unwrap();
+    let claims = TokenClaims::new(
+        "issuer",
+        "oci-client",
+        TokenScope::Write,
+        repository,
+        u64::MAX,
+    )
+    .unwrap();
+    let bootstrap_token = provider.mint_token(&claims).unwrap();
+    let basic_credentials = STANDARD.encode(format!("shardline:{bootstrap_token}"));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v2/token?service=shardline&scope=repository:team/assets:pull")
+                .header(header::AUTHORIZATION, format!("Basic {basic_credentials}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_body = body_bytes(response).await;
+    let response_json: Value = serde_json::from_slice(&response_body).unwrap();
+    let exchanged_token = response_json["access_token"].as_str().unwrap();
+    let exchanged_claims = provider.verify_token(exchanged_token).unwrap();
+    assert_eq!(exchanged_claims.subject(), "oci-client");
+    assert_eq!(exchanged_claims.scope(), TokenScope::Read);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v2/")
+                .header(header::AUTHORIZATION, format!("Bearer {exchanged_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ed25519_protects_every_application_route_family() {
+    let tmp = TempDir::new().unwrap();
+    let seed = [5_u8; 32];
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_server_frontends([
+        ServerFrontend::Xet,
+        ServerFrontend::Lfs,
+        ServerFrontend::BazelHttp,
+        ServerFrontend::Oci,
+        ServerFrontend::Hub,
+    ])
+    .unwrap()
+    .with_metrics_token(b"metrics-secret".to_vec())
+    .unwrap()
+    .with_auth_provider(crate::config::AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(seed.to_vec())
+    .unwrap();
+    let app = crate::app::router(config).await.unwrap();
+    let hash = "0".repeat(64);
+    let protected_routes = [
+        ("GET", "/v1/stats".to_owned()),
+        ("GET", "/reconstructions".to_owned()),
+        ("POST", "/v1/shards".to_owned()),
+        ("GET", format!("/v1/chunks/default/{hash}")),
+        ("HEAD", format!("/v1/xorbs/default/{hash}")),
+        ("GET", format!("/transfer/xorb/default/{hash}")),
+        ("POST", "/v1/lfs/objects/batch".to_owned()),
+        ("GET", format!("/v1/lfs/objects/{hash}")),
+        ("PUT", format!("/v1/bazel/cache/cas/{hash}")),
+        ("GET", "/v2/".to_owned()),
+        ("GET", "/api/whoami-v2".to_owned()),
+        ("GET", "/api/repos".to_owned()),
+        ("POST", "/api/repos/create".to_owned()),
+        ("POST", "/objects/batch".to_owned()),
+        ("GET", format!("/lfs/objects/{hash}")),
+        ("GET", "/models/team/assets/info/refs".to_owned()),
+        ("POST", "/models/team/assets/git-receive-pack".to_owned()),
+        ("GET", "/metrics".to_owned()),
+    ];
+
+    for (method, uri) in protected_routes {
+        let (content_type, body) = match uri.as_str() {
+            "/v1/lfs/objects/batch" => (
+                "application/vnd.git-lfs+json",
+                Body::from(r#"{"operation":"download","objects":[]}"#),
+            ),
+            "/objects/batch" => (
+                "application/vnd.git-lfs+json",
+                Body::from(r#"{"operation":"download","ref":{"name":"main"},"objects":[]}"#),
+            ),
+            "/api/repos/create" => (
+                "application/json",
+                Body::from(r#"{"type":"model","name":"team/assets","private":false}"#),
+            ),
+            _ => ("application/octet-stream", Body::empty()),
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} was not protected"
+        );
+    }
+
+    for uri in ["/healthz", "/readyz", "/health"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{uri} should remain available to probes"
+        );
+    }
+
+    let provider = Ed25519AuthProvider::new(&seed).unwrap();
+    let repository =
+        RepositoryScope::new(RepositoryProvider::Generic, "team", "assets", None).unwrap();
+    let claims = TokenClaims::new(
+        "issuer",
+        "ed25519-user",
+        TokenScope::Read,
+        repository,
+        u64::MAX,
+    )
+    .unwrap();
+    let token = provider.mint_token(&claims).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/whoami-v2")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_json: Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    assert_eq!(response_json["name"], "ed25519-user");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ed25519_expired_token_is_rejected_by_authenticated_route() {
+    let tmp = TempDir::new().unwrap();
+    let seed = [3_u8; 32];
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_auth_provider(crate::config::AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(seed.to_vec())
+    .unwrap();
+    let app = crate::app::router(config).await.unwrap();
+
+    let provider = Ed25519AuthProvider::new(&seed).unwrap();
+    let repository =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", None).unwrap();
+    let claims = TokenClaims::new("issuer", "subject", TokenScope::Read, repository, 1).unwrap();
+    let token = provider.mint_token(&claims).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ed25519_auth_rejects_token_from_wrong_key() {
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let seed = [1u8; 32];
+
+    // Build router with Ed25519 auth using seed
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_server_role(crate::ServerRole::All)
+    .with_auth_provider(crate::config::AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(seed.to_vec())
+    .unwrap();
+    let app = crate::app::router(config)
+        .await
+        .expect("router should build");
+
+    // Mint a token with a DIFFERENT key (wrong key)
+    let wrong_seed = [2u8; 32];
+    let wrong_provider = Ed25519AuthProvider::new(&wrong_seed).expect("valid wrong provider");
+    let repo = RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", None)
+        .expect("valid repo scope");
+    let claims = TokenClaims::new("issuer", "subject", TokenScope::Read, repo, 2_000_000_000)
+        .expect("valid claims");
+    let token = wrong_provider
+        .mint_token(&claims)
+        .expect("should mint token");
+
+    // Make an authenticated request with the wrong key's token to a route
+    // that enforces auth (unlike /healthz which is always open).
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/stats")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

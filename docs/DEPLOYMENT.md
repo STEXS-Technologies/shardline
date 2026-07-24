@@ -750,7 +750,8 @@ huggingface-cli download my-org/my-model
 ### Hub API Authentication
 
 Hub API routes use the same `AuthProvider` trait as CAS routes. When an auth provider
-is configured (OIDC, JWKS, or Local HMAC), Hub API bearer tokens are validated against it.
+is configured (Ed25519, OIDC, JWKS, or Local HMAC), Hub API bearer tokens are validated
+against it.
 
 When no auth provider is configured (providerless mode), Hub API routes accept all
 requests anonymously.
@@ -761,6 +762,7 @@ Shardline supports pluggable authentication via the `SHARDLINE_AUTH_PROVIDER` va
 
 ```text
 SHARDLINE_AUTH_PROVIDER=local          # HMAC-SHA256 signing key (default)
+SHARDLINE_AUTH_PROVIDER=ed25519        # Ed25519 signing or verification
 SHARDLINE_AUTH_PROVIDER=oidc           # OpenID Connect
 SHARDLINE_AUTH_PROVIDER=jwks           # JSON Web Key Set
 SHARDLINE_AUTH_PROVIDER=passthrough    # Trust upstream proxy
@@ -775,6 +777,22 @@ SHARDLINE_TOKEN_SIGNING_KEY=change-me-for-local-only
 # or
 SHARDLINE_TOKEN_SIGNING_KEY_FILE=/run/secrets/shardline-token-key
 ```
+
+### Ed25519
+
+Use a private key for signing and verification:
+
+```text
+SHARDLINE_AUTH_PROVIDER=ed25519
+SHARDLINE_ED25519_PRIVATE_KEY_FILE=/run/secrets/shardline-ed25519-private-key
+```
+
+For verification-only operation, use
+`SHARDLINE_ED25519_PUBLIC_KEY_FILE=/run/secrets/shardline-ed25519-public-key` instead.
+TOML deployments can set `auth.provider = "ed25519"` and
+`auth.ed25519.private_key_path` or `auth.ed25519.public_key_path`.
+See [Authentication](AUTHENTICATION.md#ed25519) for supported key formats, token-format
+limitations, and minting behavior.
 
 ### OIDC
 

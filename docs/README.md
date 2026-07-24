@@ -1,7 +1,8 @@
 # Shardline Docs
 
-Shardline is an open, self-hostable content-addressed storage backend with pluggable
-protocol frontends.
+Shardline is a protocol-neutral content-addressed storage engine, optimized for deduplicated
+model, dataset, container and build-artifact distribution, with Xet, OCI, Git LFS and
+cache-compatible frontends.
 
 Use this index to find the shortest path for your task.
 If you are new to the project, start with deployment, then read the protocol or operator

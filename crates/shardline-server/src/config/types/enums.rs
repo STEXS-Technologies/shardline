@@ -20,6 +20,8 @@ pub enum AuthProviderKind {
     Jwks,
     /// Trust-all passthrough for development mode.
     Passthrough,
+    /// Ed25519 asymmetric-key signing and verification.
+    Ed25519,
 }
 
 impl AuthProviderKind {
@@ -35,6 +37,7 @@ impl AuthProviderKind {
             "oidc" => Ok(Self::Oidc),
             "jwks" => Ok(Self::Jwks),
             "passthrough" => Ok(Self::Passthrough),
+            "ed25519" => Ok(Self::Ed25519),
             _other => Err(ServerConfigError::InvalidAuthProvider),
         }
     }
@@ -73,6 +76,8 @@ pub struct AuthConfig {
     pub auth_oidc_issuer: Option<String>,
     pub auth_jwks_url: Option<String>,
     pub auth_jwks_issuer: Option<String>,
+    pub ed25519_private_key: Option<SecretBytes>,
+    pub ed25519_public_key: Option<SecretBytes>,
 }
 
 /// OCI registry configuration.

@@ -95,10 +95,12 @@ flags or local client configuration.
 ## CAS-Based Interface Protocols
 
 These are the current CAS-facing protocols implemented in the server.
+The maturity tiers are defined in [Compatibility Status](COMPATIBILITY_STATUS.md).
 
-| Protocol Name | Frontend Flag | Primary Use Case | Addressing Method | Transport Type | Typical Strength |
-| --- | --- | --- | --- | --- | --- |
-| Xet Protocol | `xet` | ML and large-file repositories | Pointer hashes | Custom and HTTP | Reconstruction-oriented large-file backend. |
-| Git LFS | `lfs` | Large file versioning in standard Git workflows | SHA-256 digest | HTTP and JSON | Native interoperability with standard Git LFS clients. |
-| Remote HTTP (Bazel) | `bazel-http` | Developer and CI remote caching | SHA-256 digest paths today | HTTP `GET` and `PUT` | Straightforward shared cache protocol for build artifacts. |
-| OCI Distribution | `oci` | Container images and OCI artifacts | SHA-256 digest | HTTP and REST | Standard registry protocol for Docker, Kubernetes, and OCI artifacts. |
+| Protocol Name | Frontend Flag | Maturity | Primary Use Case | Addressing Method | Transport Type | Typical Strength |
+| --- | --- | --- | --- | --- | --- | --- |
+| Xet Protocol | `xet` | **Stable** | ML and large-file repositories | Pointer hashes | Custom and HTTP | Reconstruction-oriented large-file backend. |
+| Git LFS | `lfs` | **Beta** | Large file versioning in standard Git workflows | SHA-256 digest | HTTP and JSON | Native interoperability with standard Git LFS clients. |
+| Remote HTTP (Bazel) | `bazel-http` | **Beta** | Developer and CI remote caching | SHA-256 digest paths today | HTTP `GET` and `PUT` | Straightforward shared cache protocol for build artifacts. |
+| OCI Distribution | `oci` | **Stable** | Container images and OCI artifacts | SHA-256 digest | HTTP and REST | Standard registry protocol for Docker, Kubernetes, and OCI artifacts. |
+| Hugging Face Hub API | `hub` | **Beta** | ML model and dataset distribution | Repository paths | HTTP and REST | Drop-in alternative for huggingface-cli workflows. |

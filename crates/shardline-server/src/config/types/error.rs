@@ -205,14 +205,6 @@ pub enum ServerConfigError {
     /// The token signing key file could not be read.
     #[error("token signing key could not be read")]
     TokenSigningKey(#[source] IoError),
-    /// The token signing key was provided through both direct env and file indirection.
-    #[error("token signing key source conflict: both {env} and {file_env} are set")]
-    TokenSigningKeySourceConflict {
-        /// Direct environment variable name.
-        env: &'static str,
-        /// File-indirection environment variable name.
-        file_env: &'static str,
-    },
     /// The token signing key exceeded the bounded parser ceiling.
     #[error("token signing key exceeded the bounded parser ceiling")]
     TokenSigningKeyTooLarge {
@@ -257,7 +249,8 @@ pub enum ServerConfigError {
         /// Observed secret file length in bytes after bounded read.
         observed_bytes: u64,
     },
-    /// The selected role would expose CAS routes without bearer-token verification.
+    /// The selected role uses the local HMAC provider and would expose CAS routes
+    /// without bearer-token verification.
     #[error("served shardline routes require shardline token signing key configuration")]
     MissingTokenSigningKeyForServedRoutes,
     /// The provider bootstrap key was empty.
@@ -320,4 +313,62 @@ pub enum ServerConfigError {
         /// The rejected bind address.
         bind_addr: SocketAddr,
     },
+    /// A secret was provided through both direct env and file indirection.
+    #[error("secret source conflict: both {env} and {file_env} are set")]
+    SecretSourceConflict {
+        /// Direct environment variable name.
+        env: &'static str,
+        /// File-indirection environment variable name.
+        file_env: &'static str,
+    },
+    /// Ed25519 auth provider requires a key.
+    #[error("ed25519 auth provider requires exactly one private or public key")]
+    MissingEd25519Key,
+    /// Ed25519 signing and verification-only modes were configured together.
+    #[error("ed25519 private and public keys must not both be configured")]
+    ConflictingEd25519Keys,
+    /// The Ed25519 private key file could not be read.
+    #[error("ed25519 private key could not be read")]
+    Ed25519PrivateKey(#[source] IoError),
+    /// The Ed25519 public key file could not be read.
+    #[error("ed25519 public key could not be read")]
+    Ed25519PublicKey(#[source] IoError),
+    /// The Ed25519 private key exceeded the bounded parser ceiling.
+    #[error("ed25519 private key exceeded the bounded parser ceiling")]
+    Ed25519PrivateKeyTooLarge {
+        /// Observed secret file length in bytes.
+        observed_bytes: u64,
+        /// Maximum accepted secret file length in bytes.
+        maximum_bytes: u64,
+    },
+    /// The Ed25519 public key exceeded the bounded parser ceiling.
+    #[error("ed25519 public key exceeded the bounded parser ceiling")]
+    Ed25519PublicKeyTooLarge {
+        /// Observed secret file length in bytes.
+        observed_bytes: u64,
+        /// Maximum accepted secret file length in bytes.
+        maximum_bytes: u64,
+    },
+    /// The Ed25519 private key changed after validation and was rejected.
+    #[error("ed25519 private key changed during bounded read")]
+    Ed25519PrivateKeyLengthMismatch {
+        /// Validated secret file length in bytes.
+        expected_bytes: u64,
+        /// Observed secret file length in bytes after bounded read.
+        observed_bytes: u64,
+    },
+    /// The Ed25519 public key changed after validation and was rejected.
+    #[error("ed25519 public key changed during bounded read")]
+    Ed25519PublicKeyLengthMismatch {
+        /// Validated secret file length in bytes.
+        expected_bytes: u64,
+        /// Observed secret file length in bytes after bounded read.
+        observed_bytes: u64,
+    },
+    /// The Ed25519 private key was empty.
+    #[error("ed25519 private key must not be empty")]
+    EmptyEd25519PrivateKey,
+    /// The Ed25519 public key was empty.
+    #[error("ed25519 public key must not be empty")]
+    EmptyEd25519PublicKey,
 }

@@ -11,9 +11,10 @@ use crate::{SecretBytes, unix_now_seconds_lossy};
 type TokenMac = Hmac<sha2::Sha256>;
 
 const MAX_TOKEN_COMPONENT_BYTES: usize = 512;
-const MAX_TOKEN_STRING_BYTES: usize = 8192;
+/// Maximum accepted encoded bearer-token length.
+pub const MAX_TOKEN_STRING_BYTES: usize = 16_384;
 const TOKEN_SIGNATURE_HEX_BYTES: usize = 64;
-const MAX_TOKEN_PAYLOAD_HEX_BYTES: usize = MAX_TOKEN_STRING_BYTES - TOKEN_SIGNATURE_HEX_BYTES - 1;
+const MAX_TOKEN_PAYLOAD_HEX_BYTES: usize = MAX_TOKEN_STRING_BYTES - 2;
 
 /// CAS token scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,13 +334,9 @@ impl TokenSigner {
     ///
     /// Returns [`TokenCodecError`] when the claims cannot be serialized.
     pub fn sign(&self, claims: &TokenClaims) -> Result<String, TokenCodecError> {
-        let payload = to_vec(claims)?;
+        let payload = encode_token_claims(claims)?;
         let signature = self.signature(&payload)?;
-        Ok(format!(
-            "{}.{}",
-            hex::encode(payload),
-            hex::encode(signature)
-        ))
+        format_signed_token(&payload, &signature)
     }
 
     /// Verifies a token against the supplied current Unix timestamp.
@@ -353,16 +350,8 @@ impl TokenSigner {
         token: &str,
         current_unix_seconds: u64,
     ) -> Result<TokenClaims, TokenCodecError> {
-        if token.len() > MAX_TOKEN_STRING_BYTES {
-            return Err(TokenCodecError::InvalidFormat);
-        }
-        let Some((payload_hex, signature_hex)) = token.split_once('.') else {
-            return Err(TokenCodecError::InvalidFormat);
-        };
-        if payload_hex.is_empty()
-            || payload_hex.len() > MAX_TOKEN_PAYLOAD_HEX_BYTES
-            || signature_hex.len() != TOKEN_SIGNATURE_HEX_BYTES
-        {
+        let (payload_hex, signature_hex) = split_token(token)?;
+        if signature_hex.len() != TOKEN_SIGNATURE_HEX_BYTES {
             return Err(TokenCodecError::InvalidFormat);
         }
         let payload = hex::decode(payload_hex)?;
@@ -371,26 +360,7 @@ impl TokenSigner {
         if expected_signature.ct_eq(signature.as_slice()).unwrap_u8() != 1 {
             return Err(TokenCodecError::InvalidSignature);
         }
-
-        let claims = from_slice::<TokenClaims>(&payload)?;
-        validate_component(claims.issuer(), TokenClaimsError::EmptyIssuer)?;
-        validate_component(claims.subject(), TokenClaimsError::EmptySubject)?;
-        validate_component(
-            claims.repository().owner(),
-            TokenClaimsError::EmptyRepositoryOwner,
-        )?;
-        validate_component(
-            claims.repository().name(),
-            TokenClaimsError::EmptyRepositoryName,
-        )?;
-        if let Some(revision) = claims.repository().revision() {
-            validate_component(revision, TokenClaimsError::EmptyRevision)?;
-        }
-        if claims.expires_at_unix_seconds() < current_unix_seconds {
-            return Err(TokenCodecError::Expired);
-        }
-
-        Ok(claims)
+        decode_and_validate_claims(&payload, current_unix_seconds)
     }
 
     /// Verifies a token against the current wall clock.
@@ -408,6 +378,99 @@ impl TokenSigner {
         mac.update(payload);
         Ok(mac.finalize().into_bytes().to_vec())
     }
+}
+
+/// Splits a token string `payload_hex.signature_hex` into its two hex segments.
+///
+/// # Errors
+///
+/// Returns [`TokenCodecError::InvalidFormat`] when the token exceeds the maximum
+/// length, does not contain exactly one separator, or has an empty segment.
+pub fn split_token(token: &str) -> Result<(&str, &str), TokenCodecError> {
+    if token.len() > MAX_TOKEN_STRING_BYTES {
+        return Err(TokenCodecError::InvalidFormat);
+    }
+    let Some((payload_hex, signature_hex)) = token.split_once('.') else {
+        return Err(TokenCodecError::InvalidFormat);
+    };
+    if payload_hex.is_empty()
+        || payload_hex.len() > MAX_TOKEN_PAYLOAD_HEX_BYTES
+        || signature_hex.is_empty()
+        || signature_hex.contains('.')
+    {
+        return Err(TokenCodecError::InvalidFormat);
+    }
+    Ok((payload_hex, signature_hex))
+}
+
+/// Serializes validated token claims into the canonical signed payload.
+///
+/// # Errors
+///
+/// Returns [`TokenCodecError::Json`] when serialization fails.
+pub fn encode_token_claims(claims: &TokenClaims) -> Result<Vec<u8>, TokenCodecError> {
+    Ok(to_vec(claims)?)
+}
+
+/// Formats a payload and signature using Shardline's canonical hex token envelope.
+///
+/// # Errors
+///
+/// Returns [`TokenCodecError::InvalidFormat`] when the encoded token would exceed
+/// [`MAX_TOKEN_STRING_BYTES`] or either segment is empty.
+pub fn format_signed_token(payload: &[u8], signature: &[u8]) -> Result<String, TokenCodecError> {
+    if payload.is_empty() || signature.is_empty() {
+        return Err(TokenCodecError::InvalidFormat);
+    }
+    let encoded_len = payload
+        .len()
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(1))
+        .and_then(|length| {
+            signature
+                .len()
+                .checked_mul(2)
+                .and_then(|value| length.checked_add(value))
+        })
+        .ok_or(TokenCodecError::InvalidFormat)?;
+    if encoded_len > MAX_TOKEN_STRING_BYTES {
+        return Err(TokenCodecError::InvalidFormat);
+    }
+    Ok(format!(
+        "{}.{}",
+        hex::encode(payload),
+        hex::encode(signature)
+    ))
+}
+
+/// Decodes and validates token claims from raw JSON payload bytes.
+///
+/// # Errors
+///
+/// Returns [`TokenCodecError`] when the payload cannot be deserialized, the
+/// claims contain invalid components, or the token has expired.
+pub fn decode_and_validate_claims(
+    payload: &[u8],
+    current_unix_seconds: u64,
+) -> Result<TokenClaims, TokenCodecError> {
+    let claims = from_slice::<TokenClaims>(payload)?;
+    validate_component(claims.issuer(), TokenClaimsError::EmptyIssuer)?;
+    validate_component(claims.subject(), TokenClaimsError::EmptySubject)?;
+    validate_component(
+        claims.repository().owner(),
+        TokenClaimsError::EmptyRepositoryOwner,
+    )?;
+    validate_component(
+        claims.repository().name(),
+        TokenClaimsError::EmptyRepositoryName,
+    )?;
+    if let Some(revision) = claims.repository().revision() {
+        validate_component(revision, TokenClaimsError::EmptyRevision)?;
+    }
+    if claims.expires_at_unix_seconds() < current_unix_seconds {
+        return Err(TokenCodecError::Expired);
+    }
+    Ok(claims)
 }
 
 fn validate_component(value: &str, empty_error: TokenClaimsError) -> Result<(), TokenClaimsError> {
@@ -429,9 +492,10 @@ fn validate_component(value: &str, empty_error: TokenClaimsError) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_TOKEN_COMPONENT_BYTES, MAX_TOKEN_PAYLOAD_HEX_BYTES, RepositoryProvider,
-        RepositoryProviderParseError, RepositoryScope, TOKEN_SIGNATURE_HEX_BYTES, TokenClaims,
-        TokenClaimsError, TokenCodecError, TokenScope, TokenSigner,
+        MAX_TOKEN_COMPONENT_BYTES, MAX_TOKEN_PAYLOAD_HEX_BYTES, MAX_TOKEN_STRING_BYTES,
+        RepositoryProvider, RepositoryProviderParseError, RepositoryScope,
+        TOKEN_SIGNATURE_HEX_BYTES, TokenClaims, TokenClaimsError, TokenCodecError, TokenScope,
+        TokenSigner, format_signed_token, split_token,
     };
 
     #[test]
@@ -938,6 +1002,41 @@ mod tests {
         let signer = TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
         let result = signer.verify_at("justhexwithoutdot", 100);
         assert!(matches!(result, Err(TokenCodecError::InvalidFormat)));
+    }
+
+    #[test]
+    fn split_token_rejects_empty_signature_and_extra_separator() {
+        assert!(matches!(
+            split_token("aa."),
+            Err(TokenCodecError::InvalidFormat)
+        ));
+        assert!(matches!(
+            split_token("aa.bb.cc"),
+            Err(TokenCodecError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn format_signed_token_enforces_shared_length_limit() {
+        let maximum_payload_bytes = (MAX_TOKEN_STRING_BYTES - 1 - 2) / 2;
+        let token = format_signed_token(&vec![1_u8; maximum_payload_bytes], &[2_u8]);
+        assert!(token.is_ok());
+        assert!(token.unwrap().len() <= MAX_TOKEN_STRING_BYTES);
+
+        let oversized = format_signed_token(&vec![1_u8; maximum_payload_bytes + 1], &[2_u8]);
+        assert!(matches!(oversized, Err(TokenCodecError::InvalidFormat)));
+    }
+
+    #[test]
+    fn format_signed_token_rejects_empty_segments() {
+        assert!(matches!(
+            format_signed_token(&[], &[1_u8]),
+            Err(TokenCodecError::InvalidFormat)
+        ));
+        assert!(matches!(
+            format_signed_token(&[1_u8], &[]),
+            Err(TokenCodecError::InvalidFormat)
+        ));
     }
 
     #[test]
