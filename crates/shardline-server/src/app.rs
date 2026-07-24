@@ -36,6 +36,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tower_http::cors::{Any, CorsLayer};
 
+use shardline_server_core::auth::Ed25519AuthProvider;
+
 use crate::{
     ServerConfig, ServerError,
     auth::{AuthContext, ServerAuth},
@@ -586,6 +588,25 @@ async fn build_auth_provider(config: &ServerConfig) -> Result<Option<ServerAuth>
             let provider = JwksProvider::new(jwks_url, issuer)
                 .await
                 .map_err(|_e| ServerError::Config(ServerConfigError::InvalidAuthProvider))?;
+            Ok(Some(ServerAuth::from_provider(Box::new(provider))))
+        }
+        AuthProviderKind::Ed25519 => {
+            let provider = match (config.ed25519_private_key(), config.ed25519_public_key()) {
+                (Some(private_key), None) => Ed25519AuthProvider::new(private_key),
+                (None, Some(public_key)) => Ed25519AuthProvider::with_public_key(public_key),
+                (None, None) => {
+                    return Err(ServerError::Config(ServerConfigError::MissingEd25519Key));
+                }
+                (Some(_private_key), Some(_public_key)) => {
+                    return Err(ServerError::Config(
+                        ServerConfigError::ConflictingEd25519Keys,
+                    ));
+                }
+            }
+            .map_err(|e| {
+                tracing::warn!("ed25519 auth provider initialization failed: {e}");
+                ServerError::Config(ServerConfigError::InvalidAuthProvider)
+            })?;
             Ok(Some(ServerAuth::from_provider(Box::new(provider))))
         }
     }

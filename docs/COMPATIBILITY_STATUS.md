@@ -4,46 +4,39 @@ Shardline has a CAS-agnostic runtime with explicit protocol frontends.
 The current compatibility contract is scoped to the protocol and operator workflows
 documented in this repository.
 
-## 1.0.1 Contract
+## Current Source-Tree Contract
 
-Shardline `1.0.1` should be treated as a content-addressed backend for the validated
-workflows covered by this repository.
+The current Shardline source tree should be treated as a content-addressed backend for
+the validated workflows covered by this repository. Release notes identify which
+source-tree capabilities are included in each published version.
 
-## Validated Today
+## Surface Maturity
 
-- native Xet upload and download flows
-- Git LFS batch negotiation plus direct object upload, download, and metadata lookup
-  routes
-- Bazel HTTP remote-cache `ac` and `cas` read and write routes
-- OCI Distribution blob upload and download, manifest upload and lookup, and tag listing
-  routes
-- native external-client coverage for `git-lfs`, `bazel`/`bazelisk`, and `skopeo` across
-  multiple command-path variants in the repository test matrix
-- native `hf` CLI coverage for model and dataset repository creation, single-file and
-  filtered-directory upload, single-file and filtered snapshot download, file deletion,
-  and repository cleanup
-- provider-issued repository-scoped tokens and provider webhook handling for GitHub,
-  GitLab, Gitea, Codeberg, and the generic provider adapter
-- stock `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, and historical checkout
-  coverage in the validated test matrix, including Git Smart HTTP ref deletion
-- sparse checkout behavior for Xet-tracked files
-- local SQLite + filesystem deployments and Postgres + S3-style durable deployments
-- Redis cache connectivity over TLS and mutual TLS
-- operator workflows for migrations, fsck, lifecycle repair, index rebuild, backup,
-  storage migration, retention holds, and garbage collection
-- fuzz coverage for protocol parsing, protocol frontend selectors and validators,
-  reconstruction, lifecycle repair, stateful Hub references, CLI parsing, and local
-  filesystem race boundaries, with checked-in corpus replay in CI
+| Surface | Tier | Evidence |
+|---------|------|----------|
+| Xet CAS | **Stable** | Native Xet upload and download flows; checked-in `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, historical checkout, and sparse checkout coverage |
+| Git LFS | **Beta** | LFS batch negotiation plus direct object GET/HEAD/PUT routes; `git-lfs` push/pull plus separate pull and fetch --all flows; conformance-tested but limited production evidence |
+| Bazel HTTP remote cache | **Beta** | `ac` and `cas` object GET and PUT routes; `bazel`/`bazelisk` remote-cache flows with remote_download_outputs=all and toplevel; conformance-tested but limited production evidence |
+| OCI Distribution | **Stable** | Full blob upload/download, manifest PUT/GET/HEAD/DELETE, tag listing with pagination, token-service flow at /v2/token, upload cancellation, scoped upload-session handling; checked-in `skopeo`, Docker, Helm, and Podman client coverage |
+| Hugging Face Hub API | **Beta** | Repository create/info/delete, revision and tree lookup, preupload, NDJSON commit, resolve/download, dataset viewer routes, basic search, webhooks, Git Smart HTTP clone/fetch/push; `hf` CLI model and dataset create, upload, download, filtered snapshot, delete-files, and delete-repository flows; conformance-tested but limited production evidence |
+| Ed25519 auth provider | **Experimental** | Signing and verification, verification-only mode, environment/TOML configuration, and authenticated HTTP flows have targeted tests; the operator CLI does not mint Ed25519 tokens |
+| Local filesystem storage | **Stable** | Checked-in adapter, concurrency, and operator workflow coverage |
+| S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
+| Postgres metadata | **Stable** | Checked-in index, dedupe, concurrency, and operator workflow coverage |
+| SQLite metadata | **Stable** | Checked-in local single-node and operator workflow coverage |
+| Redis reconstruction cache | **Beta** | TLS and mTLS connectivity; cache hit/miss paths validated; limited production evidence |
+| Provider integration | **Beta** | Checked-in token issuance, webhook handling, and repository-scoped authorization coverage for GitHub, GitLab, Gitea, Codeberg, and the generic adapter |
 
-## Validated Native Clients
+### Tier Definitions
 
-| Frontend | Native client coverage |
-| --- | --- |
-| Xet | native Xet upload and download flows, plus `git` + `git-lfs` + `git-xet` push, clone, fetch, pull, historical checkout, and sparse checkout coverage |
-| Git LFS | `git-lfs` push/pull plus separate `pull` and `fetch --all` flows |
-| Bazel HTTP remote cache | `bazel` and `bazelisk` remote-cache flows with `remote_download_outputs=all` and `remote_download_outputs=toplevel` |
-| OCI Distribution | `skopeo` push/pull/tag-list, digest-reference, multi-tag, registry-to-registry copy, multi-arch index, Docker schema2, and token-service credential flow; `helm` OCI chart push/pull; `podman` pull/push; `docker` login/pull/push |
-| Hugging Face Hub API | `hf` CLI model and dataset create, upload, download, filtered snapshot, delete-files, and delete-repository flows |
+- **Stable**: broad checked-in route, integration, and native-client coverage for the
+  advertised workflows. This tier does not claim a particular deployment's production,
+  load, failure-injection, or upgrade history.
+- **Beta**: checked-in route or client coverage exists, but the compatibility surface or
+  operational evidence is narrower.
+- **Experimental**: implemented with targeted tests, but configuration or interoperability
+  may still change.
+- **Internal**: architectural component, not a user-facing promise.
 
 ## Validated Route Surface
 

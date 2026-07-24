@@ -58,7 +58,8 @@ pub use ops::{ParseStoredFileRecordError, parse_stored_file_record_bytes, provid
 
 // Explicit re-exports from shardline-auth (backward compatibility)
 pub use shardline_auth::{
-    AuthContext, AuthError, AuthProvider, LocalHmacProvider, PassthroughProvider,
+    AuthContext, AuthError, AuthProvider, Ed25519AuthProvider, LocalHmacProvider,
+    PassthroughProvider,
 };
 // Explicit re-exports from shardline-validation (backward compatibility)
 pub use shardline_validation::{

@@ -7,7 +7,8 @@ use axum::{
     http::{HeaderMap, Uri},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use shardline_protocol::{TokenClaims, TokenScope, TokenSigner};
+use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenClaims, TokenScope};
+use shardline_server_core::AuthProvider;
 
 use crate::{
     ServerError, auth::AuthContext, clock::unix_now_seconds_checked,
@@ -18,11 +19,14 @@ use crate::{
 use super::super::{AppState, authorize, parse_query_values};
 
 pub(super) const OCI_REGISTRY_SERVICE: &str = "shardline";
-const MAX_OCI_TOKEN_BASIC_AUTH_BYTES: usize = 8192;
 const MAX_OCI_TOKEN_QUERY_SERVICE_BYTES: usize = 128;
 const MAX_OCI_TOKEN_QUERY_SCOPE_BYTES: usize = 1024;
 const MAX_OCI_TOKEN_QUERY_ACCOUNT_BYTES: usize = 512;
 const MAX_OCI_TOKEN_QUERY_SCOPES: usize = 16;
+// Base64 expansion for a bounded username, separator, and the largest token
+// accepted by the shared authentication layer.
+const MAX_OCI_TOKEN_BASIC_AUTH_BYTES: usize =
+    (MAX_OCI_TOKEN_QUERY_ACCOUNT_BYTES + 1 + MAX_TOKEN_STRING_BYTES).div_ceil(3) * 4;
 
 pub(crate) async fn oci_registry_token(
     State(state): State<Arc<AppState>>,
@@ -53,12 +57,11 @@ pub(crate) async fn oci_registry_token(
         .protocol
         .begin_oci_registry_token_request();
     let _prom_active = PromActiveRequestGuard;
-    let signer = TokenSigner::new(
-        state
-            .config
-            .token_signing_key()
-            .ok_or(ServerError::MissingAuthorization)?,
-    )?;
+    let provider = state
+        .auth
+        .as_ref()
+        .map(crate::auth::ServerAuth::provider)
+        .ok_or(ServerError::MissingAuthorization)?;
     let query = parse_oci_registry_token_query(&uri)?;
     if let Some(service) = query.service.as_deref()
         && service != OCI_REGISTRY_SERVICE
@@ -67,7 +70,7 @@ pub(crate) async fn oci_registry_token(
     }
 
     let bootstrap_claims =
-        verify_oci_registry_bootstrap_credentials(&headers, &signer).map_err(|error| {
+        verify_oci_registry_bootstrap_credentials(&headers, provider).map_err(|error| {
             if matches!(
                 error,
                 ServerError::MissingAuthorization
@@ -103,7 +106,7 @@ pub(crate) async fn oci_registry_token(
         expires_at_unix_seconds,
     )
     .map_err(|_error| ServerError::InvalidProviderTokenRequest)?;
-    let token = signer.sign(&issued_claims)?;
+    let token = provider.mint_token(&issued_claims)?;
     Ok(Json(OciRegistryTokenResponse {
         access_token: token.clone(),
         token,
@@ -150,7 +153,7 @@ fn oci_bearer_challenge(
 
 fn verify_oci_registry_bootstrap_credentials(
     headers: &HeaderMap,
-    signer: &TokenSigner,
+    provider: &dyn AuthProvider,
 ) -> Result<TokenClaims, ServerError> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -158,7 +161,7 @@ fn verify_oci_registry_bootstrap_credentials(
         .to_str()
         .map_err(|_error| ServerError::InvalidAuthorizationHeader)?;
     if let Some(token) = header.strip_prefix("Bearer ") {
-        return signer.verify_now(token).map_err(ServerError::from);
+        return provider.verify_token(token).map_err(ServerError::from);
     }
     let Some(encoded) = header.strip_prefix("Basic ") else {
         return Err(ServerError::InvalidAuthorizationHeader);
@@ -177,7 +180,7 @@ fn verify_oci_registry_bootstrap_credentials(
     if password.trim().is_empty() {
         return Err(ServerError::InvalidAuthorizationHeader);
     }
-    signer.verify_now(password).map_err(ServerError::from)
+    provider.verify_token(password).map_err(ServerError::from)
 }
 
 fn parse_oci_registry_token_scope(
@@ -348,9 +351,8 @@ mod tests {
     use std::sync::Arc;
 
     use axum::http::{HeaderMap, HeaderValue, Uri};
-    use shardline_protocol::{
-        RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
-    };
+    use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
+    use shardline_server_core::{AuthProvider, LocalHmacProvider};
 
     use super::{
         MAX_OCI_TOKEN_BASIC_AUTH_BYTES, MAX_OCI_TOKEN_QUERY_SCOPE_BYTES,
@@ -376,8 +378,8 @@ mod tests {
         vec![b'k'; 32]
     }
 
-    fn test_signer() -> TokenSigner {
-        TokenSigner::new(&signing_key()).unwrap()
+    fn test_signer() -> LocalHmacProvider {
+        LocalHmacProvider::new(&signing_key()).unwrap()
     }
 
     fn test_claims() -> TokenClaims {
@@ -550,7 +552,7 @@ mod tests {
     fn verify_bootstrap_bearer_valid_token() {
         let signer = test_signer();
         let claims = test_claims();
-        let token = signer.sign(&claims).unwrap();
+        let token = signer.mint_token(&claims).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -572,7 +574,7 @@ mod tests {
             0, // expired
         )
         .unwrap();
-        let token = signer.sign(&expired_claims).unwrap();
+        let token = signer.mint_token(&expired_claims).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -588,7 +590,7 @@ mod tests {
     fn verify_bootstrap_basic_valid_token() {
         let signer = test_signer();
         let claims = test_claims();
-        let token = signer.sign(&claims).unwrap();
+        let token = signer.mint_token(&claims).unwrap();
         // Basic auth uses base64(username:password) where password is the token
         let encoded = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
@@ -800,11 +802,12 @@ mod tests {
         .with_token_signing_key(signing_key())
         .expect("signing key set");
         let backend = ServerBackend::from_config(&config).await.expect("backend");
+        let auth = Some(crate::auth::ServerAuth::new(&signing_key()).expect("server auth"));
         Arc::new(AppState {
             config,
             role: ServerRole::All,
             backend,
-            auth: None,
+            auth,
             provider_tokens: None,
             reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(
@@ -830,7 +833,7 @@ mod tests {
         let state = build_state_with_auth().await;
         let signer = test_signer();
         let claims = test_claims();
-        let token = signer.sign(&claims).unwrap();
+        let token = signer.mint_token(&claims).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -851,7 +854,7 @@ mod tests {
         let state = build_state_with_auth().await;
         let signer = test_signer();
         let claims = test_claims();
-        let token = signer.sign(&claims).unwrap();
+        let token = signer.mint_token(&claims).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -874,7 +877,7 @@ mod tests {
             0,
         )
         .unwrap();
-        let token = signer.sign(&expired).unwrap();
+        let token = signer.mint_token(&expired).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -897,7 +900,7 @@ mod tests {
             999_999_999_999,
         )
         .unwrap();
-        let token = signer.sign(&read_claims).unwrap();
+        let token = signer.mint_token(&read_claims).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -916,7 +919,7 @@ mod tests {
         let state = build_state_with_auth().await;
         let signer = test_signer();
         let claims = test_claims();
-        let token = signer.sign(&claims).unwrap();
+        let token = signer.mint_token(&claims).unwrap();
         let encoded = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             format!("user:{token}"),
@@ -976,7 +979,7 @@ mod tests {
         let state = build_state_with_auth().await;
         let signer = test_signer();
         let claims = test_claims(); // scope: owner/repo
-        let token = signer.sign(&claims).unwrap();
+        let token = signer.mint_token(&claims).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -1030,7 +1033,7 @@ mod tests {
         let state = build_state_with_auth().await;
         let signer = test_signer();
         let claims = test_claims();
-        let token = signer.sign(&claims).unwrap();
+        let token = signer.mint_token(&claims).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,

@@ -21,7 +21,10 @@ use super::{
     reconciled_provider_repository_state, router, security_headers_middleware,
     serve_with_listener_until, validate_provider_name_path,
 };
-use crate::{ServerConfig, ServerError, ServerFrontend, ServerRole, config::AuthProviderKind};
+use crate::{
+    ServerConfig, ServerConfigError, ServerError, ServerFrontend, ServerRole,
+    config::AuthProviderKind,
+};
 
 #[test]
 fn provider_subject_extraction_rejects_oversized_query_subject() {
@@ -628,6 +631,115 @@ async fn auth_provider_jwks_with_unreachable_url_errors() {
         matches!(app.err().unwrap(), ServerError::Config(_)),
         "error should be ServerError::Config"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_ed25519_with_valid_key_builds_successfully() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(vec![0u8; 32])
+    .unwrap();
+    let app = router(config).await;
+    assert!(
+        app.is_ok(),
+        "router should build with Ed25519 auth, got: {:?}",
+        app.err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_ed25519_without_key_errors() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519);
+    let app = router(config).await;
+    assert!(
+        matches!(
+            app.err().unwrap(),
+            ServerError::Config(ServerConfigError::MissingEd25519Key)
+        ),
+        "Ed25519 without key should fail with MissingEd25519Key"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_ed25519_with_public_key_only_builds_successfully() {
+    let tmp = TempDir::new().unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        chunk_size,
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_public_key(
+        hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a").unwrap(),
+    )
+    .unwrap();
+    let app = router(config).await;
+    assert!(
+        app.is_ok(),
+        "router should build with Ed25519 public key only, got: {:?}",
+        app.err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_ed25519_rejects_conflicting_private_and_public_keys() {
+    let tmp = TempDir::new().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(vec![1_u8; 32])
+    .unwrap()
+    .with_ed25519_public_key(
+        hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a").unwrap(),
+    )
+    .unwrap();
+
+    let error = router(config).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ServerError::Config(ServerConfigError::ConflictingEd25519Keys)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_provider_ed25519_rejects_weak_public_key() {
+    let tmp = TempDir::new().unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_public_key(vec![0_u8; 32])
+    .unwrap();
+
+    let error = router(config).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ServerError::Config(ServerConfigError::InvalidAuthProvider)
+    ));
 }
 
 // ── build_hub_state tests ────────────────────────────────────────────────

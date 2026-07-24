@@ -64,6 +64,7 @@ pub use security::{SecretBytes, SecretString};
 pub use text::parse_bool;
 pub use time::unix_now_seconds_lossy;
 pub use token::{
-    RepositoryProvider, RepositoryScope, TokenClaims, TokenClaimsError, TokenCodecError,
-    TokenScope, TokenSigner,
+    MAX_TOKEN_STRING_BYTES, RepositoryProvider, RepositoryScope, TokenClaims, TokenClaimsError,
+    TokenCodecError, TokenScope, TokenSigner, decode_and_validate_claims, encode_token_claims,
+    format_signed_token, split_token,
 };

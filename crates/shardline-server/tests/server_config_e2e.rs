@@ -14,15 +14,26 @@
 
 use std::{io::Write, num::NonZeroUsize, path::Path};
 
+use sha2::{Digest, Sha256};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server::{
-    ServerConfig, ServerConfigError, ServerFrontend, ServerRole, app, load_toml_config,
+    AuthProviderKind, ServerConfig, ServerConfigError, ServerFrontend, ServerRole, app,
+    load_toml_config,
 };
-use shardline_server_core::{AuthProvider, auth::LocalHmacProvider};
+use shardline_server_core::{
+    AuthProvider,
+    auth::{Ed25519AuthProvider, LocalHmacProvider},
+};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 const TEST_SIGNING_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+fn ed25519_claims(scope: TokenScope) -> TokenClaims {
+    let repository =
+        RepositoryScope::new(RepositoryProvider::Generic, "test", "test", Some("main")).unwrap();
+    TokenClaims::new("shardline", "integration", scope, repository, u64::MAX).unwrap()
+}
 
 // ---------------------------------------------------------------------------
 // 1. Body limit exceeded — 413 on oversized payload
@@ -72,6 +83,107 @@ async fn test_server_body_limit_exceeded() {
         413,
         "oversized body should return 413 Payload Too Large"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ed25519_private_key_lfs_upload_download_roundtrip() {
+    let tmp = TempDir::new().unwrap();
+    let seed = [7_u8; 32];
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_server_frontends([ServerFrontend::Lfs])
+    .unwrap()
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(seed.to_vec())
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    config.validate_runtime_requirements().unwrap();
+    let app = app::router(config).await.unwrap();
+
+    let provider = Ed25519AuthProvider::new(&seed).unwrap();
+    let token = provider
+        .mint_token(&ed25519_claims(TokenScope::Write))
+        .unwrap();
+    let body = b"ed25519 authenticated LFS integration payload";
+    let oid = hex::encode(Sha256::digest(body));
+
+    let upload = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(body.as_slice()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        upload.status().is_success(),
+        "upload failed: {}",
+        upload.status()
+    );
+
+    let download = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/v1/lfs/objects/{oid}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        download.status().is_success(),
+        "download failed: {}",
+        download.status()
+    );
+    let downloaded = axum::body::to_bytes(download.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(downloaded.as_ref(), body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ed25519_public_key_verification_mode_on_authenticated_route() {
+    let tmp = TempDir::new().unwrap();
+    let private_key =
+        hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").unwrap();
+    let public_key =
+        hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a").unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        tmp.path().to_path_buf(),
+        NonZeroUsize::new(65_536).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_public_key(public_key)
+    .unwrap()
+    .with_reconstruction_cache_disabled();
+    let app = app::router(config).await.unwrap();
+    let provider = Ed25519AuthProvider::new(&private_key).unwrap();
+    let token = provider
+        .mint_token(&ed25519_claims(TokenScope::Read))
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/stats")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
 }
 
 // ---------------------------------------------------------------------------
