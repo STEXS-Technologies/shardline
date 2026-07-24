@@ -1034,15 +1034,33 @@ mod tests {
         let sha = boxed.resolve_revision("pg-boxed", "main").expect("resolve");
         assert!(sha.is_some());
 
+        // The initial empty-tree revision is shared by every new repository.
+        // Use a repository-specific revision for file entries so this test does
+        // not collide with cleanup performed by other Postgres tests.
+        let initial_sha = sha.unwrap();
+        let file_commit_sha = "pg-boxed-files";
+        boxed
+            .create_revision(
+                "pg-boxed",
+                Some(&initial_sha),
+                file_commit_sha,
+                "files",
+                "add test file",
+            )
+            .expect("create revision for files");
+
         let files = vec![HubFileEntry {
             path: "test.py".into(),
             size: 42,
             sha: "sha_py".into(),
             is_lfs: false,
         }];
-        let commit_sha = sha.unwrap();
-        boxed.store_files(&commit_sha, &files).expect("store_files");
-        let retrieved = boxed.get_files(&commit_sha).expect("get_files");
+        boxed
+            .store_files(file_commit_sha, &files)
+            .expect("store_files");
+        let retrieved = boxed.get_files(file_commit_sha).expect("get_files");
         assert_eq!(retrieved.len(), 1);
+
+        boxed.delete_repo("pg-boxed").expect("cleanup boxed repo");
     }
 }
