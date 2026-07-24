@@ -3317,12 +3317,14 @@ dependencies = [
 name = "shardline-cas"
 version = "1.2.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -3617,6 +3619,7 @@ dependencies = [
 name = "shardline-server-core"
 version = "1.2.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "criterion",
  "hex",

@@ -194,6 +194,56 @@ impl LocalBackend {
         self.index_store.probe()
     }
 
+    pub(crate) fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
+        use shardline_index::{UploadIntentState, UploadIntentStore};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let mut reconciled = 0u64;
+        for state in &[
+            UploadIntentState::Created,
+            UploadIntentState::Storing,
+            UploadIntentState::Stored,
+            UploadIntentState::MetadataCommitted,
+        ] {
+            let intents = match self.index_store.intents_by_state(*state) {
+                Ok(intents) => intents,
+                Err(e) => {
+                    // If the intents table does not exist yet (no migration has created it),
+                    // there is nothing to reconcile. Log and continue.
+                    tracing::debug!("intent query skipped (table may not exist): {e}");
+                    continue;
+                }
+            };
+            for intent in &intents {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO);
+                let age = now.saturating_sub(intent.created_at());
+                if age < Duration::from_secs(30) {
+                    continue;
+                }
+                tracing::warn!(
+                    intent_id = %intent.intent_id(),
+                    state = ?intent.state(),
+                    age_secs = age.as_secs(),
+                    "reconciling stuck intent"
+                );
+                if let Err(e) = self
+                    .index_store
+                    .transition_intent(intent.intent_id(), UploadIntentState::Failed)
+                {
+                    tracing::warn!(intent_id = %intent.intent_id(), error = %e, "intent transition failed, skipping");
+                } else {
+                    reconciled += 1;
+                }
+            }
+        }
+        if reconciled > 0 {
+            tracing::info!(count = reconciled, "intent reconciliation complete");
+        }
+        Ok(())
+    }
+
     pub(super) async fn read_record(
         &self,
         file_id: &str,

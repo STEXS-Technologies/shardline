@@ -13,32 +13,21 @@
 
 //! CAS coordinator composition for Shardline.
 //!
-//! The coordinator ties together a metadata index, an object store, and explicit
-//! bounds for untrusted serialized protocol objects. It is deliberately generic
-//! over the backing adapters so tests, local deployments, and production
-//! deployments can share the same composition point.
+//! The coordinator ties together a metadata index, an object store, a record store,
+//! and explicit bounds for untrusted serialized protocol objects. It owns the
+//! protocol-neutral CAS state machine: content-addressed blob storage,
+//! file-reconstruction commit, and reachability queries.
 //!
-//! # Example
-//!
-//! ```
-//! use std::num::NonZeroU64;
-//!
-//! use shardline_cas::{CasCoordinator, CasLimits};
-//!
-//! #[derive(Debug)]
-//! struct IndexAdapter;
-//!
-//! #[derive(Debug)]
-//! struct ObjectAdapter;
-//!
-//! let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
-//! let coordinator = CasCoordinator::new(IndexAdapter, ObjectAdapter, limits);
-//!
-//! assert_eq!(coordinator.limits(), limits);
-//! ```
+//! All frontends (Xet, LFS, OCI, Hub, Bazel) must pass through this coordinator
+//! for authorization, admission, ordering, and visibility.
 
 mod coordinator;
+mod error;
 mod limits;
+pub mod paths;
+mod reachability;
 
 pub use coordinator::CasCoordinator;
+pub use error::CasError;
 pub use limits::CasLimits;
+pub use reachability::ObjectReachability;

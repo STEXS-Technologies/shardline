@@ -1,5 +1,6 @@
 use std::{
     error::Error as StdError,
+    future::Future,
     io::{Error as IoError, Read, Seek, SeekFrom},
     num::TryFromIntError,
 };
@@ -361,6 +362,65 @@ where
             );
         }
         visitor(DecodedXorbChunk::new(descriptor.clone(), data))
+            .map_err(XorbVisitError::Visitor)?;
+        packed_end = next_packed_end;
+    }
+
+    if packed_end != validated.packed_content_length() {
+        return Err(
+            XorbParseError::from(XorbInvalidFormatError::DecodedChunkLengthMismatch).into(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Decodes the packed chunk stream of a previously validated serialized xorb and
+/// passes each decoded chunk to an async `visitor` before decoding the next chunk.
+///
+/// # Errors
+///
+/// Returns [`XorbVisitError`] when xorb parsing fails or when the visitor rejects a
+/// decoded chunk.
+pub async fn try_for_each_serialized_xorb_chunk_async<R, F, Fut, VisitorError>(
+    reader: &mut R,
+    validated: &ValidatedXorb,
+    mut visitor: F,
+) -> Result<(), XorbVisitError<VisitorError>>
+where
+    R: Read + Seek,
+    F: FnMut(DecodedXorbChunk) -> Fut,
+    Fut: Future<Output = Result<(), VisitorError>>,
+{
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(XorbParseError::from)?;
+    let mut packed_end = 0_u64;
+
+    for descriptor in validated.chunks() {
+        let (data, packed_len, unpacked_len) =
+            deserialize_chunk(reader).map_err(|error| map_core_error(&error))?;
+        let packed_len = u64::try_from(packed_len).map_err(XorbParseError::from)?;
+        let unpacked_len = u64::from(unpacked_len);
+        let next_packed_end = packed_end.checked_add(packed_len).ok_or_else(|| {
+            XorbParseError::from(XorbInvalidFormatError::PackedChunkLengthOverflow)
+        })?;
+        if descriptor.packed_start() != packed_end
+            || descriptor.packed_end() != next_packed_end
+            || descriptor.unpacked_len() != unpacked_len
+        {
+            return Err(
+                XorbParseError::from(XorbInvalidFormatError::ChunkPayloadMetadataMismatch).into(),
+            );
+        }
+        let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data))?;
+        if descriptor.hash() != actual_hash {
+            return Err(
+                XorbParseError::from(XorbInvalidFormatError::ChunkPayloadHashMismatch).into(),
+            );
+        }
+        visitor(DecodedXorbChunk::new(descriptor.clone(), data))
+            .await
             .map_err(XorbVisitError::Visitor)?;
         packed_end = next_packed_end;
     }

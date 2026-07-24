@@ -102,6 +102,9 @@ impl ServerBackend {
             })?;
             tracing::info!("startup probe: postgres metadata OK");
 
+            // Reconcile any stuck upload intents from a previous crash
+            backend.reconcile_stuck_upload_intents()?;
+
             return Ok(Self::Postgres(backend));
         }
 
@@ -121,6 +124,9 @@ impl ServerBackend {
             ServerError::Io(std::io::Error::new(ErrorKind::ConnectionRefused, e))
         })?;
         tracing::info!("startup probe: sqlite metadata OK");
+
+        // Reconcile any stuck upload intents from a previous crash
+        backend.reconcile_stuck_upload_intents()?;
 
         Ok(Self::Local(backend))
     }
@@ -301,6 +307,13 @@ impl ServerBackend {
         match self {
             Self::Local(backend) => backend.ready().await,
             Self::Postgres(backend) => backend.ready().await,
+        }
+    }
+
+    pub(crate) fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
+        match self {
+            Self::Local(backend) => backend.reconcile_stuck_upload_intents(),
+            Self::Postgres(backend) => backend.reconcile_stuck_upload_intents(),
         }
     }
 

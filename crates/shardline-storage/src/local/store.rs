@@ -4,12 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use async_trait::async_trait;
 use shardline_protocol::ByteRange;
 use thiserror::Error;
 
 use crate::{
-    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix,
-    ObjectStore, PutOutcome,
+    AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
+    ObjectPrefix, ObjectStore, PutOutcome,
     local_fs::{
         PutBytesIfAbsentOutcome, hard_link_file_if_absent, put_bytes_if_absent,
         write_bytes_atomically,
@@ -248,7 +249,7 @@ impl ObjectStore for LocalObjectStore {
     }
 
     fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-        self.metadata(key).map(|metadata| metadata.is_some())
+        ObjectStore::metadata(self, key).map(|metadata| metadata.is_some())
     }
 
     fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
@@ -297,6 +298,113 @@ impl ObjectStore for LocalObjectStore {
     }
 }
 
+#[async_trait]
+impl AsyncObjectStore for LocalObjectStore {
+    type Error = LocalObjectStoreError;
+
+    async fn put_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: ObjectBody<'_>,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        let this = self.clone();
+        let key = key.clone();
+        let integrity = *integrity;
+        let body_bytes = body.as_slice().to_vec();
+        tokio::task::spawn_blocking(move || {
+            ObjectStore::put_if_absent(
+                &this,
+                &key,
+                ObjectBody::from_vec(body_bytes),
+                &integrity,
+            )
+        })
+        .await
+        .map_err(|join| {
+            LocalObjectStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{join}"),
+            ))
+        })?
+    }
+
+    async fn read_range(
+        &self,
+        key: &ObjectKey,
+        range: ByteRange,
+    ) -> Result<Vec<u8>, Self::Error> {
+        let this = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || ObjectStore::read_range(&this, &key, range))
+            .await
+            .map_err(|join| {
+                LocalObjectStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{join}"),
+                ))
+            })?
+    }
+
+    async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
+        let this = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || ObjectStore::contains(&this, &key))
+            .await
+            .map_err(|join| {
+                LocalObjectStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{join}"),
+                ))
+            })?
+    }
+
+    async fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
+        let this = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || ObjectStore::metadata(&this, &key))
+            .await
+            .map_err(|join| {
+                LocalObjectStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{join}"),
+                ))
+            })?
+    }
+
+    async fn list_prefix(
+        &self,
+        prefix: &ObjectPrefix,
+    ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+        let this = self.clone();
+        let prefix = prefix.clone();
+        tokio::task::spawn_blocking(move || ObjectStore::list_prefix(&this, &prefix))
+            .await
+            .map_err(|join| {
+                LocalObjectStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{join}"),
+                ))
+            })?
+    }
+
+    async fn delete_if_present(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<DeleteOutcome, Self::Error> {
+        let this = self.clone();
+        let key = key.clone();
+        tokio::task::spawn_blocking(move || ObjectStore::delete_if_present(&this, &key))
+            .await
+            .map_err(|join| {
+                LocalObjectStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{join}"),
+                ))
+            })?
+    }
+}
+
 /// Local object-store failure.
 #[derive(Debug, Error)]
 pub enum LocalObjectStoreError {
@@ -324,4 +432,78 @@ pub enum LocalObjectStoreError {
     /// The `start_after` key does not start with the requested prefix.
     #[error("start_after key is outside the requested prefix")]
     InvalidStartAfter,
+}
+
+#[cfg(test)]
+mod async_tests {
+    use tempfile::TempDir;
+    use tokio::runtime::Runtime;
+    use shardline_protocol::ShardlineHash;
+    use crate::{
+        AsyncObjectStore, DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey,
+        PutOutcome,
+    };
+
+    fn setup() -> (LocalObjectStore, TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::new(dir.path().join("obj")).unwrap();
+        (store, dir)
+    }
+
+    fn rt() -> Runtime {
+        Runtime::new().unwrap()
+    }
+
+    #[test]
+    fn async_local_put_if_absent_stores_object() {
+        let (store, _dir) = setup();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let hash = ShardlineHash::from_bytes(*blake3::hash(b"test data").as_bytes());
+        let integrity = ObjectIntegrity::new(hash, 9);
+        let result = rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"test data"), &integrity));
+        assert!(matches!(result, Ok(PutOutcome::Inserted)));
+    }
+
+    #[test]
+    fn async_local_put_if_absent_idempotent() {
+        let (store, _dir) = setup();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let hash = ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes());
+        let integrity = ObjectIntegrity::new(hash, 4);
+        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity)).unwrap();
+        let second = rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity));
+        assert!(matches!(second, Ok(PutOutcome::AlreadyExists)));
+    }
+
+    #[test]
+    fn async_local_contains_returns_true() {
+        let (store, _dir) = setup();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let hash = ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes());
+        let integrity = ObjectIntegrity::new(hash, 4);
+        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity)).unwrap();
+        assert!(matches!(rt().block_on(AsyncObjectStore::contains(&store, &key)), Ok(true)));
+    }
+
+    #[test]
+    fn async_local_delete_if_present_removes() {
+        let (store, _dir) = setup();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let hash = ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes());
+        let integrity = ObjectIntegrity::new(hash, 4);
+        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity)).unwrap();
+        let deleted = rt().block_on(AsyncObjectStore::delete_if_present(&store, &key));
+        assert!(matches!(deleted, Ok(DeleteOutcome::Deleted)));
+    }
+
+    #[test]
+    fn async_local_metadata_returns_length() {
+        let (store, _dir) = setup();
+        let key = ObjectKey::parse("test/key").unwrap();
+        let hash = ShardlineHash::from_bytes(*blake3::hash(b"12345").as_bytes());
+        let integrity = ObjectIntegrity::new(hash, 5);
+        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"12345"), &integrity)).unwrap();
+        let meta = rt().block_on(AsyncObjectStore::metadata(&store, &key));
+        assert!(matches!(meta, Ok(Some(ref m)) if m.length() == 5));
+    }
 }

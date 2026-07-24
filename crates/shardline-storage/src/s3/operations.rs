@@ -9,6 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::{
     CopyMode, CopyOptions, Error as ExternalObjectStoreError, GetOptions, GetResult,
@@ -24,8 +25,8 @@ use tokio::{
 };
 
 use crate::{
-    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix,
-    ObjectStore, PutOutcome,
+    AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
+    ObjectPrefix, ObjectStore, PutOutcome,
 };
 
 use super::{
@@ -324,7 +325,7 @@ impl S3ObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         verify_file_length(path, integrity)?;
-        if let Some(existing) = self.metadata(key)? {
+        if let Some(existing) = ObjectStore::metadata(self, key)? {
             return existing_object_outcome_from_file(
                 self,
                 key,
@@ -358,8 +359,7 @@ impl S3ObjectStore {
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
             })) => {
-                let existing_length = self
-                    .metadata(key)?
+                let existing_length = ObjectStore::metadata(self, key)?
                     .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
                     .length();
                 existing_object_outcome_from_file(self, key, existing_length, path, integrity)
@@ -392,7 +392,7 @@ impl S3ObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         verify_file_length(path, integrity)?;
-        if let Some(existing) = self.metadata(key)? {
+        if let Some(existing) = ObjectStore::metadata(self, key)? {
             return existing_object_outcome_from_file(
                 self,
                 key,
@@ -421,11 +421,10 @@ impl S3ObjectStore {
             Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
                 ..
             }))
-            | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
+            |             Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
             })) => {
-                let existing_length = self
-                    .metadata(key)?
+                let existing_length = ObjectStore::metadata(self, key)?
                     .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
                     .length();
                 existing_object_outcome_from_file(self, key, existing_length, path, integrity)
@@ -465,7 +464,7 @@ impl S3ObjectStore {
         destination: &ObjectKey,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         if source == destination {
-            return if self.metadata(source)?.is_some() {
+            return if ObjectStore::metadata(self, source)?.is_some() {
                 Ok(PutOutcome::AlreadyExists)
             } else {
                 Err(S3ObjectStoreError::External(
@@ -477,7 +476,7 @@ impl S3ObjectStore {
             };
         }
 
-        let Some(source_metadata) = self.metadata(source)? else {
+        let Some(source_metadata) = ObjectStore::metadata(self, source)? else {
             return Err(S3ObjectStoreError::External(
                 ExternalObjectStoreError::NotFound {
                     path: source.as_str().to_owned(),
@@ -531,7 +530,7 @@ impl S3ObjectStore {
         source_len: u64,
     ) -> Result<PutOutcome, S3ObjectStoreError> {
         // Fast check: if the destination already exists, compare content.
-        if let Some(_dest_meta) = self.metadata(destination)? {
+        if let Some(_dest_meta) = ObjectStore::metadata(self, destination)? {
             return existing_copy_outcome(self, source, destination, source_len);
         }
 
@@ -574,7 +573,7 @@ impl S3ObjectStore {
                 // Re-check destination existence before completing.  A
                 // concurrent writer may have promoted content to the
                 // target key while we were uploading parts.
-                if self.metadata(destination)?.is_some() {
+                if ObjectStore::metadata(self, destination)?.is_some() {
                     store.abort_multipart(&dst, &upload_id).await.ok();
                     // Content is identical for content-addressed keys,
                     // so returning AlreadyExists is correct.
@@ -674,7 +673,7 @@ impl ObjectStore for S3ObjectStore {
     ) -> Result<PutOutcome, Self::Error> {
         verify_integrity(body.as_slice(), integrity)?;
         let location = self.location_for_key(key)?;
-        if let Some(existing) = self.metadata(key)? {
+        if let Some(existing) = ObjectStore::metadata(self, key)? {
             return existing_object_outcome(
                 self,
                 key,
@@ -698,8 +697,7 @@ impl ObjectStore for S3ObjectStore {
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
             })) => {
-                let existing_length = self
-                    .metadata(key)?
+                let existing_length = ObjectStore::metadata(self, key)?
                     .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
                     .length();
                 existing_object_outcome(self, key, existing_length, bytes.as_ref(), integrity)
@@ -731,7 +729,7 @@ impl ObjectStore for S3ObjectStore {
     }
 
     fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-        self.metadata(key).map(|metadata| metadata.is_some())
+        ObjectStore::metadata(self, key).map(|metadata| metadata.is_some())
     }
 
     fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
@@ -747,7 +745,7 @@ impl ObjectStore for S3ObjectStore {
 
     fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
         let mut metadata = Vec::new();
-        self.visit_prefix(prefix, |entry| {
+        ObjectStore::visit_prefix(self, prefix, |entry| {
             metadata.push(entry);
             Ok::<(), S3ObjectStoreError>(())
         })?;
@@ -793,6 +791,144 @@ impl ObjectStore for S3ObjectStore {
                 Ok(DeleteOutcome::NotFound)
             }
             Err(error) => Err(error),
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncObjectStore for S3ObjectStore {
+    type Error = S3ObjectStoreError;
+
+    async fn put_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: ObjectBody<'_>,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        verify_integrity(body.as_slice(), integrity)?;
+        let location = self.location_for_key(key)?;
+        if let Some(existing) = AsyncObjectStore::metadata(self, key).await? {
+            return existing_object_outcome(
+                self,
+                key,
+                existing.length(),
+                body.as_slice(),
+                integrity,
+            );
+        }
+
+        let bytes = body.into_bytes();
+        match self
+            .inner
+            .put_opts(&location, bytes.clone().into(), PutMode::Create.into())
+            .await
+        {
+            Ok(_result) => Ok(PutOutcome::Inserted),
+            Err(ExternalObjectStoreError::AlreadyExists { .. })
+            | Err(ExternalObjectStoreError::Precondition { .. }) => {
+                let existing_length = AsyncObjectStore::metadata(self, key)
+                    .await?
+                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
+                    .length();
+                existing_object_outcome(self, key, existing_length, bytes.as_ref(), integrity)
+            }
+            Err(error) => Err(S3ObjectStoreError::External(error)),
+        }
+    }
+
+    async fn read_range(
+        &self,
+        key: &ObjectKey,
+        range: ByteRange,
+    ) -> Result<Vec<u8>, Self::Error> {
+        let location = self.location_for_key(key)?;
+        let external_range = validated_external_range(range)?;
+        let result = self
+            .inner
+            .get_opts(
+                &location,
+                GetOptions::new().with_range(Some(external_range.clone())),
+            )
+            .await
+            .map_err(S3ObjectStoreError::External)?;
+        if result.range != external_range {
+            return Err(S3ObjectStoreError::RangeOutOfBounds);
+        }
+        let mut acc = Vec::new();
+        let mut stream = result.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(S3ObjectStoreError::External)?;
+            acc.extend_from_slice(&chunk);
+        }
+        Ok(acc)
+    }
+
+    async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
+        AsyncObjectStore::metadata(self, key)
+            .await
+            .map(|metadata| metadata.is_some())
+    }
+
+    async fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
+        let location = self.location_for_key(key)?;
+        match self.inner.head(&location).await {
+            Ok(meta) => self.metadata_from_external(&meta).map(Some),
+            Err(ExternalObjectStoreError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(S3ObjectStoreError::External(error)),
+        }
+    }
+
+    async fn list_prefix(
+        &self,
+        prefix: &ObjectPrefix,
+    ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+        let mut metadata = Vec::new();
+        AsyncObjectStore::visit_prefix(self, prefix, |entry| {
+            metadata.push(entry);
+            Ok::<(), S3ObjectStoreError>(())
+        })
+        .await?;
+        metadata.sort_by(|left, right| left.key().as_str().cmp(right.key().as_str()));
+        Ok(metadata)
+    }
+
+    async fn visit_prefix<Visitor, VisitorError>(
+        &self,
+        prefix: &ObjectPrefix,
+        mut visitor: Visitor,
+    ) -> Result<(), VisitorError>
+    where
+        Self::Error: Into<VisitorError>,
+        Visitor: FnMut(ObjectMetadata) -> Result<(), VisitorError> + Send,
+    {
+        let location = self.location_for_prefix(prefix).map_err(Into::into)?;
+        let mut listed = self.inner.list(Some(&location));
+        while let Some(entry) = listed
+            .try_next()
+            .await
+            .map_err(S3ObjectStoreError::External)
+            .map_err(Into::into)?
+        {
+            let meta = self.metadata_from_external(&entry).map_err(Into::into)?;
+            // Skip temp upload artifacts.
+            if is_temp_upload_key(meta.key().as_str()) {
+                continue;
+            }
+            visitor(meta)?;
+        }
+
+        Ok(())
+    }
+
+    async fn delete_if_present(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<DeleteOutcome, Self::Error> {
+        let location = self.location_for_key(key)?;
+        match self.inner.delete(&location).await {
+            Ok(()) => Ok(DeleteOutcome::Deleted),
+            Err(ExternalObjectStoreError::NotFound { .. }) => Ok(DeleteOutcome::NotFound),
+            Err(error) => Err(S3ObjectStoreError::External(error)),
         }
     }
 }
@@ -870,7 +1006,7 @@ pub(crate) fn existing_object_outcome(
             .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
         let range = ByteRange::new(offset, end)
             .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let existing_chunk = store.read_range(key, range)?;
+        let existing_chunk = ObjectStore::read_range(store, key, range)?;
         let expected_chunk = expected_bytes
             .get(offset as usize..)
             .and_then(|slice| slice.get(..to_read as usize))
@@ -916,7 +1052,7 @@ pub(crate) fn existing_object_outcome_from_file(
             .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
         let range = ByteRange::new(offset, end)
             .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let existing = store.read_range(key, range)?;
+        let existing = ObjectStore::read_range(store, key, range)?;
         let expected = buffer
             .get(..to_read)
             .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
@@ -934,7 +1070,7 @@ pub(crate) fn existing_copy_outcome(
     destination: &ObjectKey,
     source_length: u64,
 ) -> Result<PutOutcome, S3ObjectStoreError> {
-    let Some(destination_metadata) = store.metadata(destination)? else {
+    let Some(destination_metadata) = ObjectStore::metadata(store, destination)? else {
         return Err(S3ObjectStoreError::ExistingObjectConflict);
     };
     if destination_metadata.length() != source_length {
@@ -956,8 +1092,8 @@ pub(crate) fn existing_copy_outcome(
             .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
         let range = ByteRange::new(offset, end)
             .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let source_bytes = store.read_range(source, range)?;
-        let destination_bytes = store.read_range(destination, range)?;
+        let source_bytes = ObjectStore::read_range(store, source, range)?;
+        let destination_bytes = ObjectStore::read_range(store, destination, range)?;
         if source_bytes != destination_bytes {
             return Err(S3ObjectStoreError::ExistingObjectConflict);
         }
