@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
 use axum::http::{HeaderMap, header::AUTHORIZATION};
-use shardline_protocol::TokenScope;
+use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenScope};
 use shardline_server_core::{AuthContext, AuthError, AuthProvider};
 
 use crate::error::HubApiError;
-
-const MAX_BEARER_TOKEN_BYTES: usize = 8192;
 
 /// Bearer-token verifier for Hub API routes.
 #[derive(Clone)]
@@ -81,7 +79,7 @@ fn parse_bearer_token(header: &str) -> Result<&str, HubApiError> {
     let Some(token) = header.strip_prefix("Bearer ") else {
         return Err(HubApiError::InvalidToken);
     };
-    if token.trim().is_empty() || token.len() > MAX_BEARER_TOKEN_BYTES {
+    if token.trim().is_empty() || token.len() > MAX_TOKEN_STRING_BYTES {
         return Err(HubApiError::InvalidToken);
     }
     if token.bytes().any(|b| b.is_ascii_whitespace()) {
@@ -177,7 +175,7 @@ mod tests {
 
     #[test]
     fn parse_bearer_token_too_long() {
-        let long_token = "a".repeat(8193);
+        let long_token = "a".repeat(MAX_TOKEN_STRING_BYTES + 1);
         let header_value = format!("Bearer {long_token}");
         let headers = make_auth_header(&header_value);
         let auth = HubAuth::new(Box::new(make_mock_provider()));

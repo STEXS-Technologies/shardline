@@ -342,6 +342,70 @@ Garbage collection, index rebuild, and storage stats should consume object metad
 an adapter stream or page sequence instead of requiring a full object listing in memory
 before useful work can begin.
 
+## Capturing Benchmark Artifacts
+
+This repository does not currently publish a canonical benchmark result set.
+Do not compare unpublished numbers without recording the exact commit, host, backend
+topology, configuration, and raw JSON output used to produce them.
+
+An isolated local run uses SQLite metadata and filesystem object storage:
+
+```bash
+shardline bench \
+  --deployment-target isolated-local \
+  --storage-dir /tmp/shardline-bench \
+  --iterations 10 \
+  --concurrency 8 \
+  --chunk-size-bytes 65536 \
+  --base-bytes 1048576 \
+  --mutated-bytes 4096 \
+  --json > benchmark-isolated-local.json
+```
+
+To measure the active Postgres, S3, or other configured adapters, load the intended
+`SHARDLINE_*` configuration and select the configured target explicitly:
+
+```bash
+shardline bench \
+  --deployment-target configured \
+  --storage-dir /tmp/shardline-bench \
+  --iterations 10 \
+  --concurrency 8 \
+  --chunk-size-bytes 65536 \
+  --base-bytes 1048576 \
+  --mutated-bytes 4096 \
+  --json > benchmark-configured.json
+```
+
+Each invocation allocates a fresh `run-NNNN` namespace below `--storage-dir`.
+Repeating either command therefore creates another isolated run; it does not turn the
+second invocation into a warm-cache measurement.
+
+The `cached-latest-reconstruction` scenario measures a cold cache fill followed by a
+hot in-memory cache hit within each iteration:
+
+```bash
+shardline bench \
+  --scenario cached-latest-reconstruction \
+  --storage-dir /tmp/shardline-bench \
+  --iterations 10 \
+  --json > benchmark-reconstruction-cache.json
+```
+
+The aggregate JSON contains arithmetic-average latency under `.latency`, throughput
+under `.throughput`, process CPU measurements under `.timing`, totals under `.totals`,
+and raw samples under `.iterations_detail`. For example:
+
+```bash
+jq '.latency.initial_upload_micros' benchmark-isolated-local.json
+jq '[.iterations_detail[].latency.initial_upload_micros]' benchmark-isolated-local.json
+```
+
+The benchmark command does not calculate percentiles or peak memory. Derive percentiles
+from `iterations_detail` with a documented analysis tool. Measure peak resident memory
+outside the process, for example with `/usr/bin/time -v`, and preserve that output beside
+the JSON artifact.
+
 ## Seamless Git Experience
 
 Performance work must be judged at the Git workflow level, not only at the request

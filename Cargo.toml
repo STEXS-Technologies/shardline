@@ -31,6 +31,7 @@ clap = "4.5.60"
 clap_complete = "4.5.59"
 clap_mangen = "0.2.31"
 criterion = { version = "0.5.1", default-features = false, features = ["html_reports"] }
+ed25519-dalek = { version = "2", features = ["pem", "pkcs8"] }
 flate2 = "1"
 futures-util = "0.3"
 getrandom = "0.3"

@@ -2,13 +2,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use axum::http::{HeaderMap, header::AUTHORIZATION};
-use shardline_protocol::{TokenClaims, TokenCodecError, TokenScope};
+use shardline_protocol::{MAX_TOKEN_STRING_BYTES, TokenClaims, TokenCodecError, TokenScope};
 use shardline_server_core::{AuthError, AuthProvider};
 use subtle::ConstantTimeEq;
 
 use crate::ServerError;
-
-const MAX_BEARER_TOKEN_BYTES: usize = 8192;
 
 /// Verified request authorization context.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +110,7 @@ fn parse_bearer_token(header: &str) -> Result<&str, ServerError> {
     if token.trim().is_empty() {
         return Err(ServerError::InvalidAuthorizationHeader);
     }
-    if token.len() > MAX_BEARER_TOKEN_BYTES {
+    if token.len() > MAX_TOKEN_STRING_BYTES {
         return Err(ServerError::InvalidAuthorizationHeader);
     }
     if token.bytes().any(|byte| byte.is_ascii_whitespace()) {
@@ -179,7 +177,7 @@ mod tests {
         RepositoryProvider, RepositoryScope, TokenClaims, TokenScope, TokenSigner,
     };
 
-    use super::{MAX_BEARER_TOKEN_BYTES, ServerAuth, authorize_static_bearer_token};
+    use super::{MAX_TOKEN_STRING_BYTES, ServerAuth, authorize_static_bearer_token};
     use crate::ServerError;
 
     #[test]
@@ -251,7 +249,7 @@ mod tests {
         let Ok(auth) = auth else {
             return;
         };
-        let token = "a".repeat(MAX_BEARER_TOKEN_BYTES + 1);
+        let token = "a".repeat(MAX_TOKEN_STRING_BYTES + 1);
         let mut headers = HeaderMap::new();
         let header_value = HeaderValue::from_str(&format!("Bearer {token}"));
         assert!(header_value.is_ok());
@@ -417,8 +415,8 @@ mod tests {
 
     #[test]
     fn parse_bearer_token_rejects_oversized_token() {
-        use super::{MAX_BEARER_TOKEN_BYTES, parse_bearer_token};
-        let large = "a".repeat(MAX_BEARER_TOKEN_BYTES + 1);
+        use super::{MAX_TOKEN_STRING_BYTES, parse_bearer_token};
+        let large = "a".repeat(MAX_TOKEN_STRING_BYTES + 1);
         let header = format!("Bearer {large}");
         let result = parse_bearer_token(&header);
         assert!(matches!(

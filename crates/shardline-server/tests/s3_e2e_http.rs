@@ -548,6 +548,7 @@ async fn test_hub_whoami_returns_200() {
 
     let resp = client
         .get(server.url("/api/whoami-v2"))
+        .header("Authorization", format!("Bearer {}", server.auth_header()))
         .send()
         .await
         .unwrap();

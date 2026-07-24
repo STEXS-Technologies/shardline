@@ -52,6 +52,7 @@ pub(crate) const DEFAULT_MAX_SHARD_XORB_CHUNKS: NonZeroUsize = match NonZeroUsiz
 };
 
 pub(crate) const MAX_TOKEN_SIGNING_KEY_BYTES: u64 = 1_048_576;
+pub(crate) const MAX_ED25519_KEY_BYTES: u64 = 16_384;
 pub(crate) const MAX_PROVIDER_API_KEY_BYTES: u64 = 4096;
 pub(crate) const MAX_METRICS_TOKEN_BYTES: u64 = 4096;
 pub(crate) const MAX_REDIS_TLS_MATERIAL_BYTES: u64 = 1_048_576;

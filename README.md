@@ -1,22 +1,37 @@
 # Shardline
 
-[![Status](https://img.shields.io/badge/status-stable%201.0.1-1f6feb)](docs/COMPATIBILITY_STATUS.md)
+[![Status](https://img.shields.io/badge/status-stable-1f6feb)](docs/COMPATIBILITY_STATUS.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#license)
 
-**The open-source storage backend for AI models, datasets, containers, and large binary assets.**
+**Shardline is a protocol-neutral content-addressed storage engine, optimized for deduplicated model, dataset, container and build-artifact distribution, with Xet, OCI, Git LFS and cache-compatible frontends.**
 
 Shardline is a self-hostable content-addressed storage (CAS) server. It accepts immutable object uploads, deduplicates content, and serves range-aware downloads. Run it standalone or pair it with GitHub, GitLab, or Gitea for repository-scoped storage.
 
-Shardline combines a Xet CAS frontend with Git LFS, Bazel HTTP remote cache, OCI Distribution, and HuggingFace Hub API support in a self-hostable, Kubernetes-ready deployment with full operational tooling.
+## Surface Maturity
+
+| Surface | Tier | Evidence |
+|---------|------|----------|
+| Xet CAS frontend | **Stable** | Native Xet upload/download flows and checked-in `git-xet` push/clone/fetch/pull coverage |
+| Git LFS frontend | **Beta** | LFS batch negotiation and direct object routes; checked-in `git-lfs` push/pull/fetch coverage |
+| Bazel HTTP remote cache frontend | **Beta** | `ac`/`cas` read and write routes; `bazel`/`bazelisk` remote-cache flows in test matrix |
+| OCI Distribution frontend | **Stable** | Blob/manifest/tag routes and checked-in `skopeo`, Docker, Helm, and Podman client coverage |
+| Hugging Face Hub API | **Beta** | Model/dataset create, upload, download, delete; `hf` CLI workflows in test matrix |
+| Local filesystem storage | **Stable** | Checked-in adapter, concurrency, and operator workflow coverage |
+| S3-compatible storage | **Stable** | Checked-in object read/write/list and HTTP integration coverage |
+| Postgres metadata | **Stable** | Checked-in index, dedupe, concurrency, and operator workflow coverage |
+| SQLite metadata | **Stable** | Checked-in local single-node and operator workflow coverage |
+| Redis reconstruction cache | **Beta** | TLS and mTLS connectivity; cache hit/miss paths validated |
+| Provider integration (GitHub/GitLab/Gitea/Codeberg/generic) | **Beta** | Checked-in token issuance, webhook, and repository-scoped authorization coverage |
+| Ed25519 auth provider | **Experimental** | Signing and verification, verification-only mode, configuration, and authenticated HTTP flows have targeted tests |
 
 ## What it does
 
 - **Store and deduplicate** any binary content — datasets, model weights, build artifacts, media
 - **Multiple protocols** — Xet (default), Git LFS, Bazel HTTP remote cache, OCI Distribution
 - **HuggingFace Hub API** — drop-in alternative for `huggingface-cli` uploads and downloads
-- **Pluggable auth** — local HMAC, OIDC, JWKS, or passthrough provider adapters
+- **Pluggable auth** — local HMAC, Ed25519, OIDC, JWKS, or passthrough provider adapters
 - **Self-hosted or cloud** — local filesystem, S3-compatible storage, Postgres metadata
-- **Production-ready** — health checks, migrations, integrity verification, garbage collection, backups
+- **Operational tooling** — health checks, migrations, integrity verification, garbage collection, backups
 - **Provider integration** — optional webhooks and token issuance for GitHub, GitLab, Gitea, Codeberg
 
 ## Use cases
@@ -69,7 +84,7 @@ All profiles run providerless by default. Provider integration is optional.
 | Guide | Description |
 |-------|-------------|
 | [Deployment](docs/DEPLOYMENT.md) | Installation and configuration |
-| [Authentication](docs/AUTHENTICATION.md) | Pluggable auth providers (HMAC, OIDC, JWKS, passthrough) |
+| [Authentication](docs/AUTHENTICATION.md) | Pluggable auth providers (HMAC, Ed25519, OIDC, JWKS, passthrough) |
 | [HuggingFace Hub API](docs/HUGGINGFACE_HUB_API.md) | Hub API compatibility for huggingface-cli |
 | [Operations](docs/OPERATIONS.md) | Day-to-day operations runbook |
 | [CLI Reference](docs/CLI.md) | All commands and flags |
