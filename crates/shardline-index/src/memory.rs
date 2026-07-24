@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Error as SerdeJsonError, to_vec};
@@ -14,6 +14,7 @@ use crate::{
     IndexStoreFuture, LifecycleStore, ProviderRepositoryState, QuarantineCandidate,
     ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope,
     RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId, xet_hash_hex_string,
+    upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
 };
 
 /// In-memory implementation of [`IndexStore`].
@@ -369,6 +370,64 @@ impl LifecycleStore for MemoryIndexStore {
     }
 }
 
+impl UploadIntentStore for MemoryIndexStore {
+    type Error = MemoryIndexStoreError;
+
+    fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        self.lock_state()?
+            .upload_intents
+            .insert(intent.intent_id().to_owned(), intent.clone());
+        Ok(())
+    }
+
+    fn transition_intent(&self, intent_id: &str, new_state: UploadIntentState) -> Result<bool, Self::Error> {
+        let mut state = self.lock_state()?;
+        if let Some(intent) = state.upload_intents.get(intent_id) {
+            let updated = UploadIntent::from_parts(
+                intent.intent_id().to_owned(),
+                intent.object_key().to_owned(),
+                intent.object_hash().to_owned(),
+                intent.object_length(),
+                new_state,
+                intent.created_at(),
+                Duration::ZERO,
+            );
+            state.upload_intents.insert(intent_id.to_owned(), updated);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
+        Ok(self.lock_state()?.upload_intents.get(intent_id).cloned())
+    }
+
+    fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
+        Ok(self
+            .lock_state()?
+            .upload_intents
+            .values()
+            .filter(|i| i.state() == state)
+            .cloned()
+            .collect())
+    }
+
+    fn stale_intents(&self, state: UploadIntentState, older_than: Duration) -> Result<Vec<UploadIntent>, Self::Error> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        let cutoff = now.saturating_sub(older_than);
+        Ok(self
+            .lock_state()?
+            .upload_intents
+            .values()
+            .filter(|i| i.state() == state && i.created_at() < cutoff)
+            .cloned()
+            .collect())
+    }
+}
+
 impl AsyncIndexStore for MemoryIndexStore {
     type Error = MemoryIndexStoreError;
 
@@ -481,6 +540,7 @@ struct MemoryIndexState {
     retention_holds: HashMap<ObjectKey, RetentionHold>,
     webhook_deliveries: HashMap<MemoryWebhookDeliveryKey, WebhookDelivery>,
     provider_repository_states: HashMap<MemoryProviderRepositoryStateKey, ProviderRepositoryState>,
+    upload_intents: HashMap<String, UploadIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

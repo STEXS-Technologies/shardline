@@ -14,12 +14,12 @@ use super::{dedupe_shard_mapping, parse_uploaded_shard, store_uploaded_xorb};
 /// # Errors
 ///
 /// Returns an error when the xorb upload fails validation or storage.
-pub fn store_uploaded_xorb_bytes(
+pub async fn store_uploaded_xorb_bytes(
     object_store: &ServerObjectStore,
     expected_hash: &str,
     uploaded_body: &[u8],
 ) -> Result<XorbUploadResponse, XetAdapterError> {
-    let stored = store_uploaded_xorb(object_store, expected_hash, uploaded_body)?;
+    let stored = store_uploaded_xorb(object_store, expected_hash, uploaded_body).await?;
 
     Ok(XorbUploadResponse {
         was_inserted: stored.was_inserted,
@@ -93,6 +93,22 @@ mod tests {
         serialized
     }
 
+    // ---- helpers ----
+
+    fn async_store_xorb_bytes(
+        store: &ServerObjectStore,
+        hash: &str,
+        body: &[u8],
+    ) -> Result<XorbUploadResponse, XetAdapterError> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store_uploaded_xorb_bytes(store, hash, body))
+    }
+
+    fn store_xorb_sync(store: &ServerObjectStore, hash: &str, body: &[u8]) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store_uploaded_xorb(store, hash, body)).unwrap();
+    }
+
     // ---- store_uploaded_xorb_bytes ----
 
     #[test]
@@ -106,7 +122,7 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let result = store_uploaded_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
+        let result = async_store_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
         assert!(
             result.is_ok(),
             "store_uploaded_xorb_bytes failed: {result:?}"
@@ -127,7 +143,7 @@ mod tests {
         let wrong_hash = "00".repeat(32);
 
         let result =
-            store_uploaded_xorb_bytes(&object_store, &wrong_hash, &serialized.serialized_data);
+            async_store_xorb_bytes(&object_store, &wrong_hash, &serialized.serialized_data);
         assert!(result.is_err(), "expected error for wrong hash");
     }
 
@@ -142,11 +158,11 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let first = store_uploaded_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
+        let first = async_store_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
         assert!(first.is_ok());
         assert!(first.unwrap().was_inserted);
 
-        let second = store_uploaded_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
+        let second = async_store_xorb_bytes(&object_store, &hash, &serialized.serialized_data);
         assert!(second.is_ok());
         assert!(
             !second.unwrap().was_inserted,
@@ -159,7 +175,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
-        let result = store_uploaded_xorb_bytes(&object_store, "not-a-hash", b"data");
+        let result = async_store_xorb_bytes(&object_store, "not-a-hash", b"data");
         assert!(result.is_err(), "expected error for invalid hash format");
     }
 
@@ -169,7 +185,7 @@ mod tests {
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
         let hash = "ab".repeat(32);
 
-        let result = store_uploaded_xorb_bytes(&object_store, &hash, b"");
+        let result = async_store_xorb_bytes(&object_store, &hash, b"");
         assert!(
             result.is_err(),
             "expected error for empty body with valid hash"
@@ -189,7 +205,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_uploaded_xorb(&object_store, &xorb_hash.hex(), &serialized.serialized_data).unwrap();
+        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // 2. Build a shard referencing that xorb
         let chunk_hash = compute_data_hash(b"x");
@@ -294,7 +310,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_uploaded_xorb(&object_store, &xorb_hash.hex(), &serialized.serialized_data).unwrap();
+        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // 2. Build a shard referencing that xorb
         let chunk_hash = compute_data_hash(b"x");
@@ -356,7 +372,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_uploaded_xorb(&object_store, &xorb_hash.hex(), &serialized.serialized_data).unwrap();
+        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         let chunk_hash = compute_data_hash(b"x");
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);

@@ -15,7 +15,7 @@ use shardline_index::{
 use shardline_protocol::{ByteRange, ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::{
     DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
-    ObjectPrefix, ObjectStore, PutOutcome,
+    ObjectPrefix, ObjectStore, PutOutcome, SyncObjectStoreBridge,
 };
 use thiserror::Error;
 
@@ -407,8 +407,8 @@ const fn provider_key(provider: RepositoryProvider) -> &'static str {
 fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
     let index = MemoryIndexStore::default();
     let object_store = MemoryObjectStore::default();
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
-    let coordinator = CasCoordinator::new(index, object_store, limits);
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
     let hash = ShardlineHash::from_bytes([5; 32]);
     let key = ObjectKey::parse("xorbs/default/05/hash.xorb");
@@ -559,8 +559,8 @@ fn coordinator_local_filesystem_adapters_support_lifecycle_and_reconstruction_co
         return;
     };
 
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
-    let coordinator = CasCoordinator::new(index, object_store, limits);
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
     let hash = ShardlineHash::from_bytes([8; 32]);
     let key = ObjectKey::parse("xorbs/default/08/hash.xorb");
@@ -1002,26 +1002,30 @@ fn delete_provider_repository_state_returns_false_for_missing() {
 
 #[test]
 fn cas_limits_new_constructs_with_provided_bounds() {
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::new(3).unwrap());
     assert_eq!(limits.max_xorb_bytes(), NonZeroU64::MIN);
     assert_eq!(limits.max_shard_bytes(), NonZeroU64::MAX);
+    assert_eq!(limits.max_object_bytes().get(), 3);
 }
 
 #[test]
 fn cas_limits_accessors_return_configured_values() {
     let xorb = NonZeroU64::new(4096).unwrap();
     let shard = NonZeroU64::new(8192).unwrap();
-    let limits = CasLimits::new(xorb, shard);
+    let max_object = NonZeroU64::new(16384).unwrap();
+    let limits = CasLimits::new(xorb, shard, max_object);
     assert_eq!(limits.max_xorb_bytes(), xorb);
     assert_eq!(limits.max_shard_bytes(), shard);
+    assert_eq!(limits.max_object_bytes(), max_object);
 }
 
 #[test]
 fn cas_limits_default_bounds_use_provided_constants() {
     // NonZeroU64::MIN is the smallest positive value (1)
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN);
     assert_eq!(limits.max_xorb_bytes().get(), 1);
     assert_eq!(limits.max_shard_bytes().get(), 1);
+    assert_eq!(limits.max_object_bytes().get(), 1);
 }
 
 // ── CasCoordinator constructors and accessors ─────────────────────────
@@ -1030,8 +1034,8 @@ fn cas_limits_default_bounds_use_provided_constants() {
 fn cas_coordinator_constructs_and_exposes_adapters_and_limits() {
     let index = MemoryIndexStore::default();
     let object_store = MemoryObjectStore::default();
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
-    let coordinator = CasCoordinator::new(index, object_store, limits);
+    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
 
     // index() returns the stored index adapter
     let _index_ref: &MemoryIndexStore = coordinator.index();
@@ -1039,6 +1043,59 @@ fn cas_coordinator_constructs_and_exposes_adapters_and_limits() {
     let _store_ref: &MemoryObjectStore = coordinator.object_store();
     // limits() returns the configured limits
     assert_eq!(coordinator.limits(), limits);
+}
+
+// ── Coordinator store_content_addressed_blob methods ─────────────────
+
+#[test]
+fn coordinator_store_content_addressed_blob_rejects_oversized_body() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
+    let object_store = SyncObjectStoreBridge::new(
+        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+    );
+    let limits = CasLimits::new(
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(5).unwrap(), // max_object = 5
+    );
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
+    let key = shardline_cas::paths::xorb_key("ab", "test-key");
+    let hash = ShardlineHash::from_bytes([1; 32]);
+    let integrity = ObjectIntegrity::new(hash, 10); // 10 > 5
+    let result = rt.block_on(coordinator.store_content_addressed_blob(
+        &key,
+        &integrity,
+        vec![0u8; 10],
+    ));
+    assert!(result.is_err(), "should reject oversized body");
+}
+
+#[test]
+fn coordinator_store_content_addressed_blob_accepts_valid_body() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
+    let object_store = SyncObjectStoreBridge::new(
+        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+    );
+    let limits = CasLimits::new(
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(100).unwrap(),
+    );
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
+    let key = shardline_cas::paths::xorb_key("ab", "test-key");
+    let body = b"hello world";
+    let hash = ShardlineHash::from_bytes(*blake3::hash(body).as_bytes());
+    let integrity = ObjectIntegrity::new(hash, body.len() as u64);
+    let result = rt.block_on(coordinator.store_content_addressed_blob(
+        &key,
+        &integrity,
+        body.to_vec(),
+    ));
+    assert!(result.is_ok(), "should accept valid body: {result:?}");
 }
 
 fn blake3_hash(bytes: &[u8]) -> ShardlineHash {

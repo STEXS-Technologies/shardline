@@ -626,6 +626,11 @@ mod tests {
     use crate::error::XetAdapterError;
     use shardline_server_core::ServerObjectStore;
 
+    fn store_xorb_sync(store: &ServerObjectStore, hash: &str, body: &[u8]) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(crate::store_uploaded_xorb(store, hash, body)).unwrap();
+    }
+
     #[test]
     fn shard_object_key_maps_native_hash_into_shard_namespace() {
         let hash = "ab".repeat(32);
@@ -1246,8 +1251,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_with_metrics_delegates_success() {
-        use crate::xorb_store::store_uploaded_xorb;
-        use shardline_xet_core::xorb_object::{
+                use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
@@ -1261,7 +1265,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_uploaded_xorb(&object_store, &xorb_hash.hex(), &serialized.serialized_data).unwrap();
+        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // Build a shard referencing it
         let chunk_hash = compute_data_hash(b"x");
@@ -1309,8 +1313,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_success_with_xorb_lookup() {
-        use crate::xorb_store::store_uploaded_xorb;
-        use shardline_xet_core::xorb_object::{
+                use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
@@ -1324,7 +1327,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_uploaded_xorb(&object_store, &xorb_hash.hex(), &serialized.serialized_data).unwrap();
+        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         // 2. Build a shard referencing that xorb
         let chunk_hash = compute_data_hash(b"x");
@@ -1362,8 +1365,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_already_exists_returns_result_zero() {
-        use crate::xorb_store::store_uploaded_xorb;
-        use shardline_xet_core::xorb_object::{
+                use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
@@ -1376,7 +1378,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_uploaded_xorb(&object_store, &xorb_hash.hex(), &serialized.serialized_data).unwrap();
+        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         let chunk_hash = compute_data_hash(b"x");
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);
@@ -1493,8 +1495,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_with_verification_and_no_metadata_ext() {
-        use crate::xorb_store::store_uploaded_xorb;
-        use shardline_xet_core::xorb_object::{
+                use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
@@ -1507,7 +1508,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let xorb_hash = serialized.hash;
-        store_uploaded_xorb(&object_store, &xorb_hash.hex(), &serialized.serialized_data).unwrap();
+        store_xorb_sync(&object_store, &xorb_hash.hex(), &serialized.serialized_data);
 
         let chunk_hash = compute_data_hash(b"x");
         let file_hash = file_hash(&[(chunk_hash, 1_u64)]);

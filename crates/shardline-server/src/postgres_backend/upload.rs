@@ -185,6 +185,7 @@ impl super::PostgresBackend {
         let uploaded_body = read_body_to_bytes(&mut body).await?;
         let object_store = self.object_store();
         store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+            .await
             .map_err(ServerError::from)
     }
 

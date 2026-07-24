@@ -50,6 +50,7 @@ pub(crate) mod local_path;
 mod object;
 #[cfg(feature = "s3")]
 mod s3;
+mod async_store;
 mod store;
 
 #[cfg(unix)]
@@ -70,4 +71,5 @@ pub use s3::{
     BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,
     S3ObjectStoreConfig, S3ObjectStoreError,
 };
+pub use async_store::{AsyncObjectStore, SyncObjectStoreBridge};
 pub use store::ObjectStore;

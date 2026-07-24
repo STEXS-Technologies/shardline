@@ -3,13 +3,16 @@ use serde::{Deserialize, Serialize};
 use shardline_protocol::{ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::ObjectKey;
 use sqlx::{Row, postgres::PgRow, query, query_scalar, types::Json};
+use std::time::Duration;
 
 use super::{PostgresMetadataStoreError, i64_to_u64, u64_to_i64};
 use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, IndexStoreFuture,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RetentionHold,
     StoredObjectId, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
-    provider::parse_repository_provider, xet_hash_hex_string,
+    provider::parse_repository_provider, upload_intent::{
+        UploadIntent, UploadIntentState, UploadIntentStore,
+    }, xet_hash_hex_string,
 };
 
 impl AsyncIndexStore for super::PostgresIndexStore {
@@ -664,6 +667,40 @@ impl AsyncIndexStore for super::PostgresIndexStore {
             .await?;
             Ok(result.rows_affected() > 0)
         })
+    }
+}
+
+impl UploadIntentStore for super::PostgresIndexStore {
+    type Error = PostgresMetadataStoreError;
+
+    fn create_intent(&self, _intent: &UploadIntent) -> Result<(), Self::Error> {
+        Err(PostgresMetadataStoreError::Unsupported(
+            "sync UploadIntentStore not available for Postgres; use the local SQLite path".into(),
+        ))
+    }
+
+    fn transition_intent(&self, _intent_id: &str, _new_state: UploadIntentState) -> Result<bool, Self::Error> {
+        Err(PostgresMetadataStoreError::Unsupported(
+            "sync UploadIntentStore not available for Postgres".into(),
+        ))
+    }
+
+    fn intent_by_id(&self, _intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
+        Err(PostgresMetadataStoreError::Unsupported(
+            "sync UploadIntentStore not available for Postgres".into(),
+        ))
+    }
+
+    fn intents_by_state(&self, _state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
+        Err(PostgresMetadataStoreError::Unsupported(
+            "sync UploadIntentStore not available for Postgres".into(),
+        ))
+    }
+
+    fn stale_intents(&self, _state: UploadIntentState, _older_than: Duration) -> Result<Vec<UploadIntent>, Self::Error> {
+        Err(PostgresMetadataStoreError::Unsupported(
+            "sync UploadIntentStore not available for Postgres".into(),
+        ))
     }
 }
 
