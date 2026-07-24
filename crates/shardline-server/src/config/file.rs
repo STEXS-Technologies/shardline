@@ -69,6 +69,13 @@ pub struct CacheSection {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Ed25519Section {
+    pub private_key_path: Option<String>,
+    pub public_key_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthSection {
     pub provider: Option<String>,
     pub token_signing_key_path: Option<String>,
@@ -77,6 +84,7 @@ pub struct AuthSection {
     pub provider_token_ttl_seconds: Option<u64>,
     pub jwks: Option<JwksSection>,
     pub oidc: Option<OidcSection>,
+    pub ed25519: Option<Ed25519Section>,
 }
 
 #[derive(Debug, Deserialize)]

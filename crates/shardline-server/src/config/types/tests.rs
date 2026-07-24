@@ -42,6 +42,14 @@ fn auth_provider_kind_parse_passthrough() {
 }
 
 #[test]
+fn auth_provider_kind_parse_ed25519() {
+    assert_eq!(
+        AuthProviderKind::parse("ed25519").unwrap(),
+        AuthProviderKind::Ed25519
+    );
+}
+
+#[test]
 fn auth_provider_kind_parse_rejects_unknown() {
     assert!(matches!(
         AuthProviderKind::parse("unknown"),
@@ -405,6 +413,64 @@ fn server_config_builder_with_token_signing_key_accepts_valid_key() {
 }
 
 #[test]
+fn server_config_builder_with_ed25519_private_key_rejects_empty() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let result = config.with_ed25519_private_key(vec![]);
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::EmptyEd25519PrivateKey)
+    ));
+}
+
+#[test]
+fn server_config_builder_with_ed25519_public_key_rejects_empty() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let result = config.with_ed25519_public_key(vec![]);
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::EmptyEd25519PublicKey)
+    ));
+}
+
+#[test]
+fn server_config_builder_with_ed25519_private_key_accepts_valid_key() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_ed25519_private_key(vec![0u8; 32])
+    .unwrap();
+    assert!(config.ed25519_private_key().is_some());
+    assert_eq!(config.ed25519_private_key().unwrap(), &[0u8; 32]);
+}
+
+#[test]
+fn server_config_builder_with_ed25519_public_key_accepts_valid_key() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_ed25519_public_key(vec![0u8; 32])
+    .unwrap();
+    assert!(config.ed25519_public_key().is_some());
+    assert_eq!(config.ed25519_public_key().unwrap(), &[0u8; 32]);
+}
+
+#[test]
 fn server_config_builder_with_auth_provider() {
     let config = ServerConfig::new(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
@@ -638,6 +704,60 @@ fn server_config_validate_runtime_requirements_accepts_passthrough_on_loopback()
 }
 
 #[test]
+fn server_config_validate_runtime_requirements_accepts_ed25519_without_hmac_key() {
+    // Ed25519 provider should NOT require the HMAC signing key.
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(vec![0u8; 32])
+    .unwrap();
+    assert!(
+        config.validate_runtime_requirements().is_ok(),
+        "Ed25519 provider should not require HMAC signing key"
+    );
+}
+
+#[test]
+fn server_config_validate_runtime_requirements_rejects_ed25519_without_key() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519);
+
+    assert!(matches!(
+        config.validate_runtime_requirements(),
+        Err(ServerConfigError::MissingEd25519Key)
+    ));
+}
+
+#[test]
+fn server_config_validate_runtime_requirements_rejects_conflicting_ed25519_keys() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    )
+    .with_auth_provider(AuthProviderKind::Ed25519)
+    .with_ed25519_private_key(vec![1_u8; 32])
+    .unwrap()
+    .with_ed25519_public_key(vec![2_u8; 32])
+    .unwrap();
+
+    assert!(matches!(
+        config.validate_runtime_requirements(),
+        Err(ServerConfigError::ConflictingEd25519Keys)
+    ));
+}
+
+#[test]
 fn server_config_non_existent_root_dir_does_not_fail_construction() {
     // ServerConfig::new() stores root_dir as a PathBuf without validating
     // existence.  Construction itself must not fail for a non-existent path.
@@ -659,6 +779,8 @@ fn server_config_non_existent_root_dir_does_not_fail_construction() {
 
 #[test]
 fn server_config_debug_redacts_secrets() {
+    const ED25519_PRIVATE_KEY: &[u8] = b"ed25519-private-key-material";
+    const ED25519_PUBLIC_KEY: &[u8] = b"ed25519-public-key-material";
     let config = ServerConfig::new(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
         "http://localhost:8080".to_owned(),
@@ -666,9 +788,15 @@ fn server_config_debug_redacts_secrets() {
         NonZeroUsize::new(4096).unwrap(),
     )
     .with_token_signing_key(b"super-secret-key-here-32-bytes!!".to_vec())
+    .unwrap()
+    .with_ed25519_private_key(ED25519_PRIVATE_KEY.to_vec())
+    .unwrap()
+    .with_ed25519_public_key(ED25519_PUBLIC_KEY.to_vec())
     .unwrap();
     let debug = format!("{config:?}");
     assert!(!debug.contains("super-secret-key-here-32-bytes!!"));
+    assert!(!debug.contains(std::str::from_utf8(ED25519_PRIVATE_KEY).unwrap()));
+    assert!(!debug.contains(std::str::from_utf8(ED25519_PUBLIC_KEY).unwrap()));
     assert!(debug.contains("***"));
 }
 
@@ -690,6 +818,8 @@ fn server_config_accessors_return_expected_values() {
     assert!(config.index_postgres_url().is_none());
     assert!(config.token_signing_key().is_none());
     assert!(config.metrics_token().is_none());
+    assert!(config.ed25519_private_key().is_none());
+    assert!(config.ed25519_public_key().is_none());
     assert!(config.provider_config_path().is_none());
     assert!(config.provider_api_key().is_none());
     assert!(config.provider_token_issuer().is_none());
@@ -1226,12 +1356,12 @@ fn server_config_error_display_token_signing_key() {
 
 #[test]
 fn server_config_error_display_token_signing_key_source_conflict() {
-    let err = ServerConfigError::TokenSigningKeySourceConflict {
+    let err = ServerConfigError::SecretSourceConflict {
         env: "SHARDLINE_TOKEN_SIGNING_KEY",
         file_env: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
     };
     let display = err.to_string();
-    assert!(display.contains("token signing key source conflict"));
+    assert!(display.contains("secret source conflict"));
 }
 
 #[test]
@@ -1363,6 +1493,99 @@ fn server_config_error_display_missing_jwks_url() {
     );
 }
 
+#[test]
+fn server_config_error_display_missing_ed25519_key() {
+    let err = ServerConfigError::MissingEd25519Key;
+    assert!(err.to_string().contains("ed25519 auth provider requires"));
+    assert!(err.to_string().contains("exactly one"));
+}
+
+#[test]
+fn server_config_error_display_conflicting_ed25519_keys() {
+    let err = ServerConfigError::ConflictingEd25519Keys;
+    assert_eq!(
+        err.to_string(),
+        "ed25519 private and public keys must not both be configured"
+    );
+}
+
+#[test]
+fn server_config_error_display_empty_ed25519_private_key() {
+    let err = ServerConfigError::EmptyEd25519PrivateKey;
+    assert_eq!(err.to_string(), "ed25519 private key must not be empty");
+}
+
+#[test]
+fn server_config_error_display_empty_ed25519_public_key() {
+    let err = ServerConfigError::EmptyEd25519PublicKey;
+    assert_eq!(err.to_string(), "ed25519 public key must not be empty");
+}
+
+#[test]
+fn server_config_error_display_ed25519_private_key() {
+    let io_err = std::io::Error::other("file error");
+    let err = ServerConfigError::Ed25519PrivateKey(io_err);
+    assert_eq!(err.to_string(), "ed25519 private key could not be read");
+}
+
+#[test]
+fn server_config_error_display_ed25519_public_key() {
+    let io_err = std::io::Error::other("file error");
+    let err = ServerConfigError::Ed25519PublicKey(io_err);
+    assert_eq!(err.to_string(), "ed25519 public key could not be read");
+}
+
+#[test]
+fn server_config_error_display_secret_source_conflict() {
+    let err = ServerConfigError::SecretSourceConflict {
+        env: "SHARDLINE_ED25519_PRIVATE_KEY",
+        file_env: "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
+    };
+    let display = err.to_string();
+    assert!(display.contains("secret source conflict"));
+    assert!(display.contains("SHARDLINE_ED25519_PRIVATE_KEY"));
+}
+
+#[test]
+fn server_config_error_display_ed25519_private_key_too_large() {
+    let err = ServerConfigError::Ed25519PrivateKeyTooLarge {
+        observed_bytes: 2_000_000,
+        maximum_bytes: 1_048_576,
+    };
+    let display = err.to_string();
+    assert!(display.contains("exceeded"));
+}
+
+#[test]
+fn server_config_error_display_ed25519_public_key_too_large() {
+    let err = ServerConfigError::Ed25519PublicKeyTooLarge {
+        observed_bytes: 2_000_000,
+        maximum_bytes: 1_048_576,
+    };
+    let display = err.to_string();
+    assert!(display.contains("exceeded"));
+}
+
+#[test]
+fn server_config_error_display_ed25519_private_key_length_mismatch() {
+    let err = ServerConfigError::Ed25519PrivateKeyLengthMismatch {
+        expected_bytes: 100,
+        observed_bytes: 200,
+    };
+    let display = err.to_string();
+    assert!(display.contains("changed during bounded read"));
+}
+
+#[test]
+fn server_config_error_display_ed25519_public_key_length_mismatch() {
+    let err = ServerConfigError::Ed25519PublicKeyLengthMismatch {
+        expected_bytes: 100,
+        observed_bytes: 200,
+    };
+    let display = err.to_string();
+    assert!(display.contains("changed during bounded read"));
+}
+
 // ── Remaining builder method tests ─────────────────────────────────────
 
 #[test]
@@ -1469,11 +1692,42 @@ fn server_config_with_token_signing_key_rejects_too_large() {
         PathBuf::from("/tmp/test"),
         NonZeroUsize::new(4096).unwrap(),
     );
-    // MAX_TOKEN_SIGNING_KEY_BYTES is 1_048_576; exceed it
+    // The bounded Ed25519 key parser rejects unreasonably large input.
     let result = config.with_token_signing_key(vec![0u8; 2_000_000]);
     assert!(matches!(
         result,
         Err(ServerConfigError::TokenSigningKeyTooLarge { .. })
+    ));
+}
+
+#[test]
+fn server_config_with_ed25519_private_key_rejects_too_large() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    // MAX_TOKEN_SIGNING_KEY_BYTES is 1_048_576; exceed it
+    let result = config.with_ed25519_private_key(vec![0u8; 2_000_000]);
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::Ed25519PrivateKeyTooLarge { .. })
+    ));
+}
+
+#[test]
+fn server_config_with_ed25519_public_key_rejects_too_large() {
+    let config = ServerConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        "http://localhost:8080".to_owned(),
+        PathBuf::from("/tmp/test"),
+        NonZeroUsize::new(4096).unwrap(),
+    );
+    let result = config.with_ed25519_public_key(vec![0u8; 2_000_000]);
+    assert!(matches!(
+        result,
+        Err(ServerConfigError::Ed25519PublicKeyTooLarge { .. })
     ));
 }
 

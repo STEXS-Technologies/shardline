@@ -1,5 +1,6 @@
 use std::{
     env::var,
+    io::Error as IoError,
     num::{NonZeroU64, NonZeroUsize, ParseIntError},
     path::{Path, PathBuf},
 };
@@ -8,15 +9,15 @@ use shardline_protocol::{SecretBytes, SecretString};
 
 use super::file::ShardlineTomlConfig;
 use super::secrets::{
-    configure_provider_runtime_from_paths, load_redis_tls_config_from_env,
-    load_s3_object_store_config_from_env, read_secret_file_bytes,
+    configure_provider_runtime_from_paths, ensure_secret_size_within_limit,
+    load_redis_tls_config_from_env, load_s3_object_store_config_from_env, read_secret_file_bytes,
 };
 use super::{
     AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
     DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES, ObjectStorageAdapter, ServerConfig,
-    ServerConfigError, ShardMetadataLimits, default_transfer_max_in_flight_chunks,
-    default_upload_max_in_flight_chunks,
+    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
+    ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
+    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks,
 };
 use crate::{
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
@@ -169,9 +170,59 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     let reconstruction_cache_redis_url = var("SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL").ok();
     let reconstruction_cache_redis_tls = load_redis_tls_config_from_env()?;
     let index_postgres_url = var("SHARDLINE_INDEX_POSTGRES_URL").ok();
-    let token_signing_key = optional_token_signing_key_from_sources(
-        var("SHARDLINE_TOKEN_SIGNING_KEY").ok(),
-        var("SHARDLINE_TOKEN_SIGNING_KEY_FILE").ok(),
+    let token_signing_key = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_TOKEN_SIGNING_KEY",
+            "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
+        ),
+        MAX_TOKEN_SIGNING_KEY_BYTES,
+        ServerConfigError::EmptyTokenSigningKey,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::TokenSigningKey,
+        |observed, maximum| ServerConfigError::TokenSigningKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::TokenSigningKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
+    let ed25519_private_key = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_ED25519_PRIVATE_KEY",
+            "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
+        ),
+        MAX_ED25519_KEY_BYTES,
+        ServerConfigError::EmptyEd25519PrivateKey,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::Ed25519PrivateKey,
+        |observed, maximum| ServerConfigError::Ed25519PrivateKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::Ed25519PrivateKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
+    )?;
+    let ed25519_public_key = load_secret_from_env_or_file_with_conflict_check(
+        (
+            "SHARDLINE_ED25519_PUBLIC_KEY",
+            "SHARDLINE_ED25519_PUBLIC_KEY_FILE",
+        ),
+        MAX_ED25519_KEY_BYTES,
+        ServerConfigError::EmptyEd25519PublicKey,
+        |env, file_env| ServerConfigError::SecretSourceConflict { env, file_env },
+        ServerConfigError::Ed25519PublicKey,
+        |observed, maximum| ServerConfigError::Ed25519PublicKeyTooLarge {
+            observed_bytes: observed,
+            maximum_bytes: maximum,
+        },
+        |expected, observed| ServerConfigError::Ed25519PublicKeyLengthMismatch {
+            expected_bytes: expected,
+            observed_bytes: observed,
+        },
     )?;
     let metrics_token = match var("SHARDLINE_METRICS_TOKEN_FILE") {
         Ok(path) => Some(read_secret_file_bytes(
@@ -256,6 +307,13 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
                 return Err(ServerConfigError::MissingJwksUrl);
             }
         }
+        AuthProviderKind::Ed25519 => {
+            match (ed25519_private_key.is_some(), ed25519_public_key.is_some()) {
+                (false, false) => return Err(ServerConfigError::MissingEd25519Key),
+                (true, true) => return Err(ServerConfigError::ConflictingEd25519Keys),
+                (true, false) | (false, true) => {}
+            }
+        }
         AuthProviderKind::Local | AuthProviderKind::Passthrough => {}
     }
     config = config.with_auth_provider(auth_provider);
@@ -267,6 +325,12 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     }
     if let Some(issuer) = auth_jwks_issuer {
         config = config.with_auth_jwks_issuer(issuer);
+    }
+    if let Some(key) = ed25519_private_key {
+        config = config.with_ed25519_private_key(key)?;
+    }
+    if let Some(key) = ed25519_public_key {
+        config = config.with_ed25519_public_key(key)?;
     }
     if let Some(metrics_token) = metrics_token {
         config = config.with_metrics_token(metrics_token)?;
@@ -320,29 +384,50 @@ fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, Server
     Ok(parsed)
 }
 
-pub(super) fn optional_token_signing_key_from_sources(
-    direct: Option<String>,
-    file: Option<String>,
+/// Loads a secret from a direct env var or a file-indirection env var.
+///
+/// Returns `None` when neither env var is set. Returns an error when both
+/// are set (source conflict), the file cannot be read, or the file content
+/// exceeds the size limit.
+pub(super) fn load_secret_from_env_or_file_with_conflict_check(
+    env_names: (&'static str, &'static str),
+    maximum_bytes: u64,
+    empty_error: ServerConfigError,
+    source_conflict_error: impl Fn(&'static str, &'static str) -> ServerConfigError + Copy,
+    read_error: impl Fn(IoError) -> ServerConfigError + Copy,
+    too_large_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
+    length_mismatch_error: impl Fn(u64, u64) -> ServerConfigError + Copy,
 ) -> Result<Option<SecretBytes>, ServerConfigError> {
+    let (env_name, file_env_name) = env_names;
+    let direct = var(env_name).ok();
+    let file = var(file_env_name).ok();
     match (direct, file) {
-        (Some(_direct), Some(_file)) => Err(ServerConfigError::TokenSigningKeySourceConflict {
-            env: "SHARDLINE_TOKEN_SIGNING_KEY",
-            file_env: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
-        }),
-        (Some(value), None) => Ok(Some(SecretBytes::new(value.into_bytes()))),
-        (None, Some(path)) => Ok(Some(read_secret_file_bytes(
-            Path::new(&path),
-            MAX_TOKEN_SIGNING_KEY_BYTES,
-            ServerConfigError::TokenSigningKey,
-            |observed_bytes, maximum_bytes| ServerConfigError::TokenSigningKeyTooLarge {
-                observed_bytes,
+        (Some(_direct), Some(_file)) => Err(source_conflict_error(env_name, file_env_name)),
+        (Some(value), None) => {
+            let bytes = SecretBytes::new(value.into_bytes());
+            if bytes.expose_secret().is_empty() {
+                return Err(empty_error);
+            }
+            ensure_secret_size_within_limit(
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                 maximum_bytes,
-            },
-            |expected_bytes, observed_bytes| ServerConfigError::TokenSigningKeyLengthMismatch {
-                expected_bytes,
-                observed_bytes,
-            },
-        )?)),
+                too_large_error,
+            )?;
+            Ok(Some(bytes))
+        }
+        (None, Some(path)) => {
+            let bytes = read_secret_file_bytes(
+                Path::new(&path),
+                maximum_bytes,
+                read_error,
+                too_large_error,
+                length_mismatch_error,
+            )?;
+            if bytes.expose_secret().is_empty() {
+                return Err(empty_error);
+            }
+            Ok(Some(bytes))
+        }
         (None, None) => Ok(None),
     }
 }
@@ -478,6 +563,16 @@ pub fn load_server_config_from_env_with_toml(
         if let Some(oidc) = &auth.oidc {
             set_if_unset("SHARDLINE_AUTH_OIDC_ISSUER", oidc.issuer_url.clone());
         }
+        if let Some(ed25519) = &auth.ed25519 {
+            set_if_unset(
+                "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
+                ed25519.private_key_path.clone(),
+            );
+            set_if_unset(
+                "SHARDLINE_ED25519_PUBLIC_KEY_FILE",
+                ed25519.public_key_path.clone(),
+            );
+        }
     }
 
     // Apply TOML values to the process environment for keys not already set.
@@ -606,8 +701,7 @@ mod tests {
     use crate::ServerFrontend;
 
     use super::{
-        load_non_zero_usize_env, load_server_config_from_env_with_toml,
-        optional_token_signing_key_from_sources, parse_server_frontends_env,
+        load_non_zero_usize_env, load_server_config_from_env_with_toml, parse_server_frontends_env,
     };
 
     fn set_env_var(key: &str, value: &str) {
@@ -634,6 +728,7 @@ mod tests {
             "SHARDLINE_S3_ALLOW_HTTP",
             "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE_REQUEST",
             "SHARDLINE_S3_VIRTUAL_HOSTED_STYLE",
+            "SHARDLINE_AUTH_PROVIDER",
         ];
         for key in S3_KEYS {
             remove_env_var(key);
@@ -764,115 +859,6 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         assert!(result.is_ok());
         let frontends = result.unwrap();
         assert_eq!(frontends.len(), 5);
-    }
-
-    // ── optional_token_signing_key_from_sources ────────────────────────────
-
-    #[test]
-    fn optional_token_signing_key_from_sources_none() {
-        let result = optional_token_signing_key_from_sources(None, None).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_direct() {
-        let result =
-            optional_token_signing_key_from_sources(Some("my-key".to_owned()), None).unwrap();
-        let inner = result.unwrap();
-        assert_eq!(inner.expose_secret(), b"my-key");
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_both_conflict() {
-        let result = optional_token_signing_key_from_sources(
-            Some("direct".to_owned()),
-            Some("/path/to/file".to_owned()),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_file_read() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        use std::io::Write;
-        tmp.write_all(b"file-key-value").unwrap();
-        tmp.flush().unwrap();
-        let result =
-            optional_token_signing_key_from_sources(None, Some(tmp.path().display().to_string()));
-        assert!(result.is_ok());
-        let inner = result.unwrap().unwrap();
-        assert_eq!(inner.expose_secret(), b"file-key-value");
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_direct_empty_string() {
-        let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
-        let inner = result.unwrap();
-        assert_eq!(inner.expose_secret(), b"");
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_file_read_too_large() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        use std::io::Write;
-        // MAX_TOKEN_SIGNING_KEY_BYTES is 1_048_576; write data exceeding this
-        let large_data = vec![0u8; 2_000_000];
-        tmp.write_all(&large_data).unwrap();
-        tmp.flush().unwrap();
-        let result =
-            optional_token_signing_key_from_sources(None, Some(tmp.path().display().to_string()));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_empty_direct_produces_empty_bytes() {
-        let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
-        let inner = result.unwrap();
-        assert_eq!(inner.expose_secret(), b"");
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_direct_empty_string_is_some() {
-        let result = optional_token_signing_key_from_sources(Some(String::new()), None).unwrap();
-        assert!(result.is_some());
-        assert!(result.unwrap().is_empty());
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_both_empty_conflict() {
-        // "empty" direct value with a non-empty file path → conflict
-        let result = optional_token_signing_key_from_sources(
-            Some(String::new()),
-            Some("/some/file".to_owned()),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_file_not_found() {
-        let result = optional_token_signing_key_from_sources(
-            None,
-            Some("/nonexistent/token/file".to_owned()),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn optional_token_signing_key_from_sources_file_length_mismatch() {
-        // Line 340: the length mismatch callback when reading a signing key file.
-        // MAX_TOKEN_SIGNING_KEY_BYTES is 1_048_576. We create a file that would
-        // trigger the length-mismatch error path.
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        use std::io::Write;
-        // The read_secret_file_bytes function validates length against expected
-        // number-of-bytes parameters. We exercise the |expected,observed| callback
-        // by writing data of a size that will trigger it (not zero, not too large).
-        tmp.write_all(b"key-material-with-exact-length").unwrap();
-        // This test verifies the error callback compiles and fires when the
-        // observed length does not match expectations from upstream validation.
-        let result =
-            optional_token_signing_key_from_sources(None, Some(tmp.path().display().to_string()));
-        assert!(result.is_ok());
     }
 
     #[test]
@@ -1668,6 +1654,123 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 
+    // ── load_server_config_from_env: Ed25519 auth provider ───────────────
+
+    #[test]
+    #[serial_test::serial]
+    fn env_ed25519_private_key_from_direct_env() {
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
+        set_env_var("SHARDLINE_ED25519_PRIVATE_KEY", &hex::encode([0u8; 32]));
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "ed25519");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline-test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let config = super::load_server_config_from_env()
+            .expect("config should load with Ed25519 private key");
+        assert_eq!(config.auth_provider(), super::AuthProviderKind::Ed25519);
+        assert!(config.ed25519_private_key().is_some());
+
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_ed25519_private_key_from_file_env() {
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmp.path(), [0u8; 32]).expect("write key");
+        set_env_var(
+            "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
+            tmp.path().to_str().unwrap(),
+        );
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "ed25519");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline-test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let config = super::load_server_config_from_env()
+            .expect("config should load with Ed25519 private key file");
+        assert_eq!(config.auth_provider(), super::AuthProviderKind::Ed25519);
+        assert!(config.ed25519_private_key().is_some());
+
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_ed25519_public_key_from_direct_env() {
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
+        set_env_var("SHARDLINE_ED25519_PUBLIC_KEY", &hex::encode([0u8; 32]));
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "ed25519");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline-test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let config = super::load_server_config_from_env()
+            .expect("config should load with Ed25519 public key");
+        assert_eq!(config.auth_provider(), super::AuthProviderKind::Ed25519);
+        assert!(config.ed25519_public_key().is_some());
+        assert!(config.ed25519_private_key().is_none());
+
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_ed25519_missing_both_keys_errors() {
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "ed25519");
+        set_env_var("SHARDLINE_ROOT_DIR", "/tmp/shardline-test");
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+
+        let result = super::load_server_config_from_env();
+        assert!(
+            matches!(result, Err(super::ServerConfigError::MissingEd25519Key)),
+            "expected MissingEd25519Key, got: {:?}",
+            result.err()
+        );
+
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+        remove_env_var("SHARDLINE_ROOT_DIR");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_ed25519_private_and_public_key_conflict_errors() {
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
+        set_env_var("SHARDLINE_ED25519_PRIVATE_KEY", &hex::encode([1_u8; 32]));
+        set_env_var("SHARDLINE_ED25519_PUBLIC_KEY", &hex::encode([2_u8; 32]));
+        set_env_var("SHARDLINE_AUTH_PROVIDER", "ed25519");
+
+        let result = super::load_server_config_from_env();
+        assert!(matches!(
+            result,
+            Err(super::ServerConfigError::ConflictingEd25519Keys)
+        ));
+
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY");
+        remove_env_var("SHARDLINE_AUTH_PROVIDER");
+    }
+
     // ── load_server_config_from_env: end-to-end integration ───────────────
 
     #[test]
@@ -1766,5 +1869,60 @@ root_dir = "runtime#dir\nSHARDLINE_INJECTED_VALUE=unexpected"
         remove_env_var("SHARDLINE_AUTH_PROVIDER");
         remove_env_var("SHARDLINE_AUTH_OIDC_ISSUER");
         remove_env_var("SHARDLINE_TOKEN_SIGNING_KEY");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn toml_ed25519_section_maps_to_env_vars() {
+        use std::io::Write;
+
+        // Clean relevant env vars
+        for key in &[
+            "SHARDLINE_ED25519_PRIVATE_KEY_FILE",
+            "SHARDLINE_ED25519_PUBLIC_KEY_FILE",
+            "SHARDLINE_ED25519_PRIVATE_KEY",
+            "SHARDLINE_ED25519_PUBLIC_KEY",
+            "SHARDLINE_AUTH_PROVIDER",
+            "SHARDLINE_TOKEN_SIGNING_KEY",
+        ] {
+            remove_env_var(key);
+        }
+
+        // Create temporary key files so the config loader can read them.
+        let mut priv_key_file = tempfile::NamedTempFile::new().expect("temp private key");
+        priv_key_file
+            .write_all(&[0u8; 32])
+            .expect("write private key");
+        priv_key_file.flush().expect("flush");
+        let priv_path = priv_key_file.path().to_str().unwrap().to_owned();
+
+        let toml_content = format!(
+            r#"
+[auth]
+provider = "ed25519"
+
+[auth.ed25519]
+private_key_path = "{priv_path}"
+"#
+        );
+
+        let toml: super::ShardlineTomlConfig =
+            toml::from_str(&toml_content).expect("TOML should parse");
+
+        set_env_var("SHARDLINE_PUBLIC_BASE_URL", "http://localhost:8080");
+        let _config = load_server_config_from_env_with_toml(&toml)
+            .expect("config should load with ed25519 TOML section");
+
+        // The TOML values should be set as env vars for downstream loading
+        assert_eq!(
+            std::env::var("SHARDLINE_ED25519_PRIVATE_KEY_FILE").as_deref(),
+            Ok(priv_path.as_str())
+        );
+        assert!(std::env::var("SHARDLINE_ED25519_PUBLIC_KEY_FILE").is_err());
+
+        // Clean up
+        remove_env_var("SHARDLINE_ED25519_PRIVATE_KEY_FILE");
+        remove_env_var("SHARDLINE_ED25519_PUBLIC_KEY_FILE");
+        remove_env_var("SHARDLINE_PUBLIC_BASE_URL");
     }
 }

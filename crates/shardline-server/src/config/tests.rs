@@ -20,7 +20,7 @@ use super::{
     PendingS3ObjectStoreConfig, ServerConfig, ShardMetadataLimits,
     adaptive_default_in_flight_chunks_for_parallelism, configure_provider_runtime_from_paths,
     configure_s3_object_store_config, default_transfer_max_in_flight_chunks,
-    default_upload_max_in_flight_chunks, env, optional_s3_secret_from_sources,
+    default_upload_max_in_flight_chunks, optional_s3_secret_from_sources,
 };
 use crate::{
     ServerFrontend, ServerRole,
@@ -859,35 +859,6 @@ fn s3_config_rejects_invalid_utf8_file_backed_credential() {
         credential,
         Err(super::ServerConfigError::S3CredentialUtf8 {
             name: "SHARDLINE_S3_ACCESS_KEY_ID_FILE"
-        })
-    ));
-}
-
-#[test]
-fn token_signing_key_accepts_direct_env_source() {
-    let loaded =
-        env::optional_token_signing_key_from_sources(Some("direct-signing-key".to_owned()), None);
-
-    assert!(loaded.is_ok());
-    let Ok(loaded) = loaded else {
-        return;
-    };
-    let inner = loaded.unwrap();
-    assert_eq!(inner.expose_secret(), b"direct-signing-key");
-}
-
-#[test]
-fn token_signing_key_rejects_direct_and_file_source_conflict() {
-    let loaded = env::optional_token_signing_key_from_sources(
-        Some("direct-signing-key".to_owned()),
-        Some("/run/secrets/token-signing-key".to_owned()),
-    );
-
-    assert!(matches!(
-        loaded,
-        Err(super::ServerConfigError::TokenSigningKeySourceConflict {
-            env: "SHARDLINE_TOKEN_SIGNING_KEY",
-            file_env: "SHARDLINE_TOKEN_SIGNING_KEY_FILE",
         })
     ));
 }
