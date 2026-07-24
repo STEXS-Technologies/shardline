@@ -4,7 +4,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use reqwest::Client;
 use sha2::Digest;
 use shardline_protocol::SecretString;
-use shardline_server::{ServerConfig, ServerFrontend, ServerRole, serve_with_listener};
+use shardline_server::{
+    DatabaseMigrationCommand, DatabaseMigrationOptions, ServerConfig, ServerFrontend, ServerRole,
+    run_database_migration, serve_with_listener,
+};
 use tokio::net::TcpListener;
 
 async fn start_server() -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
@@ -113,6 +116,16 @@ fn mint_token(subject: &str, owner: &str, repo: &str, revision: &str) -> Result<
     )?;
     let claims = shardline_protocol::TokenClaims::new("local", subject, shardline_protocol::TokenScope::Write, repository, u64::MAX)?;
     Ok(signer.sign(&claims)?)
+}
+
+async fn migrate_postgres_database(database_url: &str) {
+    let options = DatabaseMigrationOptions::new(
+        database_url.to_owned(),
+        DatabaseMigrationCommand::Up { steps: None },
+    );
+    run_database_migration(&options)
+        .await
+        .expect("migrate Docker Postgres database");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6877,6 +6890,7 @@ async fn postgres_backend_lfs_round_trip() {
         return;
     };
     let pg_url = docker.postgres_url().unwrap();
+    migrate_postgres_database(&pg_url).await;
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
@@ -7447,6 +7461,7 @@ async fn postgres_backend_oci_manifest_push_pull() {
         .start().unwrap();
     let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
     let pg_url = docker.postgres_url().unwrap();
+    migrate_postgres_database(&pg_url).await;
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
