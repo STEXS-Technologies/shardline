@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-24
+
+Minor release adding Ed25519 asymmetric token verification, Hub authentication coverage,
+and more reliable container-backed CI coverage. There are no intentional breaking API or
+configuration changes from `1.1.0`.
+
+### Added
+
+- **Ed25519 authentication**: local authentication can validate Ed25519-signed tokens,
+  including PEM and PKCS#8 signing-key configuration and key-identifier selection.
+- **Hub authentication coverage**: end-to-end coverage verifies that the Hub `whoami`
+  endpoint requires authentication.
+
+### Fixed
+
+- **Postgres CI stability**: isolated integration-test repository state and applied database
+  migrations in PostgreSQL-backed end-to-end tests.
+- **S3 and GC coverage stability**: removed timing-sensitive outage assertions and corrected
+  the quarantine-object fixture used by integrity validation.
+
+### Performance
+
+- No intentional performance changes in this release.
+
+### Documentation
+
+- Authentication, deployment, protocol, compatibility, and performance documentation updated
+  for Ed25519 token verification.
+
 ## [1.1.0] - 2026-07-23
 
 Minor release adding config file support (shardline.toml + .env), governance documentation, documentation drift fixes, and CI/publish pipeline hardening. There are no intentional breaking API or configuration changes from `1.0.1`.
@@ -231,7 +260,8 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/STEXS-Technologies/shardline/releases/tag/v1.0.0
