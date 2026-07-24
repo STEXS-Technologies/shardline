@@ -471,10 +471,13 @@ pub(crate) async fn lfs_patch_object(
         if is_final {
             let assembled: Vec<u8> = fs::read(&tmp_path)?;
             drop(fs::remove_file(&tmp_path));
-            let _stored = backend.put_sha256_addressed_object_bytes_if_absent(
-                &object_key_for_closure,
-                &oid_for_closure,
-                assembled,
+            let _stored = tokio::runtime::Handle::current().block_on(
+                crate::ServerBackend::put_sha256_addressed_object_bytes_if_absent(
+                    &backend,
+                    &object_key_for_closure,
+                    &oid_for_closure,
+                    assembled,
+                ),
             )?;
         }
 
@@ -2085,6 +2088,7 @@ mod tests {
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .await
             .expect("insert mismatched data");
 
         // Verify with second_oid — content hash won't match
@@ -2118,6 +2122,7 @@ mod tests {
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .await
             .expect("store initial object");
 
         // Send PATCH with Content-Range claiming 10 bytes but body only has 5
@@ -2170,6 +2175,7 @@ mod tests {
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .await
             .expect("insert object");
 
         // Inflate the file size on disk beyond MAX_LFS_VERIFY_BYTES.

@@ -61,7 +61,8 @@ pub(crate) async fn bazel_put_ac(
     // Unlike CAS, the action key is therefore not expected to hash the body.
     let _stored = state
         .backend
-        .put_object_bytes_if_absent(&object_key, bytes)?;
+        .put_object_bytes_if_absent(&object_key, bytes)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

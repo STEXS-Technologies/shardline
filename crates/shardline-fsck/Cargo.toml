@@ -11,6 +11,7 @@ description = "Storage integrity checking logic for the Shardline server ecosyst
 
 [dependencies]
 serde_json.workspace = true
+shardline-cas.workspace = true
 shardline-index.workspace = true
 shardline-metrics.workspace = true
 shardline-protocol.workspace = true

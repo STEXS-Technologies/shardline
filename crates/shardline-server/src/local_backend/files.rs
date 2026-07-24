@@ -1,6 +1,7 @@
 use axum::body::Bytes;
 #[cfg(test)]
 use shardline_index::FileRecord;
+use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::ObjectStore;
 use tokio::task;
@@ -89,9 +90,25 @@ impl LocalBackend {
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
         let uploaded_body = read_body_to_bytes(&mut body).await?;
+        let body_hash = blake3::hash(&uploaded_body);
+        let intent_id = format!("shard-{}", hex::encode(body_hash.as_bytes()));
+        let body_hash_hex = hex::encode(body_hash.as_bytes());
+        let prefix = &body_hash_hex[..2];
+        let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
+        let intent = UploadIntent::new(
+            intent_id.clone(),
+            object_key,
+            body_hash_hex,
+            uploaded_body.len() as u64,
+        );
+        self.index_store
+            .create_intent(&intent)
+            .await
+            .map_err(ServerError::from)?;
+
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        register_uploaded_shard_bytes(
+        let result = register_uploaded_shard_bytes(
             &object_store,
             &uploaded_body,
             repository_scope,
@@ -104,7 +121,24 @@ impl LocalBackend {
             },
         )
         .await
-        .map_err(ServerError::from)
+        .map_err(ServerError::from);
+
+        match result {
+            Ok(response) => {
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::Visible)
+                    .await
+                    .map_err(ServerError::from)?;
+                Ok(response)
+            }
+            Err(e) => {
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::Failed)
+                    .await
+                    .ok();
+                Err(e)
+            }
+        }
     }
 
     /// Loads reconstruction metadata for a file.

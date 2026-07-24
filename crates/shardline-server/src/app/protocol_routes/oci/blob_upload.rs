@@ -58,6 +58,7 @@ pub(crate) async fn oci_post_blob_upload(
         match state
             .backend
             .copy_object_if_absent(&source_key, &target_key)
+            .await
         {
             Ok(_stored) => {
                 return oci_created_response(
@@ -262,12 +263,10 @@ pub(crate) async fn oci_put_blob_upload(
         return Err(ServerError::ExpectedBodyHashMismatch);
     }
     let upload_path = upload_body_path_for_session(state.config.root_dir(), session_id)?;
-    let _stored = state.backend.put_sha256_addressed_object_file(
-        &object_key,
-        &digest_hex,
-        &upload_path,
-        &integrity,
-    )?;
+    let _stored = state
+        .backend
+        .put_sha256_addressed_object_file(&object_key, &digest_hex, &upload_path, &integrity)
+        .await?;
     delete_upload_session(state.config.root_dir(), session_id).await?;
     metrics().protocol.record_oci_upload();
     oci_created_response(

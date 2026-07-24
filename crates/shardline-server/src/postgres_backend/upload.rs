@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use axum::body::Bytes;
+use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
 use shardline_protocol::RepositoryScope;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 
@@ -12,7 +13,7 @@ use crate::{
     validation::validate_identifier,
     xet_adapter::{
         ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_bytes,
-        store_uploaded_xorb_bytes,
+        store_uploaded_xorb_bytes, xorb_object_key,
     },
 };
 
@@ -183,10 +184,40 @@ impl super::PostgresBackend {
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
         let uploaded_body = read_body_to_bytes(&mut body).await?;
-        let object_store = self.object_store();
-        store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+        let intent_id = format!("xorb-{expected_hash}");
+        let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
+        let intent = UploadIntent::new(
+            intent_id.clone(),
+            object_key.as_str().to_owned(),
+            expected_hash.to_owned(),
+            uploaded_body.len() as u64,
+        );
+        self.index_store
+            .create_intent(&intent)
             .await
-            .map_err(ServerError::from)
+            .map_err(ServerError::from)?;
+
+        let object_store = self.object_store();
+        let result = store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+            .await
+            .map_err(ServerError::from);
+
+        match result {
+            Ok(response) => {
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::Visible)
+                    .await
+                    .map_err(ServerError::from)?;
+                Ok(response)
+            }
+            Err(e) => {
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::Failed)
+                    .await
+                    .ok();
+                Err(e)
+            }
+        }
     }
 
     /// Stores a bounded native Xet shard and indexes the contained file reconstructions.
@@ -202,9 +233,25 @@ impl super::PostgresBackend {
         shard_metadata_limits: ShardMetadataLimits,
     ) -> Result<ShardUploadResponse, ServerError> {
         let uploaded_body = read_body_to_bytes(&mut body).await?;
+        let body_hash = blake3::hash(&uploaded_body);
+        let intent_id = format!("shard-{}", hex::encode(body_hash.as_bytes()));
+        let body_hash_hex = hex::encode(body_hash.as_bytes());
+        let prefix = &body_hash_hex[..2];
+        let object_key = format!("shards/{prefix}/{body_hash_hex}.shard");
+        let intent = UploadIntent::new(
+            intent_id.clone(),
+            object_key,
+            body_hash_hex,
+            uploaded_body.len() as u64,
+        );
+        self.index_store
+            .create_intent(&intent)
+            .await
+            .map_err(ServerError::from)?;
+
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        register_uploaded_shard_bytes(
+        let result = register_uploaded_shard_bytes(
             &object_store,
             &uploaded_body,
             repository_scope,
@@ -217,7 +264,24 @@ impl super::PostgresBackend {
             },
         )
         .await
-        .map_err(ServerError::from)
+        .map_err(ServerError::from);
+
+        match result {
+            Ok(response) => {
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::Visible)
+                    .await
+                    .map_err(ServerError::from)?;
+                Ok(response)
+            }
+            Err(e) => {
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::Failed)
+                    .await
+                    .ok();
+                Err(e)
+            }
+        }
     }
 }
 

@@ -8,8 +8,8 @@ use axum::body::Bytes;
 use sha2::{Digest, Sha256};
 use shardline_protocol::{ByteRange, RepositoryScope, ShardlineHash};
 use shardline_storage::{
-    BeginMultipartUploadResult, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey,
-    ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
+    AsyncObjectStore, BeginMultipartUploadResult, DeleteOutcome, ObjectBody, ObjectIntegrity,
+    ObjectKey, ObjectMetadata, ObjectPrefix, PutOutcome,
 };
 
 use std::sync::{
@@ -346,70 +346,112 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) fn put_object_bytes_if_absent(
+    pub(crate) async fn put_object_bytes_if_absent(
         &self,
         object_key: &ObjectKey,
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => backend.put_object_bytes_if_absent(object_key, bytes),
-            Self::Postgres(backend) => backend.put_object_bytes_if_absent(object_key, bytes),
-        }
+        let object_store = self.object_store();
+        let integrity = ObjectIntegrity::new(
+            crate::local_backend::chunk_hash(&bytes),
+            u64::try_from(bytes.len())?,
+        );
+        Ok(AsyncObjectStore::put_if_absent(
+            &object_store,
+            object_key,
+            ObjectBody::from_vec(bytes),
+            &integrity,
+        )
+        .await?)
     }
 
-    pub(crate) fn put_sha256_addressed_object_bytes_if_absent(
+    pub(crate) async fn put_sha256_addressed_object_bytes_if_absent(
         &self,
         object_key: &ObjectKey,
         digest_hex: &str,
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => {
-                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-            }
-            Self::Postgres(backend) => {
-                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-            }
+        let object_store = self.object_store();
+        let canonical_key = crate::protocol_support::shared_sha256_object_key(digest_hex)?;
+        let integrity = ObjectIntegrity::new(
+            crate::local_backend::chunk_hash(&bytes),
+            u64::try_from(bytes.len())?,
+        );
+        let canonical_outcome = AsyncObjectStore::put_if_absent(
+            &object_store,
+            &canonical_key,
+            ObjectBody::from_vec(bytes),
+            &integrity,
+        )
+        .await?;
+        if canonical_key == *object_key {
+            return Ok(canonical_outcome);
         }
+        Ok(object_store.copy_if_absent(&canonical_key, object_key)?)
     }
 
-    pub(crate) fn copy_object_if_absent(
+    pub(crate) async fn copy_object_if_absent(
         &self,
         source: &ObjectKey,
         destination: &ObjectKey,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => backend.copy_object_if_absent(source, destination),
-            Self::Postgres(backend) => backend.copy_object_if_absent(source, destination),
-        }
+        let object_store = self.object_store();
+        let source = source.clone();
+        let destination = destination.clone();
+        tokio::task::spawn_blocking(move || {
+            Ok(object_store.copy_if_absent(&source, &destination)?)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 
-    pub(crate) fn put_object_bytes_overwrite(
+    pub(crate) async fn put_object_bytes_overwrite(
         &self,
         object_key: &ObjectKey,
         bytes: Vec<u8>,
     ) -> Result<(), ServerError> {
-        match self {
-            Self::Local(backend) => backend.put_object_bytes_overwrite(object_key, bytes),
-            Self::Postgres(backend) => backend.put_object_bytes_overwrite(object_key, bytes),
-        }
+        let object_store = self.object_store();
+        let object_key = object_key.clone();
+        let integrity = ObjectIntegrity::new(
+            crate::local_backend::chunk_hash(&bytes),
+            u64::try_from(bytes.len())?,
+        );
+        tokio::task::spawn_blocking(move || {
+            Ok(object_store.put_overwrite(
+                &object_key,
+                ObjectBody::from_vec(bytes),
+                &integrity,
+            )?)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 
-    pub(crate) fn put_sha256_addressed_object_file(
+    pub(crate) async fn put_sha256_addressed_object_file(
         &self,
         object_key: &ObjectKey,
         digest_hex: &str,
         path: &Path,
         integrity: &shardline_storage::ObjectIntegrity,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => {
-                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
+        let object_store = self.object_store();
+        let canonical_key = crate::protocol_support::shared_sha256_object_key(digest_hex)?;
+        let object_key = object_key.clone();
+        let path = path.to_path_buf();
+        let integrity = ObjectIntegrity::new(integrity.hash(), integrity.length());
+        tokio::task::spawn_blocking(move || {
+            let canonical_outcome = object_store.put_content_addressed_file(
+                &canonical_key,
+                &path,
+                &integrity,
+            )?;
+            if canonical_key == object_key {
+                return Ok(canonical_outcome);
             }
-            Self::Postgres(backend) => {
-                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
-            }
-        }
+            Ok(object_store.copy_if_absent(&canonical_key, &object_key)?)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
@@ -600,14 +642,19 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         digest_hex: &str,
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => backend
-                .put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-                .map_err(server_error_to_oci),
-            Self::Postgres(backend) => backend
-                .put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-                .map_err(server_error_to_oci),
-        }
+        let object_key = object_key.clone();
+        let digest_hex = digest_hex.to_owned();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                ServerBackend::put_sha256_addressed_object_bytes_if_absent(
+                    self,
+                    &object_key,
+                    &digest_hex,
+                    bytes,
+                ),
+            )
+        });
+        result.map_err(server_error_to_oci)
     }
 
     fn copy_object_if_absent(
@@ -615,14 +662,14 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         source: &ObjectKey,
         destination: &ObjectKey,
     ) -> Result<PutOutcome, shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => backend
-                .copy_object_if_absent(source, destination)
-                .map_err(server_error_to_oci),
-            Self::Postgres(backend) => backend
-                .copy_object_if_absent(source, destination)
-                .map_err(server_error_to_oci),
-        }
+        let source = source.clone();
+        let destination = destination.clone();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                ServerBackend::copy_object_if_absent(self, &source, &destination),
+            )
+        });
+        result.map_err(server_error_to_oci)
     }
 
     async fn delete_object_if_present(
@@ -763,7 +810,8 @@ async fn put_sha256_addressed_object_stream_if_absent_with_object_store(
                 ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes()),
                 u64::try_from(bytes.len())?,
             );
-            let canonical_outcome = object_store.put_if_absent(
+            let canonical_outcome = shardline_storage::ObjectStore::put_if_absent(
+                object_store,
                 &canonical_key,
                 ObjectBody::from_vec(bytes),
                 &integrity,
@@ -1323,7 +1371,7 @@ mod tests {
     async fn server_backend_put_object_bytes_if_absent_stores_and_returns_outcome() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-test-key").unwrap();
-        let result = backend.put_object_bytes_if_absent(&key, b"hello-backend".to_vec());
+        let result = backend.put_object_bytes_if_absent(&key, b"hello-backend".to_vec()).await;
         assert!(result.is_ok());
         let length = backend.object_length(&key).await.unwrap();
         assert_eq!(length, 13);
@@ -1333,9 +1381,9 @@ mod tests {
     async fn server_backend_put_object_bytes_if_absent_idempotent() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-idempotent").unwrap();
-        let first = backend.put_object_bytes_if_absent(&key, b"data".to_vec());
+        let first = backend.put_object_bytes_if_absent(&key, b"data".to_vec()).await;
         assert!(first.is_ok());
-        let second = backend.put_object_bytes_if_absent(&key, b"data".to_vec());
+        let second = backend.put_object_bytes_if_absent(&key, b"data".to_vec()).await;
         assert!(second.is_ok());
     }
 
@@ -1343,7 +1391,7 @@ mod tests {
     async fn server_backend_put_object_bytes_overwrite_stores_object() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-overwrite").unwrap();
-        let result = backend.put_object_bytes_overwrite(&key, b"overwrite-data".to_vec());
+        let result = backend.put_object_bytes_overwrite(&key, b"overwrite-data".to_vec()).await;
         assert!(result.is_ok());
         // Verify stored content
         let read_back = backend.read_object(&key).await.unwrap();
@@ -1356,11 +1404,9 @@ mod tests {
         let body = b"sha256-payload-backend";
         let digest_hex = "ab".repeat(32);
         let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
-        let result = backend.put_sha256_addressed_object_bytes_if_absent(
-            &canonical_key,
-            &digest_hex,
-            body.to_vec(),
-        );
+        let result = backend
+            .put_sha256_addressed_object_bytes_if_absent(&canonical_key, &digest_hex, body.to_vec())
+            .await;
         assert!(result.is_ok());
         let length = backend.object_length(&canonical_key).await.unwrap();
         assert_eq!(length, body.len() as u64);
@@ -1373,8 +1419,9 @@ mod tests {
         let dst = ObjectKey::parse("backend-dst").unwrap();
         backend
             .put_object_bytes_if_absent(&src, b"copy-source".to_vec())
+            .await
             .unwrap();
-        let result = backend.copy_object_if_absent(&src, &dst);
+        let result = backend.copy_object_if_absent(&src, &dst).await;
         assert!(result.is_ok());
         let src_len = backend.object_length(&src).await.unwrap();
         let dst_len = backend.object_length(&dst).await.unwrap();
@@ -1388,6 +1435,7 @@ mod tests {
         let data = b"readable-content";
         backend
             .put_object_bytes_if_absent(&key, data.to_vec())
+            .await
             .unwrap();
         let result = backend.read_object(&key).await.unwrap();
         assert_eq!(result.as_slice(), data);
@@ -1408,6 +1456,7 @@ mod tests {
         let data = b"length-check";
         backend
             .put_object_bytes_if_absent(&key, data.to_vec())
+            .await
             .unwrap();
         let length = backend.object_length(&key).await.unwrap();
         assert_eq!(length, data.len() as u64);
@@ -1427,6 +1476,7 @@ mod tests {
         let key = ObjectKey::parse("backend-delete").unwrap();
         backend
             .put_object_bytes_if_absent(&key, b"to-delete".to_vec())
+            .await
             .unwrap();
         let outcome = backend.delete_object_if_present(&key).await.unwrap();
         assert_eq!(outcome, DeleteOutcome::Deleted);
@@ -1449,9 +1499,11 @@ mod tests {
         let k2 = ObjectKey::parse("prefix-a/obj2").unwrap();
         backend
             .put_object_bytes_if_absent(&k1, b"d1".to_vec())
+            .await
             .unwrap();
         backend
             .put_object_bytes_if_absent(&k2, b"d2".to_vec())
+            .await
             .unwrap();
         let prefix = ObjectPrefix::parse("prefix-a").unwrap();
         let mut keys = Vec::new();
@@ -1472,6 +1524,7 @@ mod tests {
             let key = ObjectKey::parse(&format!("list-be/obj{i}")).unwrap();
             backend
                 .put_object_bytes_if_absent(&key, b"d".to_vec())
+                .await
                 .unwrap();
         }
         let page = backend
@@ -1487,6 +1540,7 @@ mod tests {
         let data = b"stream-content-backend";
         backend
             .put_object_bytes_if_absent(&key, data.to_vec())
+            .await
             .unwrap();
         let result = backend
             .read_object_stream(&key, data.len() as u64, None)
@@ -1584,6 +1638,7 @@ mod tests {
         let key = ObjectKey::parse("oci-delete-key").unwrap();
         backend
             .put_object_bytes_if_absent(&key, b"oci-delete".to_vec())
+            .await
             .unwrap();
         let outcome = OciBackend::delete_object_if_present(&backend, &key).await;
         assert!(outcome.is_ok());
@@ -1598,6 +1653,7 @@ mod tests {
         let dst = ObjectKey::parse("oci-copy-dst").unwrap();
         backend
             .put_object_bytes_if_absent(&src, b"oci-copy-data".to_vec())
+            .await
             .unwrap();
         let result = OciBackend::copy_object_if_absent(&backend, &src, &dst);
         assert!(result.is_ok());

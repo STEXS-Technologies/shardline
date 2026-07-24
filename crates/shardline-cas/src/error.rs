@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// CAS coordinator error.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CasError {
     /// Object body exceeds the configured maximum.
     BodyTooLarge {

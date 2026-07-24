@@ -108,8 +108,11 @@ where
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
+    use shardline_index::{MemoryIndexStore, UploadIntent, UploadIntentState, UploadIntentStore};
+    use shardline_storage::{LocalObjectStore, SyncObjectStoreBridge};
+
     use super::CasCoordinator;
-    use crate::CasLimits;
+    use crate::{CasError, CasLimits};
 
     #[derive(Debug, PartialEq, Eq)]
     struct IndexProbe;
@@ -152,5 +155,79 @@ mod tests {
         let a = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN);
         let b = CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX);
         assert_ne!(CasCoordinator::new((), (), (), a).limits(), CasCoordinator::new((), (), (), b).limits());
+    }
+
+    #[test]
+    fn with_upload_intent_success_transitions_to_visible() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let index = MemoryIndexStore::new();
+        let object_store = SyncObjectStoreBridge::new(
+            LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+        );
+        let limits = CasLimits::new(
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+        );
+        let coordinator = CasCoordinator::new(index.clone(), object_store, (), limits);
+
+        let intent = UploadIntent::new(
+            "success-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let result = rt.block_on(coordinator.with_upload_intent(
+            &index,
+            &intent,
+            || async { Ok(42) },
+        ));
+
+        assert_eq!(result, Ok(42));
+
+        let stored = rt
+            .block_on(index.intent_by_id("success-intent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Visible);
+    }
+
+    #[test]
+    fn with_upload_intent_failure_transitions_to_failed() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let index = MemoryIndexStore::new();
+        let object_store = SyncObjectStoreBridge::new(
+            LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+        );
+        let limits = CasLimits::new(
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+        );
+        let coordinator = CasCoordinator::new(index.clone(), object_store, (), limits);
+
+        let intent = UploadIntent::new(
+            "failure-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let result: Result<i32, CasError> = rt.block_on(coordinator.with_upload_intent(
+            &index,
+            &intent,
+            || async { Err(CasError::Overflow) },
+        ));
+
+        assert_eq!(result, Err(CasError::Overflow));
+
+        let stored = rt
+            .block_on(index.intent_by_id("failure-intent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Failed);
     }
 }
