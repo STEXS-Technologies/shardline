@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use shardline_cas::ObjectReachability;
 use shardline_index::{AsyncIndexStore, FileRecord, FileRecordInvariantError, xet_hash_hex_string};
 use shardline_server_core::{
     OpsRecordStore, ServerObjectStore, ShardMetadataLimits, checked_increment, read_full_object,
@@ -52,7 +53,7 @@ where
     RecordAdapter: OpsRecordStore + Sync,
     RecordAdapter::Error: Into<FsckError>,
     IndexAdapter: AsyncIndexStore + Sync,
-    IndexAdapter::Error: Into<FsckError>,
+    IndexAdapter::Error: std::error::Error + Into<FsckError>,
 {
     let start = std::time::Instant::now();
     let mut report = FsckReport {
@@ -287,7 +288,7 @@ async fn inspect_reconstruction_index<IndexAdapter>(
 ) -> Result<(), FsckError>
 where
     IndexAdapter: AsyncIndexStore + Sync,
-    IndexAdapter::Error: Into<FsckError>,
+    IndexAdapter::Error: std::error::Error + Into<FsckError>,
 {
     let file_ids = index_store
         .list_reconstruction_file_ids()
@@ -321,10 +322,9 @@ where
 
         for term in reconstruction.terms() {
             let object_id = term.object_id();
-            if !index_store
-                .contains_object(&object_id)
+            if !ObjectReachability::is_object_reachable(index_store, &object_id)
                 .await
-                .map_err(Into::into)?
+                .map_err(FsckError::Cas)?
             {
                 push_issue(
                     report,

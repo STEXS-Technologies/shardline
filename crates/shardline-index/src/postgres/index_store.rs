@@ -675,7 +675,7 @@ impl UploadIntentStore for super::PostgresIndexStore {
 
     async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
         sqlx::query(
-            "INSERT INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, now(), now())"
+            "INSERT INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, now(), now()) ON CONFLICT (intent_id) DO NOTHING"
         )
         .bind(intent.intent_id())
         .bind(intent.object_key())

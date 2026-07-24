@@ -136,10 +136,12 @@ pub(crate) async fn update_oci_tags(
         let target_key = oci_tag_target_key(repository, digest_hex, tag, repository_scope)?;
         state
             .backend
-            .put_object_bytes_overwrite(&target_key, Vec::new())?;
+            .put_object_bytes_overwrite(&target_key, Vec::new())
+            .await?;
         state
             .backend
-            .put_object_bytes_overwrite(&tag_key, digest_bytes.clone())?;
+            .put_object_bytes_overwrite(&tag_key, digest_bytes.clone())
+            .await?;
         if let Some(previous_digest) = previous_digest
             && previous_digest != digest_hex
         {

@@ -1,5 +1,6 @@
 use std::{io::Error as IoError, num::TryFromIntError};
 
+use shardline_cas::CasError;
 use shardline_index::{
     LocalIndexStoreError, MemoryIndexStoreError, MemoryRecordStoreError, PostgresMetadataStoreError,
 };
@@ -24,6 +25,9 @@ pub enum FsckError {
     /// Numeric conversion exceeded supported bounds.
     #[error("numeric conversion exceeded supported bounds")]
     NumericConversion(#[from] TryFromIntError),
+    /// CAS (Content-Addressable Storage) coordinator or reachability error.
+    #[error("cas operation failed")]
+    Cas(#[from] CasError),
     /// Arithmetic overflowed a checked bound.
     #[error("arithmetic overflow")]
     Overflow,

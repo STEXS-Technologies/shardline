@@ -526,7 +526,7 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
             conn.execute(
-                "INSERT INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR IGNORE INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at_unix_seconds, updated_at_unix_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     intent.intent_id(),
                     intent.object_key(),

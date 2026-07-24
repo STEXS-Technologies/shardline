@@ -106,14 +106,14 @@ pub(crate) async fn oci_put_manifest(
     validate_oci_manifest_document(state, repository, scope, &media_type, &bytes).await?;
     let manifest_key = oci_manifest_key(repository, &digest_hex, scope)?;
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
-    let _stored_manifest = state.backend.put_sha256_addressed_object_bytes_if_absent(
-        &manifest_key,
-        &digest_hex,
-        bytes,
-    )?;
+    let _stored_manifest = state
+        .backend
+        .put_sha256_addressed_object_bytes_if_absent(&manifest_key, &digest_hex, bytes)
+        .await?;
     let _stored_media_type = state
         .backend
-        .put_object_bytes_if_absent(&media_type_key, media_type.clone().into_bytes())?;
+        .put_object_bytes_if_absent(&media_type_key, media_type.clone().into_bytes())
+        .await?;
     let mut accepted_tags = match reference {
         OciReference::Tag(tag) => vec![tag],
         OciReference::Digest(_) => Vec::new(),

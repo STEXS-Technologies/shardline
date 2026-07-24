@@ -3333,6 +3333,7 @@ version = "1.2.0"
 dependencies = [
  "rusqlite",
  "serde_json",
+ "shardline-cas",
  "shardline-index",
  "shardline-metrics",
  "shardline-protocol",
