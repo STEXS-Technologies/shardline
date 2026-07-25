@@ -327,9 +327,19 @@ mod tests {
     #[test]
     fn quota_tracker_upload_count_increments() {
         let qt = QuotaTracker::new();
-        qt.record_store("gitlab/team/project", 500);
-        qt.record_store("gitlab/team/project", 300);
-        assert_eq!(qt.upload_count("gitlab/team/project"), 2);
+        qt.record_store("repo/x", 50);
+        qt.record_store("repo/x", 30);
+        assert_eq!(qt.storage_bytes("repo/x"), 80);
+        assert_eq!(qt.upload_count("repo/x"), 2);
+    }
+
+    #[test]
+    fn quota_tracker_multiple_repos_independent() {
+        let qt = QuotaTracker::new();
+        qt.record_store("repo/a", 100);
+        qt.record_store("repo/b", 200);
+        assert_eq!(qt.storage_bytes("repo/a"), 100);
+        assert_eq!(qt.storage_bytes("repo/b"), 200);
     }
 
     // ── WeightedAdmission tests ─────────────────────────────────────────
@@ -411,10 +421,58 @@ mod tests {
     }
 
     #[test]
+    fn bounded_pool_releases_permit_on_drop() {
+        let pool = BoundedPool::new(NonZeroUsize::new(2).unwrap());
+        let p1 = pool.try_acquire();
+        assert_eq!(pool.available_permits(), 1);
+        drop(p1);
+        assert_eq!(pool.available_permits(), 2);
+    }
+
+    #[test]
     fn execution_pools_default_sizes() {
         let pools = ExecutionPools::default_sizes();
         assert_eq!(pools.hashing.capacity(), 8);
         assert_eq!(pools.parsing.capacity(), 8);
         assert_eq!(pools.blocking_io.capacity(), 16);
+    }
+
+    #[test]
+    fn execution_pools_with_sizes() {
+        let pools = ExecutionPools::with_sizes(
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(6).unwrap(),
+            NonZeroUsize::new(8).unwrap(),
+        );
+        assert_eq!(pools.hashing.capacity(), 4);
+        assert_eq!(pools.parsing.capacity(), 6);
+        assert_eq!(pools.blocking_io.capacity(), 8);
+    }
+
+    #[test]
+    fn admission_available_permits_reflects_usage() {
+        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
+        assert_eq!(ctrl.available_permits(), 10);
+        let p1 = ctrl.try_acquire(3).unwrap();
+        assert_eq!(ctrl.available_permits(), 7);
+        drop(p1);
+        assert_eq!(ctrl.available_permits(), 10);
+    }
+
+    #[test]
+    fn admission_weighted_max_weight_accessor() {
+        let ctrl = WeightedAdmission::new(NonZeroUsize::new(50).unwrap());
+        assert_eq!(ctrl.max_weight(), 50);
+    }
+
+    #[test]
+    fn timeout_constants_are_reasonable() {
+        use crate::admission::timeouts;
+        assert!(timeouts::STORAGE_READ.as_secs() <= 60);
+        assert!(timeouts::STORAGE_WRITE.as_secs() <= 120);
+        assert!(timeouts::DATABASE_QUERY.as_secs() <= 30);
+        assert!(timeouts::DATABASE_WRITE.as_secs() <= 60);
+        assert!(timeouts::REQUEST_HEADERS.as_secs() <= 30);
+        assert!(timeouts::REQUEST_TOTAL.as_secs() >= 60);
     }
 }
