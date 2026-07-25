@@ -63,6 +63,7 @@ pub(crate) async fn build_oci_test_state() -> OciTestContext {
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
+        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     OciTestContext { _temp: temp, state }

@@ -103,6 +103,7 @@ async fn test_app_for_frontends_with_role(
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
+        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     let mut app = Router::new()
@@ -328,6 +329,7 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
+        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     let mut app = Router::new()
@@ -565,6 +567,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
+        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     let mut app = Router::new()
