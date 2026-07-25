@@ -36,6 +36,7 @@
 //! }
 //! ```
 
+mod admission;
 pub mod app;
 mod auth;
 mod backend;

@@ -238,6 +238,9 @@ mod tests {
                 std::num::NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
             protocol_metrics: ProtocolMetrics::default(),
         });
 
@@ -298,6 +301,9 @@ mod tests {
                 std::num::NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
             protocol_metrics: ProtocolMetrics::default(),
         });
 

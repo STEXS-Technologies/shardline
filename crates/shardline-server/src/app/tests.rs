@@ -1115,6 +1115,9 @@ async fn authorize_with_no_auth_returns_ok_none() {
             NonZeroUsize::new(4).unwrap(),
         ),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
         protocol_metrics: crate::ProtocolMetrics::default(),
     });
 
@@ -1166,6 +1169,9 @@ async fn acquire_chunk_transfer_permit_times_out_when_permits_exhausted() {
         reconstruction_cache: crate::ReconstructionCacheService::disabled(),
         transfer_limiter,
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
         protocol_metrics: crate::ProtocolMetrics::default(),
     });
 

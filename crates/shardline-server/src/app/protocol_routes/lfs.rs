@@ -642,6 +642,9 @@ mod tests {
             reconstruction_cache: crate::ReconstructionCacheService::disabled(),
             transfer_limiter,
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
             protocol_metrics: crate::ProtocolMetrics::default(),
         });
 
@@ -677,6 +680,9 @@ mod tests {
             reconstruction_cache: crate::ReconstructionCacheService::disabled(),
             transfer_limiter,
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
             protocol_metrics: crate::ProtocolMetrics::default(),
         });
 

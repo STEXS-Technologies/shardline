@@ -64,6 +64,7 @@ pub struct ServerConfig {
     pub(crate) cache: CacheConfig,
     pub(crate) provider: ProviderConfig,
     pub(crate) shutdown_timeout: Option<Duration>,
+    pub(crate) admission_max_weight: NonZeroUsize,
 }
 
 impl ServerConfig {
@@ -121,6 +122,7 @@ impl ServerConfig {
                 token_ttl_seconds: None,
             },
             shutdown_timeout: None,
+            admission_max_weight: NonZeroUsize::new(256).unwrap(),
         }
     }
 
@@ -559,6 +561,12 @@ impl ServerConfig {
         self.shutdown_timeout
     }
 
+    /// Returns the admission control max weight.
+    #[must_use]
+    pub const fn admission_max_weight(&self) -> NonZeroUsize {
+        self.admission_max_weight
+    }
+
     /// Sets a maximum drain duration after the shutdown signal is received.
     ///
     /// Once the shutdown signal fires, the server stops accepting new
@@ -567,6 +575,13 @@ impl ServerConfig {
     #[must_use]
     pub const fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = Some(timeout);
+        self
+    }
+
+    /// Overrides the admission control max weight.
+    #[must_use]
+    pub const fn with_admission_max_weight(mut self, max_weight: NonZeroUsize) -> Self {
+        self.admission_max_weight = max_weight;
         self
     }
 

@@ -1150,6 +1150,9 @@ mod tests {
                 NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
             protocol_metrics: crate::app::ProtocolMetrics::default(),
         });
         let app = oci_test_router(&state);

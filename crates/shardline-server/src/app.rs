@@ -40,6 +40,7 @@ use shardline_server_core::auth::Ed25519AuthProvider;
 
 use crate::{
     ServerConfig, ServerError,
+    admission::WeightedAdmission,
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
     config::AuthProviderKind,
@@ -95,6 +96,7 @@ pub struct AppState {
     pub provider_tokens: Option<ProviderTokenService>,
     pub reconstruction_cache: ReconstructionCacheService,
     pub transfer_limiter: TransferLimiter,
+    pub admission: WeightedAdmission,
     pub oci_registry_token_limiter: Arc<Semaphore>,
     pub protocol_metrics: ProtocolMetrics,
 }
@@ -193,6 +195,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     let oci_registry_token_limiter = Arc::new(Semaphore::new(
         config.oci_registry_token_max_in_flight_requests().get(),
     ));
+    let admission = WeightedAdmission::new(config.admission_max_weight());
     let state = Arc::new(AppState {
         config,
         role,
@@ -201,6 +204,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         provider_tokens,
         reconstruction_cache,
         transfer_limiter,
+        admission,
         oci_registry_token_limiter,
         protocol_metrics: ProtocolMetrics::default(),
     });

@@ -262,7 +262,8 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_reconstruction_cache_memory(
             reconstruction_cache_ttl_seconds,
             reconstruction_cache_memory_max_entries,
-        );
+        )
+        .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
     config.cache.redis_tls = reconstruction_cache_redis_tls;
@@ -366,6 +367,17 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     )?;
 
     Ok(config)
+}
+
+/// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
+pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
+    match var("SHARDLINE_ADMISSION_MAX_WEIGHT") {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            tracing::warn!("invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256");
+            NonZeroUsize::new(256).unwrap()
+        }),
+        Err(_) => NonZeroUsize::new(256).unwrap(),
+    }
 }
 
 /// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
