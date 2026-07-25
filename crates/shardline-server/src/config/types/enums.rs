@@ -3,6 +3,7 @@ use std::{
     path::PathBuf,
 };
 
+use serde::{Deserialize, Serialize};
 use shardline_cache::RedisTlsConfig;
 use shardline_protocol::{SecretBytes, SecretString};
 
@@ -65,6 +66,27 @@ impl ObjectStorageAdapter {
             "s3" => Ok(Self::S3),
             _other => Err(ServerConfigError::InvalidObjectStorageAdapter),
         }
+    }
+}
+
+/// Server deployment security mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum DeploymentMode {
+    /// Allow all requests, no auth required. For local development only.
+    Insecure,
+    /// Require authentication for all data-plane routes.
+    /// Passthrough provider is allowed for development behind a trusted proxy.
+    Authenticated,
+    /// Strictest production mode. Passthrough provider is rejected.
+    /// Signing key, metrics token, and explicit auth provider are all required.
+    Strict,
+}
+
+impl DeploymentMode {
+    /// Returns the default deployment mode.
+    #[must_use]
+    pub const fn default() -> Self {
+        Self::Insecure
     }
 }
 

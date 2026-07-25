@@ -44,11 +44,13 @@ use crate::{
     backend::ServerBackend,
     config::AuthProviderKind,
     config::ServerConfigError,
+    config::{DeploymentMode},
     jwks_provider::JwksProvider,
     metrics::MetricsLayer,
     oidc_provider::OidcProvider,
     provider::ProviderTokenService,
     reconstruction_cache::ReconstructionCacheService,
+    route_policy::{RoutePolicyRegistry, register_route_policies},
     server_frontend::ServerFrontend,
     server_role::ServerRole,
     transfer_limiter::TransferLimiter,
@@ -273,7 +275,17 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Apply CORS after every optional frontend has been registered and the Hub
     // router has been merged, so preflight and normal requests are covered by
     // the same policy regardless of which protocol owns the route.
-    Ok(app.layer(cors))
+    let app = app.layer(cors);
+
+    // Register route auth policies for auditability and fail-closed enforcement.
+    let mut policy_registry = RoutePolicyRegistry::new();
+    register_route_policies(&mut policy_registry);
+    tracing::debug!(
+        "registered {} route auth policies",
+        policy_registry.len()
+    );
+
+    Ok(app)
 }
 
 /// Runs the Shardline HTTP server.
@@ -466,6 +478,12 @@ fn authorize(
         return Ok(Some(auth.authorize(headers, required_scope)?));
     }
 
+    // No auth provider configured
+    if state.config.deployment_mode() == DeploymentMode::Strict {
+        return Err(ServerError::Config(ServerConfigError::ConfigFileError(
+            "no authentication provider configured — strict mode requires auth".into(),
+        )));
+    }
     Ok(None)
 }
 

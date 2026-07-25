@@ -67,6 +67,7 @@ mod provider;
 mod provider_events;
 mod rebuild;
 mod reconstruction_cache;
+mod route_policy;
 mod record_store;
 mod repository_scope_path;
 mod runtime_check;

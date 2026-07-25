@@ -4,13 +4,16 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     num::NonZeroU64,
+    time::Duration,
 };
 
-use shardline_cas::{CasCoordinator, CasLimits};
+use async_trait::async_trait;
+use shardline_cas::{CasCoordinator, CasError, CasLimits};
 use shardline_index::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore, LocalIndexStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
-    RetentionHold, StoredObjectId, WebhookDelivery, xet_hash_hex_string,
+    RetentionHold, StoredObjectId, UploadIntent, UploadIntentState, UploadIntentStore,
+    WebhookDelivery, xet_hash_hex_string,
 };
 use shardline_protocol::{ByteRange, ChunkRange, RepositoryProvider, ShardlineHash};
 use shardline_storage::{
@@ -402,6 +405,60 @@ const fn provider_key(provider: RepositoryProvider) -> &'static str {
         RepositoryProvider::Generic => "generic",
     }
 }
+
+// ── Mock upload-intent store for error-injection tests ─────────────
+
+#[derive(Debug, Clone)]
+struct UploadIntentError(String);
+
+impl std::fmt::Display for UploadIntentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for UploadIntentError {}
+
+#[derive(Debug)]
+struct FailingIntentStore;
+
+#[async_trait]
+impl UploadIntentStore for FailingIntentStore {
+    type Error = UploadIntentError;
+
+    async fn create_intent(&self, _intent: &UploadIntent) -> Result<(), Self::Error> {
+        Err(UploadIntentError("create_intent failed".to_owned()))
+    }
+
+    async fn transition_intent(
+        &self,
+        _intent_id: &str,
+        _new_state: UploadIntentState,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    async fn intent_by_id(&self, _intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
+        Ok(None)
+    }
+
+    async fn intents_by_state(
+        &self,
+        _state: UploadIntentState,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
+        Ok(vec![])
+    }
+
+    async fn stale_intents(
+        &self,
+        _state: UploadIntentState,
+        _older_than: Duration,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
+        Ok(vec![])
+    }
+}
+
+// ── Contract tests ─────────────────────────────────────────────────
 
 #[test]
 fn coordinator_adapters_support_lifecycle_and_reconstruction_contracts() {
@@ -1096,6 +1153,70 @@ fn coordinator_store_content_addressed_blob_accepts_valid_body() {
         body.to_vec(),
     ));
     assert!(result.is_ok(), "should accept valid body: {result:?}");
+}
+
+#[test]
+fn coordinator_store_content_addressed_blob_accepts_body_at_max_boundary() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
+    let object_store = SyncObjectStoreBridge::new(
+        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+    );
+    let limits = CasLimits::new(
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(5).unwrap(), // max_object = 5
+    );
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
+    let key = shardline_cas::paths::xorb_key("ab", "test-boundary");
+    let body = b"hello"; // exactly 5 bytes (equals max)
+    let hash = blake3_hash(body);
+    let integrity = ObjectIntegrity::new(hash, body.len() as u64);
+    let result = rt.block_on(coordinator.store_content_addressed_blob(
+        &key,
+        &integrity,
+        body.to_vec(),
+    ));
+    assert!(
+        result.is_ok(),
+        "should accept body at max boundary: {result:?}"
+    );
+}
+
+#[test]
+fn with_upload_intent_create_intent_error_returns_record_error() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let index = shardline_index::MemoryIndexStore::new();
+    let object_store = SyncObjectStoreBridge::new(
+        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+    );
+    let limits = CasLimits::new(
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(100).unwrap(),
+    );
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
+
+    let failing_store = FailingIntentStore;
+    let intent = UploadIntent::new(
+        "failing-intent".to_owned(),
+        "objects/test".to_owned(),
+        "abcdef".to_owned(),
+        42,
+    );
+
+    let result: Result<i32, CasError> = rt.block_on(coordinator.with_upload_intent(
+        &failing_store,
+        &intent,
+        || async { Ok(42) },
+    ));
+
+    assert!(
+        matches!(&result, Err(CasError::Record(msg)) if msg.contains("create_intent failed")),
+        "expected Record error with 'create_intent failed', got: {result:?}"
+    );
 }
 
 fn blake3_hash(bytes: &[u8]) -> ShardlineHash {

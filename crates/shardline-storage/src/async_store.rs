@@ -388,6 +388,34 @@ mod tests {
     }
 
     #[test]
+    fn bridge_inner_returns_correct_store() {
+        let store = TestStore::default();
+        let bridge = SyncObjectStoreBridge::new(store);
+        let inner = bridge.inner();
+        assert!(!inner
+            .metadata(&ObjectKey::parse("test/k").unwrap())
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn bridge_read_range_returns_data() {
+        let bridge = SyncObjectStoreBridge::new(TestStore::default());
+        let key = ObjectKey::parse("test/rr").unwrap();
+        let body = b"hello world";
+        let hash = ShardlineHash::from_bytes(*blake3::hash(body).as_bytes());
+        rt().block_on(bridge.put_if_absent(
+            &key,
+            ObjectBody::from_slice(body),
+            &ObjectIntegrity::new(hash, body.len() as u64),
+        ))
+        .unwrap();
+        let range = ByteRange::new(0, 4).unwrap();
+        let data = rt().block_on(bridge.read_range(&key, range)).unwrap();
+        assert_eq!(data, b"hello");
+    }
+
+    #[test]
     fn bridge_list_prefix_returns_filtered_keys() {
         let bridge = SyncObjectStoreBridge::new(TestStore::default());
         let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
