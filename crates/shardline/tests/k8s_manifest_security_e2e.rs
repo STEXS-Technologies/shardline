@@ -4,7 +4,7 @@ use std::{fs::read_to_string, path::Path};
 fn production_api_manifest_pins_secret_volume_permissions() {
     let manifest = read_manifest("docs/k8s/production-scaled/api-deployment.yaml");
 
-    assert!(manifest.contains("fsGroup: 999"));
+    assert!(manifest.contains("fsGroup: 1000"));
     assert!(manifest.contains("fsGroupChangePolicy: OnRootMismatch"));
     assert!(manifest.contains("secretName: shardline-runtime"));
     assert!(manifest.contains("defaultMode: 0440"));
@@ -19,7 +19,7 @@ fn production_api_manifest_pins_secret_volume_permissions() {
 fn production_transfer_manifest_pins_secret_volume_permissions() {
     let manifest = read_manifest("docs/k8s/production-scaled/transfer-deployment.yaml");
 
-    assert!(manifest.contains("fsGroup: 999"));
+    assert!(manifest.contains("fsGroup: 1000"));
     assert!(manifest.contains("fsGroupChangePolicy: OnRootMismatch"));
     assert!(manifest.contains("secretName: shardline-runtime"));
     assert!(manifest.contains("defaultMode: 0440"));
@@ -33,7 +33,7 @@ fn production_transfer_manifest_pins_secret_volume_permissions() {
 fn production_gc_manifest_pins_secret_volume_permissions() {
     let manifest = read_manifest("docs/k8s/production-scaled/gc-cronjob.yaml");
 
-    assert!(manifest.contains("fsGroup: 999"));
+    assert!(manifest.contains("fsGroup: 1000"));
     assert!(manifest.contains("fsGroupChangePolicy: OnRootMismatch"));
     assert!(manifest.contains("secretName: shardline-runtime"));
     assert!(manifest.contains("defaultMode: 0440"));
