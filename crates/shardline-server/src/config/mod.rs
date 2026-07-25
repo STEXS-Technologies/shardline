@@ -1,4 +1,4 @@
-mod env;
+pub(crate) mod env;
 mod secrets;
 mod types;
 

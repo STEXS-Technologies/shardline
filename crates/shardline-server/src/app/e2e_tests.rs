@@ -101,6 +101,7 @@ async fn test_app_for_frontends_with_role(
         admission: crate::admission::WeightedAdmission::new(
             std::num::NonZeroUsize::new(256).unwrap(),
         ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
 
@@ -325,6 +326,7 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         admission: crate::admission::WeightedAdmission::new(
             std::num::NonZeroUsize::new(256).unwrap(),
         ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
 
@@ -561,6 +563,7 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
         admission: crate::admission::WeightedAdmission::new(
             std::num::NonZeroUsize::new(256).unwrap(),
         ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
 

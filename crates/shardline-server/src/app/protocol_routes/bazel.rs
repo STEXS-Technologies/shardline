@@ -342,6 +342,7 @@ mod tests {
             admission: crate::admission::WeightedAdmission::new(
                 std::num::NonZeroUsize::new(256).unwrap(),
             ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
         });
 

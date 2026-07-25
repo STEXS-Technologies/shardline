@@ -40,12 +40,10 @@ use shardline_server_core::auth::Ed25519AuthProvider;
 
 use crate::{
     ServerConfig, ServerError,
-    admission::WeightedAdmission,
+    admission::{ExecutionPools, WeightedAdmission},
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
-    config::AuthProviderKind,
-    config::ServerConfigError,
-    config::{DeploymentMode},
+    config::{AuthProviderKind, DeploymentMode, ServerConfigError, env::bounded_pool_size_from_env},
     jwks_provider::JwksProvider,
     metrics::MetricsLayer,
     oidc_provider::OidcProvider,
@@ -97,6 +95,7 @@ pub struct AppState {
     pub reconstruction_cache: ReconstructionCacheService,
     pub transfer_limiter: TransferLimiter,
     pub admission: WeightedAdmission,
+    pub pools: ExecutionPools,
     pub oci_registry_token_limiter: Arc<Semaphore>,
     pub protocol_metrics: ProtocolMetrics,
 }
@@ -196,6 +195,11 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         config.oci_registry_token_max_in_flight_requests().get(),
     ));
     let admission = WeightedAdmission::new(config.admission_max_weight());
+    let pools = ExecutionPools::with_sizes(
+        bounded_pool_size_from_env("SHARDLINE_HASHING_POOL_SIZE", 8),
+        bounded_pool_size_from_env("SHARDLINE_PARSING_POOL_SIZE", 8),
+        bounded_pool_size_from_env("SHARDLINE_BLOCKING_IO_POOL_SIZE", 16),
+    );
     let state = Arc::new(AppState {
         config,
         role,
@@ -205,6 +209,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         reconstruction_cache,
         transfer_limiter,
         admission,
+        pools,
         oci_registry_token_limiter,
         protocol_metrics: ProtocolMetrics::default(),
     });
