@@ -98,6 +98,9 @@ async fn test_app_for_frontends_with_role(
         reconstruction_cache: ReconstructionCacheService::disabled(),
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
         protocol_metrics: ProtocolMetrics::default(),
     });
 
@@ -319,6 +322,9 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         reconstruction_cache: ReconstructionCacheService::disabled(),
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
         protocol_metrics: ProtocolMetrics::default(),
     });
 
@@ -552,6 +558,9 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
         reconstruction_cache: ReconstructionCacheService::disabled(),
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
         protocol_metrics: ProtocolMetrics::default(),
     });
 

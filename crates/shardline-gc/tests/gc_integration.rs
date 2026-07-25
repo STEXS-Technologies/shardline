@@ -614,7 +614,7 @@ fn quarantine_mark_then_sweep_retains_unexpired_entry() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    // Phase 1: Mark — create quarantine entry with long retention.
+    // Mark — create quarantine entry with long retention.
     let diag = rt.block_on(run_gc_helper(
         &object_store,
         &index_store,
@@ -624,7 +624,7 @@ fn quarantine_mark_then_sweep_retains_unexpired_entry() {
     assert_eq!(diag.report.new_quarantine_candidates, 1);
     assert_eq!(diag.report.active_quarantine_candidates, 1);
 
-    // Phase 2: Sweep (retention not expired) — should retain.
+    // Sweep (retention not expired) — should retain.
     let diag = rt.block_on(run_gc_helper(
         &object_store,
         &index_store,
