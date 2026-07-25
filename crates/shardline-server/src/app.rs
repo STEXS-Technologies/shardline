@@ -40,7 +40,7 @@ use shardline_server_core::auth::Ed25519AuthProvider;
 
 use crate::{
     ServerConfig, ServerError,
-    admission::{ExecutionPools, WeightedAdmission},
+    admission::{ExecutionPools, QuotaTracker, WeightedAdmission},
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
     config::{AuthProviderKind, DeploymentMode, ServerConfigError, env::bounded_pool_size_from_env},
@@ -98,6 +98,7 @@ pub struct AppState {
     pub pools: ExecutionPools,
     pub oci_registry_token_limiter: Arc<Semaphore>,
     pub protocol_metrics: ProtocolMetrics,
+    pub quota_tracker: QuotaTracker,
 }
 
 #[derive(Debug, Default)]
@@ -212,6 +213,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         pools,
         oci_registry_token_limiter,
         protocol_metrics: ProtocolMetrics::default(),
+        quota_tracker: QuotaTracker::new(),
     });
 
     let cors = CorsLayer::new()

@@ -647,6 +647,7 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::ProtocolMetrics::default(),
+            quota_tracker: crate::admission::QuotaTracker::new(),
         });
 
         (state, tmp)
@@ -686,6 +687,7 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::ProtocolMetrics::default(),
+            quota_tracker: crate::admission::QuotaTracker::new(),
         });
 
         (state, tmp)

@@ -1155,6 +1155,7 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::app::ProtocolMetrics::default(),
+            quota_tracker: crate::admission::QuotaTracker::new(),
         });
         let app = oci_test_router(&state);
 

@@ -1120,6 +1120,7 @@ async fn authorize_with_no_auth_returns_ok_none() {
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: crate::ProtocolMetrics::default(),
+        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     let result = super::authorize(&state, &HeaderMap::new(), TokenScope::Read);
@@ -1175,6 +1176,7 @@ async fn acquire_chunk_transfer_permit_times_out_when_permits_exhausted() {
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: crate::ProtocolMetrics::default(),
+        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     // Exhaust the single permit.

@@ -820,6 +820,7 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
+            quota_tracker: crate::admission::QuotaTracker::new(),
         })
     }
 
@@ -970,6 +971,7 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
+            quota_tracker: crate::admission::QuotaTracker::new(),
         });
         let headers = HeaderMap::new();
         let uri: Uri = "/v2/token".parse().unwrap();
@@ -1031,6 +1033,7 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
+            quota_tracker: crate::admission::QuotaTracker::new(),
         });
         let headers = HeaderMap::new();
         let uri: Uri = "/v2/token".parse().unwrap();
