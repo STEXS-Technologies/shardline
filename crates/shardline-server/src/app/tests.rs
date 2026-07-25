@@ -1118,6 +1118,7 @@ async fn authorize_with_no_auth_returns_ok_none() {
         admission: crate::admission::WeightedAdmission::new(
             std::num::NonZeroUsize::new(256).unwrap(),
         ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: crate::ProtocolMetrics::default(),
     });
 
@@ -1172,6 +1173,7 @@ async fn acquire_chunk_transfer_permit_times_out_when_permits_exhausted() {
         admission: crate::admission::WeightedAdmission::new(
             std::num::NonZeroUsize::new(256).unwrap(),
         ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: crate::ProtocolMetrics::default(),
     });
 

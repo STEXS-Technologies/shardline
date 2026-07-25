@@ -369,6 +369,17 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     Ok(config)
 }
 
+/// Loads a bounded pool size from an environment variable, falling back to `default`.
+pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroUsize {
+    match var(name) {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            tracing::warn!("invalid {name} value '{v}', using default {default}");
+            NonZeroUsize::new(default).unwrap()
+        }),
+        Err(_) => NonZeroUsize::new(default).unwrap(),
+    }
+}
+
 /// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
 pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
     match var("SHARDLINE_ADMISSION_MAX_WEIGHT") {

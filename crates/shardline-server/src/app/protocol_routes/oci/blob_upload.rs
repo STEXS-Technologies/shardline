@@ -1153,6 +1153,7 @@ mod tests {
             admission: crate::admission::WeightedAdmission::new(
                 std::num::NonZeroUsize::new(256).unwrap(),
             ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::app::ProtocolMetrics::default(),
         });
         let app = oci_test_router(&state);
