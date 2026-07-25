@@ -438,10 +438,10 @@ pub enum LocalObjectStoreError {
 mod async_tests {
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
-    use shardline_protocol::ShardlineHash;
+    use shardline_protocol::{ByteRange, ShardlineHash};
     use crate::{
         AsyncObjectStore, DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey,
-        PutOutcome,
+        ObjectPrefix, PutOutcome,
     };
 
     fn setup() -> (LocalObjectStore, TempDir) {
@@ -505,5 +505,56 @@ mod async_tests {
         rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"12345"), &integrity)).unwrap();
         let meta = rt().block_on(AsyncObjectStore::metadata(&store, &key));
         assert!(matches!(meta, Ok(Some(ref m)) if m.length() == 5));
+    }
+
+    #[test]
+    fn async_local_read_range_returns_data() {
+        let (store, _dir) = setup();
+        let key = ObjectKey::parse("test/rr").unwrap();
+        let body = b"hello world";
+        let hash = ShardlineHash::from_bytes(*blake3::hash(body).as_bytes());
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(body),
+            &ObjectIntegrity::new(hash, body.len() as u64),
+        ))
+        .unwrap();
+        let range = ByteRange::new(0, 4).unwrap();
+        let data =
+            rt().block_on(AsyncObjectStore::read_range(&store, &key, range)).unwrap();
+        assert_eq!(data, b"hello");
+    }
+
+    #[test]
+    fn async_local_list_prefix_returns_filtered() {
+        let (store, _dir) = setup();
+        let hash = ShardlineHash::from_bytes(*blake3::hash(b"x").as_bytes());
+        let integrity = ObjectIntegrity::new(hash, 1);
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &ObjectKey::parse("ns/a").unwrap(),
+            ObjectBody::from_slice(b"x"),
+            &integrity,
+        ))
+        .unwrap();
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &ObjectKey::parse("ns/b").unwrap(),
+            ObjectBody::from_slice(b"x"),
+            &integrity,
+        ))
+        .unwrap();
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &ObjectKey::parse("other/c").unwrap(),
+            ObjectBody::from_slice(b"x"),
+            &integrity,
+        ))
+        .unwrap();
+        let prefix = ObjectPrefix::parse("ns/").unwrap();
+        let items =
+            rt().block_on(AsyncObjectStore::list_prefix(&store, &prefix)).unwrap();
+        assert_eq!(items.len(), 2);
     }
 }

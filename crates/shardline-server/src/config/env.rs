@@ -15,7 +15,7 @@ use super::secrets::{
 use super::{
     AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
     DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
+    DeploymentMode, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
     ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
     default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks,
 };
@@ -336,6 +336,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_metrics_token(metrics_token)?;
     }
 
+    if let Some(deployment_mode) = deployment_mode_from_env() {
+        config = config.with_deployment_mode(deployment_mode);
+    }
+
     // Validate Hub frontend requires auth configuration.
     if config.server_frontends().contains(&ServerFrontend::Hub)
         && config.token_signing_key().is_none()
@@ -362,6 +366,22 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     )?;
 
     Ok(config)
+}
+
+/// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
+pub(crate) fn deployment_mode_from_env() -> Option<DeploymentMode> {
+    match var("SHARDLINE_DEPLOYMENT_MODE") {
+        Ok(v) if v.eq_ignore_ascii_case("insecure") => Some(DeploymentMode::Insecure),
+        Ok(v) if v.eq_ignore_ascii_case("authenticated") => Some(DeploymentMode::Authenticated),
+        Ok(v) if v.eq_ignore_ascii_case("strict") => Some(DeploymentMode::Strict),
+        Ok(other) => {
+            tracing::warn!(
+                "unknown SHARDLINE_DEPLOYMENT_MODE value '{other}', falling back to default"
+            );
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {

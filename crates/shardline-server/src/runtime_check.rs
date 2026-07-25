@@ -69,7 +69,10 @@ mod tests {
     };
 
     use super::run_config_check;
-    use crate::{ServerConfig, ServerConfigError, ServerError, ServerRole};
+    use crate::{
+        ServerConfig, ServerConfigError, ServerError, ServerRole,
+        config::DeploymentMode,
+    };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_check_reports_local_backend_for_initialized_storage() {
@@ -125,7 +128,8 @@ mod tests {
             "http://127.0.0.1:8080".to_owned(),
             storage.path_buf(),
             NonZeroUsize::MIN,
-        );
+        )
+        .with_deployment_mode(DeploymentMode::Authenticated);
 
         let report = run_config_check(config).await;
 
@@ -146,11 +150,14 @@ mod tests {
             storage.path_buf(),
             NonZeroUsize::MIN,
         )
-        .with_server_role(ServerRole::Transfer);
+        .with_server_role(ServerRole::Transfer)
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap();
 
         let report = run_config_check(config).await;
-        // Transfer role has no signing key, so it will fail validation first.
-        assert!(report.is_err());
+        assert!(report.is_ok(), "config check should succeed: {report:?}");
+        let report = report.unwrap();
+        assert_eq!(report.cache_backend, "disabled");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
