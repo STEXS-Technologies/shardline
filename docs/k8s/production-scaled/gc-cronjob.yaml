@@ -24,11 +24,9 @@ spec:
             runAsUser: 1000
             runAsGroup: 1000
             fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            readOnlyRootFilesystem: true
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: gc
               image: registry.example.com/shardline:1.0.1

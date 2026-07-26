@@ -30,7 +30,6 @@ COPY --from=builder /tmp/shardline /usr/local/bin/shardline
 USER 10001:10001
 # Ensure the container can run with arbitrary non-root UIDs
 ENV SHARDLINE_BIND_ADDR=0.0.0.0:8080
-ENV SHARDLINE_PUBLIC_BASE_URL=http://127.0.0.1:8080
 ENV SHARDLINE_ROOT_DIR=/var/lib/shardline
 ENV SHARDLINE_CHUNK_SIZE_BYTES=65536
 
