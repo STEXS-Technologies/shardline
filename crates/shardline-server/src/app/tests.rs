@@ -538,8 +538,8 @@ fn bounded_api_body_limit_with_equal_values() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_provider_local_without_signing_key_returns_none() {
     // Local auth with no signing key → build_auth_provider returns Ok(None),
-    // but validate_runtime_requirements rejects it first. Verify the expected
-    // validation error is returned.
+    // but validate_runtime_requirements rejects it first (in non-Insecure modes).
+    // Verify the expected validation error is returned.
     let tmp = TempDir::new().unwrap();
     let chunk_size = NonZeroUsize::new(65536).unwrap();
     let config = ServerConfig::new(
@@ -548,7 +548,8 @@ async fn auth_provider_local_without_signing_key_returns_none() {
         tmp.path().to_path_buf(),
         chunk_size,
     )
-    .with_auth_provider(AuthProviderKind::Local);
+    .with_auth_provider(AuthProviderKind::Local)
+    .with_deployment_mode(crate::config::DeploymentMode::Authenticated);
     // No with_token_signing_key() → validation fails
     let app = router(config).await;
     assert!(
@@ -1114,6 +1115,10 @@ async fn authorize_with_no_auth_returns_ok_none() {
             NonZeroUsize::new(4).unwrap(),
         ),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: crate::ProtocolMetrics::default(),
     });
 
@@ -1165,6 +1170,10 @@ async fn acquire_chunk_transfer_permit_times_out_when_permits_exhausted() {
         reconstruction_cache: crate::ReconstructionCacheService::disabled(),
         transfer_limiter,
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: crate::ProtocolMetrics::default(),
     });
 

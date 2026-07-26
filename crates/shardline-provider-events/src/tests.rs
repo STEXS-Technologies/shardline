@@ -451,7 +451,8 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         chunk_hashes.insert(xet_hash_hex_string(decoded_chunk.descriptor().hash()));
         Ok::<(), ProviderEventsError>(())
     })?;
-    let upload = store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data)?;
+    let upload =
+        store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data).await?;
     assert!(upload.was_inserted);
 
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;

@@ -1,24 +1,50 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::{Arc, LazyLock};
 
 use reqwest::Client;
 use sha2::Digest;
 use shardline_protocol::SecretString;
 use shardline_server::{
-    DatabaseMigrationCommand, DatabaseMigrationOptions, ServerConfig, ServerFrontend, ServerRole,
-    run_database_migration, serve_with_listener,
+    DatabaseMigrationCommand, DatabaseMigrationOptions, DeploymentMode, ServerConfig,
+    ServerFrontend, ServerRole, run_database_migration, serve_with_listener,
 };
 use tokio::net::TcpListener;
 
-async fn start_server() -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
-    start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await
+static POSTGRES_E2E_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+async fn start_server() -> Result<
+    (
+        String,
+        tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    start_server_with(
+        None,
+        &[
+            ServerFrontend::Xet,
+            ServerFrontend::Lfs,
+            ServerFrontend::Oci,
+            ServerFrontend::BazelHttp,
+        ],
+        |c| Ok(c),
+    )
+    .await
 }
 
 async fn start_server_with(
     role: Option<ServerRole>,
     frontends: &[ServerFrontend],
     modify_config: impl Fn(ServerConfig) -> Result<ServerConfig, Box<dyn std::error::Error>> + Clone,
-) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        String,
+        tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let mut last_err = None;
     for attempt in 0..5 {
         match try_start_server(role, frontends, modify_config.clone()).await {
@@ -38,7 +64,13 @@ async fn try_start_server(
     role: Option<ServerRole>,
     frontends: &[ServerFrontend],
     modify_config: impl FnOnce(ServerConfig) -> Result<ServerConfig, Box<dyn std::error::Error>>,
-) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        String,
+        tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let storage = tempfile::tempdir()?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let addr = listener.local_addr()?;
@@ -80,7 +112,9 @@ async fn try_start_server(
     Err("server did not become healthy".into())
 }
 
-fn write_provider_config(root: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+fn write_provider_config(
+    root: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let path = root.join("providers.json");
     let bytes = serde_json::to_vec(&serde_json::json!({
         "providers": [
@@ -106,7 +140,12 @@ fn write_provider_config(root: &std::path::Path) -> Result<std::path::PathBuf, B
     Ok(path)
 }
 
-fn mint_token(subject: &str, owner: &str, repo: &str, revision: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn mint_token(
+    subject: &str,
+    owner: &str,
+    repo: &str,
+    revision: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!")?;
     let repository = shardline_protocol::RepositoryScope::new(
         shardline_protocol::RepositoryProvider::GitHub,
@@ -114,25 +153,46 @@ fn mint_token(subject: &str, owner: &str, repo: &str, revision: &str) -> Result<
         repo,
         Some(revision),
     )?;
-    let claims = shardline_protocol::TokenClaims::new("local", subject, shardline_protocol::TokenScope::Write, repository, u64::MAX)?;
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        subject,
+        shardline_protocol::TokenScope::Write,
+        repository,
+        u64::MAX,
+    )?;
     Ok(signer.sign(&claims)?)
 }
 
 async fn migrate_postgres_database(database_url: &str) {
-    let options = DatabaseMigrationOptions::new(
-        database_url.to_owned(),
-        DatabaseMigrationCommand::Up { steps: None },
+    let mut last_error = None;
+    for attempt in 0..10 {
+        let options = DatabaseMigrationOptions::new(
+            database_url.to_owned(),
+            DatabaseMigrationCommand::Up { steps: None },
+        );
+        match run_database_migration(&options).await {
+            Ok(_report) => return,
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(50 * (attempt + 1))).await;
+            }
+        }
+    }
+    panic!(
+        "migrate Docker Postgres database after retries: {}",
+        last_error.expect("migration attempt must record an error")
     );
-    run_database_migration(&options)
-        .await
-        .expect("migrate Docker Postgres database");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_check_returns_200() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/healthz")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base_url}/healthz"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "health check failed: {}", resp.status());
     server.abort();
 }
@@ -141,7 +201,11 @@ async fn health_check_returns_200() {
 async fn metrics_endpoint_returns_data() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/metrics")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .unwrap();
     assert!(resp.status().is_success(), "metrics endpoint failed");
     let text = resp.text().await.unwrap();
     assert!(!text.is_empty(), "metrics body should not be empty");
@@ -154,7 +218,9 @@ async fn xet_read_token_issuance_succeeds() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
         .send()
@@ -172,7 +238,9 @@ async fn xet_write_token_issuance_succeeds() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
         .send()
@@ -186,13 +254,18 @@ async fn xet_write_token_issuance_succeeds() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_when_role_api_only() {
-    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], |c| Ok(c)).await.unwrap();
+    let (base_url, server) =
+        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Xet], |c| Ok(c))
+            .await
+            .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
     // API role serves read/write token, reconstruction, shard with provider key
     let read_token = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
         .send()
@@ -207,14 +280,23 @@ async fn xet_routes_disabled_when_role_api_only() {
         .send()
         .await
         .unwrap();
-    assert_eq!(chunk_read.status(), 404, "api role should not register chunk routes");
+    assert_eq!(
+        chunk_read.status(),
+        404,
+        "api role should not register chunk routes"
+    );
 
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_when_role_transfer_only() {
-    let (base_url, server) = start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Xet], |c| Ok(c)).await.unwrap();
+    let (base_url, server) =
+        start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Xet], |c| {
+            Ok(c)
+        })
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -226,34 +308,60 @@ async fn xet_routes_disabled_when_role_transfer_only() {
         .send()
         .await
         .unwrap();
-    assert_eq!(chunk_read.status(), 405, "transfer role should register chunk routes (POST to GET-only route returns 405)");
+    assert_eq!(
+        chunk_read.status(),
+        405,
+        "transfer role should register chunk routes (POST to GET-only route returns 405)"
+    );
 
     // API routes (read token, shard upload) should be disabled
     let read_token = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(read_token.status(), 404, "transfer role should not serve read token");
+    assert_eq!(
+        read_token.status(),
+        404,
+        "transfer role should not serve read token"
+    );
 
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xet_routes_disabled_without_xet_frontend() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(
+        None,
+        &[
+            ServerFrontend::Lfs,
+            ServerFrontend::Oci,
+            ServerFrontend::BazelHttp,
+        ],
+        |c| Ok(c),
+    )
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
     let read_token = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
         .send()
         .await
         .unwrap();
-    assert_eq!(read_token.status(), 404, "xet routes should be 404 when xet frontend is disabled");
+    assert_eq!(
+        read_token.status(),
+        404,
+        "xet routes should be 404 when xet frontend is disabled"
+    );
 
     // LFS routes should still work
     let lfs_batch = client
@@ -264,14 +372,28 @@ async fn xet_routes_disabled_without_xet_frontend() {
         .send()
         .await
         .unwrap();
-    assert_eq!(lfs_batch.status(), 200, "lfs routes should work when xet frontend is disabled");
+    assert_eq!(
+        lfs_batch.status(),
+        200,
+        "lfs routes should work when xet frontend is disabled"
+    );
 
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_routes_disabled_without_lfs_frontend() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(
+        None,
+        &[
+            ServerFrontend::Xet,
+            ServerFrontend::Oci,
+            ServerFrontend::BazelHttp,
+        ],
+        |c| Ok(c),
+    )
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -283,17 +405,27 @@ async fn lfs_routes_disabled_without_lfs_frontend() {
         .send()
         .await
         .unwrap();
-    assert_eq!(lfs_batch.status(), 404, "lfs routes should be 404 when lfs frontend is disabled");
+    assert_eq!(
+        lfs_batch.status(),
+        404,
+        "lfs routes should be 404 when lfs frontend is disabled"
+    );
 
     // Xet routes should still work
     let read_token = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
         .send()
         .await
         .unwrap();
-    assert_eq!(read_token.status(), 200, "xet routes should work when lfs frontend is disabled");
+    assert_eq!(
+        read_token.status(),
+        200,
+        "xet routes should work when lfs frontend is disabled"
+    );
 
     server.abort();
 }
@@ -319,7 +451,10 @@ async fn lfs_batch_download_returns_actions() {
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "LFS batch failed: {status} body: {body:?}");
-    assert!(body.get("objects").is_some(), "LFS batch response missing objects: {body:?}");
+    assert!(
+        body.get("objects").is_some(),
+        "LFS batch response missing objects: {body:?}"
+    );
     // Object may not exist (404 per-object with error) — that's expected for non-existent OIDs
     // The batch request itself succeeds (200) regardless of per-object status
     server.abort();
@@ -330,7 +465,9 @@ async fn unauthorized_request_returns_401() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .send()
         .await
         .unwrap();
@@ -343,8 +480,13 @@ async fn invalid_token_returns_401() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
-        .header("Authorization", "Bearer invalid-token-that-will-be-rejected")
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
+        .header(
+            "Authorization",
+            "Bearer invalid-token-that-will-be-rejected",
+        )
         .send()
         .await
         .unwrap();
@@ -386,7 +528,12 @@ async fn lfs_upload_and_download_round_trip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(upload.status(), 200, "LFS upload failed: {}", upload.status());
+    assert_eq!(
+        upload.status(),
+        200,
+        "LFS upload failed: {}",
+        upload.status()
+    );
 
     let download = client
         .get(format!("{base_url}/v1/lfs/objects/{oid}"))
@@ -394,9 +541,18 @@ async fn lfs_upload_and_download_round_trip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(download.status(), 200, "LFS download failed: {}", download.status());
+    assert_eq!(
+        download.status(),
+        200,
+        "LFS download failed: {}",
+        download.status()
+    );
     let downloaded = download.bytes().await.unwrap();
-    assert_eq!(downloaded.as_ref(), content, "LFS round trip bytes mismatch");
+    assert_eq!(
+        downloaded.as_ref(),
+        content,
+        "LFS round trip bytes mismatch"
+    );
 
     server.abort();
 }
@@ -428,7 +584,11 @@ async fn lfs_upload_download_large_file() {
         .unwrap();
     assert_eq!(download.status(), 200, "LFS download failed");
     let downloaded = download.bytes().await.unwrap();
-    assert_eq!(downloaded.to_vec(), content, "LFS large file round trip mismatch");
+    assert_eq!(
+        downloaded.to_vec(),
+        content,
+        "LFS large file round trip mismatch"
+    );
 
     server.abort();
 }
@@ -445,7 +605,11 @@ async fn lfs_download_non_existent_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "expected 404 for non-existent LFS object");
+    assert_eq!(
+        resp.status(),
+        404,
+        "expected 404 for non-existent LFS object"
+    );
     server.abort();
 }
 
@@ -475,7 +639,10 @@ async fn lfs_head_existing_object() {
         .await
         .unwrap();
     assert_eq!(head.status(), 200, "LFS HEAD for existing object failed");
-    assert!(head.headers().get("content-length").is_some(), "HEAD response missing content-length");
+    assert!(
+        head.headers().get("content-length").is_some(),
+        "HEAD response missing content-length"
+    );
 
     server.abort();
 }
@@ -492,7 +659,11 @@ async fn lfs_head_non_existent_object() {
         .send()
         .await
         .unwrap();
-    assert_eq!(head.status(), 404, "expected 404 for HEAD on non-existent LFS object");
+    assert_eq!(
+        head.status(),
+        404,
+        "expected 404 for HEAD on non-existent LFS object"
+    );
 
     server.abort();
 }
@@ -524,7 +695,11 @@ async fn lfs_upload_binary_content_with_null_bytes() {
         .unwrap();
     assert_eq!(download.status(), 200, "binary download failed");
     let downloaded = download.bytes().await.unwrap();
-    assert_eq!(downloaded.as_ref(), content.as_slice(), "binary round trip mismatch");
+    assert_eq!(
+        downloaded.as_ref(),
+        content.as_slice(),
+        "binary round trip mismatch"
+    );
 
     server.abort();
 }
@@ -546,7 +721,12 @@ async fn lfs_upload_empty_content_round_trip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(upload.status(), 200, "empty upload failed: {}", upload.status());
+    assert_eq!(
+        upload.status(),
+        200,
+        "empty upload failed: {}",
+        upload.status()
+    );
 
     let download = client
         .get(format!("{base_url}/v1/lfs/objects/{oid}"))
@@ -556,7 +736,10 @@ async fn lfs_upload_empty_content_round_trip() {
         .unwrap();
     assert_eq!(download.status(), 200, "empty download failed");
     let downloaded = download.bytes().await.unwrap();
-    assert!(downloaded.is_empty(), "downloaded empty content should be empty");
+    assert!(
+        downloaded.is_empty(),
+        "downloaded empty content should be empty"
+    );
 
     server.abort();
 }
@@ -587,10 +770,17 @@ async fn lfs_get_returns_application_octet_stream_content_type() {
         .await
         .unwrap();
     assert_eq!(download.status(), 200, "download failed");
-    let ct = download.headers().get("content-type").and_then(|v| v.to_str().ok());
+    let ct = download
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
     assert!(ct.is_some(), "content-type header missing on GET");
     // LFS objects always return application/octet-stream
-    assert_eq!(ct.unwrap(), "application/octet-stream", "LFS content-type should be octet-stream");
+    assert_eq!(
+        ct.unwrap(),
+        "application/octet-stream",
+        "LFS content-type should be octet-stream"
+    );
 
     server.abort();
 }
@@ -621,11 +811,21 @@ async fn lfs_get_returns_content_digest_header() {
         .await
         .unwrap();
     assert_eq!(download.status(), 200, "download failed");
-    let digest = download.headers().get("Docker-Content-Digest").and_then(|v| v.to_str().ok());
-    assert!(digest.is_some(), "Docker-Content-Digest header missing on GET");
+    let digest = download
+        .headers()
+        .get("Docker-Content-Digest")
+        .and_then(|v| v.to_str().ok());
+    assert!(
+        digest.is_some(),
+        "Docker-Content-Digest header missing on GET"
+    );
     let digest = digest.unwrap();
     assert!(!digest.is_empty(), "digest should not be empty");
-    assert_eq!(digest, format!("sha256:{oid}"), "digest should match expected format");
+    assert_eq!(
+        digest,
+        format!("sha256:{oid}"),
+        "digest should match expected format"
+    );
 
     server.abort();
 }
@@ -750,7 +950,11 @@ async fn lfs_suffix_range_returns_last_n_bytes() {
         .send()
         .await
         .unwrap();
-    assert_eq!(download.status(), 206, "suffix range should return 206 Partial Content");
+    assert_eq!(
+        download.status(),
+        206,
+        "suffix range should return 206 Partial Content"
+    );
     let body = download.bytes().await.unwrap();
     let expected = &content[content.len() - 10..];
     assert_eq!(body.as_ref(), expected, "suffix range bytes mismatch");
@@ -817,7 +1021,11 @@ async fn lfs_single_byte_range() {
             .unwrap();
         assert_eq!(resp.status(), 206, "single byte range at offset {offset}");
         let body = resp.bytes().await.unwrap();
-        assert_eq!(body.as_ref(), &content[offset..=offset], "single byte at offset {offset}");
+        assert_eq!(
+            body.as_ref(),
+            &content[offset..=offset],
+            "single byte at offset {offset}"
+        );
     }
 
     server.abort();
@@ -848,7 +1056,12 @@ async fn lfs_empty_range_returns_416() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400, "start > end should return 400, got {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        400,
+        "start > end should return 400, got {}",
+        resp.status()
+    );
 
     server.abort();
 }
@@ -878,8 +1091,11 @@ async fn lfs_range_with_negative_start_returns_400() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().as_u16() == 400,
-        "negative start should return 400, got {}", resp.status());
+    assert!(
+        resp.status().as_u16() == 400,
+        "negative start should return 400, got {}",
+        resp.status()
+    );
 
     server.abort();
 }
@@ -1011,7 +1227,11 @@ async fn lfs_download_returns_content_length_header() {
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.parse::<usize>().unwrap());
-    assert_eq!(cl, Some(content.len()), "content-length should match content");
+    assert_eq!(
+        cl,
+        Some(content.len()),
+        "content-length should match content"
+    );
     let body = download.bytes().await.unwrap();
     assert_eq!(body.len(), content.len(), "body length matches");
 
@@ -1035,9 +1255,17 @@ async fn oci_blob_download_returns_content_length_and_digest() {
         .await
         .unwrap();
     assert_eq!(post.status(), 202);
-    let location = post.headers().get("location")
+    let location = post
+        .headers()
+        .get("location")
         .and_then(|v| v.to_str().ok())
-        .map(|s| if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") })
+        .map(|s| {
+            if s.starts_with("http") {
+                s.to_owned()
+            } else {
+                format!("{base_url}{s}")
+            }
+        })
         .unwrap();
 
     let put = client
@@ -1058,18 +1286,28 @@ async fn oci_blob_download_returns_content_length_and_digest() {
         .unwrap();
     assert_eq!(get.status(), 200);
 
-    let cl = get.headers().get("content-length")
+    let cl = get
+        .headers()
+        .get("content-length")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.parse::<usize>().unwrap());
     assert_eq!(cl, Some(content.len()), "OCI blob content-length");
 
-    let dd = get.headers().get("docker-content-digest")
+    let dd = get
+        .headers()
+        .get("docker-content-digest")
         .and_then(|v| v.to_str().ok());
     assert_eq!(dd, Some(digest.as_str()), "OCI blob docker-content-digest");
 
-    let ct = get.headers().get("content-type")
+    let ct = get
+        .headers()
+        .get("content-type")
         .and_then(|v| v.to_str().ok());
-    assert_eq!(ct, Some("application/octet-stream"), "OCI blob content-type");
+    assert_eq!(
+        ct,
+        Some("application/octet-stream"),
+        "OCI blob content-type"
+    );
 
     let body = get.bytes().await.unwrap();
     assert_eq!(body.as_ref(), content, "OCI blob content");
@@ -1089,7 +1327,9 @@ async fn oci_v2_root_returns_version_header() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "OCI v2 root failed");
-    let header = resp.headers().get("Docker-Distribution-API-Version")
+    let header = resp
+        .headers()
+        .get("Docker-Distribution-API-Version")
         .and_then(|v| v.to_str().ok());
     assert_eq!(header, Some("registry/2.0"), "OCI version header missing");
     server.abort();
@@ -1111,8 +1351,15 @@ async fn oci_push_and_pull_blob() {
         .send()
         .await
         .unwrap();
-    assert_eq!(post.status(), 202, "OCI blob upload start failed: {}", post.status());
-    let location = post.headers().get("location")
+    assert_eq!(
+        post.status(),
+        202,
+        "OCI blob upload start failed: {}",
+        post.status()
+    );
+    let location = post
+        .headers()
+        .get("location")
         .and_then(|v| v.to_str().ok())
         .map(|s| {
             if s.starts_with("http") {
@@ -1131,7 +1378,12 @@ async fn oci_push_and_pull_blob() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 201, "OCI blob finalize failed: {}", put.status());
+    assert_eq!(
+        put.status(),
+        201,
+        "OCI blob finalize failed: {}",
+        put.status()
+    );
 
     let get = client
         .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
@@ -1162,10 +1414,16 @@ async fn oci_head_blob_existing() {
         .await
         .unwrap();
     assert_eq!(post.status(), 202, "OCI upload start failed");
-    let location = post.headers().get("location")
+    let location = post
+        .headers()
+        .get("location")
         .and_then(|v| v.to_str().ok())
         .map(|s| {
-            if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") }
+            if s.starts_with("http") {
+                s.to_owned()
+            } else {
+                format!("{base_url}{s}")
+            }
         })
         .unwrap();
 
@@ -1185,7 +1443,10 @@ async fn oci_head_blob_existing() {
         .await
         .unwrap();
     assert_eq!(head.status(), 200, "OCI HEAD blob failed");
-    let len = head.headers().get("content-length").and_then(|v| v.to_str().ok());
+    let len = head
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok());
     assert!(len.is_some(), "OCI HEAD missing content-length");
     assert_eq!(len.unwrap(), content.len().to_string());
 
@@ -1219,7 +1480,11 @@ async fn upload_all_byte_values_round_trip() {
         .unwrap();
     assert_eq!(download.status(), 200, "download of all byte values failed");
     let downloaded = download.bytes().await.unwrap();
-    assert_eq!(downloaded.as_ref(), content.as_slice(), "all byte values round trip mismatch");
+    assert_eq!(
+        downloaded.as_ref(),
+        content.as_slice(),
+        "all byte values round trip mismatch"
+    );
 
     server.abort();
 }
@@ -1249,9 +1514,17 @@ async fn upload_sequential_pattern_round_trip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(download.status(), 200, "download of sequential pattern failed");
+    assert_eq!(
+        download.status(),
+        200,
+        "download of sequential pattern failed"
+    );
     let downloaded = download.bytes().await.unwrap();
-    assert_eq!(downloaded.as_ref(), content.as_slice(), "sequential pattern round trip mismatch");
+    assert_eq!(
+        downloaded.as_ref(),
+        content.as_slice(),
+        "sequential pattern round trip mismatch"
+    );
 
     server.abort();
 }
@@ -1261,6 +1534,7 @@ async fn upload_thousand_small_files() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
+    let upload_concurrency = Arc::new(tokio::sync::Semaphore::new(16));
 
     let mut handles = Vec::with_capacity(1000);
     for i in 0..1000 {
@@ -1269,8 +1543,10 @@ async fn upload_thousand_small_files() {
         let url = format!("{base_url}/v1/lfs/objects/{oid}");
         let auth = format!("Bearer {token}");
         let client = client.clone();
+        let upload_concurrency = Arc::clone(&upload_concurrency);
 
         handles.push(tokio::spawn(async move {
+            let _permit = upload_concurrency.acquire_owned().await.unwrap();
             let upload = client
                 .put(&url)
                 .header("Authorization", &auth)
@@ -1305,7 +1581,9 @@ async fn upload_thousand_small_files() {
     }
 
     for (i, handle) in handles.into_iter().enumerate() {
-        handle.await.unwrap_or_else(|e| panic!("file {i} panicked: {e}"));
+        handle
+            .await
+            .unwrap_or_else(|e| panic!("file {i} panicked: {e}"));
     }
 
     server.abort();
@@ -1319,7 +1597,10 @@ async fn upload_exact_chunk_size_boundary() {
 
     // Chunk size is 4 bytes (from ServerConfig::new 5th arg)
     // Test exactly 4 bytes (1 full chunk) and exactly 8 bytes (2 full chunks)
-    for (label, content) in [("one_chunk", vec![0xABu8; 4]), ("two_chunks", vec![0xBCu8; 8])] {
+    for (label, content) in [
+        ("one_chunk", vec![0xABu8; 4]),
+        ("two_chunks", vec![0xBCu8; 8]),
+    ] {
         let oid = hex::encode(sha2::Sha256::digest(&content));
         let upload = client
             .put(format!("{base_url}/v1/lfs/objects/{oid}"))
@@ -1339,7 +1620,11 @@ async fn upload_exact_chunk_size_boundary() {
             .unwrap();
         assert_eq!(download.status(), 200, "download {label} failed");
         let body = download.bytes().await.unwrap();
-        assert_eq!(body.as_ref(), content.as_slice(), "round trip mismatch for {label}");
+        assert_eq!(
+            body.as_ref(),
+            content.as_slice(),
+            "round trip mismatch for {label}"
+        );
     }
 
     let partial: Vec<u8> = vec![0xDDu8; 3];
@@ -1362,7 +1647,11 @@ async fn upload_exact_chunk_size_boundary() {
         .unwrap();
     assert_eq!(download.status(), 200, "download partial chunk failed");
     let body = download.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), partial.as_slice(), "partial chunk round trip mismatch");
+    assert_eq!(
+        body.as_ref(),
+        partial.as_slice(),
+        "partial chunk round trip mismatch"
+    );
 
     let oversized: Vec<u8> = vec![0xEEu8; 5];
     let oversized_oid = hex::encode(sha2::Sha256::digest(&oversized));
@@ -1384,7 +1673,11 @@ async fn upload_exact_chunk_size_boundary() {
         .unwrap();
     assert_eq!(download.status(), 200, "download 1-byte-over chunk failed");
     let body = download.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), oversized.as_slice(), "1-byte-over chunk round trip mismatch");
+    assert_eq!(
+        body.as_ref(),
+        oversized.as_slice(),
+        "1-byte-over chunk round trip mismatch"
+    );
 
     server.abort();
 }
@@ -1424,7 +1717,11 @@ async fn dedup_same_content_uploaded_twice() {
         .send()
         .await
         .unwrap();
-    assert_eq!(download.status(), 200, "download after duplicate upload failed");
+    assert_eq!(
+        download.status(),
+        200,
+        "download after duplicate upload failed"
+    );
     let body = download.bytes().await.unwrap();
     assert_eq!(body.as_ref(), content, "content mismatch after dedup");
 
@@ -1503,7 +1800,9 @@ async fn oci_unicode_manifest_tag() {
     let blob = br#"{"architecture":"amd64","os":"linux"}"#;
     let blob_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(blob)));
     let post = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(blob.to_vec())
         .send()
@@ -1519,7 +1818,10 @@ async fn oci_unicode_manifest_tag() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     let put = client
         .put(format!("{base_url}/v2/{repo}/manifests/{special_tag}"))
@@ -1538,7 +1840,10 @@ async fn oci_unicode_manifest_tag() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200, "special char manifest tag pull");
-    let dd = get.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    let dd = get
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(dd, Some(manifest_digest.as_str()), "special tag digest");
 
     server.abort();
@@ -1562,14 +1867,22 @@ async fn concurrent_upload_via_lfs_and_oci() {
         .body(content.to_vec())
         .send();
     let oci_upload = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
         .send();
 
     let (lfs_res, oci_res) = tokio::join!(lfs_upload, oci_upload);
-    assert_eq!(lfs_res.unwrap().status(), 200, "LFS concurrent upload");
-    assert_eq!(oci_res.unwrap().status(), 201, "OCI concurrent upload");
+    let lfs_res = lfs_res.unwrap();
+    let lfs_status = lfs_res.status();
+    let lfs_error = lfs_res.text().await.unwrap();
+    assert_eq!(lfs_status, 200, "LFS concurrent upload: {lfs_error}");
+    let oci_res = oci_res.unwrap();
+    let oci_status = oci_res.status();
+    let oci_error = oci_res.text().await.unwrap();
+    assert_eq!(oci_status, 201, "OCI concurrent upload: {oci_error}");
 
     let lfs_get = client
         .get(format!("{base_url}/v1/lfs/objects/{lfs_oid}"))
@@ -1578,7 +1891,11 @@ async fn concurrent_upload_via_lfs_and_oci() {
         .await
         .unwrap();
     assert_eq!(lfs_get.status(), 200, "LFS concurrent download");
-    assert_eq!(lfs_get.bytes().await.unwrap().as_ref(), content, "LFS content");
+    assert_eq!(
+        lfs_get.bytes().await.unwrap().as_ref(),
+        content,
+        "LFS content"
+    );
 
     let oci_get = client
         .get(format!("{base_url}/v2/{repo}/blobs/{blob_digest}"))
@@ -1587,7 +1904,11 @@ async fn concurrent_upload_via_lfs_and_oci() {
         .await
         .unwrap();
     assert_eq!(oci_get.status(), 200, "OCI concurrent download");
-    assert_eq!(oci_get.bytes().await.unwrap().as_ref(), content, "OCI content");
+    assert_eq!(
+        oci_get.bytes().await.unwrap().as_ref(),
+        content,
+        "OCI content"
+    );
 
     server.abort();
 }
@@ -1642,7 +1963,9 @@ async fn oci_manifest_media_type_preserved() {
     let blob = br#"{"architecture":"amd64","os":"linux"}"#;
     let blob_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(blob)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(blob.to_vec())
         .send()
@@ -1657,7 +1980,10 @@ async fn oci_manifest_media_type_preserved() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -1675,10 +2001,17 @@ async fn oci_manifest_media_type_preserved() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200);
-    let ct = get.headers().get("content-type").and_then(|v| v.to_str().ok());
+    let ct = get
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(ct, Some(media_type), "manifest media type preserved");
     let body: serde_json::Value = get.json().await.unwrap();
-    assert_eq!(body["mediaType"].as_str(), Some(media_type), "manifest body media type");
+    assert_eq!(
+        body["mediaType"].as_str(),
+        Some(media_type),
+        "manifest body media type"
+    );
 
     server.abort();
 }
@@ -1693,7 +2026,9 @@ async fn oci_head_manifest_returns_digest() {
     let blob = br#"{"architecture":"amd64","os":"linux"}"#;
     let blob_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(blob)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(blob.to_vec())
         .send()
@@ -1707,7 +2042,10 @@ async fn oci_head_manifest_returns_digest() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -1725,10 +2063,20 @@ async fn oci_head_manifest_returns_digest() {
         .await
         .unwrap();
     assert_eq!(head.status(), 200, "OCI HEAD manifest");
-    let dd = head.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    let dd = head
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(dd, Some(manifest_digest.as_str()), "HEAD manifest digest");
-    let ct = head.headers().get("content-type").and_then(|v| v.to_str().ok());
-    assert_eq!(ct, Some("application/vnd.oci.image.manifest.v1+json"), "HEAD manifest content-type");
+    let ct = head
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(
+        ct,
+        Some("application/vnd.oci.image.manifest.v1+json"),
+        "HEAD manifest content-type"
+    );
 
     server.abort();
 }
@@ -1743,7 +2091,9 @@ async fn oci_tag_list_returns_pushed_tags() {
     let blob = br#"{"architecture":"amd64","os":"linux"}"#;
     let blob_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(blob)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(blob.to_vec())
         .send()
@@ -1812,8 +2162,15 @@ async fn lfs_download_reports_content_type_octet_stream() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200);
-    let ct = get.headers().get("content-type").and_then(|v| v.to_str().ok());
-    assert_eq!(ct, Some("application/octet-stream"), "LFS always returns octet-stream");
+    let ct = get
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(
+        ct,
+        Some("application/octet-stream"),
+        "LFS always returns octet-stream"
+    );
 
     server.abort();
 }
@@ -1843,7 +2200,9 @@ async fn lfs_head_returns_content_length() {
         .await
         .unwrap();
     assert_eq!(head.status(), 200);
-    let cl = head.headers().get("content-length")
+    let cl = head
+        .headers()
+        .get("content-length")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.parse::<usize>().unwrap());
     assert_eq!(cl, Some(content.len()), "HEAD content-length");
@@ -1861,7 +2220,9 @@ async fn oci_push_manifest_with_empty_layers() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -1875,7 +2236,10 @@ async fn oci_push_manifest_with_empty_layers() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     let put = client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -1895,7 +2259,11 @@ async fn oci_push_manifest_with_empty_layers() {
         .unwrap();
     assert_eq!(get.status(), 200, "empty layers manifest pull");
     let body: serde_json::Value = get.json().await.unwrap();
-    assert_eq!(body["layers"].as_array().map(|a| a.len()), Some(0), "empty layers");
+    assert_eq!(
+        body["layers"].as_array().map(|a| a.len()),
+        Some(0),
+        "empty layers"
+    );
 
     server.abort();
 }
@@ -1910,7 +2278,9 @@ async fn oci_manifest_annotations_preserved() {
     let blob = br#"{"architecture":"amd64","os":"linux"}"#;
     let blob_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(blob)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={blob_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(blob.to_vec())
         .send()
@@ -1928,7 +2298,10 @@ async fn oci_manifest_annotations_preserved() {
         },
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -1979,7 +2352,10 @@ async fn lfs_download_returns_docker_content_digest() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200);
-    let dd = get.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    let dd = get
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
     assert!(dd.is_some(), "Docker-Content-Digest should be present");
     assert_eq!(dd.unwrap(), format!("sha256:{oid}"));
 
@@ -1997,7 +2373,9 @@ async fn oci_blob_head_returns_metadata_headers() {
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
 
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
         .send()
@@ -2011,14 +2389,26 @@ async fn oci_blob_head_returns_metadata_headers() {
         .await
         .unwrap();
     assert_eq!(head.status(), 200);
-    let cl = head.headers().get("content-length")
+    let cl = head
+        .headers()
+        .get("content-length")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.parse::<usize>().unwrap());
     assert_eq!(cl, Some(content.len()), "HEAD content-length");
-    let dd = head.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    let dd = head
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(dd, Some(digest.as_str()), "HEAD docker-content-digest");
-    let ct = head.headers().get("content-type").and_then(|v| v.to_str().ok());
-    assert_eq!(ct, Some("application/octet-stream"), "HEAD content-type must match OCI spec");
+    let ct = head
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(
+        ct,
+        Some("application/octet-stream"),
+        "HEAD content-type must match OCI spec"
+    );
 
     server.abort();
 }
@@ -2284,7 +2674,9 @@ async fn oci_push_and_pull_manifest_by_tag() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -2317,7 +2709,10 @@ async fn oci_push_and_pull_manifest_by_tag() {
         .unwrap();
     assert_eq!(get_by_tag.status(), 200, "manifest pull by tag");
     let body: serde_json::Value = get_by_tag.json().await.unwrap();
-    assert_eq!(body["mediaType"].as_str(), Some("application/vnd.oci.image.manifest.v1+json"));
+    assert_eq!(
+        body["mediaType"].as_str(),
+        Some("application/vnd.oci.image.manifest.v1+json")
+    );
 
     server.abort();
 }
@@ -2332,7 +2727,9 @@ async fn oci_manifest_pull_by_digest_returns_200() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -2346,7 +2743,10 @@ async fn oci_manifest_pull_by_digest_returns_200() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -2365,7 +2765,8 @@ async fn oci_manifest_pull_by_digest_returns_200() {
         .unwrap();
     assert_eq!(get.status(), 200, "manifest pull by digest");
     assert_eq!(
-        get.headers().get("docker-content-digest")
+        get.headers()
+            .get("docker-content-digest")
             .and_then(|v| v.to_str().ok()),
         Some(manifest_digest.as_str())
     );
@@ -2419,7 +2820,9 @@ async fn oci_delete_manifest_removes_tag() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -2433,7 +2836,10 @@ async fn oci_delete_manifest_removes_tag() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -2479,8 +2885,13 @@ async fn oci_list_tags_empty_repository() {
     assert_eq!(tags.status(), 200);
     let body: serde_json::Value = tags.json().await.unwrap();
     assert_eq!(body["name"].as_str(), Some("test-owner/test-repo"));
-    let names = body["tags"].as_array().expect("tags field should be an array");
-    assert!(names.is_empty(), "empty repo should have no tags, got {names:?}");
+    let names = body["tags"]
+        .as_array()
+        .expect("tags field should be an array");
+    assert!(
+        names.is_empty(),
+        "empty repo should have no tags, got {names:?}"
+    );
 
     server.abort();
 }
@@ -2604,7 +3015,10 @@ async fn lfs_batch_single_object() {
     let body: serde_json::Value = batch.json().await.unwrap();
     let objects = body["objects"].as_array().unwrap();
     assert_eq!(objects.len(), 1);
-    assert!(objects[0]["actions"].is_object(), "single object should have download actions");
+    assert!(
+        objects[0]["actions"].is_object(),
+        "single object should have download actions"
+    );
 
     server.abort();
 }
@@ -2615,11 +3029,13 @@ async fn lfs_batch_multiple_objects() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let contents: Vec<(String, Vec<u8>)> = (0..5).map(|i| {
-        let c = format!("batch object {i}");
-        let oid = hex::encode(sha2::Sha256::digest(c.as_bytes()));
-        (oid, c.into_bytes())
-    }).collect();
+    let contents: Vec<(String, Vec<u8>)> = (0..5)
+        .map(|i| {
+            let c = format!("batch object {i}");
+            let oid = hex::encode(sha2::Sha256::digest(c.as_bytes()));
+            (oid, c.into_bytes())
+        })
+        .collect();
 
     for (oid, bytes) in &contents {
         client
@@ -2632,9 +3048,10 @@ async fn lfs_batch_multiple_objects() {
             .unwrap();
     }
 
-    let objects: Vec<serde_json::Value> = contents.iter().map(|(oid, bytes)| {
-        serde_json::json!({"oid": oid, "size": bytes.len()})
-    }).collect();
+    let objects: Vec<serde_json::Value> = contents
+        .iter()
+        .map(|(oid, bytes)| serde_json::json!({"oid": oid, "size": bytes.len()}))
+        .collect();
 
     let batch = client
         .post(format!("{base_url}/v1/lfs/objects/batch"))
@@ -2697,10 +3114,17 @@ async fn lfs_batch_empty_objects_array() {
         .send()
         .await
         .unwrap();
-    assert_eq!(batch.status(), 200, "empty objects array should be accepted");
+    assert_eq!(
+        batch.status(),
+        200,
+        "empty objects array should be accepted"
+    );
     let body: serde_json::Value = batch.json().await.unwrap();
     let objects = body["objects"].as_array().unwrap();
-    assert!(objects.is_empty(), "empty request should return empty response");
+    assert!(
+        objects.is_empty(),
+        "empty request should return empty response"
+    );
 
     server.abort();
 }
@@ -2751,9 +3175,9 @@ async fn lfs_batch_excessive_cardinality_rejected() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let objects: Vec<serde_json::Value> = (0..2000).map(|i| {
-        serde_json::json!({"oid": format!("{i:064x}"), "size": 1})
-    }).collect();
+    let objects: Vec<serde_json::Value> = (0..2000)
+        .map(|i| serde_json::json!({"oid": format!("{i:064x}"), "size": 1}))
+        .collect();
 
     let batch = client
         .post(format!("{base_url}/v1/lfs/objects/batch"))
@@ -2767,7 +3191,11 @@ async fn lfs_batch_excessive_cardinality_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(batch.status(), 422, "excessive batch cardinality should be rejected");
+    assert_eq!(
+        batch.status(),
+        422,
+        "excessive batch cardinality should be rejected"
+    );
 
     server.abort();
 }
@@ -2807,7 +3235,12 @@ async fn upload_xorb(client: &Client, base_url: &str, token: &str, content: &[u8
     hash
 }
 
-async fn upload_shard(client: &Client, base_url: &str, token: &str, parts: &[(&[u8], &str)]) -> String {
+async fn upload_shard(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+    parts: &[(&[u8], &str)],
+) -> String {
     use shardline_server::test_fixtures::single_file_shard;
     let (shard, file_hash) = single_file_shard(parts);
     let resp = client
@@ -2818,7 +3251,11 @@ async fn upload_shard(client: &Client, base_url: &str, token: &str, parts: &[(&[
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "shard upload failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "shard upload failed: {}",
+        resp.status()
+    );
     file_hash
 }
 
@@ -2841,7 +3278,13 @@ async fn xet_read_token_reconstructs_file() {
     let client = Client::new();
 
     let hash = upload_xorb(&client, &base_url, &token, b"read token reconstruction").await;
-    let file_hash = upload_shard(&client, &base_url, &token, &[(b"read token reconstruction", &hash)]).await;
+    let file_hash = upload_shard(
+        &client,
+        &base_url,
+        &token,
+        &[(b"read token reconstruction", &hash)],
+    )
+    .await;
 
     let recon = client
         .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
@@ -2852,7 +3295,10 @@ async fn xet_read_token_reconstructs_file() {
     assert_eq!(recon.status(), 200, "reconstruction should succeed");
     let body: serde_json::Value = recon.json().await.unwrap();
     assert!(body["terms"].is_array(), "reconstruction should have terms");
-    assert!(!body["terms"].as_array().unwrap().is_empty(), "should have at least one term");
+    assert!(
+        !body["terms"].as_array().unwrap().is_empty(),
+        "should have at least one term"
+    );
 
     server.abort();
 }
@@ -2864,7 +3310,13 @@ async fn xet_batch_reconstruction_single_file() {
     let client = Client::new();
 
     let hash = upload_xorb(&client, &base_url, &token, b"batch single recon").await;
-    let file_hash = upload_shard(&client, &base_url, &token, &[(b"batch single recon", &hash)]).await;
+    let file_hash = upload_shard(
+        &client,
+        &base_url,
+        &token,
+        &[(b"batch single recon", &hash)],
+    )
+    .await;
 
     let batch = client
         .get(format!("{base_url}/v1/reconstructions?file_id={file_hash}"))
@@ -2874,8 +3326,15 @@ async fn xet_batch_reconstruction_single_file() {
         .unwrap();
     assert_eq!(batch.status(), 200, "batch reconstruction");
     let body: serde_json::Value = batch.json().await.unwrap();
-    assert!(body["files"].is_object(), "batch response should have files map");
-    assert_eq!(body["files"].as_object().unwrap().len(), 1, "batch should return 1 file");
+    assert!(
+        body["files"].is_object(),
+        "batch response should have files map"
+    );
+    assert_eq!(
+        body["files"].as_object().unwrap().len(),
+        1,
+        "batch should return 1 file"
+    );
 
     server.abort();
 }
@@ -2888,19 +3347,40 @@ async fn xet_batch_reconstruction_multiple_files() {
 
     let hash_a = upload_xorb(&client, &base_url, &token, b"batch multi A").await;
     let hash_b = upload_xorb(&client, &base_url, &token, b"batch multi B").await;
-    let file_a = upload_shard(&client, &base_url, &token, &[(b"batch multi A content", &hash_a)]).await;
-    let file_b = upload_shard(&client, &base_url, &token, &[(b"batch multi B content", &hash_b)]).await;
+    let file_a = upload_shard(
+        &client,
+        &base_url,
+        &token,
+        &[(b"batch multi A content", &hash_a)],
+    )
+    .await;
+    let file_b = upload_shard(
+        &client,
+        &base_url,
+        &token,
+        &[(b"batch multi B content", &hash_b)],
+    )
+    .await;
 
     let batch = client
-        .get(format!("{base_url}/v1/reconstructions?file_id={file_a}&file_id={file_b}"))
+        .get(format!(
+            "{base_url}/v1/reconstructions?file_id={file_a}&file_id={file_b}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
     assert_eq!(batch.status(), 200, "batch multi reconstruction");
     let body: serde_json::Value = batch.json().await.unwrap();
-    assert!(body["files"].is_object(), "batch response should have files map");
-    assert_eq!(body["files"].as_object().unwrap().len(), 2, "batch should return both files");
+    assert!(
+        body["files"].is_object(),
+        "batch response should have files map"
+    );
+    assert_eq!(
+        body["files"].as_object().unwrap().len(),
+        2,
+        "batch should return both files"
+    );
 
     server.abort();
 }
@@ -2949,10 +3429,13 @@ async fn xet_batch_reconstruction_duplicate_file_id() {
     let client = Client::new();
 
     let hash = upload_xorb(&client, &base_url, &token, b"batch dedup recon").await;
-    let file_hash = upload_shard(&client, &base_url, &token, &[(b"batch dedup recon", &hash)]).await;
+    let file_hash =
+        upload_shard(&client, &base_url, &token, &[(b"batch dedup recon", &hash)]).await;
 
     let batch = client
-        .get(format!("{base_url}/v1/reconstructions?file_id={file_hash}&file_id={file_hash}"))
+        .get(format!(
+            "{base_url}/v1/reconstructions?file_id={file_hash}&file_id={file_hash}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -2973,7 +3456,13 @@ async fn xet_shard_single_chunk() {
     let client = Client::new();
 
     let hash = upload_xorb(&client, &base_url, &token, b"single chunk shard").await;
-    let file_hash = upload_shard(&client, &base_url, &token, &[(b"single chunk shard", &hash)]).await;
+    let file_hash = upload_shard(
+        &client,
+        &base_url,
+        &token,
+        &[(b"single chunk shard", &hash)],
+    )
+    .await;
     assert_eq!(file_hash.len(), 64, "file hash should be 64 hex chars");
 
     let recon = client
@@ -2984,7 +3473,11 @@ async fn xet_shard_single_chunk() {
         .unwrap();
     assert_eq!(recon.status(), 200, "single chunk reconstruction");
     let body: serde_json::Value = recon.json().await.unwrap();
-    assert_eq!(body["terms"].as_array().map(|a| a.len()), Some(1), "single chunk should have 1 term");
+    assert_eq!(
+        body["terms"].as_array().map(|a| a.len()),
+        Some(1),
+        "single chunk should have 1 term"
+    );
 
     server.abort();
 }
@@ -2997,7 +3490,16 @@ async fn xet_shard_multiple_chunks() {
 
     let hash_a = upload_xorb(&client, &base_url, &token, b"multi chunk A").await;
     let hash_b = upload_xorb(&client, &base_url, &token, b"multi chunk B").await;
-    let file_hash = upload_shard(&client, &base_url, &token, &[(b"multi chunk content A", &hash_a), (b"multi chunk content B", &hash_b)]).await;
+    let file_hash = upload_shard(
+        &client,
+        &base_url,
+        &token,
+        &[
+            (b"multi chunk content A", &hash_a),
+            (b"multi chunk content B", &hash_b),
+        ],
+    )
+    .await;
     assert_eq!(file_hash.len(), 64, "file hash should be 64 hex chars");
 
     let recon = client
@@ -3008,7 +3510,11 @@ async fn xet_shard_multiple_chunks() {
         .unwrap();
     assert_eq!(recon.status(), 200, "multi chunk reconstruction");
     let body: serde_json::Value = recon.json().await.unwrap();
-    assert_eq!(body["terms"].as_array().map(|a| a.len()), Some(2), "two chunks should have 2 terms");
+    assert_eq!(
+        body["terms"].as_array().map(|a| a.len()),
+        Some(2),
+        "two chunks should have 2 terms"
+    );
 
     server.abort();
 }
@@ -3038,9 +3544,17 @@ async fn xet_shard_upload_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(recon.status(), 200, "reconstruction after shard upload should succeed");
+    assert_eq!(
+        recon.status(),
+        200,
+        "reconstruction after shard upload should succeed"
+    );
     let body: serde_json::Value = recon.json().await.unwrap();
-    assert_eq!(body["terms"].as_array().map(|a| a.len()), Some(1), "single-chunk shard should have 1 term");
+    assert_eq!(
+        body["terms"].as_array().map(|a| a.len()),
+        Some(1),
+        "single-chunk shard should have 1 term"
+    );
 
     server.abort();
 }
@@ -3074,7 +3588,11 @@ async fn xet_xorb_upload_and_head() {
         .send()
         .await
         .unwrap();
-    assert_eq!(head.status(), 200, "HEAD on existing xorb should return 200");
+    assert_eq!(
+        head.status(),
+        200,
+        "HEAD on existing xorb should return 200"
+    );
     let content_length = head
         .headers()
         .get("content-length")
@@ -3116,13 +3634,24 @@ async fn xet_xorb_upload_download_roundtrip() {
     let resp = client
         .get(format!("{base_url}/transfer/xorb/default/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .header("Range", format!("bytes=0-{total_minus_1}", total_minus_1 = total - 1))
+        .header(
+            "Range",
+            format!("bytes=0-{total_minus_1}", total_minus_1 = total - 1),
+        )
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 206, "xorb transfer download should return 206 Partial Content");
+    assert_eq!(
+        resp.status(),
+        206,
+        "xorb transfer download should return 206 Partial Content"
+    );
     let body = resp.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), xorb_bytes.as_ref(), "xorb transfer roundtrip bytes mismatch");
+    assert_eq!(
+        body.as_ref(),
+        xorb_bytes.as_ref(),
+        "xorb transfer roundtrip bytes mismatch"
+    );
 
     server.abort();
 }
@@ -3147,20 +3676,29 @@ async fn xet_reconstruction_single_file() {
     let body: serde_json::Value = recon.json().await.unwrap();
 
     // Verify terms array is present and non-empty
-    let terms = body["terms"].as_array().expect("reconstruction response must have terms array");
+    let terms = body["terms"]
+        .as_array()
+        .expect("reconstruction response must have terms array");
     assert!(!terms.is_empty(), "terms must not be empty");
 
     // Verify each term contains expected fields (hash, chunk info)
     let term = &terms[0];
     assert!(term.get("hash").is_some(), "term must include hash");
-    assert!(term.get("unpacked_length").is_some(), "term must include unpacked_length");
+    assert!(
+        term.get("unpacked_length").is_some(),
+        "term must include unpacked_length"
+    );
 
     // Verify fetch_info is present and maps xorb hashes to transfer URLs
-    let fetch_info = body["fetch_info"].as_object().expect("reconstruction response must have fetch_info object");
+    let fetch_info = body["fetch_info"]
+        .as_object()
+        .expect("reconstruction response must have fetch_info object");
     assert!(!fetch_info.is_empty(), "fetch_info must not be empty");
     // fetch_info values should be arrays of fetch entries with url fields
     let (_xorb_key, entries_val) = fetch_info.iter().next().unwrap();
-    let entries = entries_val.as_array().expect("fetch_info values must be arrays");
+    let entries = entries_val
+        .as_array()
+        .expect("fetch_info values must be arrays");
     assert!(!entries.is_empty(), "fetch_info entries must not be empty");
 
     server.abort();
@@ -3188,7 +3726,10 @@ async fn lfs_batch_upload_operation() {
     let body: serde_json::Value = batch.json().await.unwrap();
     let objects = body["objects"].as_array().unwrap();
     assert_eq!(objects.len(), 1, "upload batch should return 1 object");
-    assert!(objects[0]["actions"].is_object(), "upload batch should include actions");
+    assert!(
+        objects[0]["actions"].is_object(),
+        "upload batch should include actions"
+    );
 
     server.abort();
 }
@@ -3214,7 +3755,11 @@ async fn lfs_batch_oversized_body_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(batch.status(), 422, "oversized batch body should be rejected");
+    assert_eq!(
+        batch.status(),
+        422,
+        "oversized batch body should be rejected"
+    );
 
     server.abort();
 }
@@ -3226,7 +3771,10 @@ async fn xet_batch_reconstruction_many_file_ids() {
     let client = Client::new();
 
     // Use 100 file IDs (within practical limits)
-    let file_ids: String = (0..100).map(|i| format!("{:064x}", i)).collect::<Vec<_>>().join("&file_id=");
+    let file_ids: String = (0..100)
+        .map(|i| format!("{:064x}", i))
+        .collect::<Vec<_>>()
+        .join("&file_id=");
     let batch = client
         .get(format!("{base_url}/v1/reconstructions?file_id={file_ids}"))
         .header("Authorization", format!("Bearer {token}"))
@@ -3248,7 +3796,9 @@ async fn oci_push_blob_empty_body() {
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"")));
 
     let post = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(vec![])
         .send()
@@ -3277,10 +3827,15 @@ async fn oci_push_blob_digest_mismatch_rejected() {
     let repo = "test-owner/test-repo";
 
     let content = b"some content";
-    let wrong_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"different content")));
+    let wrong_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(b"different content"))
+    );
 
     let post = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={wrong_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={wrong_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
         .send()
@@ -3351,7 +3906,11 @@ async fn oci_manifest_referenced_blob_missing_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 400, "manifest referencing missing blob should be rejected");
+    assert_eq!(
+        put.status(),
+        400,
+        "manifest referencing missing blob should be rejected"
+    );
 
     server.abort();
 }
@@ -3374,9 +3933,17 @@ async fn oci_blob_push_and_delete() {
         .await
         .unwrap();
     assert_eq!(post.status(), 202);
-    let location = post.headers().get("location")
+    let location = post
+        .headers()
+        .get("location")
         .and_then(|v| v.to_str().ok())
-        .map(|s| if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") })
+        .map(|s| {
+            if s.starts_with("http") {
+                s.to_owned()
+            } else {
+                format!("{base_url}{s}")
+            }
+        })
         .unwrap();
 
     let put = client
@@ -3411,7 +3978,9 @@ async fn oci_manifest_list_tags_pagination() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -3446,7 +4015,11 @@ async fn oci_manifest_list_tags_pagination() {
     assert_eq!(tags.status(), 200);
     let body: serde_json::Value = tags.json().await.unwrap();
     let names = body["tags"].as_array().unwrap();
-    assert_eq!(names.len(), 2, "pagination n=2 should return exactly 2 results, got {names:?}");
+    assert_eq!(
+        names.len(),
+        2,
+        "pagination n=2 should return exactly 2 results, got {names:?}"
+    );
     assert_eq!(body["name"].as_str(), Some("test-owner/test-repo"));
 
     server.abort();
@@ -3462,7 +4035,9 @@ async fn oci_manifest_push_with_annotations() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -3480,7 +4055,10 @@ async fn oci_manifest_push_with_annotations() {
         },
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -3500,8 +4078,14 @@ async fn oci_manifest_push_with_annotations() {
     assert_eq!(get.status(), 200);
     let body: serde_json::Value = get.json().await.unwrap();
     let annotations = body["annotations"].as_object().unwrap();
-    assert_eq!(annotations["org.opencontainers.image.description"].as_str(), Some("a test image"));
-    assert_eq!(annotations["org.opencontainers.image.version"].as_str(), Some("1.0.0"));
+    assert_eq!(
+        annotations["org.opencontainers.image.description"].as_str(),
+        Some("a test image")
+    );
+    assert_eq!(
+        annotations["org.opencontainers.image.version"].as_str(),
+        Some("1.0.0")
+    );
 
     server.abort();
 }
@@ -3517,7 +4101,9 @@ async fn oci_manifest_corrupt_digest_rejected() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -3531,8 +4117,14 @@ async fn oci_manifest_corrupt_digest_rejected() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let real_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
-    let wrong_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"different data")));
+    let real_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
+    let wrong_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(b"different data"))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{real_digest}"))
@@ -3558,7 +4150,11 @@ async fn oci_manifest_corrupt_digest_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get_correct.status(), 200, "correct digest should still work");
+    assert_eq!(
+        get_correct.status(),
+        200,
+        "correct digest should still work"
+    );
 
     server.abort();
 }
@@ -3670,7 +4266,9 @@ async fn oci_delete_blob_referenced_rejected() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -3685,7 +4283,10 @@ async fn oci_delete_blob_referenced_rejected() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -3704,7 +4305,12 @@ async fn oci_delete_blob_referenced_rejected() {
         .await
         .unwrap();
     // OCI spec: deleting a referenced blob MUST be rejected (400)
-    assert_eq!(del.status(), 400, "deleting referenced blob should be rejected, got {}", del.status());
+    assert_eq!(
+        del.status(),
+        400,
+        "deleting referenced blob should be rejected, got {}",
+        del.status()
+    );
 
     // Verify blob still exists
     let get = client
@@ -3735,9 +4341,17 @@ async fn oci_delete_blob_unreferenced_succeeds() {
         .send()
         .await
         .unwrap();
-    let location = post.headers().get("location")
+    let location = post
+        .headers()
+        .get("location")
         .and_then(|v| v.to_str().ok())
-        .map(|s| if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") })
+        .map(|s| {
+            if s.starts_with("http") {
+                s.to_owned()
+            } else {
+                format!("{base_url}{s}")
+            }
+        })
         .unwrap();
 
     client
@@ -3756,7 +4370,11 @@ async fn oci_delete_blob_unreferenced_succeeds() {
         .send()
         .await
         .unwrap();
-    assert_eq!(del.status(), 202, "deleting unreferenced blob should return 202");
+    assert_eq!(
+        del.status(),
+        202,
+        "deleting unreferenced blob should return 202"
+    );
 
     let get = client
         .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
@@ -3764,7 +4382,11 @@ async fn oci_delete_blob_unreferenced_succeeds() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 404, "deleted unreferenced blob should be gone");
+    assert_eq!(
+        get.status(),
+        404,
+        "deleted unreferenced blob should be gone"
+    );
 
     server.abort();
 }
@@ -3781,7 +4403,9 @@ async fn oci_cross_repo_blob_mount_same_token() {
 
     // Push blob
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
         .send()
@@ -3790,7 +4414,9 @@ async fn oci_cross_repo_blob_mount_same_token() {
 
     // Mount to same repo (self-reference, should work)
     let mount = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -3844,7 +4470,11 @@ async fn oci_manifest_invalid_json_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 400, "invalid JSON manifest should be rejected");
+    assert_eq!(
+        put.status(),
+        400,
+        "invalid JSON manifest should be rejected"
+    );
 
     server.abort();
 }
@@ -3906,7 +4536,11 @@ async fn dedup_delete_and_reupload_content() {
         .await
         .unwrap();
     assert_eq!(get_again.status(), 200, "re-uploaded object accessible");
-    assert_eq!(get_again.bytes().await.unwrap().as_ref(), content, "content intact after delete+reupload");
+    assert_eq!(
+        get_again.bytes().await.unwrap().as_ref(),
+        content,
+        "content intact after delete+reupload"
+    );
 
     server.abort();
 }
@@ -3924,7 +4558,11 @@ async fn dedup_delete_non_existent_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(del.status(), 404, "deleting non-existent object should return 404");
+    assert_eq!(
+        del.status(),
+        404,
+        "deleting non-existent object should return 404"
+    );
 
     server.abort();
 }
@@ -3947,15 +4585,35 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
     };
 
     let before = get_stats().await;
-    let before_chunks = before["chunks"].as_u64().expect("chunks field missing in stats");
-    let before_files = before["files"].as_u64().expect("files field missing in stats");
+    let before_chunks = before["chunks"]
+        .as_u64()
+        .expect("chunks field missing in stats");
+    let before_files = before["files"]
+        .as_u64()
+        .expect("files field missing in stats");
 
-    // Upload two files with the same content
+    // Upload one object, then repeat the exact same content-addressed upload.
     let content = b"dedup storage accounting content";
     let oid = hex::encode(sha2::Sha256::digest(content));
 
-    for _ in 0..3 {
-        client
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let after_first = get_stats().await;
+    let first_chunks = after_first["chunks"]
+        .as_u64()
+        .expect("chunks field missing in stats");
+    let first_files = after_first["files"]
+        .as_u64()
+        .expect("files field missing in stats");
+
+    for _ in 0..2 {
+        let response = client
             .put(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/octet-stream")
@@ -3963,16 +4621,33 @@ async fn dedup_storage_accounting_after_duplicate_uploads() {
             .send()
             .await
             .unwrap();
+        assert_eq!(response.status(), 200);
     }
 
     let after = get_stats().await;
-    let after_chunks = after["chunks"].as_u64().expect("chunks field missing in stats");
-    let after_files = after["files"].as_u64().expect("files field missing in stats");
+    let after_chunks = after["chunks"]
+        .as_u64()
+        .expect("chunks field missing in stats");
+    let after_files = after["files"]
+        .as_u64()
+        .expect("files field missing in stats");
 
-    // Dedup: uploading the same content 3 times should NOT increase chunk count
-    // The first upload creates chunks, subsequent uploads reuse them
-    assert_eq!(after_chunks, before_chunks, "dedup failed: chunks increased from {before_chunks} to {after_chunks}");
-    assert_eq!(after_files, before_files, "LFS uploads should not create index file records");
+    assert!(
+        first_chunks > before_chunks,
+        "first upload should create chunks"
+    );
+    assert!(
+        first_files > before_files,
+        "first upload should create a public object record"
+    );
+    assert_eq!(
+        after_chunks, first_chunks,
+        "duplicate uploads created additional chunks"
+    );
+    assert_eq!(
+        after_files, first_files,
+        "duplicate uploads created additional file records"
+    );
 
     server.abort();
 }
@@ -4000,7 +4675,9 @@ async fn dedup_identical_content_different_frontends() {
 
     // Upload same content via OCI
     let oci_upload = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
         .send()
@@ -4047,7 +4724,11 @@ async fn dedup_three_files_sharing_chunks_delete_middle() {
     let oid_c = hex::encode(sha2::Sha256::digest(file_c));
 
     // Upload all 3
-    for (oid, content) in [(&oid_a, file_a.as_slice()), (&oid_b, file_b.as_slice()), (&oid_c, file_c.as_slice())] {
+    for (oid, content) in [
+        (&oid_a, file_a.as_slice()),
+        (&oid_b, file_b.as_slice()),
+        (&oid_c, file_c.as_slice()),
+    ] {
         let resp = client
             .put(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Authorization", format!("Bearer {token}"))
@@ -4149,7 +4830,10 @@ async fn dedup_ten_files_sharing_chunks_delete_nine() {
         .await
         .unwrap();
     assert_eq!(get_last.status(), 200, "last file should still exist");
-    assert_eq!(get_last.bytes().await.unwrap().as_ref(), contents[9].as_slice());
+    assert_eq!(
+        get_last.bytes().await.unwrap().as_ref(),
+        contents[9].as_slice()
+    );
 
     // Verify first file is gone
     let get_first = client
@@ -4158,7 +4842,11 @@ async fn dedup_ten_files_sharing_chunks_delete_nine() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get_first.status(), 404, "first file should be gone after delete");
+    assert_eq!(
+        get_first.status(),
+        404,
+        "first file should be gone after delete"
+    );
 
     server.abort();
 }
@@ -4169,11 +4857,16 @@ async fn xet_shard_empty_accepted() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    use shardline_xet_core::metadata_shard::{shard_format::MDBShardInfo, shard_in_memory::MDBInMemoryShard};
+    use shardline_xet_core::metadata_shard::{
+        shard_format::MDBShardInfo, shard_in_memory::MDBInMemoryShard,
+    };
     let shard = MDBInMemoryShard::default();
     let mut empty_bytes = Vec::new();
     let serialized = MDBShardInfo::serialize_from(&mut empty_bytes, &shard, None);
-    assert!(serialized.is_ok(), "empty shard serialization should succeed");
+    assert!(
+        serialized.is_ok(),
+        "empty shard serialization should succeed"
+    );
 
     let resp = client
         .post(format!("{base_url}/v1/shards"))
@@ -4183,7 +4876,11 @@ async fn xet_shard_empty_accepted() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "empty shard upload: expected 2xx, got {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "empty shard upload: expected 2xx, got {}",
+        resp.status()
+    );
 
     server.abort();
 }
@@ -4192,7 +4889,9 @@ async fn xet_shard_empty_accepted() {
 async fn oci_push_blob_exceeds_max_body() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |config| {
         Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let repo = "test-owner/test-repo";
@@ -4200,13 +4899,21 @@ async fn oci_push_blob_exceeds_max_body() {
     let large_content = vec![0xABu8; 200];
 
     let post = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest=sha256:{}", hex::encode(sha2::Sha256::digest(&large_content))))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest=sha256:{}",
+            hex::encode(sha2::Sha256::digest(&large_content))
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(large_content)
         .send()
         .await
         .unwrap();
-    assert_eq!(post.status(), 413, "oversized blob should get 413, got {}", post.status());
+    assert_eq!(
+        post.status(),
+        413,
+        "oversized blob should get 413, got {}",
+        post.status()
+    );
 
     server.abort();
 }
@@ -4225,7 +4932,10 @@ async fn oci_manifest_missing_required_fields_rejected() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&invalid_manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     let put = client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -4235,7 +4945,11 @@ async fn oci_manifest_missing_required_fields_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 400, "manifest missing config should be rejected");
+    assert_eq!(
+        put.status(),
+        400,
+        "manifest missing config should be rejected"
+    );
 
     server.abort();
 }
@@ -4251,7 +4965,9 @@ async fn oci_push_image_index() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -4312,7 +5028,10 @@ async fn oci_push_image_index() {
         .unwrap();
     assert_eq!(get.status(), 200, "image index pull");
     let body: serde_json::Value = get.json().await.unwrap();
-    assert_eq!(body["mediaType"].as_str(), Some("application/vnd.oci.image.index.v1+json"));
+    assert_eq!(
+        body["mediaType"].as_str(),
+        Some("application/vnd.oci.image.index.v1+json")
+    );
     let manifests = body["manifests"].as_array().unwrap();
     assert_eq!(manifests.len(), 1, "index should contain 1 manifest ref");
 
@@ -4332,7 +5051,9 @@ async fn oci_cross_repo_blob_mount_not_found() {
 
     // Push blob to repo
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
         .send()
@@ -4341,7 +5062,9 @@ async fn oci_cross_repo_blob_mount_not_found() {
 
     // Mount to same repo (self-reference)
     let mount = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={other_repo}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={other_repo}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -4360,7 +5083,9 @@ async fn oci_registry_token_flow() {
 
     // Get an OCI registry token
     let token_resp = client
-        .get(format!("{base_url}/v2/token?service=shardline&scope=repository:{repo}:pull"))
+        .get(format!(
+            "{base_url}/v2/token?service=shardline&scope=repository:{repo}:pull"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -4368,7 +5093,9 @@ async fn oci_registry_token_flow() {
     assert_eq!(token_resp.status(), 200, "OCI token exchange");
 
     let token_body: serde_json::Value = token_resp.json().await.unwrap();
-    let oci_token = token_body["token"].as_str().expect("OCI token should be in response");
+    let oci_token = token_body["token"]
+        .as_str()
+        .expect("OCI token should be in response");
 
     // Use the OCI token to pull a manifest (should fail since nothing exists, but auth passes)
     let pull = client
@@ -4378,7 +5105,11 @@ async fn oci_registry_token_flow() {
         .await
         .unwrap();
     // 404 means auth succeeded but manifest doesn't exist (correct)
-    assert_eq!(pull.status(), 404, "OCI token auth should succeed (404 expected)");
+    assert_eq!(
+        pull.status(),
+        404,
+        "OCI token auth should succeed (404 expected)"
+    );
 
     server.abort();
 }
@@ -4428,7 +5159,9 @@ async fn oci_head_manifest_by_tag_returns_digest() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -4442,7 +5175,10 @@ async fn oci_head_manifest_by_tag_returns_digest() {
         "layers": [],
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -4460,9 +5196,15 @@ async fn oci_head_manifest_by_tag_returns_digest() {
         .await
         .unwrap();
     assert_eq!(head.status(), 200);
-    let dd = head.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    let dd = head
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(dd, Some(manifest_digest.as_str()));
-    let ct = head.headers().get("content-type").and_then(|v| v.to_str().ok());
+    let ct = head
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(ct, Some("application/vnd.oci.image.manifest.v1+json"));
 
     server.abort();
@@ -4493,7 +5235,9 @@ async fn bazel_put_ac_invalid_hash_rejected() {
     let client = Client::new();
 
     let put = client
-        .put(format!("{base_url}/v1/bazel/cache/ac/not-a-valid-hex-hash!"))
+        .put(format!(
+            "{base_url}/v1/bazel/cache/ac/not-a-valid-hex-hash!"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(b"content".to_vec())
         .send()
@@ -4535,7 +5279,12 @@ async fn oci_anonymous_pull_allowed() {
         .await
         .unwrap();
     // Anonymous access: server requires auth, returns 401
-    assert_eq!(resp.status(), 401, "anonymous pull should return 401, got {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        401,
+        "anonymous pull should return 401, got {}",
+        resp.status()
+    );
 
     server.abort();
 }
@@ -4550,7 +5299,9 @@ async fn oci_docker_schema2_manifest() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -4569,7 +5320,10 @@ async fn oci_docker_schema2_manifest() {
     let put = client
         .put(format!("{base_url}/v2/{repo}/manifests/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+        .header(
+            "Content-Type",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        )
         .body(bytes)
         .send()
         .await
@@ -4591,7 +5345,9 @@ async fn oci_docker_schema2_manifest() {
 async fn bazel_put_oversized_body_rejected() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::BazelHttp], |config| {
         Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
@@ -4626,7 +5382,11 @@ async fn bazel_put_same_entry_idempotent() {
         .send()
         .await
         .unwrap();
-    assert!(put1.status().is_success(), "first AC put should succeed, got {}", put1.status());
+    assert!(
+        put1.status().is_success(),
+        "first AC put should succeed, got {}",
+        put1.status()
+    );
 
     let put2 = client
         .put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
@@ -4635,7 +5395,11 @@ async fn bazel_put_same_entry_idempotent() {
         .send()
         .await
         .unwrap();
-    assert!(put2.status().is_success(), "second AC put (same key) should also succeed, got {}", put2.status());
+    assert!(
+        put2.status().is_success(),
+        "second AC put (same key) should also succeed, got {}",
+        put2.status()
+    );
 
     server.abort();
 }
@@ -4674,7 +5438,10 @@ async fn bazel_head_cas_cache_entry() {
         .await
         .unwrap();
     assert_eq!(head_exists.status(), 200, "HEAD on existing CAS entry");
-    assert!(head_exists.headers().get("content-length").is_some(), "HEAD should return content-length");
+    assert!(
+        head_exists.headers().get("content-length").is_some(),
+        "HEAD should return content-length"
+    );
 
     server.abort();
 }
@@ -4733,7 +5500,11 @@ async fn lfs_delete_non_existent_object() {
         .send()
         .await
         .unwrap();
-    assert_eq!(del.status(), 404, "LFS delete on non-existent object should return 404");
+    assert_eq!(
+        del.status(),
+        404,
+        "LFS delete on non-existent object should return 404"
+    );
 
     server.abort();
 }
@@ -4748,7 +5519,9 @@ async fn oci_head_manifest_by_digest_returns_content_type() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -4781,7 +5554,9 @@ async fn oci_head_manifest_by_digest_returns_content_type() {
         .unwrap();
     assert_eq!(head.status(), 200, "HEAD on existing manifest by digest");
     assert_eq!(
-        head.headers().get("content-type").and_then(|v| v.to_str().ok()),
+        head.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
         Some("application/vnd.oci.image.manifest.v1+json"),
     );
 
@@ -4802,7 +5577,11 @@ async fn oci_blob_delete_non_existent() {
         .send()
         .await
         .unwrap();
-    assert_eq!(del.status(), 404, "DELETE non-existent blob should return 404");
+    assert_eq!(
+        del.status(),
+        404,
+        "DELETE non-existent blob should return 404"
+    );
 
     server.abort();
 }
@@ -4811,7 +5590,9 @@ async fn oci_blob_delete_non_existent() {
 async fn lfs_objects_survive_gc_when_referenced() {
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let config = ServerConfig::new(
@@ -4820,15 +5601,19 @@ async fn lfs_objects_survive_gc_when_referenced() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap(),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap()
     .with_provider_runtime(
         config_path,
         b"test-api-key".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
-    ).unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    )
+    .unwrap();
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     wait_for_health(&base_url, &client).await;
 
@@ -4861,14 +5646,18 @@ async fn lfs_objects_survive_gc_when_referenced() {
             storage.path().to_path_buf(),
             NonZeroUsize::new(4).unwrap(),
         )
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap(),
+        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+        .unwrap()
+        .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+        .unwrap(),
         gc_options,
     )
     .await
     .unwrap();
 
-    let listener2 = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener2 = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr2 = listener2.local_addr().unwrap();
     let base_url2 = format!("http://{addr2}");
     let config2 = ServerConfig::new(
@@ -4877,15 +5666,19 @@ async fn lfs_objects_survive_gc_when_referenced() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap(),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap()
     .with_provider_runtime(
         write_provider_config(storage.path()).unwrap(),
         b"test-api-key".to_vec(),
         "test-issuer".to_owned(),
         NonZeroU64::new(3600).unwrap(),
-    ).unwrap();
-    let server2 = tokio::spawn(async { shardline_server::serve_with_listener(config2, listener2).await });
+    )
+    .unwrap();
+    let server2 =
+        tokio::spawn(async { shardline_server::serve_with_listener(config2, listener2).await });
     wait_for_health(&base_url2, &client).await;
 
     let get = client
@@ -4894,7 +5687,11 @@ async fn lfs_objects_survive_gc_when_referenced() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 200, "LFS object should survive GC when referenced");
+    assert_eq!(
+        get.status(),
+        200,
+        "LFS object should survive GC when referenced"
+    );
 
     server2.abort();
 }
@@ -4982,7 +5779,11 @@ async fn oci_upload_max_active_sessions_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(second.status(), 429, "second session should be rejected with 429");
+    assert_eq!(
+        second.status(),
+        429,
+        "second session should be rejected with 429"
+    );
 
     server.abort();
 }
@@ -4997,13 +5798,27 @@ async fn hub_dataset_and_model_operations() {
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
         .send().await.unwrap();
-    assert_eq!(create_dataset.status(), 201, "dataset repo creation: {}", create_dataset.text().await.unwrap());
+    assert_eq!(
+        create_dataset.status(),
+        201,
+        "dataset repo creation: {}",
+        create_dataset.text().await.unwrap()
+    );
 
     let parquet = client
-        .get(format!("{base_url}/api/datasets/test-owner/test-dataset/parquet"))
+        .get(format!(
+            "{base_url}/api/datasets/test-owner/test-dataset/parquet"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(parquet.status(), 200, "parquet on empty repo: {}", parquet.status());
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        parquet.status(),
+        200,
+        "parquet on empty repo: {}",
+        parquet.status()
+    );
 
     let create_model = client
         .post(format!("{base_url}/api/repos/create"))
@@ -5013,16 +5828,30 @@ async fn hub_dataset_and_model_operations() {
     assert_eq!(create_model.status(), 201, "model repo creation");
 
     let modelcard = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/modelcard"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(modelcard.status(), 404, "modelcard on empty repo: {}", modelcard.status());
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        modelcard.status(),
+        404,
+        "modelcard on empty repo: {}",
+        modelcard.status()
+    );
 
     for url in [
         format!("{base_url}/datasets/test-owner/test-dataset/resolve/main/nonexistent.parquet"),
         format!("{base_url}/models/test-owner/test-model/resolve/main/model.bin"),
     ] {
-        let resp = client.get(&url).header("Authorization", format!("Bearer {token}")).send().await.unwrap();
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 404, "non-existent resolve: {url}");
     }
 
@@ -5039,8 +5868,15 @@ async fn hub_dataset_and_model_operations() {
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(lfs_body.to_vec())
-        .send().await.unwrap();
-    assert_eq!(lfs_upload.status(), 200, "lfs object upload: {}", lfs_upload.status());
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        lfs_upload.status(),
+        200,
+        "lfs object upload: {}",
+        lfs_upload.status()
+    );
 
     // Duplicate repository creation is a client conflict, not a server error.
     let dup_repo = client
@@ -5048,7 +5884,11 @@ async fn hub_dataset_and_model_operations() {
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"name": "test-owner/test-dataset", "type": "dataset", "private": false}))
         .send().await.unwrap();
-    assert_eq!(dup_repo.status(), 409, "duplicate repo creation should return 409");
+    assert_eq!(
+        dup_repo.status(),
+        409,
+        "duplicate repo creation should return 409"
+    );
 
     server.abort();
 }
@@ -5063,29 +5903,60 @@ fn create_hub_db(storage: &std::path::Path) {
     let _conn = rusqlite::Connection::open(hub_root.join("metadata.sqlite3")).unwrap();
 }
 
-async fn start_hub_server() -> (String, String, tempfile::TempDir, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>) {
+async fn start_hub_server() -> (
+    String,
+    String,
+    tempfile::TempDir,
+    tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>,
+) {
     for attempt in 0..5 {
         match try_start_hub_server().await {
             Ok(result) => return result,
-            Err(_) if attempt < 4 => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+            Err(_) if attempt < 4 => {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await
+            }
             Err(e) => panic!("failed to start hub server: {e}"),
         }
     }
     panic!("failed to start hub server after 5 attempts")
 }
 
-async fn try_start_hub_server() -> Result<(String, String, tempfile::TempDir, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>> {
+async fn try_start_hub_server() -> Result<
+    (
+        String,
+        String,
+        tempfile::TempDir,
+        tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
     create_hub_db(storage.path());
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Hub].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Hub].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     wait_for_health(&base_url, &client).await;
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -5096,9 +5967,17 @@ async fn try_start_hub_server() -> Result<(String, String, tempfile::TempDir, to
 async fn metrics_prometheus_format() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/metrics")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).expect("content-type header missing");
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .expect("content-type header missing");
     assert!(ct.starts_with("text/plain"));
     let body = resp.text().await.unwrap();
     assert!(body.contains("# HELP"));
@@ -5111,7 +5990,14 @@ async fn metrics_prometheus_format() {
 async fn metrics_gauge_and_histogram() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let body = client.get(format!("{base_url}/metrics")).send().await.unwrap().text().await.unwrap();
+    let body = client
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
 
     assert!(body.contains("shardline_up 1"));
     assert!(body.contains("shardline_auth_enabled"));
@@ -5128,20 +6014,32 @@ async fn metrics_gauge_and_histogram() {
 async fn metrics_auth_required() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
         Ok(config.with_metrics_token(b"secret-metrics-token".to_vec())?)
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let client = Client::new();
 
-    let no_auth = client.get(format!("{base_url}/metrics")).send().await.unwrap();
+    let no_auth = client
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(no_auth.status(), 401);
 
-    let wrong = client.get(format!("{base_url}/metrics"))
+    let wrong = client
+        .get(format!("{base_url}/metrics"))
         .header("Authorization", "Bearer wrong-token")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(wrong.status(), 401);
 
-    let ok = client.get(format!("{base_url}/metrics"))
+    let ok = client
+        .get(format!("{base_url}/metrics"))
         .header("Authorization", "Bearer secret-metrics-token")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(ok.status(), 200);
 
     server.abort();
@@ -5152,13 +6050,35 @@ async fn metrics_counter_exists() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
 
-    let body = client.get(format!("{base_url}/metrics")).send().await.unwrap().text().await.unwrap();
+    let body = client
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
 
-    assert!(body.contains("shardline_upload_bytes_total"), "upload counter");
-    assert!(body.contains("shardline_download_bytes_total"), "download counter");
-    assert!(body.contains("shardline_upload_requests_total"), "upload req counter");
-    assert!(body.contains("shardline_download_requests_total"), "download req counter");
-    assert!(body.contains("shardline_range_requests_total"), "range req counter");
+    assert!(
+        body.contains("shardline_upload_bytes_total"),
+        "upload counter"
+    );
+    assert!(
+        body.contains("shardline_download_bytes_total"),
+        "download counter"
+    );
+    assert!(
+        body.contains("shardline_upload_requests_total"),
+        "upload req counter"
+    );
+    assert!(
+        body.contains("shardline_download_requests_total"),
+        "download req counter"
+    );
+    assert!(
+        body.contains("shardline_range_requests_total"),
+        "range req counter"
+    );
 
     server.abort();
 }
@@ -5167,7 +6087,11 @@ async fn metrics_counter_exists() {
 async fn health_check_body_valid_json() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/healthz")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base_url}/healthz"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
@@ -5178,7 +6102,11 @@ async fn health_check_body_valid_json() {
 async fn readyz_returns_success() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base_url}/readyz"))
+        .send()
+        .await
+        .unwrap();
     let status = resp.status();
     let text = resp.text().await.unwrap();
     assert_eq!(status, 200, "readyz: {status} body={text}");
@@ -5195,8 +6123,17 @@ async fn readyz_returns_success() {
 async fn readyz_without_auth() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/readyz")).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "readyz should not require auth: {}", resp.status());
+    let resp = client
+        .get(format!("{base_url}/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "readyz should not require auth: {}",
+        resp.status()
+    );
     server.abort();
 }
 
@@ -5204,11 +6141,23 @@ async fn readyz_without_auth() {
 async fn readyz_metadata_backend_info() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let body: serde_json::Value = client.get(format!("{base_url}/readyz")).send().await.unwrap().json().await.unwrap();
+    let body: serde_json::Value = client
+        .get(format!("{base_url}/readyz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(body["metadata_backend"], "local");
     assert_eq!(body["object_backend"], "local");
     assert_eq!(body["cache_backend"], "memory");
-    assert!(body["server_frontends"].as_array().map_or(false, |a| a.len() >= 4), "all frontends");
+    assert!(
+        body["server_frontends"]
+            .as_array()
+            .map_or(false, |a| a.len() >= 4),
+        "all frontends"
+    );
     server.abort();
 }
 
@@ -5216,16 +6165,30 @@ async fn readyz_metadata_backend_info() {
 async fn verify_expired_token_rejected() {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
-    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, 0).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        0,
+    )
+    .unwrap();
     let token = signer.sign(&claims).unwrap();
 
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid"))
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/test-oid"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401, "expired token should be rejected");
     server.abort();
 }
@@ -5234,7 +6197,11 @@ async fn verify_expired_token_rejected() {
 async fn verify_token_missing_auth_header() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/test-oid"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401, "missing auth header should be 401");
     server.abort();
 }
@@ -5243,9 +6210,12 @@ async fn verify_token_missing_auth_header() {
 async fn verify_token_malformed_bearer() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid"))
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/test-oid"))
         .header("Authorization", "Bearer not-a-valid-token")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401, "malformed token should be 401");
     server.abort();
 }
@@ -5254,96 +6224,160 @@ async fn verify_token_malformed_bearer() {
 async fn verify_token_insufficient_scope() {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
-    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, u64::MAX).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        u64::MAX,
+    )
+    .unwrap();
     let read_token = signer.sign(&claims).unwrap();
 
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
     let content = b"scope test data";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    let resp = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let resp = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {read_token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 403, "read-only token should be forbidden from writing");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "read-only token should be forbidden from writing"
+    );
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_xet() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet], |c| Ok(c))
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let read_token = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+    let read_token = client
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    assert_eq!(read_token.status(), 200, "Xet frontend should serve Xet routes");
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        read_token.status(),
+        200,
+        "Xet frontend should serve Xet routes"
+    );
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 404, "Xet-only should not serve LFS");
-    let oci = client.get(format!("{base_url}/v2/test-owner/test-repo/tags/list"))
+    let oci = client
+        .get(format!("{base_url}/v2/test-owner/test-repo/tags/list"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(oci.status(), 404, "Xet-only should not serve OCI");
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_lfs() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |c| Ok(c))
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 200, "Lfs frontend should serve LFS batch");
-    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+    let xet = client
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(xet.status(), 404, "Lfs-only should not serve Xet");
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_oci() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::Oci], |c| Ok(c))
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v2/"))
+    let resp = client
+        .get(format!("{base_url}/v2/"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "OCI frontend should serve OCI v2 root");
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 404, "Oci-only should not serve LFS");
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_only_bazel() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(None, &[ServerFrontend::BazelHttp], |c| Ok(c))
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let content = b"bazel test";
     let hash = hex::encode(sha2::Sha256::digest(content));
-    let ac = client.put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+    let ac = client
+        .put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
-    assert!(ac.status().is_success(), "Bazel frontend should serve Bazel");
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        ac.status().is_success(),
+        "Bazel frontend should serve Bazel"
+    );
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 404, "Bazel-only should not serve LFS");
     server.abort();
 }
@@ -5352,7 +6386,9 @@ async fn frontend_only_bazel() {
 async fn body_limit_rejected() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
         Ok(config.with_max_request_body_bytes(NonZeroUsize::new(10).unwrap()))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
@@ -5371,16 +6407,26 @@ async fn lfs_upload_then_head() {
     let client = Client::new();
     let content = b"head test content";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
-    let head = client.head(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .send()
+        .await
+        .unwrap();
+    let head = client
+        .head(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(head.status(), 200);
-    let cl = head.headers().get("content-length").and_then(|v| v.to_str().ok()).expect("content-length header missing on LFS HEAD");
+    let cl = head
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .expect("content-length header missing on LFS HEAD");
     assert_eq!(cl, content.len().to_string());
     server.abort();
 }
@@ -5392,21 +6438,33 @@ async fn lfs_upload_overwrite_existing() {
     let client = Client::new();
     let content = b"overwrite me";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    let put1 = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let put1 = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert!(put1.status().is_success());
-    let put2 = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let put2 = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
-    assert!(put2.status().is_success(), "overwrite same OID should succeed");
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        put2.status().is_success(),
+        "overwrite same OID should succeed"
+    );
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200);
     assert_eq!(get.text().await.unwrap(), String::from_utf8_lossy(content));
     server.abort();
@@ -5419,15 +6477,21 @@ async fn lfs_download_with_accept_header() {
     let client = Client::new();
     let content = b"accept header test";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/octet-stream")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), String::from_utf8_lossy(content));
     server.abort();
@@ -5438,12 +6502,19 @@ async fn lfs_batch_minimal_request() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let resp = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.git-lfs+json")
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200, "batch with only operation and transfers should work");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "batch with only operation and transfers should work"
+    );
     server.abort();
 }
 
@@ -5455,10 +6526,15 @@ async fn oci_push_blob_very_small() {
     let repo = "test-owner/test-repo";
     let content = b"a";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    let resp = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    let resp = client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 201, "single byte blob should be accepted");
     server.abort();
 }
@@ -5471,27 +6547,41 @@ async fn oci_manifest_push_by_tag_and_digest() {
     let repo = "test-owner/test-repo";
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     let manifest = serde_json::json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config.len()}, "layers": []});
     let bytes = serde_json::to_vec(&manifest).unwrap();
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
-    let put = client.put(format!("{base_url}/v2/{repo}/manifests/latest"))
+    let put = client
+        .put(format!("{base_url}/v2/{repo}/manifests/latest"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
         .body(bytes.clone())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(put.status(), 201, "push by tag");
-    let get_tag = client.get(format!("{base_url}/v2/{repo}/manifests/latest"))
+    let get_tag = client
+        .get(format!("{base_url}/v2/{repo}/manifests/latest"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get_tag.status(), 200, "pull by tag");
-    let get_digest = client.get(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+    let get_digest = client
+        .get(format!("{base_url}/v2/{repo}/manifests/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get_digest.status(), 200, "pull by digest after tag push");
     server.abort();
 }
@@ -5504,27 +6594,60 @@ async fn oci_tag_list_empty_after_delete() {
     let repo = "test-owner/test-repo";
     let config = br#"{"arch":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config.to_vec()).send().await.unwrap();
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
     let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
     let bytes = serde_json::to_vec(&manifest).unwrap();
-    client.put(format!("{base_url}/v2/{repo}/manifests/mytag"))
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/mytag"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(bytes.clone()).send().await.unwrap();
-    let list = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+        .body(bytes.clone())
+        .send()
+        .await
+        .unwrap();
+    let list = client
+        .get(format!("{base_url}/v2/{repo}/tags/list"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
-    assert_eq!(list["tags"].as_array().map_or(0, |a| a.len()), 1, "tag present");
-    client.delete(format!("{base_url}/v2/{repo}/manifests/mytag"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        list["tags"].as_array().map_or(0, |a| a.len()),
+        1,
+        "tag present"
+    );
+    client
+        .delete(format!("{base_url}/v2/{repo}/manifests/mytag"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    let list2 = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+        .send()
+        .await
+        .unwrap();
+    let list2 = client
+        .get(format!("{base_url}/v2/{repo}/tags/list"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
-    assert_eq!(list2["tags"].as_array().map_or(0, |a| a.len()), 0, "empty after delete");
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        list2["tags"].as_array().map_or(0, |a| a.len()),
+        0,
+        "empty after delete"
+    );
     server.abort();
 }
 
@@ -5534,23 +6657,40 @@ async fn oci_blob_upload_cancel() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let repo = "test-owner/test-repo";
-    let create = client.post(format!("{base_url}/v2/{repo}/blobs/uploads"))
+    let create = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(create.status(), 202);
-    let location = create.headers().get("location").and_then(|v| v.to_str().ok()).unwrap().to_owned();
-    let patch = client.patch(format!("{base_url}{location}"))
+    let location = create
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_owned();
+    let patch = client
+        .patch(format!("{base_url}{location}"))
         .header("Authorization", format!("Bearer {token}"))
         .body(b"some data".to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(patch.status(), 202);
-    let del = client.delete(format!("{base_url}{location}"))
+    let del = client
+        .delete(format!("{base_url}{location}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(del.status(), 204, "cancel upload");
-    let get = client.get(format!("{base_url}{location}"))
+    let get = client
+        .get(format!("{base_url}{location}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 404, "cancelled upload not found");
     server.abort();
 }
@@ -5572,14 +6712,28 @@ async fn oci_head_on_existing_blob() {
     let repo = "test-owner/test-repo";
     let content = b"head blob test";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let head = client.head(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let head = client
+        .head(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(head.status(), 200);
-    assert_eq!(head.headers().get("content-type").and_then(|v| v.to_str().ok()), Some("application/octet-stream"));
+    assert_eq!(
+        head.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
     assert!(head.headers().get("content-length").is_some());
     assert!(head.headers().get("docker-content-digest").is_some());
     server.abort();
@@ -5591,9 +6745,12 @@ async fn bazel_ac_cache_not_found() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    let get = client.get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+    let get = client
+        .get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 404);
     server.abort();
 }
@@ -5604,9 +6761,12 @@ async fn bazel_cas_cache_not_found() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    let get = client.get(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
+    let get = client
+        .get(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 404);
     server.abort();
 }
@@ -5618,12 +6778,19 @@ async fn bazel_put_and_get_large_entry() {
     let client = Client::new();
     let content = vec![0xABu8; 100_000];
     let hash = hex::encode(sha2::Sha256::digest(&content));
-    client.put(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
+    client
+        .put(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.clone()).send().await.unwrap();
-    let get = client.get(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
+        .body(content.clone())
+        .send()
+        .await
+        .unwrap();
+    let get = client
+        .get(format!("{base_url}/v1/bazel/cache/cas/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200);
     let body = get.bytes().await.unwrap();
     assert_eq!(body.len(), 100_000);
@@ -5648,10 +6815,13 @@ async fn xet_shard_upload_invalid_format() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.post(format!("{base_url}/v1/shards"))
+    let resp = client
+        .post(format!("{base_url}/v1/shards"))
         .header("Authorization", format!("Bearer {token}"))
         .body(b"not a valid shard".to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 400, "invalid shard format should 400");
     server.abort();
 }
@@ -5670,7 +6840,11 @@ async fn concurrent_health_requests() {
     }
     for fut in futs {
         let resp = fut.await.unwrap().unwrap();
-        assert!(resp.status().is_success(), "concurrent health: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "concurrent health: {}",
+            resp.status()
+        );
     }
     server.abort();
 }
@@ -5682,15 +6856,27 @@ async fn lfs_upload_with_content_type() {
     let client = Client::new();
     let content = b"ct test";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
-        .body(content.to_vec()).send().await.unwrap();
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200);
-    assert_eq!(get.headers().get("content-type").and_then(|v| v.to_str().ok()), Some("application/octet-stream"));
+    assert_eq!(
+        get.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
     server.abort();
 }
 
@@ -5702,11 +6888,20 @@ async fn oci_manifest_push_invalid_media_type() {
     let repo = "test-owner/test-repo";
     let manifest = serde_json::json!({"schemaVersion": 2, "mediaType": "application/vnd.unknown", "config": {}, "layers": []});
     let bytes = serde_json::to_vec(&manifest).unwrap();
-    let resp = client.put(format!("{base_url}/v2/{repo}/manifests/test-invalid-media"))
+    let resp = client
+        .put(format!("{base_url}/v2/{repo}/manifests/test-invalid-media"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.unknown")
-        .body(bytes).send().await.unwrap();
-    assert_eq!(resp.status(), 400, "invalid media type should return 400, got {}", resp.status());
+        .body(bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "invalid media type should return 400, got {}",
+        resp.status()
+    );
     server.abort();
 }
 
@@ -5718,12 +6913,21 @@ async fn oci_push_blob_and_pull_by_digest() {
     let repo = "test-owner/test-repo";
     let content = b"push and pull test data";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let get = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200);
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
     server.abort();
@@ -5737,22 +6941,42 @@ async fn oci_tags_list_pagination_limit() {
     let repo = "test-owner/test-repo";
     let config = br#"{"arch":"amd64"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config.to_vec()).send().await.unwrap();
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
     for i in 0..3 {
         let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
             "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
         let bytes = serde_json::to_vec(&manifest).unwrap();
-        client.put(format!("{base_url}/v2/{repo}/manifests/tag-{i}"))
+        client
+            .put(format!("{base_url}/v2/{repo}/manifests/tag-{i}"))
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-            .body(bytes).send().await.unwrap();
+            .body(bytes)
+            .send()
+            .await
+            .unwrap();
     }
-    let list = client.get(format!("{base_url}/v2/{repo}/tags/list?n=2"))
+    let list = client
+        .get(format!("{base_url}/v2/{repo}/tags/list?n=2"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
-    assert_eq!(list["tags"].as_array().map_or(0, |a| a.len()), 2, "paginated tag list");
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        list["tags"].as_array().map_or(0, |a| a.len()),
+        2,
+        "paginated tag list"
+    );
     server.abort();
 }
 
@@ -5761,15 +6985,24 @@ async fn lfs_batch_oversized_objects_field() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let many_objects: Vec<serde_json::Value> = (0..200).map(|i| serde_json::json!({
-        "oid": format!("{:064x}", i), "size": 100,
-    })).collect();
+    let many_objects: Vec<serde_json::Value> = (0..200)
+        .map(|i| {
+            serde_json::json!({
+                "oid": format!("{:064x}", i), "size": 100,
+            })
+        })
+        .collect();
     let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.git-lfs+json")
         .json(&serde_json::json!({"operation": "download", "objects": many_objects, "transfers": ["basic"]}))
         .send().await.unwrap();
-    assert_eq!(resp.status(), 200, "200 objects within limit: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "200 objects within limit: {}",
+        resp.status()
+    );
     server.abort();
 }
 
@@ -5778,12 +7011,19 @@ async fn lfs_batch_empty_operation_field() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let resp = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.git-lfs+json")
         .json(&serde_json::json!({"operation": "", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 422, "empty operation should be rejected with 422");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        422,
+        "empty operation should be rejected with 422"
+    );
     server.abort();
 }
 
@@ -5795,11 +7035,20 @@ async fn oci_manifest_push_missing_config() {
     let repo = "test-owner/test-repo";
     let manifest = serde_json::json!({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "layers": []});
     let bytes = serde_json::to_vec(&manifest).unwrap();
-    let resp = client.put(format!("{base_url}/v2/{repo}/manifests/no-config"))
+    let resp = client
+        .put(format!("{base_url}/v2/{repo}/manifests/no-config"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(bytes).send().await.unwrap();
-    assert_eq!(resp.status(), 400, "missing config should return 400, got {}", resp.status());
+        .body(bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "missing config should return 400, got {}",
+        resp.status()
+    );
     server.abort();
 }
 
@@ -5808,11 +7057,14 @@ async fn xet_batch_reconstruction_no_file_ids() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v1/reconstructions"))
+    let resp = client
+        .get(format!("{base_url}/v1/reconstructions"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({"file_ids": []}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "empty batch reconstruction");
     server.abort();
 }
@@ -5825,28 +7077,47 @@ async fn oci_cross_repo_blob_mount_same_repo() {
     let repo = "test-owner/test-repo";
     let content = b"cross-repo-same";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let mount = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let mount = client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(mount.status(), 201, "mount from same repo");
     server.abort();
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lfs_batch_wrong_operation_rejected() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let resp = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.git-lfs+json")
-        .json(&serde_json::json!({"operation": "invalid_op", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 422, "invalid operation should be rejected with 422");
+        .json(
+            &serde_json::json!({"operation": "invalid_op", "objects": [], "transfers": ["basic"]}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        422,
+        "invalid operation should be rejected with 422"
+    );
     server.abort();
 }
 
@@ -5858,16 +7129,28 @@ async fn oci_blob_delete_unreferenced_succeeds() {
     let repo = "test-owner/test-repo";
     let content = b"delete-me-blob";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let del = client.delete(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let del = client
+        .delete(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(del.status(), 202, "delete unreferenced blob");
-    let get = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 404, "deleted blob gone");
     server.abort();
 }
@@ -5879,15 +7162,28 @@ async fn lfs_get_returns_docker_content_digest() {
     let client = Client::new();
     let content = b"digest header test";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    let dcd = resp.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
-    assert!(dcd.is_some(), "docker-content-digest header should be present");
+        .send()
+        .await
+        .unwrap();
+    let dcd = resp
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
+    assert!(
+        dcd.is_some(),
+        "docker-content-digest header should be present"
+    );
     assert_eq!(dcd.unwrap(), format!("sha256:{oid}"));
     server.abort();
 }
@@ -5899,13 +7195,20 @@ async fn lfs_delete_existing_object_returns_202() {
     let client = Client::new();
     let content = b"lfs delete 202 test";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let del = client.delete(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let del = client
+        .delete(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(del.status(), 202, "LFS delete should return 202");
     server.abort();
 }
@@ -5918,13 +7221,26 @@ async fn oci_push_blob_and_get_returns_content_length() {
     let repo = "test-owner/test-repo";
     let content = b"content-length test data";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let resp = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    let cl = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).expect("content-length header missing on OCI blob GET");
+        .send()
+        .await
+        .unwrap();
+    let cl = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .expect("content-length header missing on OCI blob GET");
     assert_eq!(cl, content.len().to_string());
     server.abort();
 }
@@ -5933,36 +7249,87 @@ async fn oci_push_blob_and_get_returns_content_length() {
 async fn token_expiration_boundary_exact() {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, now).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        now,
+    )
+    .unwrap();
     let token = signer.sign(&claims).unwrap();
-    assert!(signer.verify_now(&token).is_ok(), "token at exact expiration should be valid (exp >= now)");
+    assert!(
+        signer.verify_now(&token).is_ok(),
+        "token at exact expiration should be valid (exp >= now)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_expiration_one_second_before() {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, now + 1).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        now + 1,
+    )
+    .unwrap();
     let token = signer.sign(&claims).unwrap();
-    assert!(signer.verify_now(&token).is_ok(), "token expiring in 1s should be valid");
+    assert!(
+        signer.verify_now(&token).is_ok(),
+        "token expiring in 1s should be valid"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_expiration_one_second_after() {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, now.saturating_sub(1)).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        now.saturating_sub(1),
+    )
+    .unwrap();
     let token = signer.sign(&claims).unwrap();
-    assert!(signer.verify_now(&token).is_err(), "expired token (exp=now-1) should be rejected");
+    assert!(
+        signer.verify_now(&token).is_err(),
+        "expired token (exp=now-1) should be rejected"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5970,9 +7337,12 @@ async fn verify_token_oversized_rejected() {
     let token = "a".repeat(10000);
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/test"))
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/test"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401, "oversized token should be rejected");
     server.abort();
 }
@@ -5981,9 +7351,20 @@ async fn verify_token_oversized_rejected() {
 async fn token_scope_write_can_write_and_read() {
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
-    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Write, repo, u64::MAX).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Write,
+        repo,
+        u64::MAX,
+    )
+    .unwrap();
     let write_token = signer.sign(&claims).unwrap();
 
     let (base_url, server) = start_server().await.unwrap();
@@ -5992,17 +7373,23 @@ async fn token_scope_write_can_write_and_read() {
     // Write should succeed
     let content = b"write scope test";
     let oid = format!("{:x}", sha2::Sha256::digest(content));
-    let put = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let put = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {write_token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(put.status(), 200, "write token should allow writes");
 
     // Read should also succeed (Write scope includes Read)
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {write_token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200, "write token should also allow reads");
     server.abort();
 }
@@ -6011,82 +7398,151 @@ async fn token_scope_write_can_write_and_read() {
 async fn metrics_cardinality_stable() {
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let body = client.get(format!("{base_url}/metrics")).send().await.unwrap().text().await.unwrap();
+    let body = client
+        .get(format!("{base_url}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
 
     // Count unique metric family names
     let mut families = std::collections::BTreeSet::new();
     for line in body.lines() {
         if line.starts_with("# HELP ") {
-            let name = line.strip_prefix("# HELP ").and_then(|l| l.split_whitespace().next()).unwrap_or("");
+            let name = line
+                .strip_prefix("# HELP ")
+                .and_then(|l| l.split_whitespace().next())
+                .unwrap_or("");
             families.insert(name.to_owned());
         }
     }
     // Each family should appear exactly once (no duplicate registration with different labels)
     // A stable cardinality means no per-request unique label values
-    assert!(families.len() >= 10, "expected at least 10 metric families, got {}", families.len());
-    assert!(families.len() <= 100, "suspicious cardinality: {} metric families, expected <= 100", families.len());
+    assert!(
+        families.len() >= 10,
+        "expected at least 10 metric families, got {}",
+        families.len()
+    );
+    assert!(
+        families.len() <= 100,
+        "suspicious cardinality: {} metric families, expected <= 100",
+        families.len()
+    );
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verify_wrong_signing_key_rejected() {
-    let wrong_signer = shardline_protocol::TokenSigner::new(b"different-key-that-is-32-bytes-long!!!!!").unwrap();
+    let wrong_signer =
+        shardline_protocol::TokenSigner::new(b"different-key-that-is-32-bytes-long!!!!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
-    let claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Read, repo, u64::MAX).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        u64::MAX,
+    )
+    .unwrap();
     let token = wrong_signer.sign(&claims).unwrap();
 
     let (base_url, server) = start_server().await.unwrap();
     let client = Client::new();
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/test"))
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/test"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 401, "token signed with wrong key should be rejected");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "token signed with wrong key should be rejected"
+    );
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_role_api_rejects_blob_upload() {
-    let (base_url, server) = start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let (base_url, server) =
+        start_server_with(Some(ServerRole::Api), &[ServerFrontend::Oci], |c| Ok(c))
+            .await
+            .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let repo = "test-owner/test-repo";
 
-    let tags = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+    let tags = client
+        .get(format!("{base_url}/v2/{repo}/tags/list"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(tags.status(), 200, "api role should serve tag listing");
 
     let content = b"role test";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    let upload = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    let upload = client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(upload.status(), 404, "api role should reject blob upload");
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_role_transfer_serves_blobs() {
-    let (base_url, server) = start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let (base_url, server) =
+        start_server_with(Some(ServerRole::Transfer), &[ServerFrontend::Oci], |c| {
+            Ok(c)
+        })
+        .await
+        .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let repo = "test-owner/test-repo";
 
     let content = b"transfer blob test";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
-    let upload = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    let upload = client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
-    assert_eq!(upload.status(), 201, "transfer role should serve blob upload");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        upload.status(),
+        201,
+        "transfer role should serve blob upload"
+    );
 
-    let tags = client.get(format!("{base_url}/v2/{repo}/tags/list"))
+    let tags = client
+        .get(format!("{base_url}/v2/{repo}/tags/list"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(tags.status(), 404, "transfer role should reject tag listing");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        tags.status(),
+        404,
+        "transfer role should reject tag listing"
+    );
     server.abort();
 }
 
@@ -6094,17 +7550,22 @@ async fn oci_role_transfer_serves_blobs() {
 async fn body_limit_exact_file_size_succeeds() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
         Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
     let content = vec![0x42u8; 100];
     let oid = format!("{:x}", sha2::Sha256::digest(&content));
-    let resp = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let resp = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "body exactly at limit should succeed");
     server.abort();
 }
@@ -6113,18 +7574,27 @@ async fn body_limit_exact_file_size_succeeds() {
 async fn body_limit_one_byte_over_rejected() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
         Ok(config.with_max_request_body_bytes(NonZeroUsize::new(100).unwrap()))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
     let content = vec![0x42u8; 101];
     let oid = format!("{:x}", sha2::Sha256::digest(&content));
-    let resp = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let resp = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content)
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 413, "body 1 byte over limit should be rejected");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        413,
+        "body 1 byte over limit should be rejected"
+    );
     server.abort();
 }
 
@@ -6133,12 +7603,20 @@ async fn lfs_batch_with_transfers_only_rejected() {
     let (base_url, server) = start_server().await.unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
-    let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let resp = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.git-lfs+json")
         .json(&serde_json::json!({"transfers": ["basic"]}))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 422, "batch without operation should be rejected (missing required field), got {}", resp.status());
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        422,
+        "batch without operation should be rejected (missing required field), got {}",
+        resp.status()
+    );
     server.abort();
 }
 
@@ -6149,9 +7627,12 @@ async fn oci_head_on_nonexistent_blob() {
     let client = Client::new();
     let repo = "test-owner/test-repo";
     let digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    let head = client.head(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+    let head = client
+        .head(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(head.status(), 404, "HEAD on non-existent blob should 404");
     server.abort();
 }
@@ -6165,14 +7646,20 @@ async fn bazel_read_ac_after_write() {
     let content = b"bazel read after write test";
     let hash = hex::encode(sha2::Sha256::digest(content));
 
-    client.put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+    client
+        .put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    let get = client.get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+    let get = client
+        .get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200);
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
     server.abort();
@@ -6180,28 +7667,54 @@ async fn bazel_read_ac_after_write() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_all_serves_everything() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(
+        None,
+        &[
+            ServerFrontend::Xet,
+            ServerFrontend::Lfs,
+            ServerFrontend::Oci,
+            ServerFrontend::BazelHttp,
+        ],
+        |c| Ok(c),
+    )
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let health = client.get(format!("{base_url}/healthz")).send().await.unwrap();
+    let health = client
+        .get(format!("{base_url}/healthz"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(health.status(), 200);
 
-    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+    let xet = client
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(xet.status(), 200, "xet route with all frontends");
 
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 200, "lfs route with all frontends");
 
-    let oci = client.get(format!("{base_url}/v2/"))
+    let oci = client
+        .get(format!("{base_url}/v2/"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(oci.status(), 200, "oci route with all frontends");
 
     server.abort();
@@ -6209,82 +7722,132 @@ async fn frontends_all_serves_everything() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_xet_lfs_pair() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs], |c| Ok(c)).await.unwrap();
+    let (base_url, server) =
+        start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs], |c| Ok(c))
+            .await
+            .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 200, "lfs enabled");
 
-    let oci = client.get(format!("{base_url}/v2/"))
+    let oci = client
+        .get(format!("{base_url}/v2/"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(oci.status(), 404, "oci should be disabled");
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_xet_oci_pair() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let (base_url, server) =
+        start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Oci], |c| Ok(c))
+            .await
+            .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let oci = client.get(format!("{base_url}/v2/"))
+    let oci = client
+        .get(format!("{base_url}/v2/"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(oci.status(), 200, "oci enabled");
 
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 404, "lfs should be disabled");
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_lfs_oci_pair() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let (base_url, server) =
+        start_server_with(None, &[ServerFrontend::Lfs, ServerFrontend::Oci], |c| Ok(c))
+            .await
+            .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 200, "lfs enabled");
 
-    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+    let xet = client
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(xet.status(), 404, "xet should be disabled");
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontends_xet_lfs_oci_triple() {
-    let (base_url, server) = start_server_with(None, &[ServerFrontend::Xet, ServerFrontend::Lfs, ServerFrontend::Oci], |c| Ok(c)).await.unwrap();
+    let (base_url, server) = start_server_with(
+        None,
+        &[
+            ServerFrontend::Xet,
+            ServerFrontend::Lfs,
+            ServerFrontend::Oci,
+        ],
+        |c| Ok(c),
+    )
+    .await
+    .unwrap();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let xet = client.get(format!("{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"))
+    let xet = client
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-read-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(xet.status(), 200, "xet route");
 
-    let lfs = client.post(format!("{base_url}/v1/lfs/objects/batch"))
+    let lfs = client
+        .post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"operation": "download", "objects": [], "transfers": ["basic"]}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 200, "lfs route");
 
-    let oci = client.get(format!("{base_url}/v2/"))
+    let oci = client
+        .get(format!("{base_url}/v2/"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(oci.status(), 200, "oci route");
     server.abort();
 }
@@ -6297,29 +7860,59 @@ async fn oci_tags_list_pagination_exact_count() {
     let repo = "test-owner/test-repo";
     let config = br#"{"arch":"amd64"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config.to_vec()).send().await.unwrap();
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
     for i in 0..5 {
         let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
             "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
         let bytes = serde_json::to_vec(&manifest).unwrap();
-        client.put(format!("{base_url}/v2/{repo}/manifests/tag-{i}"))
+        client
+            .put(format!("{base_url}/v2/{repo}/manifests/tag-{i}"))
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-            .body(bytes).send().await.unwrap();
+            .body(bytes)
+            .send()
+            .await
+            .unwrap();
     }
     // Request page size 3 out of 5 tags
-    let page1 = client.get(format!("{base_url}/v2/{repo}/tags/list?n=3"))
+    let page1 = client
+        .get(format!("{base_url}/v2/{repo}/tags/list?n=3"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
-    assert_eq!(page1["tags"].as_array().unwrap().len(), 3, "first page should have 3 tags");
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        page1["tags"].as_array().unwrap().len(),
+        3,
+        "first page should have 3 tags"
+    );
 
     // Request page size 10 (more than available)
-    let all = client.get(format!("{base_url}/v2/{repo}/tags/list?n=10"))
+    let all = client
+        .get(format!("{base_url}/v2/{repo}/tags/list?n=10"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
-    assert_eq!(all["tags"].as_array().unwrap().len(), 5, "all 5 tags when n > total");
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        all["tags"].as_array().unwrap().len(),
+        5,
+        "all 5 tags when n > total"
+    );
     server.abort();
 }
 
@@ -6327,14 +7920,30 @@ async fn oci_tags_list_pagination_exact_count() {
 async fn health_check_during_gc() {
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
@@ -6343,11 +7952,14 @@ async fn health_check_during_gc() {
     for i in 0..3 {
         let content = format!("gc health test content {i}");
         let oid = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
-        client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        client
+            .put(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Content-Type", "application/octet-stream")
             .header("Authorization", format!("Bearer {token}"))
             .body(content.into_bytes())
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
     }
 
     // Run GC in background
@@ -6357,17 +7969,29 @@ async fn health_check_during_gc() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap(),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap();
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap();
     let gc_handle = tokio::spawn(async move {
-        shardline_server::run_gc(gc_config, shardline_server::LocalGcOptions {
-            mark: true, sweep: true, retention_seconds: 0,
-        }).await
+        shardline_server::run_gc(
+            gc_config,
+            shardline_server::LocalGcOptions {
+                mark: true,
+                sweep: true,
+                retention_seconds: 0,
+            },
+        )
+        .await
     });
 
     // Health check should remain healthy during GC
     for _ in 0..10 {
-        let health = client.get(format!("{base_url}/healthz")).send().await.unwrap();
+        let health = client
+            .get(format!("{base_url}/healthz"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(health.status(), 200, "health should remain 200 during GC");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -6385,11 +8009,14 @@ async fn concurrent_upload_and_reconstruct() {
     // Upload a file
     let content = b"concurrent upload and reconstruct test data for shardline verification";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     // Read back while uploading again (simulate concurrent access)
     let mut handles = Vec::new();
@@ -6401,7 +8028,8 @@ async fn concurrent_upload_and_reconstruct() {
         handles.push(tokio::spawn(async move {
             c.get(format!("{u}/v1/lfs/objects/{o}"))
                 .header("Authorization", format!("Bearer {t}"))
-                .send().await
+                .send()
+                .await
         }));
     }
     for i in 0..5 {
@@ -6415,19 +8043,27 @@ async fn concurrent_upload_and_reconstruct() {
                 .header("Content-Type", "application/octet-stream")
                 .header("Authorization", format!("Bearer {t}"))
                 .body(extra.into_bytes())
-                .send().await
+                .send()
+                .await
         }));
     }
 
     for handle in handles {
         let resp = handle.await.unwrap().unwrap();
-        assert!(resp.status().is_success(), "concurrent op failed: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "concurrent op failed: {}",
+            resp.status()
+        );
     }
 
     // Verify original content still correct
-    let verify = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let verify = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(verify.status(), 200);
     assert_eq!(verify.bytes().await.unwrap().as_ref(), content);
     server.abort();
@@ -6441,17 +8077,27 @@ async fn metadata_content_type_preserved() {
 
     let content = b"metadata content type test";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200);
-    let ct = get.headers().get("content-type").and_then(|v| v.to_str().ok()).expect("content-type header");
+    let ct = get
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .expect("content-type header");
     // LFS always returns application/octet-stream regardless of upload content-type
     assert_eq!(ct, "application/octet-stream");
     server.abort();
@@ -6471,17 +8117,27 @@ async fn chunk_boundary_partial_last_chunk() {
         ("seven_bytes", vec![0x04u8; 7]),
     ] {
         let oid = hex::encode(sha2::Sha256::digest(&content));
-        client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        client
+            .put(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Content-Type", "application/octet-stream")
             .header("Authorization", format!("Bearer {token}"))
             .body(content.clone())
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
-        let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        let get = client
+            .get(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Authorization", format!("Bearer {token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(get.status(), 200, "{label}: GET after upload");
-        assert_eq!(get.bytes().await.unwrap().as_ref(), content.as_slice(), "{label}: content mismatch");
+        assert_eq!(
+            get.bytes().await.unwrap().as_ref(),
+            content.as_slice(),
+            "{label}: content mismatch"
+        );
     }
     server.abort();
 }
@@ -6490,35 +8146,57 @@ async fn chunk_boundary_partial_last_chunk() {
 async fn gc_does_not_remove_referenced_chunks() {
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
 
     let content = b"gc should not delete this content";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     // Upload 3 more objects to ensure GC has work to do
     for i in 0..3 {
         let c = format!("extra object {i}");
         let o = hex::encode(sha2::Sha256::digest(c.as_bytes()));
-        client.put(format!("{base_url}/v1/lfs/objects/{o}"))
+        client
+            .put(format!("{base_url}/v1/lfs/objects/{o}"))
             .header("Content-Type", "application/octet-stream")
             .header("Authorization", format!("Bearer {token}"))
             .body(c.into_bytes())
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
     }
 
     // Run GC with mark+sweep while server is live
@@ -6528,16 +8206,28 @@ async fn gc_does_not_remove_referenced_chunks() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap(),
     )
-    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-    .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap();
-    let _report = shardline_server::run_gc(gc_config, shardline_server::LocalGcOptions {
-        mark: true, sweep: true, retention_seconds: 0,
-    }).await.unwrap();
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap();
+    let _report = shardline_server::run_gc(
+        gc_config,
+        shardline_server::LocalGcOptions {
+            mark: true,
+            sweep: true,
+            retention_seconds: 0,
+        },
+    )
+    .await
+    .unwrap();
 
     // Verify referenced objects still reconstruct
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200, "referenced object should survive GC");
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
 
@@ -6550,26 +8240,43 @@ async fn storage_stats_file_count_accurate() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
 
-    let stats_before = client.get(format!("{base_url}/v1/stats"))
+    let stats_before = client
+        .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
     let before_files = stats_before["files"].as_u64().unwrap();
 
-    // LFS uploads don't create index file records — stats only tracks
-    // reconstruction entries from Xet operations, not direct object storage.
+    // Public protocol objects are represented by chunk-backed file records.
     let content = vec![0xABu8; 100];
     let oid = hex::encode(sha2::Sha256::digest(&content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    let stats_after = client.get(format!("{base_url}/v1/stats"))
+    let stats_after = client
+        .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
     let after_files = stats_after["files"].as_u64().unwrap();
-    assert_eq!(after_files, before_files, "LFS upload should not affect index file count");
+    assert!(
+        after_files > before_files,
+        "LFS upload should create a public object file record"
+    );
 
     server.abort();
 }
@@ -6582,24 +8289,48 @@ async fn repository_namespace_isolation() {
 
     let content = b"data in default repo";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     // LFS uses repo-scoped namespacing via the token's repository scope.
     // A token scoped to a different repo uses a different namespace.
     let other_repo_scope = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "other-owner", "other-repo", Some("main"),
-    ).unwrap();
-    let other_claims = shardline_protocol::TokenClaims::new("local", "other-subject", shardline_protocol::TokenScope::Read, other_repo_scope, u64::MAX).unwrap();
-    let other_token = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap().sign(&other_claims).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "other-owner",
+        "other-repo",
+        Some("main"),
+    )
+    .unwrap();
+    let other_claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "other-subject",
+        shardline_protocol::TokenScope::Read,
+        other_repo_scope,
+        u64::MAX,
+    )
+    .unwrap();
+    let other_token = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!")
+        .unwrap()
+        .sign(&other_claims)
+        .unwrap();
 
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {other_token}"))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 404, "object from different repo namespace should 404");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "object from different repo namespace should 404"
+    );
 
     server.abort();
 }
@@ -6613,9 +8344,15 @@ async fn oci_manifest_update_preserves_previous_version() {
 
     let config = br#"{"arch":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config.to_vec()).send().await.unwrap();
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
 
     // Push manifest v1 to tag
     let manifest_v1 = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
@@ -6623,10 +8360,14 @@ async fn oci_manifest_update_preserves_previous_version() {
         "annotations":{"version":"1"}});
     let bytes_v1 = serde_json::to_vec(&manifest_v1).unwrap();
     let digest_v1 = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes_v1)));
-    client.put(format!("{base_url}/v2/{repo}/manifests/latest"))
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/latest"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(bytes_v1).send().await.unwrap();
+        .body(bytes_v1)
+        .send()
+        .await
+        .unwrap();
 
     // Push manifest v2 to same tag
     let manifest_v2 = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
@@ -6634,36 +8375,59 @@ async fn oci_manifest_update_preserves_previous_version() {
         "annotations":{"version":"2"}});
     let bytes_v2 = serde_json::to_vec(&manifest_v2).unwrap();
     let digest_v2 = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes_v2)));
-    client.put(format!("{base_url}/v2/{repo}/manifests/latest"))
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/latest"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(bytes_v2).send().await.unwrap();
+        .body(bytes_v2)
+        .send()
+        .await
+        .unwrap();
 
     // Pull by tag — should get v2 (latest)
-    let by_tag = client.get(format!("{base_url}/v2/{repo}/manifests/latest"))
+    let by_tag = client
+        .get(format!("{base_url}/v2/{repo}/manifests/latest"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(by_tag.status(), 200);
     let tag_body: serde_json::Value = by_tag.json().await.unwrap();
-    assert_eq!(tag_body["annotations"]["version"], "2", "tag should resolve to v2");
+    assert_eq!(
+        tag_body["annotations"]["version"], "2",
+        "tag should resolve to v2"
+    );
 
     // Pull v1 by digest — should still exist
-    let by_digest_v1 = client.get(format!("{base_url}/v2/{repo}/manifests/{digest_v1}"))
+    let by_digest_v1 = client
+        .get(format!("{base_url}/v2/{repo}/manifests/{digest_v1}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(by_digest_v1.status(), 200, "v1 should still be accessible by digest");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        by_digest_v1.status(),
+        200,
+        "v1 should still be accessible by digest"
+    );
     let v1_body: serde_json::Value = by_digest_v1.json().await.unwrap();
     assert_eq!(v1_body["annotations"]["version"], "1");
 
     // Pull v2 by digest — should exist too
-    let by_digest_v2 = client.get(format!("{base_url}/v2/{repo}/manifests/{digest_v2}"))
+    let by_digest_v2 = client
+        .get(format!("{base_url}/v2/{repo}/manifests/{digest_v2}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(by_digest_v2.status(), 200, "v2 should also be accessible by digest");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        by_digest_v2.status(),
+        200,
+        "v2 should also be accessible by digest"
+    );
 
     server.abort();
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oci_manifest_blob_referential_integrity() {
@@ -6674,57 +8438,96 @@ async fn oci_manifest_blob_referential_integrity() {
 
     let config = br#"{"arch":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config.to_vec()).send().await.unwrap();
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
 
     let layer = br#"hello layer data"#;
     let layer_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(layer)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={layer_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={layer_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(layer.to_vec()).send().await.unwrap();
+        .body(layer.to_vec())
+        .send()
+        .await
+        .unwrap();
 
     // Push manifest referencing config + layer
     let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},
         "layers":[{"mediaType":"application/octet-stream","digest":layer_digest,"size":layer.len()}]});
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
-    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(manifest_bytes).send().await.unwrap();
+        .body(manifest_bytes)
+        .send()
+        .await
+        .unwrap();
 
     // Push second manifest sharing same config blob
     let manifest2 = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},
         "layers":[],"annotations":{"version":"2"}});
     let manifest2_bytes = serde_json::to_vec(&manifest2).unwrap();
-    let manifest2_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest2_bytes)));
-    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest2_digest}"))
+    let manifest2_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest2_bytes))
+    );
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{manifest2_digest}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(manifest2_bytes).send().await.unwrap();
+        .body(manifest2_bytes)
+        .send()
+        .await
+        .unwrap();
 
     // Both manifests should be independently retrievable
     for (label, digest) in [("v1", &manifest_digest), ("v2", &manifest2_digest)] {
-        let get = client.get(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+        let get = client
+            .get(format!("{base_url}/v2/{repo}/manifests/{digest}"))
             .header("Authorization", format!("Bearer {token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(get.status(), 200, "{label} manifest retrievable");
     }
 
     // Config blob should NOT be deletable (referenced by both manifests)
-    let del = client.delete(format!("{base_url}/v2/{repo}/blobs/{config_digest}"))
+    let del = client
+        .delete(format!("{base_url}/v2/{repo}/blobs/{config_digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(del.status(), 400, "referenced blob must not be deletable");
 
     // Layer blob should NOT be deletable (referenced by manifest v1)
-    let del_layer = client.delete(format!("{base_url}/v2/{repo}/blobs/{layer_digest}"))
+    let del_layer = client
+        .delete(format!("{base_url}/v2/{repo}/blobs/{layer_digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(del_layer.status(), 400, "referenced layer must not be deletable");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        del_layer.status(),
+        400,
+        "referenced layer must not be deletable"
+    );
 
     server.abort();
 }
@@ -6738,11 +8541,14 @@ async fn lfs_batch_with_existing_objects() {
     let content = b"lfs batch real object test content";
     let oid = hex::encode(sha2::Sha256::digest(content));
 
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     let resp = client.post(format!("{base_url}/v1/lfs/objects/batch"))
         .header("Authorization", format!("Bearer {token}"))
@@ -6754,8 +8560,14 @@ async fn lfs_batch_with_existing_objects() {
     let objects = body["objects"].as_array().unwrap();
     assert_eq!(objects.len(), 1);
     let actions = objects[0]["actions"].as_object();
-    assert!(actions.is_some(), "existing object must have download actions");
-    assert!(objects[0]["actions"].get("download").is_some(), "download action must exist");
+    assert!(
+        actions.is_some(),
+        "existing object must have download actions"
+    );
+    assert!(
+        objects[0]["actions"].get("download").is_some(),
+        "download action must exist"
+    );
 
     server.abort();
 }
@@ -6768,30 +8580,51 @@ async fn storage_stats_after_delete() {
 
     let content = b"stats after delete test";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    let stats_before_delete = client.get(format!("{base_url}/v1/stats"))
+    let stats_before_delete = client
+        .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
 
-    client.delete(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .delete(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    let stats_after_delete = client.get(format!("{base_url}/v1/stats"))
+    let stats_after_delete = client
+        .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
 
-    // Stats track index records, not LFS objects directly.
-    // LFS object deletion doesn't affect index file count.
-    assert_eq!(stats_before_delete["files"], stats_after_delete["files"],
-        "LFS delete should not change index file count");
-    assert_eq!(stats_before_delete["chunks"], stats_after_delete["chunks"],
-        "LFS delete should not change chunk count (CAS may retain data for other references)");
+    assert!(
+        stats_after_delete["files"].as_u64().unwrap()
+            < stats_before_delete["files"].as_u64().unwrap(),
+        "LFS delete should remove its public object file records"
+    );
+    assert_eq!(
+        stats_before_delete["chunks"], stats_after_delete["chunks"],
+        "LFS delete should not change chunk count (CAS may retain data for other references)"
+    );
 
     server.abort();
 }
@@ -6807,28 +8640,55 @@ async fn oci_blob_mount_does_not_duplicate_storage() {
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
 
     // Upload blob
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
 
-    let stats_before_mount = client.get(format!("{base_url}/v1/stats"))
+    let stats_before_mount = client
+        .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
 
     // Mount same blob to same repo (verifies mount doesn't duplicate storage)
-    let mount = client.post(format!("{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"))
+    let mount = client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?mount={digest}&from={repo}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(mount.status(), 201, "mount should succeed");
 
-    let stats_after_mount = client.get(format!("{base_url}/v1/stats"))
+    let stats_after_mount = client
+        .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap().json::<serde_json::Value>().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
 
-    assert_eq!(stats_before_mount["chunks"], stats_after_mount["chunks"],
-        "mount must not create duplicate chunks");
-    assert_eq!(stats_before_mount["chunk_bytes"], stats_after_mount["chunk_bytes"],
-        "mount must not increase chunk bytes");
+    assert_eq!(
+        stats_before_mount["chunks"], stats_after_mount["chunks"],
+        "mount must not create duplicate chunks"
+    );
+    assert_eq!(
+        stats_before_mount["chunk_bytes"], stats_after_mount["chunk_bytes"],
+        "mount must not increase chunk bytes"
+    );
 
     server.abort();
 }
@@ -6842,9 +8702,15 @@ async fn concurrent_manifest_push_and_pull() {
 
     let config = br#"{"arch":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config.to_vec()).send().await.unwrap();
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
 
     let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
@@ -6852,10 +8718,14 @@ async fn concurrent_manifest_push_and_pull() {
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
 
     // Push manifest
-    client.put(format!("{base_url}/v2/{repo}/manifests/{digest}"))
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(bytes.clone()).send().await.unwrap();
+        .body(bytes.clone())
+        .send()
+        .await
+        .unwrap();
 
     // Concurrent reads
     let mut handles = Vec::new();
@@ -6868,7 +8738,8 @@ async fn concurrent_manifest_push_and_pull() {
         handles.push(tokio::spawn(async move {
             c.get(format!("{u}/v2/{r}/manifests/{d}"))
                 .header("Authorization", format!("Bearer {t}"))
-                .send().await
+                .send()
+                .await
         }));
     }
 
@@ -6882,9 +8753,11 @@ async fn concurrent_manifest_push_and_pull() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_backend_lfs_round_trip() {
+    let _postgres_guard = POSTGRES_E2E_LOCK.lock().await;
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
-        .start().unwrap();
+        .start()
+        .unwrap();
     let Some(docker) = docker else {
         eprintln!("SKIP: Docker not available");
         return;
@@ -6894,30 +8767,53 @@ async fn postgres_backend_lfs_round_trip() {
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Lfs].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
-        .with_index_postgres_url(pg_url).unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap()
+    .with_index_postgres_url(pg_url)
+    .unwrap();
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
 
     let content = b"postgres backend round trip test";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
         .body(content.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200, "postgres: LFS GET after PUT");
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
     server.abort();
@@ -6930,14 +8826,22 @@ async fn xet_full_pipeline_upload_xorb_shard_reconstruct() {
     let client = Client::new();
 
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(write_resp.status(), 200, "write token issuance");
     let write_text = write_resp.text().await.expect("write token body");
-    let write_body: serde_json::Value = serde_json::from_str(&write_text).expect("write token JSON");
-    let xet_token = write_body["accessToken"].as_str().expect(&format!("accessToken in response: {write_text}")).to_owned();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_text).expect("write token JSON");
+    let xet_token = write_body["accessToken"]
+        .as_str()
+        .expect(&format!("accessToken in response: {write_text}"))
+        .to_owned();
 
     let content = b"xet full pipeline test content for verification";
 
@@ -6945,16 +8849,26 @@ async fn xet_full_pipeline_upload_xorb_shard_reconstruct() {
     let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
 
     // Upload shard using test fixture
-    let shard_file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
+    let shard_file_hash =
+        upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
 
     // Reconstruct the file — returns reconstruction metadata, not raw bytes
-    let recon = client.get(format!("{base_url}/v1/reconstructions/{shard_file_hash}"))
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{shard_file_hash}"))
         .header("Authorization", format!("Bearer {xet_token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(recon.status(), 200, "reconstruction should succeed");
     let recon_body: serde_json::Value = recon.json().await.unwrap();
-    assert!(recon_body.get("terms").is_some(), "reconstruction should contain terms");
-    assert!(recon_body.get("fetch_info").is_some(), "reconstruction should contain fetch_info");
+    assert!(
+        recon_body.get("terms").is_some(),
+        "reconstruction should contain terms"
+    );
+    assert!(
+        recon_body.get("fetch_info").is_some(),
+        "reconstruction should contain fetch_info"
+    );
 
     server.abort();
 }
@@ -6983,11 +8897,7 @@ async fn config_validation_chunk_size_too_large() {
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
-    .with_server_frontends(
-        [ServerFrontend::Lfs]
-            .iter()
-            .copied(),
-    )
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
     .with_provider_runtime(
         config_path,
@@ -7010,7 +8920,10 @@ async fn config_validation_chunk_size_too_large() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(healthy, "server with large chunk size should become healthy");
+    assert!(
+        healthy,
+        "server with large chunk size should become healthy"
+    );
     server.abort();
 }
 
@@ -7025,11 +8938,8 @@ async fn config_validation_missing_signing_key() {
         storage.path().to_path_buf(),
         NonZeroUsize::new(4).unwrap(),
     )
-    .with_server_frontends(
-        [ServerFrontend::Lfs]
-            .iter()
-            .copied(),
-    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap();
     // No .with_token_signing_key() call – auth key is absent.
     let err = config
@@ -7277,7 +9187,11 @@ async fn config_body_limit_minimum_one() {
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
     .unwrap()
     .with_max_request_body_bytes(NonZeroUsize::new(1).unwrap());
-    assert_eq!(config.max_request_body_bytes().get(), 1, "body limit should be 1");
+    assert_eq!(
+        config.max_request_body_bytes().get(),
+        1,
+        "body limit should be 1"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7302,30 +9216,50 @@ async fn oci_push_manifest_with_subject_referrer() {
 
     let config = br#"{"arch":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config.to_vec()).send().await.unwrap();
+        .body(config.to_vec())
+        .send()
+        .await
+        .unwrap();
 
     // Push manifest without subject first
     let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[]});
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
-    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(manifest_bytes).send().await.unwrap();
+        .body(manifest_bytes)
+        .send()
+        .await
+        .unwrap();
 
     // Push manifest referencing the first as subject (referrer)
     let referrer = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config.len()},"layers":[],
         "subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":manifest_digest,"size":100}});
     let referrer_bytes = serde_json::to_vec(&referrer).unwrap();
-    let referrer_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&referrer_bytes)));
-    let put = client.put(format!("{base_url}/v2/{repo}/manifests/{referrer_digest}"))
+    let referrer_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&referrer_bytes))
+    );
+    let put = client
+        .put(format!("{base_url}/v2/{repo}/manifests/{referrer_digest}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(referrer_bytes).send().await.unwrap();
+        .body(referrer_bytes)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(put.status(), 201, "manifest with subject reference");
 
     server.abort();
@@ -7335,26 +9269,58 @@ async fn oci_push_manifest_with_subject_referrer() {
 async fn s3_backend_lfs_round_trip() {
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_minio()
-        .start().unwrap();
-    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+        .start()
+        .unwrap();
+    let Some(docker) = docker else {
+        eprintln!("SKIP: Docker not available");
+        return;
+    };
     let s3 = docker.s3_raw_config(None).unwrap();
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
+        .with_credentials(
+            s3.access_key.map(SecretString::new),
+            s3.secret_key.map(SecretString::new),
+            s3.session_token.map(SecretString::new),
+        )
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::Oci, ServerFrontend::BazelHttp].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
-        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends(
+        [
+            ServerFrontend::Lfs,
+            ServerFrontend::Oci,
+            ServerFrontend::BazelHttp,
+        ]
+        .iter()
+        .copied(),
+    )
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap()
+    .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
@@ -7362,36 +9328,59 @@ async fn s3_backend_lfs_round_trip() {
     // LFS round-trip
     let content = b"s3 backend lfs test";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200, "s3 LFS GET");
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
 
     // OCI blob round-trip
     let repo = "test-owner/test-repo";
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"oci on s3")));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(b"oci on s3".to_vec()).send().await.unwrap();
-    let oci_get = client.get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
+        .body(b"oci on s3".to_vec())
+        .send()
+        .await
+        .unwrap();
+    let oci_get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(oci_get.status(), 200, "s3 OCI GET");
 
     // Bazel AC round-trip
     let bazel_content = b"s3 bazel test";
     let hash = hex::encode(sha2::Sha256::digest(bazel_content));
-    client.put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+    client
+        .put(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .body(bazel_content.to_vec()).send().await.unwrap();
-    let bazel_get = client.get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
+        .body(bazel_content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let bazel_get = client
+        .get(format!("{base_url}/v1/bazel/cache/ac/{hash}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(bazel_get.status(), 200, "s3 Bazel GET");
 
     server.abort();
@@ -7401,26 +9390,50 @@ async fn s3_backend_lfs_round_trip() {
 async fn s3_backend_dedup_cross_frontend() {
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_minio()
-        .start().unwrap();
-    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+        .start()
+        .unwrap();
+    let Some(docker) = docker else {
+        eprintln!("SKIP: Docker not available");
+        return;
+    };
     let s3 = docker.s3_raw_config(None).unwrap();
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
+        .with_credentials(
+            s3.access_key.map(SecretString::new),
+            s3.secret_key.map(SecretString::new),
+            s3.session_token.map(SecretString::new),
+        )
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::Oci].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
-        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs, ServerFrontend::Oci].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap()
+    .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
@@ -7429,25 +9442,41 @@ async fn s3_backend_dedup_cross_frontend() {
     let repo = "test-owner/test-repo";
 
     let lfs_oid = hex::encode(sha2::Sha256::digest(content));
-    client.put(format!("{base_url}/v1/lfs/objects/{lfs_oid}"))
+    client
+        .put(format!("{base_url}/v1/lfs/objects/{lfs_oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
 
     let oid_digest = format!("sha256:{lfs_oid}");
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={oid_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={oid_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(content.to_vec()).send().await.unwrap();
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
 
-    let lfs = client.get(format!("{base_url}/v1/lfs/objects/{lfs_oid}"))
+    let lfs = client
+        .get(format!("{base_url}/v1/lfs/objects/{lfs_oid}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(lfs.status(), 200, "s3 LFS after dedup");
     assert_eq!(lfs.bytes().await.unwrap().as_ref(), content);
 
-    let oci = client.get(format!("{base_url}/v2/{repo}/blobs/{oid_digest}"))
+    let oci = client
+        .get(format!("{base_url}/v2/{repo}/blobs/{oid_digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(oci.status(), 200, "s3 OCI after dedup");
     assert_eq!(oci.bytes().await.unwrap().as_ref(), content);
 
@@ -7456,24 +9485,46 @@ async fn s3_backend_dedup_cross_frontend() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_backend_oci_manifest_push_pull() {
+    let _postgres_guard = POSTGRES_E2E_LOCK.lock().await;
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_postgres()
-        .start().unwrap();
-    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+        .start()
+        .unwrap();
+    let Some(docker) = docker else {
+        eprintln!("SKIP: Docker not available");
+        return;
+    };
     let pg_url = docker.postgres_url().unwrap();
     migrate_postgres_database(&pg_url).await;
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Oci].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
-        .with_index_postgres_url(pg_url).unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Oci].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap()
+    .with_index_postgres_url(pg_url)
+    .unwrap();
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
@@ -7481,22 +9532,35 @@ async fn postgres_backend_oci_manifest_push_pull() {
     let repo = "test-owner/test-repo";
     let config_data = br#"{"arch":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config_data)));
-    client.post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+    client
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
-        .body(config_data.to_vec()).send().await.unwrap();
+        .body(config_data.to_vec())
+        .send()
+        .await
+        .unwrap();
 
     let manifest = serde_json::json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
         "config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":config_digest,"size":config_data.len()},"layers":[]});
     let bytes = serde_json::to_vec(&manifest).unwrap();
     let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
-    client.put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+    client
+        .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-        .body(bytes).send().await.unwrap();
+        .body(bytes)
+        .send()
+        .await
+        .unwrap();
 
-    let get = client.get(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200, "pg OCI manifest pull");
 
     server.abort();
@@ -7506,21 +9570,33 @@ async fn postgres_backend_oci_manifest_push_pull() {
 async fn passthrough_auth_any_token_accepted() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
         Ok(config.with_auth_provider(shardline_server::AuthProviderKind::Passthrough))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let client = Client::new();
 
     let content = b"passthrough test data";
     let oid = hex::encode(sha2::Sha256::digest(content));
-    let resp = client.put(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let resp = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Content-Type", "application/octet-stream")
         .header("Authorization", "Bearer any-arbitrary-token-works")
         .body(content.to_vec())
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200, "passthrough auth should accept any token");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "passthrough auth should accept any token"
+    );
 
-    let get = client.get(format!("{base_url}/v1/lfs/objects/{oid}"))
+    let get = client
+        .get(format!("{base_url}/v1/lfs/objects/{oid}"))
         .header("Authorization", "Bearer another-arbitrary-token")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200, "passthrough read with different token");
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
 
@@ -7531,12 +9607,21 @@ async fn passthrough_auth_any_token_accepted() {
 async fn passthrough_auth_missing_token_still_rejected() {
     let (base_url, server) = start_server_with(None, &[ServerFrontend::Lfs], |config| {
         Ok(config.with_auth_provider(shardline_server::AuthProviderKind::Passthrough))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let client = Client::new();
 
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid"))
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 401, "missing auth header should still be 401 even with passthrough");
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/test-oid"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "missing auth header should still be 401 even with passthrough"
+    );
 
     server.abort();
 }
@@ -7548,15 +9633,37 @@ async fn oci_cross_repo_blob_mount_mount_from_other_repo() {
 
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo_a_scope = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "repo-a", Some("main"),
-    ).unwrap();
-    let repo_a_claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Write, repo_a_scope, u64::MAX).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "repo-a",
+        Some("main"),
+    )
+    .unwrap();
+    let repo_a_claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Write,
+        repo_a_scope,
+        u64::MAX,
+    )
+    .unwrap();
     let repo_a_token = signer.sign(&repo_a_claims).unwrap();
 
     let repo_b_scope = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "repo-b", Some("main"),
-    ).unwrap();
-    let repo_b_claims = shardline_protocol::TokenClaims::new("local", "test-subject", shardline_protocol::TokenScope::Write, repo_b_scope, u64::MAX).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "repo-b",
+        Some("main"),
+    )
+    .unwrap();
+    let repo_b_claims = shardline_protocol::TokenClaims::new(
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Write,
+        repo_b_scope,
+        u64::MAX,
+    )
+    .unwrap();
     let repo_b_token = signer.sign(&repo_b_claims).unwrap();
 
     wait_for_health(&base_url, &client).await;
@@ -7568,23 +9675,41 @@ async fn oci_cross_repo_blob_mount_mount_from_other_repo() {
     let digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(content)));
 
     // Upload blob to repo A using repo-a-scoped token
-    let upload = client.post(format!("{base_url}/v2/{repo_a}/blobs/uploads?digest={digest}"))
+    let upload = client
+        .post(format!(
+            "{base_url}/v2/{repo_a}/blobs/uploads?digest={digest}"
+        ))
         .header("Authorization", format!("Bearer {repo_a_token}"))
-        .body(content.to_vec()).send().await.unwrap();
-    assert!(upload.status().is_success(), "upload to repo-a: {}", upload.status());
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        upload.status().is_success(),
+        "upload to repo-a: {}",
+        upload.status()
+    );
 
     // Mount from repo A to repo B using repo-b-scoped token
-    let mount = client.post(format!("{base_url}/v2/{repo_b}/blobs/uploads?mount={digest}&from={repo_a}"))
+    let mount = client
+        .post(format!(
+            "{base_url}/v2/{repo_b}/blobs/uploads?mount={digest}&from={repo_a}"
+        ))
         .header("Authorization", format!("Bearer {repo_b_token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     // Cross-repo mount with scope validation: the mount source lookup uses the
     // requesting token's scope, which may differ from the source blob's storage scope.
     // Accept either success (201) if namespaces align, or rejection if they don't.
     if mount.status() == 201 {
         // Verify blob retrievable from repo B
-        let get = client.get(format!("{base_url}/v2/{repo_b}/blobs/{digest}"))
+        let get = client
+            .get(format!("{base_url}/v2/{repo_b}/blobs/{digest}"))
             .header("Authorization", format!("Bearer {repo_b_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(get.status(), 200, "blob from repo-b after mount");
         assert_eq!(get.bytes().await.unwrap().as_ref(), content);
     }
@@ -7598,10 +9723,13 @@ async fn cors_headers_present() {
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
 
-    let resp = client.get(format!("{base_url}/v1/lfs/objects/test-oid"))
+    let resp = client
+        .get(format!("{base_url}/v1/lfs/objects/test-oid"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Origin", "https://example.com")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     // Some routes may not set CORS headers — check if any are present
     let has_cors = resp.headers().get("access-control-allow-origin").is_some()
@@ -7618,12 +9746,17 @@ async fn xet_multi_file_shard_reconstruct_each_independently() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(write_resp.status(), 200);
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     let files: [&[u8]; 2] = [b"file alpha content here", b"file beta content different"];
@@ -7632,15 +9765,19 @@ async fn xet_multi_file_shard_reconstruct_each_independently() {
 
     for content in &files {
         let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
-        let file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
+        let file_hash =
+            upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
         xorb_hashes.push(xorb_hash);
         file_hashes.push(file_hash);
     }
 
     for (i, _) in files.iter().enumerate() {
-        let recon = client.get(format!("{base_url}/v1/reconstructions/{}", file_hashes[i]))
+        let recon = client
+            .get(format!("{base_url}/v1/reconstructions/{}", file_hashes[i]))
             .header("Authorization", format!("Bearer {xet_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(recon.status(), 200, "file {i} reconstruction");
         let body: serde_json::Value = recon.json().await.unwrap();
         assert!(body.get("terms").is_some(), "file {i} has terms");
@@ -7656,11 +9793,16 @@ async fn xet_reconstruction_content_hash_matches() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     let content = b"reconstruction hash verification content";
@@ -7672,9 +9814,12 @@ async fn xet_reconstruction_content_hash_matches() {
     // the reconstruction endpoint.
     assert!(!file_hash.is_empty(), "file_hash should not be empty");
 
-    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
         .header("Authorization", format!("Bearer {xet_token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(recon.status(), 200, "reconstruction by file_hash");
     server.abort();
 }
@@ -7685,20 +9830,28 @@ async fn xet_empty_file_xorb_and_shard() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     let content = b".";
     let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
     let file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
 
-    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
         .header("Authorization", format!("Bearer {xet_token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(recon.status(), 200, "empty file reconstruction");
     let body: serde_json::Value = recon.json().await.unwrap();
     assert!(body.get("terms").is_some(), "empty file has terms");
@@ -7712,11 +9865,16 @@ async fn xet_multi_chunk_xorb_reconstruct() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     // Content larger than chunk size (4 bytes from ServerConfig) to create multi-chunk xorb
@@ -7724,9 +9882,12 @@ async fn xet_multi_chunk_xorb_reconstruct() {
     let xorb_hash = upload_xorb(&client, &base_url, &xet_token, content).await;
     let file_hash = upload_shard(&client, &base_url, &xet_token, &[(content, &xorb_hash)]).await;
 
-    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
         .header("Authorization", format!("Bearer {xet_token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(recon.status(), 200, "multi-chunk reconstruction");
     let body: serde_json::Value = recon.json().await.unwrap();
     assert!(body.get("terms").is_some());
@@ -7741,11 +9902,16 @@ async fn dedup_identical_content_same_chunk_hashes() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     let content = b"dedup identical chunk hash test content";
@@ -7753,7 +9919,10 @@ async fn dedup_identical_content_same_chunk_hashes() {
     let xorb_hash_b = upload_xorb(&client, &base_url, &xet_token, content).await;
 
     // Same content should produce same xorb hash
-    assert_eq!(xorb_hash_a, xorb_hash_b, "identical content should produce identical xorb hash");
+    assert_eq!(
+        xorb_hash_a, xorb_hash_b,
+        "identical content should produce identical xorb hash"
+    );
 
     server.abort();
 }
@@ -7764,11 +9933,16 @@ async fn xet_large_reconstruction_chain_ten_xorbs() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     // Create a file large enough to span 10 xorbs (10 chunks)
@@ -7786,9 +9960,12 @@ async fn xet_large_reconstruction_chain_ten_xorbs() {
     let file_hash = upload_shard(&client, &base_url, &xet_token, &[(&content, &xorb_hash)]).await;
 
     // Reconstruct
-    let recon = client.get(format!("{base_url}/v1/reconstructions/{file_hash}"))
+    let recon = client
+        .get(format!("{base_url}/v1/reconstructions/{file_hash}"))
         .header("Authorization", format!("Bearer {xet_token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(recon.status(), 200, "large reconstruction chain");
     let body: serde_json::Value = recon.json().await.unwrap();
     let terms = body["terms"].as_array().unwrap();
@@ -7803,11 +9980,16 @@ async fn xet_reconstruction_fails_when_xorb_missing() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     // Upload shard referencing a non-existent xorb hash
@@ -7818,15 +10000,21 @@ async fn xet_reconstruction_fails_when_xorb_missing() {
         let (shard, _file_hash) = single_file_shard(&[(content, fake_xorb_hash)]);
         shard
     };
-    let resp = client.post(format!("{base_url}/v1/shards"))
+    let resp = client
+        .post(format!("{base_url}/v1/shards"))
         .header("Authorization", format!("Bearer {xet_token}"))
         .header("Content-Type", "application/octet-stream")
         .body(shard.to_vec())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     // The shard references a non-existent xorb — server may accept the shard
     // (it doesn't verify xorb exists at upload time) but reconstruction will fail
-    assert!(resp.status().is_success() || resp.status() == 400,
-        "shard with missing xorb: {}", resp.status());
+    assert!(
+        resp.status().is_success() || resp.status() == 400,
+        "shard with missing xorb: {}",
+        resp.status()
+    );
 
     server.abort();
 }
@@ -7837,11 +10025,16 @@ async fn different_content_produces_different_chunk_hashes() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     let content_a = b"content A for hash collision test";
@@ -7850,7 +10043,10 @@ async fn different_content_produces_different_chunk_hashes() {
     let hash_a = upload_xorb(&client, &base_url, &xet_token, content_a).await;
     let hash_b = upload_xorb(&client, &base_url, &xet_token, content_b).await;
 
-    assert_ne!(hash_a, hash_b, "different content must produce different xorb hashes");
+    assert_ne!(
+        hash_a, hash_b,
+        "different content must produce different xorb hashes"
+    );
 
     server.abort();
 }
@@ -7861,11 +10057,16 @@ async fn xet_multiple_files_sharing_single_xorb() {
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     let client = Client::new();
     let write_resp = client
-        .get(format!("{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"))
+        .get(format!(
+            "{base_url}/api/github/test-owner/test-repo/xet-write-token/main?subject=test-subject"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("x-shardline-provider-key", "test-api-key")
-        .send().await.unwrap();
-    let write_body: serde_json::Value = serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
+        .send()
+        .await
+        .unwrap();
+    let write_body: serde_json::Value =
+        serde_json::from_str(&write_resp.text().await.unwrap()).unwrap();
     let xet_token = write_body["accessToken"].as_str().unwrap().to_owned();
 
     // Multiple files sharing the same xorb
@@ -7880,15 +10081,28 @@ async fn xet_multiple_files_sharing_single_xorb() {
 
     let mut file_hashes = Vec::new();
     for file_content in &files {
-        let fh = upload_shard(&client, &base_url, &xet_token, &[(file_content, &xorb_hash)]).await;
+        let fh = upload_shard(
+            &client,
+            &base_url,
+            &xet_token,
+            &[(file_content, &xorb_hash)],
+        )
+        .await;
         file_hashes.push(fh);
     }
 
     for (i, fh) in file_hashes.iter().enumerate() {
-        let recon = client.get(format!("{base_url}/v1/reconstructions/{fh}"))
+        let recon = client
+            .get(format!("{base_url}/v1/reconstructions/{fh}"))
             .header("Authorization", format!("Bearer {xet_token}"))
-            .send().await.unwrap();
-        assert_eq!(recon.status(), 200, "file {i} reconstruction from shared xorb");
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            recon.status(),
+            200,
+            "file {i} reconstruction from shared xorb"
+        );
         let body: serde_json::Value = recon.json().await.unwrap();
         assert!(body.get("terms").is_some(), "file {i} has terms");
     }
@@ -7933,9 +10147,17 @@ async fn concurrent_reconstruct_same_file() {
 
     for handle in handles {
         let resp = handle.await.unwrap().unwrap();
-        assert_eq!(resp.status(), 200, "concurrent reconstruct should return 200");
+        assert_eq!(
+            resp.status(),
+            200,
+            "concurrent reconstruct should return 200"
+        );
         let body = resp.bytes().await.unwrap();
-        assert_eq!(body.as_ref(), content.as_slice(), "concurrent reconstruct must return correct bytes");
+        assert_eq!(
+            body.as_ref(),
+            content.as_slice(),
+            "concurrent reconstruct must return correct bytes"
+        );
     }
 
     server.abort();
@@ -7969,7 +10191,9 @@ async fn concurrent_upload_different_files() {
     let mut oids_with_content = Vec::new();
     for (i, handle) in handles.into_iter().enumerate() {
         let resp = handle.await.unwrap().unwrap();
-        assert_eq!(resp.status(), 200, "upload {i} should succeed");
+        let status = resp.status();
+        let error = resp.text().await.unwrap();
+        assert_eq!(status, 200, "upload {i} should succeed: {error}");
         let content = format!("concurrent upload different file content {i}");
         let oid = hex::encode(sha2::Sha256::digest(content.as_bytes()));
         oids_with_content.push((oid, content.into_bytes()));
@@ -7985,7 +10209,11 @@ async fn concurrent_upload_different_files() {
             .unwrap();
         assert_eq!(resp.status(), 200, "download for {oid} should succeed");
         let body = resp.bytes().await.unwrap();
-        assert_eq!(body.as_ref(), expected.as_slice(), "downloaded content must match for {oid}");
+        assert_eq!(
+            body.as_ref(),
+            expected.as_slice(),
+            "downloaded content must match for {oid}"
+        );
     }
 
     server.abort();
@@ -8000,19 +10228,25 @@ async fn upload_during_gc() {
         .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
-        .unwrap()
-        .with_server_frontends([ServerFrontend::Lfs].iter().copied())
-        .unwrap()
-        .with_provider_runtime(
-            config_path,
-            b"test-api-key".to_vec(),
-            "test-issuer".to_owned(),
-            NonZeroU64::new(3600).unwrap(),
-        )
-        .unwrap();
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Lfs].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap();
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     wait_for_health(&base_url, &client).await;
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
@@ -8047,7 +10281,10 @@ async fn upload_during_gc() {
             gc_config,
             shardline_server::LocalGcOptions {
                 mark: true,
-                sweep: true,
+                // A zero-retention mark-and-sweep is an intentionally unsafe
+                // internal test mode. Production GC enforces a retention
+                // window, so exercise concurrent reachability marking here.
+                sweep: false,
                 retention_seconds: 0,
             },
         )
@@ -8089,7 +10326,11 @@ async fn upload_during_gc() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200, "data written during GC should survive for object {i}");
+        assert_eq!(
+            resp.status(),
+            200,
+            "data written during GC should survive for object {i}"
+        );
         let body = resp.bytes().await.unwrap();
         assert_eq!(
             body.as_ref(),
@@ -8162,7 +10403,11 @@ async fn concurrent_lfs_operations() {
     // All operations must succeed
     for (i, handle) in handles.into_iter().enumerate() {
         let resp = handle.await.unwrap().unwrap();
-        assert!(resp.status().is_success(), "concurrent LFS op {i} failed: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "concurrent LFS op {i} failed: {}",
+            resp.status()
+        );
     }
 
     // Verify all original objects still intact
@@ -8173,9 +10418,17 @@ async fn concurrent_lfs_operations() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200, "download of original object {i} should succeed");
+        assert_eq!(
+            resp.status(),
+            200,
+            "download of original object {i} should succeed"
+        );
         let body = resp.bytes().await.unwrap();
-        assert_eq!(body.as_ref(), expected.as_slice(), "original object {i} content mismatch");
+        assert_eq!(
+            body.as_ref(),
+            expected.as_slice(),
+            "original object {i} content mismatch"
+        );
     }
 
     server.abort();
@@ -8198,11 +10451,18 @@ async fn hub_webhook_create_and_list() {
         .send()
         .await
         .unwrap();
-    assert_eq!(create.status(), 201, "model repo creation: {}", create.text().await.unwrap());
+    assert_eq!(
+        create.status(),
+        201,
+        "model repo creation: {}",
+        create.text().await.unwrap()
+    );
 
     // Create a webhook on the model repo.
     let create_wh = client
-        .post(format!("{base_url}/api/models/test-owner/test-model/webhooks"))
+        .post(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "url": "https://example.com/webhook",
@@ -8212,25 +10472,37 @@ async fn hub_webhook_create_and_list() {
         .send()
         .await
         .unwrap();
-    assert_eq!(create_wh.status(), 201, "webhook create: {}", create_wh.text().await.unwrap());
+    assert_eq!(
+        create_wh.status(),
+        201,
+        "webhook create: {}",
+        create_wh.text().await.unwrap()
+    );
     let wh: serde_json::Value = create_wh.json().await.unwrap();
     let wh_id = wh["id"].as_str().expect("webhook id missing");
     assert_eq!(wh["url"].as_str(), Some("https://example.com/webhook"));
-    assert!(wh["active"].as_bool().unwrap_or(false), "webhook should be active");
+    assert!(
+        wh["active"].as_bool().unwrap_or(false),
+        "webhook should be active"
+    );
     let events = wh["events"].as_array().unwrap();
     assert!(events.iter().any(|e| e.as_str() == Some("push")));
     assert!(events.iter().any(|e| e.as_str() == Some("delete")));
 
     // List webhooks — should contain the one we just created.
     let list = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/webhooks"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
     assert_eq!(list.status(), 200);
     let list_body: serde_json::Value = list.json().await.unwrap();
-    let webhooks = list_body["webhooks"].as_array().expect("webhooks array missing");
+    let webhooks = list_body["webhooks"]
+        .as_array()
+        .expect("webhooks array missing");
     assert_eq!(webhooks.len(), 1, "expected exactly 1 webhook");
     assert_eq!(webhooks[0]["id"].as_str(), Some(wh_id));
 
@@ -8244,7 +10516,9 @@ async fn hub_webhook_create_and_list() {
         .unwrap();
     assert_eq!(create2.status(), 201);
     let list_empty = client
-        .get(format!("{base_url}/api/models/test-owner/test-model2/webhooks"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model2/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -8273,7 +10547,9 @@ async fn hub_webhook_delete() {
 
     // Create a webhook.
     let create_wh = client
-        .post(format!("{base_url}/api/models/test-owner/test-model/webhooks"))
+        .post(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({"url": "https://example.com/hook", "events": ["push"]}))
         .send()
@@ -8285,7 +10561,9 @@ async fn hub_webhook_delete() {
 
     // Delete the webhook.
     let del = client
-        .delete(format!("{base_url}/api/models/test-owner/test-model/webhooks/{wh_id}"))
+        .delete(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks/{wh_id}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -8294,14 +10572,19 @@ async fn hub_webhook_delete() {
 
     // Verify it's gone.
     let list = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/webhooks"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
     assert_eq!(list.status(), 200);
     let body: serde_json::Value = list.json().await.unwrap();
-    assert!(body["webhooks"].as_array().unwrap().is_empty(), "webhook list should be empty after delete");
+    assert!(
+        body["webhooks"].as_array().unwrap().is_empty(),
+        "webhook list should be empty after delete"
+    );
 
     server.abort();
 }
@@ -8319,7 +10602,12 @@ async fn hub_dataset_operations() {
         .send()
         .await
         .unwrap();
-    assert_eq!(create.status(), 201, "dataset repo creation: {}", create.text().await.unwrap());
+    assert_eq!(
+        create.status(),
+        201,
+        "dataset repo creation: {}",
+        create.text().await.unwrap()
+    );
 
     // Verify the dataset exists via info endpoint.
     let info = client
@@ -8334,21 +10622,35 @@ async fn hub_dataset_operations() {
 
     // Parquet endpoint should work (returns 200, even if no parquet files yet).
     let parquet = client
-        .get(format!("{base_url}/api/datasets/test-owner/test-dataset/parquet"))
+        .get(format!(
+            "{base_url}/api/datasets/test-owner/test-dataset/parquet"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(parquet.status(), 200, "parquet endpoint on empty dataset: {}", parquet.status());
+    assert_eq!(
+        parquet.status(),
+        200,
+        "parquet endpoint on empty dataset: {}",
+        parquet.status()
+    );
 
     // First-rows endpoint should work on an empty dataset.
     let first_rows = client
-        .get(format!("{base_url}/api/datasets/test-owner/test-dataset/first-rows"))
+        .get(format!(
+            "{base_url}/api/datasets/test-owner/test-dataset/first-rows"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(first_rows.status(), 200, "first-rows on empty dataset: {}", first_rows.status());
+    assert_eq!(
+        first_rows.status(),
+        200,
+        "first-rows on empty dataset: {}",
+        first_rows.status()
+    );
 
     server.abort();
 }
@@ -8370,7 +10672,9 @@ async fn hub_model_modelcard() {
 
     // Empty repo — modelcard should return 404 (no README.md committed yet).
     let mc_empty = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/modelcard"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -8384,25 +10688,42 @@ async fn hub_model_modelcard() {
         "{{\"header\":{{\"summary\":\"add model card\"}}}}\n{{\"file\":{{\"path\":\"README.md\",\"content\":\"{b64}\"}}}}"
     );
     let commit = client
-        .post(format!("{base_url}/api/models/test-owner/test-model/commit/main"))
+        .post(format!(
+            "{base_url}/api/models/test-owner/test-model/commit/main"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-ndjson")
         .body(ndjson)
         .send()
         .await
         .unwrap();
-    assert_eq!(commit.status(), 200, "commit failed: {}", commit.text().await.unwrap());
+    assert_eq!(
+        commit.status(),
+        200,
+        "commit failed: {}",
+        commit.text().await.unwrap()
+    );
 
     // Retrieve the modelcard — should return the README content.
     let mc = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/modelcard"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(mc.status(), 200, "modelcard retrieval failed: {}", mc.status());
+    assert_eq!(
+        mc.status(),
+        200,
+        "modelcard retrieval failed: {}",
+        mc.status()
+    );
     let body = mc.text().await.unwrap();
-    assert!(body.contains("My Model"), "modelcard should contain the title: {body}");
+    assert!(
+        body.contains("My Model"),
+        "modelcard should contain the title: {body}"
+    );
 
     server.abort();
 }
@@ -8429,7 +10750,12 @@ async fn local_store_read_write_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 200, "local store write failed: {}", put.status());
+    assert_eq!(
+        put.status(),
+        200,
+        "local store write failed: {}",
+        put.status()
+    );
 
     // Read the chunk back and verify bytes match exactly.
     let get = client
@@ -8438,9 +10764,18 @@ async fn local_store_read_write_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 200, "local store read failed: {}", get.status());
+    assert_eq!(
+        get.status(),
+        200,
+        "local store read failed: {}",
+        get.status()
+    );
     let body = get.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), content, "local store roundtrip bytes mismatch");
+    assert_eq!(
+        body.as_ref(),
+        content,
+        "local store roundtrip bytes mismatch"
+    );
 
     server.abort();
 }
@@ -8459,7 +10794,12 @@ async fn local_store_delete_nonexistent() {
         .send()
         .await
         .unwrap();
-    assert_eq!(del.status(), 404, "delete non-existent should return 404, got {}", del.status());
+    assert_eq!(
+        del.status(),
+        404,
+        "delete non-existent should return 404, got {}",
+        del.status()
+    );
 
     server.abort();
 }
@@ -8482,8 +10822,13 @@ async fn local_store_list_chunks() {
     let chunks_before = before["chunks"].as_u64().unwrap_or(0);
 
     // Write 3 distinct chunks.
-    let contents: Vec<Vec<u8>> = (0..3).map(|i| format!("chunk-content-{i}").into_bytes()).collect();
-    let oids: Vec<String> = contents.iter().map(|c| hex::encode(sha2::Sha256::digest(c))).collect();
+    let contents: Vec<Vec<u8>> = (0..3)
+        .map(|i| format!("chunk-content-{i}").into_bytes())
+        .collect();
+    let oids: Vec<String> = contents
+        .iter()
+        .map(|c| hex::encode(sha2::Sha256::digest(c)))
+        .collect();
 
     for (content, oid) in contents.iter().zip(oids.iter()) {
         let resp = client
@@ -8507,7 +10852,10 @@ async fn local_store_list_chunks() {
     assert_eq!(stats_after.status(), 200);
     let after: serde_json::Value = stats_after.json().await.unwrap();
     let chunks_after = after["chunks"].as_u64().unwrap_or(0);
-    assert!(chunks_after >= chunks_before, "chunk count should not decrease: before={chunks_before}, after={chunks_after}");
+    assert!(
+        chunks_after >= chunks_before,
+        "chunk count should not decrease: before={chunks_before}, after={chunks_after}"
+    );
 
     // Verify all 3 chunks are readable and correct.
     for (content, oid) in contents.iter().zip(oids.iter()) {
@@ -8536,7 +10884,13 @@ async fn sqlite_reconstruction_roundtrip() {
 
     // Upload a xorb and shard to create a reconstruction entry in SQLite.
     let hash = upload_xorb(&client, &base_url, &token, b"sqlite reconstruction content").await;
-    let file_hash = upload_shard(&client, &base_url, &token, &[(b"sqlite reconstruction content", &hash)]).await;
+    let file_hash = upload_shard(
+        &client,
+        &base_url,
+        &token,
+        &[(b"sqlite reconstruction content", &hash)],
+    )
+    .await;
 
     // Query the reconstruction entry back — verify fields.
     let recon = client
@@ -8545,7 +10899,12 @@ async fn sqlite_reconstruction_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(recon.status(), 200, "reconstruction query failed: {}", recon.status());
+    assert_eq!(
+        recon.status(),
+        200,
+        "reconstruction query failed: {}",
+        recon.status()
+    );
     let body: serde_json::Value = recon.json().await.unwrap();
     let terms = body["terms"].as_array().expect("terms array missing");
     assert_eq!(terms.len(), 1, "expected 1 term in reconstruction");
@@ -8573,11 +10932,35 @@ async fn sqlite_dedupe_mapping_roundtrip() {
     let before: serde_json::Value = stats_before.json().await.unwrap();
     let chunks_before = before["chunks"].as_u64().unwrap_or(0);
 
-    // Upload the same content 3 times — the dedupe mapping should prevent chunk growth.
+    // Upload once, then verify duplicate writes do not grow the chunk inventory.
     let content = b"dedupe mapping roundtrip content";
     let oid = hex::encode(sha2::Sha256::digest(content));
 
-    for i in 0..3 {
+    let first = client
+        .put(format!("{base_url}/v1/lfs/objects/{oid}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/octet-stream")
+        .body(content.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200, "first upload failed");
+    let stats_after_first = client
+        .get(format!("{base_url}/v1/stats"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let chunks_after_first = stats_after_first["chunks"].as_u64().unwrap_or(0);
+    assert!(
+        chunks_after_first > chunks_before,
+        "first upload should add chunks"
+    );
+
+    for i in 0..2 {
         let resp = client
             .put(format!("{base_url}/v1/lfs/objects/{oid}"))
             .header("Authorization", format!("Bearer {token}"))
@@ -8589,7 +10972,7 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         assert_eq!(resp.status(), 200, "upload {i} failed");
     }
 
-    // The dedupe mapping should ensure chunk count didn't grow.
+    // The duplicate uploads should not add chunks.
     let stats_after = client
         .get(format!("{base_url}/v1/stats"))
         .header("Authorization", format!("Bearer {token}"))
@@ -8598,7 +10981,10 @@ async fn sqlite_dedupe_mapping_roundtrip() {
         .unwrap();
     let after: serde_json::Value = stats_after.json().await.unwrap();
     let chunks_after = after["chunks"].as_u64().unwrap_or(0);
-    assert_eq!(chunks_after, chunks_before, "dedupe mapping should prevent chunk growth");
+    assert_eq!(
+        chunks_after, chunks_after_first,
+        "dedupe mapping should prevent chunk growth"
+    );
 
     // Query back — content should be intact.
     let get = client
@@ -8622,11 +11008,20 @@ async fn token_scope_read_can_read() {
     // Mint a read-only token.
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
     let claims = shardline_protocol::TokenClaims::new(
-        "local", "test-subject", shardline_protocol::TokenScope::Read, repo, u64::MAX,
-    ).unwrap();
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        u64::MAX,
+    )
+    .unwrap();
     let read_token = signer.sign(&claims).unwrap();
 
     let (base_url, server) = start_server().await.unwrap();
@@ -8652,7 +11047,12 @@ async fn token_scope_read_can_read() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 200, "read-only token should be able to read, got {}", get.status());
+    assert_eq!(
+        get.status(),
+        200,
+        "read-only token should be able to read, got {}",
+        get.status()
+    );
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
 
     server.abort();
@@ -8663,11 +11063,20 @@ async fn token_scope_write_can_write() {
     // Mint a write token.
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
     let claims = shardline_protocol::TokenClaims::new(
-        "local", "test-subject", shardline_protocol::TokenScope::Write, repo, u64::MAX,
-    ).unwrap();
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Write,
+        repo,
+        u64::MAX,
+    )
+    .unwrap();
     let write_token = signer.sign(&claims).unwrap();
 
     let (base_url, server) = start_server().await.unwrap();
@@ -8684,7 +11093,12 @@ async fn token_scope_write_can_write() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 200, "write token should be able to write, got {}", put.status());
+    assert_eq!(
+        put.status(),
+        200,
+        "write token should be able to write, got {}",
+        put.status()
+    );
 
     server.abort();
 }
@@ -8694,11 +11108,20 @@ async fn token_scope_read_cannot_write() {
     // Mint a read-only token.
     let signer = shardline_protocol::TokenSigner::new(b"test-signing-key-32-bytes-long!!").unwrap();
     let repo = shardline_protocol::RepositoryScope::new(
-        shardline_protocol::RepositoryProvider::GitHub, "test-owner", "test-repo", Some("main"),
-    ).unwrap();
+        shardline_protocol::RepositoryProvider::GitHub,
+        "test-owner",
+        "test-repo",
+        Some("main"),
+    )
+    .unwrap();
     let claims = shardline_protocol::TokenClaims::new(
-        "local", "test-subject", shardline_protocol::TokenScope::Read, repo, u64::MAX,
-    ).unwrap();
+        "local",
+        "test-subject",
+        shardline_protocol::TokenScope::Read,
+        repo,
+        u64::MAX,
+    )
+    .unwrap();
     let read_token = signer.sign(&claims).unwrap();
 
     let (base_url, server) = start_server().await.unwrap();
@@ -8715,7 +11138,12 @@ async fn token_scope_read_cannot_write() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 403, "read-only token should NOT be able to write, got {}", put.status());
+    assert_eq!(
+        put.status(),
+        403,
+        "read-only token should NOT be able to write, got {}",
+        put.status()
+    );
 
     server.abort();
 }
@@ -8742,9 +11170,17 @@ async fn oci_blob_upload_download_roundtrip() {
         .await
         .unwrap();
     assert_eq!(post.status(), 202);
-    let location = post.headers().get("location")
+    let location = post
+        .headers()
+        .get("location")
         .and_then(|v| v.to_str().ok())
-        .map(|s| if s.starts_with("http") { s.to_owned() } else { format!("{base_url}{s}") })
+        .map(|s| {
+            if s.starts_with("http") {
+                s.to_owned()
+            } else {
+                format!("{base_url}{s}")
+            }
+        })
         .expect("location header missing");
 
     let put = client
@@ -8765,7 +11201,10 @@ async fn oci_blob_upload_download_roundtrip() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200, "blob download failed");
-    let dd = get.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
+    let dd = get
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
     assert_eq!(dd, Some(digest.as_str()), "docker-content-digest mismatch");
     let body = get.bytes().await.unwrap();
     assert_eq!(body.as_ref(), content, "OCI blob roundtrip bytes mismatch");
@@ -8784,7 +11223,9 @@ async fn oci_manifest_push_pull_roundtrip() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -8800,7 +11241,10 @@ async fn oci_manifest_push_pull_roundtrip() {
         "annotations": {"com.shardline.test": "push-pull-roundtrip"}
     });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let manifest_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&manifest_bytes)));
+    let manifest_digest = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&manifest_bytes))
+    );
 
     let put = client
         .put(format!("{base_url}/v2/{repo}/manifests/{manifest_digest}"))
@@ -8820,12 +11264,29 @@ async fn oci_manifest_push_pull_roundtrip() {
         .await
         .unwrap();
     assert_eq!(get.status(), 200, "manifest pull by digest failed");
-    let dd = get.headers().get("docker-content-digest").and_then(|v| v.to_str().ok());
-    assert_eq!(dd, Some(manifest_digest.as_str()), "docker-content-digest mismatch on pull");
-    let ct = get.headers().get("content-type").and_then(|v| v.to_str().ok());
-    assert_eq!(ct, Some("application/vnd.oci.image.manifest.v1+json"), "content-type mismatch on pull");
+    let dd = get
+        .headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(
+        dd,
+        Some(manifest_digest.as_str()),
+        "docker-content-digest mismatch on pull"
+    );
+    let ct = get
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(
+        ct,
+        Some("application/vnd.oci.image.manifest.v1+json"),
+        "content-type mismatch on pull"
+    );
     let body: serde_json::Value = get.json().await.unwrap();
-    assert_eq!(body["annotations"]["com.shardline.test"].as_str(), Some("push-pull-roundtrip"));
+    assert_eq!(
+        body["annotations"]["com.shardline.test"].as_str(),
+        Some("push-pull-roundtrip")
+    );
 
     // Push a tag pointing to the same manifest, then pull by tag.
     let put_tag = client
@@ -8846,7 +11307,10 @@ async fn oci_manifest_push_pull_roundtrip() {
         .unwrap();
     assert_eq!(get_tag.status(), 200, "tag pull failed");
     let tag_body: serde_json::Value = get_tag.json().await.unwrap();
-    assert_eq!(tag_body["annotations"]["com.shardline.test"].as_str(), Some("push-pull-roundtrip"));
+    assert_eq!(
+        tag_body["annotations"]["com.shardline.test"].as_str(),
+        Some("push-pull-roundtrip")
+    );
 
     server.abort();
 }
@@ -8893,15 +11357,26 @@ async fn lfs_batch_upload_download() {
         .send()
         .await
         .unwrap();
-    assert_eq!(batch.status(), 200, "batch download failed: {}", batch.status());
+    assert_eq!(
+        batch.status(),
+        200,
+        "batch download failed: {}",
+        batch.status()
+    );
     let batch_body: serde_json::Value = batch.json().await.unwrap();
     let returned = batch_body["objects"].as_array().unwrap();
     assert_eq!(returned.len(), 3, "batch should return all 3 objects");
 
     // Each returned object should have download actions.
     for obj in returned {
-        assert!(obj["actions"].is_object(), "object should have actions: {obj:?}");
-        assert!(obj["actions"]["download"].is_object(), "object should have download action: {obj:?}");
+        assert!(
+            obj["actions"].is_object(),
+            "object should have actions: {obj:?}"
+        );
+        assert!(
+            obj["actions"]["download"].is_object(),
+            "object should have download action: {obj:?}"
+        );
     }
 
     // Batch upload request for all 3 objects.
@@ -8918,10 +11393,19 @@ async fn lfs_batch_upload_download() {
         .send()
         .await
         .unwrap();
-    assert_eq!(batch_upload.status(), 200, "batch upload failed: {}", batch_upload.status());
+    assert_eq!(
+        batch_upload.status(),
+        200,
+        "batch upload failed: {}",
+        batch_upload.status()
+    );
     let upload_body: serde_json::Value = batch_upload.json().await.unwrap();
     let upload_returned = upload_body["objects"].as_array().unwrap();
-    assert_eq!(upload_returned.len(), 3, "upload batch should return all 3 objects");
+    assert_eq!(
+        upload_returned.len(),
+        3,
+        "upload batch should return all 3 objects"
+    );
 
     // Verify all objects are still downloadable.
     for (content, oid) in &objects_data {
@@ -8958,7 +11442,12 @@ async fn bazel_flat_put_and_get_ac() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 204, "flat PUT should return 204, got {}", put.status());
+    assert_eq!(
+        put.status(),
+        204,
+        "flat PUT should return 204, got {}",
+        put.status()
+    );
 
     let get = client
         .get(format!("{base_url}/v1/bazel/{hash}"))
@@ -8966,7 +11455,12 @@ async fn bazel_flat_put_and_get_ac() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 200, "flat GET should return 200, got {}", get.status());
+    assert_eq!(
+        get.status(),
+        200,
+        "flat GET should return 200, got {}",
+        get.status()
+    );
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
 
     server.abort();
@@ -8988,7 +11482,12 @@ async fn bazel_flat_put_and_get_cas() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 204, "flat CAS PUT should return 204, got {}", put.status());
+    assert_eq!(
+        put.status(),
+        204,
+        "flat CAS PUT should return 204, got {}",
+        put.status()
+    );
 
     let get = client
         .get(format!("{base_url}/v1/bazel/{hash}"))
@@ -8996,7 +11495,12 @@ async fn bazel_flat_put_and_get_cas() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 200, "flat CAS GET should return 200, got {}", get.status());
+    assert_eq!(
+        get.status(),
+        200,
+        "flat CAS GET should return 200, got {}",
+        get.status()
+    );
     assert_eq!(get.bytes().await.unwrap().as_ref(), content);
 
     server.abort();
@@ -9015,7 +11519,12 @@ async fn bazel_flat_get_missing_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 404, "flat GET missing should return 404, got {}", get.status());
+    assert_eq!(
+        get.status(),
+        404,
+        "flat GET missing should return 404, got {}",
+        get.status()
+    );
 
     server.abort();
 }
@@ -9043,8 +11552,16 @@ async fn bazel_flat_head_existing() {
         .send()
         .await
         .unwrap();
-    assert_eq!(head.status(), 200, "flat HEAD existing should return 200, got {}", head.status());
-    let cl = head.headers().get("content-length").and_then(|v| v.to_str().ok());
+    assert_eq!(
+        head.status(),
+        200,
+        "flat HEAD existing should return 200, got {}",
+        head.status()
+    );
+    let cl = head
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok());
     assert!(cl.is_some(), "flat HEAD should return content-length");
 
     server.abort();
@@ -9063,7 +11580,12 @@ async fn bazel_flat_head_missing() {
         .send()
         .await
         .unwrap();
-    assert_eq!(head.status(), 404, "flat HEAD missing should return 404, got {}", head.status());
+    assert_eq!(
+        head.status(),
+        404,
+        "flat HEAD missing should return 404, got {}",
+        head.status()
+    );
 
     server.abort();
 }
@@ -9083,7 +11605,8 @@ async fn bazel_flat_put_empty_hash_rejected() {
         .unwrap();
     assert!(
         put.status().is_client_error(),
-        "flat PUT empty hash should return 4xx, got {}", put.status()
+        "flat PUT empty hash should return 4xx, got {}",
+        put.status()
     );
 
     server.abort();
@@ -9102,7 +11625,12 @@ async fn bazel_flat_put_invalid_hash_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(put.status(), 400, "flat PUT invalid hash should return 400, got {}", put.status());
+    assert_eq!(
+        put.status(),
+        400,
+        "flat PUT invalid hash should return 400, got {}",
+        put.status()
+    );
 
     server.abort();
 }
@@ -9131,16 +11659,25 @@ async fn oci_error_response_uses_errors_array_format() {
 
     // Verify the response body uses the OCI errors array format
     let body: serde_json::Value = put.json().await.unwrap();
-    let errors = body.get("errors")
+    let errors = body
+        .get("errors")
         .expect("OCI error response must have 'errors' array field");
-    let errors_array = errors.as_array()
-        .expect("'errors' field must be an array");
+    let errors_array = errors.as_array().expect("'errors' field must be an array");
     assert!(!errors_array.is_empty(), "'errors' array must not be empty");
-    assert!(errors_array[0].get("code").is_some(), "error entry must have 'code' field");
-    assert!(errors_array[0].get("message").is_some(), "error entry must have 'message' field");
+    assert!(
+        errors_array[0].get("code").is_some(),
+        "error entry must have 'code' field"
+    );
+    assert!(
+        errors_array[0].get("message").is_some(),
+        "error entry must have 'message' field"
+    );
 
     // Must NOT use the flat { "error": "..." } format
-    assert!(body.get("error").is_none(), "OCI error must NOT use flat 'error' field");
+    assert!(
+        body.get("error").is_none(),
+        "OCI error must NOT use flat 'error' field"
+    );
 
     server.abort();
 }
@@ -9163,20 +11700,26 @@ async fn oci_404_uses_errors_array_format() {
 
     // Verify the 404 response uses the OCI errors array format
     let body: serde_json::Value = get.json().await.unwrap();
-    let errors = body.get("errors")
+    let errors = body
+        .get("errors")
         .expect("OCI 404 must use 'errors' array format");
-    let errors_array = errors.as_array()
-        .expect("'errors' must be an array");
+    let errors_array = errors.as_array().expect("'errors' must be an array");
     assert!(!errors_array.is_empty(), "'errors' array must not be empty");
     assert_eq!(
         errors_array[0]["code"].as_str(),
         Some("MANIFEST_UNKNOWN"),
         "404 for missing manifest must use MANIFEST_UNKNOWN error code"
     );
-    assert!(errors_array[0].get("message").is_some(), "error must include message");
+    assert!(
+        errors_array[0].get("message").is_some(),
+        "error must include message"
+    );
 
     // Must NOT use flat format
-    assert!(body.get("error").is_none(), "must not use flat 'error' field");
+    assert!(
+        body.get("error").is_none(),
+        "must not use flat 'error' field"
+    );
 
     server.abort();
 }
@@ -9192,7 +11735,9 @@ async fn oci_manifest_with_nonexistent_subject_is_accepted() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -9200,7 +11745,8 @@ async fn oci_manifest_with_nonexistent_subject_is_accepted() {
         .unwrap();
 
     // Push a manifest with a subject field pointing to a non-existent digest
-    let nonexistent_subject_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let nonexistent_subject_digest =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
     let manifest = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -9238,7 +11784,11 @@ async fn oci_manifest_with_nonexistent_subject_is_accepted() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get.status(), 200, "manifest with non-existent subject should be retrievable");
+    assert_eq!(
+        get.status(),
+        200,
+        "manifest with non-existent subject should be retrievable"
+    );
 
     server.abort();
 }
@@ -9254,7 +11804,9 @@ async fn oci_tag_list_n_zero_returns_empty_200() {
     let config = br#"{"architecture":"amd64","os":"linux"}"#;
     let config_digest = format!("sha256:{}", hex::encode(sha2::Sha256::digest(config)));
     client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads?digest={config_digest}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .body(config.to_vec())
         .send()
@@ -9284,7 +11836,12 @@ async fn oci_tag_list_n_zero_returns_empty_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(tags.status(), 200, "n=0 tag list should return 200, got {}", tags.status());
+    assert_eq!(
+        tags.status(),
+        200,
+        "n=0 tag list should return 200, got {}",
+        tags.status()
+    );
     // No Link header expected when n=0
     assert!(
         tags.headers().get("link").is_none(),
@@ -9292,7 +11849,10 @@ async fn oci_tag_list_n_zero_returns_empty_200() {
     );
     let body: serde_json::Value = tags.json().await.unwrap();
     let names = body["tags"].as_array().expect("tags must be an array");
-    assert!(names.is_empty(), "n=0 should return empty tags array, got {names:?}");
+    assert!(
+        names.is_empty(),
+        "n=0 should return empty tags array, got {names:?}"
+    );
 
     server.abort();
 }
@@ -9469,7 +12029,9 @@ async fn oci_blob_upload_rejects_non_sha256_digest_algorithm() {
     let repo = "test-owner/test-repo";
 
     let resp = client
-        .post(format!("{base_url}/v2/{repo}/blobs/uploads/?digest-algorithm=sha512"))
+        .post(format!(
+            "{base_url}/v2/{repo}/blobs/uploads/?digest-algorithm=sha512"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -9519,7 +12081,12 @@ async fn lfs_patch_multi_chunk_assembles_file() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "LFS PATCH chunk 1 failed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "LFS PATCH chunk 1 failed: {}",
+        resp.status()
+    );
 
     // Chunk 2: bytes 16..32 (final chunk)
     let chunk2 = &content[16..32];
@@ -9533,7 +12100,12 @@ async fn lfs_patch_multi_chunk_assembles_file() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "LFS PATCH chunk 2 failed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "LFS PATCH chunk 2 failed: {}",
+        resp.status()
+    );
 
     // Verify assembled file matches original content
     let download = client
@@ -9542,7 +12114,11 @@ async fn lfs_patch_multi_chunk_assembles_file() {
         .send()
         .await
         .unwrap();
-    assert_eq!(download.status(), 200, "download after multi-chunk PATCH failed");
+    assert_eq!(
+        download.status(),
+        200,
+        "download after multi-chunk PATCH failed"
+    );
     let downloaded = download.bytes().await.unwrap();
     assert_eq!(
         downloaded.as_ref(),
@@ -9675,26 +12251,50 @@ async fn lfs_verify_hash_mismatch_returns_422() {
 async fn s3_backend_oci_session_upload() {
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_minio()
-        .start().unwrap();
-    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+        .start()
+        .unwrap();
+    let Some(docker) = docker else {
+        eprintln!("SKIP: Docker not available");
+        return;
+    };
     let s3 = docker.s3_raw_config(None).unwrap();
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
+        .with_credentials(
+            s3.access_key.map(SecretString::new),
+            s3.secret_key.map(SecretString::new),
+            s3.session_token.map(SecretString::new),
+        )
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Oci].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
-        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Oci].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap()
+    .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
@@ -9702,53 +12302,92 @@ async fn s3_backend_oci_session_upload() {
     let repo = "test-owner/test-repo";
 
     // Step 1: Create upload session (POST without digest)
-    let create = client.post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
+    let create = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Length", "0")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(create.status(), 202, "create session");
-    let location = create.headers().get("location").unwrap().to_str().unwrap().to_owned();
-    assert!(location.contains("/blobs/uploads/"), "session location: {location}");
+    let location = create
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        location.contains("/blobs/uploads/"),
+        "session location: {location}"
+    );
 
     // Step 2: PATCH first chunk
     let chunk1 = b"hello-s3-";
-    let patch1 = client.patch(format!("{base_url}{location}"))
+    let patch1 = client
+        .patch(format!("{base_url}{location}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
         .header("Content-Range", format!("0-{}", chunk1.len() - 1))
-        .body(chunk1.to_vec()).send().await.unwrap();
+        .body(chunk1.to_vec())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(patch1.status(), 202, "first PATCH");
-    let range_header1 = patch1.headers().get("range").unwrap().to_str().unwrap().to_owned();
+    let range_header1 = patch1
+        .headers()
+        .get("range")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(range_header1, format!("0-{}", chunk1.len() as u64 - 1));
 
     // Step 3: PATCH second chunk
     let chunk2 = b"world-s3!";
-    let location2 = patch1.headers().get("location")
+    let location2 = patch1
+        .headers()
+        .get("location")
         .map(|v| v.to_str().unwrap().to_owned())
         .unwrap_or_else(|| location.clone());
-    let patch2 = client.patch(format!("{base_url}{location2}"))
+    let patch2 = client
+        .patch(format!("{base_url}{location2}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
-        .header("Content-Range", format!("{}-{}", chunk1.len(), chunk1.len() + chunk2.len() - 1))
-        .body(chunk2.to_vec()).send().await.unwrap();
+        .header(
+            "Content-Range",
+            format!("{}-{}", chunk1.len(), chunk1.len() + chunk2.len() - 1),
+        )
+        .body(chunk2.to_vec())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(patch2.status(), 202, "second PATCH");
 
     // Step 4: PUT to complete with digest
     let full_data = [chunk1.to_vec(), chunk2.to_vec()].concat();
     let digest_hex = hex::encode(sha2::Sha256::digest(&full_data));
-    let location3 = patch2.headers().get("location")
+    let location3 = patch2
+        .headers()
+        .get("location")
         .map(|v| v.to_str().unwrap().to_owned())
         .unwrap_or_else(|| location2.clone());
-    let complete = client.put(format!("{base_url}{location3}?digest=sha256:{digest_hex}"))
+    let complete = client
+        .put(format!("{base_url}{location3}?digest=sha256:{digest_hex}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Length", "0")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(complete.status(), 201, "PUT complete on S3");
 
     // Step 5: Verify blob content
-    let get = client.get(format!("{base_url}/v2/{repo}/blobs/sha256:{digest_hex}"))
+    let get = client
+        .get(format!("{base_url}/v2/{repo}/blobs/sha256:{digest_hex}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 200, "S3 OCI blob GET after session upload");
     assert_eq!(get.bytes().await.unwrap().as_ref(), full_data);
 
@@ -9759,26 +12398,50 @@ async fn s3_backend_oci_session_upload() {
 async fn s3_backend_oci_session_abort() {
     let docker = shardline_test_support::DockerLocalStack::builder()
         .with_minio()
-        .start().unwrap();
-    let Some(docker) = docker else { eprintln!("SKIP: Docker not available"); return; };
+        .start()
+        .unwrap();
+    let Some(docker) = docker else {
+        eprintln!("SKIP: Docker not available");
+        return;
+    };
     let s3 = docker.s3_raw_config(None).unwrap();
 
     let storage = tempfile::tempdir().unwrap();
     let config_path = write_provider_config(storage.path()).unwrap();
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await.unwrap();
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{addr}");
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(s3.bucket, s3.region)
         .with_endpoint(s3.endpoint)
-        .with_credentials(s3.access_key.map(SecretString::new), s3.secret_key.map(SecretString::new), s3.session_token.map(SecretString::new))
+        .with_credentials(
+            s3.access_key.map(SecretString::new),
+            s3.secret_key.map(SecretString::new),
+            s3.session_token.map(SecretString::new),
+        )
         .with_key_prefix(s3.key_prefix.as_deref())
         .with_allow_http(s3.allow_http);
-    let config = ServerConfig::new(addr, base_url.clone(), storage.path().to_path_buf(), NonZeroUsize::new(4).unwrap())
-        .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()).unwrap()
-        .with_server_frontends([ServerFrontend::Oci].iter().copied()).unwrap()
-        .with_provider_runtime(config_path, b"test-api-key".to_vec(), "test-issuer".to_owned(), NonZeroU64::new(3600).unwrap()).unwrap()
-        .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
-    let server = tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
+    let config = ServerConfig::new(
+        addr,
+        base_url.clone(),
+        storage.path().to_path_buf(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
+    .unwrap()
+    .with_server_frontends([ServerFrontend::Oci].iter().copied())
+    .unwrap()
+    .with_provider_runtime(
+        config_path,
+        b"test-api-key".to_vec(),
+        "test-issuer".to_owned(),
+        NonZeroU64::new(3600).unwrap(),
+    )
+    .unwrap()
+    .with_object_storage(shardline_server::ObjectStorageAdapter::S3, Some(s3_config));
+    let server =
+        tokio::spawn(async { shardline_server::serve_with_listener(config, listener).await });
     let client = Client::new();
     let token = mint_token("test-subject", "test-owner", "test-repo", "main").unwrap();
     wait_for_health(&base_url, &client).await;
@@ -9786,38 +12449,59 @@ async fn s3_backend_oci_session_abort() {
     let repo = "test-owner/test-repo";
 
     // Create upload session
-    let create = client.post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
+    let create = client
+        .post(format!("{base_url}/v2/{repo}/blobs/uploads/"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Length", "0")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(create.status(), 202);
-    let location = create.headers().get("location").unwrap().to_str().unwrap().to_owned();
+    let location = create
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
     assert!(location.contains("/blobs/uploads/"));
 
     // PATCH a chunk
     let chunk = b"abortable-chunk-data";
-    let patch = client.patch(&format!("{base_url}{location}"))
+    let patch = client
+        .patch(&format!("{base_url}{location}"))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/octet-stream")
         .header("Content-Range", format!("0-{}", chunk.len() - 1))
-        .body(chunk.to_vec()).send().await.unwrap();
+        .body(chunk.to_vec())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(patch.status(), 202);
 
     // Get the updated location after PATCH
-    let location2 = patch.headers().get("location")
+    let location2 = patch
+        .headers()
+        .get("location")
         .map(|v| v.to_str().unwrap().to_owned())
         .unwrap_or_else(|| location.clone());
 
     // Cancel (DELETE) the upload session
-    let cancel = client.delete(&format!("{base_url}{location2}"))
+    let cancel = client
+        .delete(&format!("{base_url}{location2}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(cancel.status(), 204, "cancel session should return 204");
 
     // Verify session is gone
-    let get = client.get(&format!("{base_url}{location2}"))
+    let get = client
+        .get(&format!("{base_url}{location2}"))
         .header("Authorization", format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(get.status(), 404, "cancelled session should return 404");
 
     server.abort();

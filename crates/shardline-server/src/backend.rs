@@ -6,10 +6,10 @@ use std::{
 
 use axum::body::Bytes;
 use sha2::{Digest, Sha256};
-use shardline_protocol::{ByteRange, RepositoryScope, ShardlineHash};
+use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::{
-    BeginMultipartUploadResult, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey,
-    ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
+    AsyncObjectStore, DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata,
+    ObjectPrefix, PutOutcome,
 };
 
 use std::sync::{
@@ -24,12 +24,10 @@ use crate::{
     download_stream::ServerByteStream,
     model::{ServerStatsResponse, UploadFileResponse},
     object_store::{ServerObjectStore, object_store_from_config},
-    overflow::checked_add,
-    protocol_support::shared_sha256_object_key,
     reconstruction_cache::{
         ReconstructionCacheBenchReport, benchmark_memory_reconstruction_cache_with_loader,
     },
-    upload_ingest::{RequestBodyReader, read_body_to_bytes},
+    upload_ingest::RequestBodyReader,
     xet_adapter::{FileReconstructionResponse, ShardUploadResponse, XorbUploadResponse},
 };
 
@@ -37,6 +35,13 @@ use crate::{
 pub enum ServerBackend {
     Local(LocalBackend),
     Postgres(PostgresBackend),
+}
+
+fn protocol_object_file_id(object_key: &ObjectKey) -> String {
+    format!(
+        "protocol-object-{}",
+        hex::encode(Sha256::digest(object_key.as_str().as_bytes()))
+    )
 }
 
 /// Public benchmark-facing backend wrapper that resolves the active metadata and object
@@ -102,6 +107,9 @@ impl ServerBackend {
             })?;
             tracing::info!("startup probe: postgres metadata OK");
 
+            // Reconcile any stuck upload intents from a previous crash
+            backend.reconcile_stuck_upload_intents().await?;
+
             return Ok(Self::Postgres(backend));
         }
 
@@ -121,6 +129,9 @@ impl ServerBackend {
             ServerError::Io(std::io::Error::new(ErrorKind::ConnectionRefused, e))
         })?;
         tracing::info!("startup probe: sqlite metadata OK");
+
+        // Reconcile any stuck upload intents from a previous crash
+        backend.reconcile_stuck_upload_intents().await?;
 
         Ok(Self::Local(backend))
     }
@@ -162,26 +173,50 @@ impl ServerBackend {
         digest_hex: &str,
         body: RequestBodyReader,
     ) -> Result<PutOutcome, ServerError> {
+        // Local metadata is SQLite-backed. Keep the existence probe, intent
+        // transitions, and atomic record commit in one serialized operation so
+        // concurrent protocol uploads cannot race independent SQLite connections.
+        let _local_upload_guard = match self {
+            Self::Local(backend) => Some(backend.protocol_upload_lock.lock().await),
+            Self::Postgres(_) => None,
+        };
+        if object_key.as_str().rsplit('/').next() != Some(digest_hex) {
+            return Err(ServerError::InvalidDigest);
+        }
+        let direct_length = match self {
+            Self::Local(backend) => backend.object_length(object_key).await,
+            Self::Postgres(backend) => backend.object_length(object_key).await,
+        };
+        match direct_length {
+            Ok(_length) => {
+                verify_sha256_body(body, digest_hex).await?;
+                return Ok(PutOutcome::AlreadyExists);
+            }
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let file_id = protocol_object_file_id(object_key);
+        match self.file_total_bytes(&file_id, None, None).await {
+            Ok(_length) => {
+                verify_sha256_body(body, digest_hex).await?;
+                return Ok(PutOutcome::AlreadyExists);
+            }
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
         match self {
             Self::Local(backend) => {
-                put_sha256_addressed_object_stream_if_absent_with_object_store(
-                    &backend.object_store(),
-                    object_key,
-                    digest_hex,
-                    body,
-                )
-                .await
+                backend
+                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .await?;
             }
             Self::Postgres(backend) => {
-                put_sha256_addressed_object_stream_if_absent_with_object_store(
-                    &backend.object_store(),
-                    object_key,
-                    digest_hex,
-                    body,
-                )
-                .await
+                backend
+                    .upload_file_stream(&file_id, body, None, Some(digest_hex))
+                    .await?;
             }
         }
+        Ok(PutOutcome::Inserted)
     }
 
     pub(crate) async fn reconstruction(
@@ -333,83 +368,191 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) fn put_object_bytes_if_absent(
+    pub(crate) async fn put_object_bytes_if_absent(
         &self,
         object_key: &ObjectKey,
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => backend.put_object_bytes_if_absent(object_key, bytes),
-            Self::Postgres(backend) => backend.put_object_bytes_if_absent(object_key, bytes),
-        }
+        let object_store = self.object_store();
+        let integrity = ObjectIntegrity::new(
+            crate::local_backend::chunk_hash(&bytes),
+            u64::try_from(bytes.len())?,
+        );
+        Ok(AsyncObjectStore::put_if_absent(
+            &object_store,
+            object_key,
+            ObjectBody::from_vec(bytes),
+            &integrity,
+        )
+        .await?)
     }
 
-    pub(crate) fn put_sha256_addressed_object_bytes_if_absent(
+    pub(crate) async fn put_sha256_addressed_object_bytes_if_absent(
         &self,
         object_key: &ObjectKey,
         digest_hex: &str,
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => {
-                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-            }
-            Self::Postgres(backend) => {
-                backend.put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-            }
-        }
+        self.put_sha256_addressed_object_stream_if_absent(
+            object_key,
+            digest_hex,
+            RequestBodyReader::from_bytes(bytes.into()),
+        )
+        .await
     }
 
-    pub(crate) fn copy_object_if_absent(
+    pub(crate) async fn copy_object_if_absent(
         &self,
         source: &ObjectKey,
         destination: &ObjectKey,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => backend.copy_object_if_absent(source, destination),
-            Self::Postgres(backend) => backend.copy_object_if_absent(source, destination),
+        match self.object_length(destination).await {
+            Ok(_length) => return Ok(PutOutcome::AlreadyExists),
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
         }
+        let direct_length = match self {
+            Self::Local(backend) => backend.object_length(source).await,
+            Self::Postgres(backend) => backend.object_length(source).await,
+        };
+        if direct_length.is_ok() {
+            if let Some(digest_hex) = destination.as_str().strip_prefix("objects/sha256/") {
+                let total_length = direct_length?;
+                let source_stream = match self {
+                    Self::Local(backend) => {
+                        backend
+                            .read_object_stream(source, total_length, None)
+                            .await?
+                    }
+                    Self::Postgres(backend) => {
+                        backend
+                            .read_object_stream(source, total_length, None)
+                            .await?
+                    }
+                };
+                return self
+                    .put_sha256_addressed_object_stream_if_absent(
+                        destination,
+                        digest_hex,
+                        RequestBodyReader::from_stream(source_stream),
+                    )
+                    .await;
+            }
+            let object_store = self.object_store();
+            let source = source.clone();
+            let destination = destination.clone();
+            return tokio::task::spawn_blocking(move || {
+                Ok(object_store.copy_if_absent(&source, &destination)?)
+            })
+            .await
+            .map_err(ServerError::BlockingTask)?;
+        }
+        if !matches!(direct_length, Err(ServerError::NotFound)) {
+            return Err(direct_length.err().unwrap_or(ServerError::NotFound));
+        }
+        let source_file_id = protocol_object_file_id(source);
+        let destination_file_id = protocol_object_file_id(destination);
+        let inserted = match self {
+            Self::Local(backend) => {
+                backend
+                    .copy_file_reference(&source_file_id, &destination_file_id)
+                    .await?
+            }
+            Self::Postgres(backend) => {
+                backend
+                    .copy_file_reference(&source_file_id, &destination_file_id)
+                    .await?
+            }
+        };
+        Ok(if inserted {
+            PutOutcome::Inserted
+        } else {
+            PutOutcome::AlreadyExists
+        })
     }
 
-    pub(crate) fn put_object_bytes_overwrite(
+    pub(crate) async fn put_object_bytes_overwrite(
         &self,
         object_key: &ObjectKey,
         bytes: Vec<u8>,
     ) -> Result<(), ServerError> {
-        match self {
-            Self::Local(backend) => backend.put_object_bytes_overwrite(object_key, bytes),
-            Self::Postgres(backend) => backend.put_object_bytes_overwrite(object_key, bytes),
-        }
+        let object_store = self.object_store();
+        let object_key = object_key.clone();
+        let integrity = ObjectIntegrity::new(
+            crate::local_backend::chunk_hash(&bytes),
+            u64::try_from(bytes.len())?,
+        );
+        tokio::task::spawn_blocking(move || {
+            Ok(object_store.put_overwrite(&object_key, ObjectBody::from_vec(bytes), &integrity)?)
+        })
+        .await
+        .map_err(ServerError::BlockingTask)?
     }
 
-    pub(crate) fn put_sha256_addressed_object_file(
+    pub(crate) async fn put_sha256_addressed_object_file(
         &self,
         object_key: &ObjectKey,
         digest_hex: &str,
         path: &Path,
-        integrity: &shardline_storage::ObjectIntegrity,
+        _integrity: &shardline_storage::ObjectIntegrity,
     ) -> Result<PutOutcome, ServerError> {
-        match self {
-            Self::Local(backend) => {
-                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
+        use tokio::io::AsyncReadExt as _;
+
+        let file = tokio::fs::File::open(path).await?;
+        let stream = futures_util::stream::unfold(file, |mut file| async move {
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            match file.read(&mut buffer).await {
+                Ok(0) => None,
+                Ok(read) => {
+                    buffer.truncate(read);
+                    Some((Ok(Bytes::from(buffer)), file))
+                }
+                Err(error) => Some((Err(ServerError::Io(error)), file)),
             }
-            Self::Postgres(backend) => {
-                backend.put_sha256_addressed_object_file(object_key, digest_hex, path, integrity)
-            }
-        }
+        });
+        self.put_sha256_addressed_object_stream_if_absent(
+            object_key,
+            digest_hex,
+            RequestBodyReader::from_stream(stream),
+        )
+        .await
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
-        match self {
+        let direct = match self {
             Self::Local(backend) => backend.object_length(object_key).await,
             Self::Postgres(backend) => backend.object_length(object_key).await,
+        };
+        match direct {
+            Ok(length) => Ok(length),
+            Err(ServerError::NotFound) => {
+                self.file_total_bytes(&protocol_object_file_id(object_key), None, None)
+                    .await
+            }
+            Err(error) => Err(error),
         }
     }
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
-        match self {
+        let direct = match self {
             Self::Local(backend) => backend.read_object(object_key).await,
             Self::Postgres(backend) => backend.read_object(object_key).await,
+        };
+        match direct {
+            Ok(bytes) => Ok(bytes),
+            Err(ServerError::NotFound) => match self {
+                Self::Local(backend) => {
+                    backend
+                        .download_file(&protocol_object_file_id(object_key), None, None)
+                        .await
+                }
+                Self::Postgres(backend) => {
+                    backend
+                        .download_file(&protocol_object_file_id(object_key), None, None)
+                        .await
+                }
+            },
+            Err(error) => Err(error),
         }
     }
 
@@ -419,18 +562,38 @@ impl ServerBackend {
         total_length: u64,
         range: Option<ByteRange>,
     ) -> Result<ServerByteStream, ServerError> {
-        match self {
-            Self::Local(backend) => {
-                backend
-                    .read_object_stream(object_key, total_length, range)
-                    .await
-            }
-            Self::Postgres(backend) => {
-                backend
-                    .read_object_stream(object_key, total_length, range)
-                    .await
-            }
+        let direct_length = match self {
+            Self::Local(backend) => backend.object_length(object_key).await,
+            Self::Postgres(backend) => backend.object_length(object_key).await,
+        };
+        if direct_length.is_ok() {
+            return match self {
+                Self::Local(backend) => {
+                    backend
+                        .read_object_stream(object_key, total_length, range)
+                        .await
+                }
+                Self::Postgres(backend) => {
+                    backend
+                        .read_object_stream(object_key, total_length, range)
+                        .await
+                }
+            };
         }
+        if !matches!(direct_length, Err(ServerError::NotFound)) {
+            return Err(direct_length.err().unwrap_or(ServerError::NotFound));
+        }
+        let file_id = protocol_object_file_id(object_key);
+        let (stream, record_length) = match self {
+            Self::Local(backend) => backend.read_file_stream(&file_id, range).await?,
+            Self::Postgres(backend) => backend.read_file_stream(&file_id, range).await?,
+        };
+        if record_length != total_length {
+            return Err(ServerError::ObjectStore(
+                ObjectStoreError::StoredLengthMismatch,
+            ));
+        }
+        Ok(stream)
     }
 
     pub(crate) fn visit_object_prefix<Visitor>(
@@ -467,11 +630,35 @@ impl ServerBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, ServerError> {
-        match self {
+        let direct = match self {
             Self::Local(backend) => backend.delete_object_if_present(object_key).await,
             Self::Postgres(backend) => backend.delete_object_if_present(object_key).await,
+        }?;
+        let file_id = protocol_object_file_id(object_key);
+        let record_deleted = match self {
+            Self::Local(backend) => backend.delete_file_reference(&file_id).await?,
+            Self::Postgres(backend) => backend.delete_file_reference(&file_id).await?,
+        };
+        if direct == DeleteOutcome::Deleted || record_deleted {
+            Ok(DeleteOutcome::Deleted)
+        } else {
+            Ok(DeleteOutcome::NotFound)
         }
     }
+}
+
+async fn verify_sha256_body(
+    mut body: RequestBodyReader,
+    expected_digest: &str,
+) -> Result<(), ServerError> {
+    let mut hasher = Sha256::new();
+    while let Some(bytes) = body.next_bytes().await? {
+        hasher.update(&bytes);
+    }
+    if hex::encode(hasher.finalize()) != expected_digest {
+        return Err(ServerError::ExpectedBodyHashMismatch);
+    }
+    Ok(())
 }
 
 impl shardline_oci_adapter::OciBackend for ServerBackend {
@@ -587,14 +774,19 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         digest_hex: &str,
         bytes: Vec<u8>,
     ) -> Result<PutOutcome, shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => backend
-                .put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-                .map_err(server_error_to_oci),
-            Self::Postgres(backend) => backend
-                .put_sha256_addressed_object_bytes_if_absent(object_key, digest_hex, bytes)
-                .map_err(server_error_to_oci),
-        }
+        let object_key = object_key.clone();
+        let digest_hex = digest_hex.to_owned();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                ServerBackend::put_sha256_addressed_object_bytes_if_absent(
+                    self,
+                    &object_key,
+                    &digest_hex,
+                    bytes,
+                ),
+            )
+        });
+        result.map_err(server_error_to_oci)
     }
 
     fn copy_object_if_absent(
@@ -602,14 +794,16 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         source: &ObjectKey,
         destination: &ObjectKey,
     ) -> Result<PutOutcome, shardline_oci_adapter::OciAdapterError> {
-        match self {
-            Self::Local(backend) => backend
-                .copy_object_if_absent(source, destination)
-                .map_err(server_error_to_oci),
-            Self::Postgres(backend) => backend
-                .copy_object_if_absent(source, destination)
-                .map_err(server_error_to_oci),
-        }
+        let source = source.clone();
+        let destination = destination.clone();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(ServerBackend::copy_object_if_absent(
+                self,
+                &source,
+                &destination,
+            ))
+        });
+        result.map_err(server_error_to_oci)
     }
 
     async fn delete_object_if_present(
@@ -693,73 +887,13 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::NotAcceptable
         | ServerError::UnauthorizedChallenge(_)
         | ServerError::TooManyRegistryTokenRequests
+        | ServerError::UploadIntentConflict
         | ServerError::MissingReconstructionCacheRedisUrl
         | ServerError::TransferLimiterClosed
         | ServerError::TransferLimiterTimedOut
+        | ServerError::WorkQueueSaturated
+        | ServerError::RequestTimedOut
         | ServerError::SigningKeyError(_)) => OciAdapterError::Io(Error::other(other.to_string())),
-    }
-}
-
-async fn put_sha256_addressed_object_stream_if_absent_with_object_store(
-    object_store: &ServerObjectStore,
-    object_key: &ObjectKey,
-    digest_hex: &str,
-    mut body: RequestBodyReader,
-) -> Result<PutOutcome, ServerError> {
-    let canonical_key = shared_sha256_object_key(digest_hex)?;
-    match object_store {
-        ServerObjectStore::S3(store) => {
-            let canonical_outcome =
-                match store.begin_content_addressed_upload(&canonical_key).await? {
-                    BeginMultipartUploadResult::AlreadyExists => PutOutcome::AlreadyExists,
-                    BeginMultipartUploadResult::Upload(mut upload, temp_key) => {
-                        let mut sha256 = Sha256::new();
-                        let mut total_length = 0_u64;
-                        while let Some(bytes) = body.next_bytes().await? {
-                            sha256.update(&bytes);
-                            total_length = checked_add(total_length, u64::try_from(bytes.len())?)?;
-                            upload.write(&bytes);
-                            if let Err(error) = upload.wait_for_capacity(4).await {
-                                let _ignored = upload.abort().await;
-                                return Err(ServerError::from(error));
-                            }
-                        }
-                        let observed = hex::encode(sha256.finalize());
-                        if observed != digest_hex {
-                            let _ignored = upload.abort().await;
-                            return Err(ServerError::ExpectedBodyHashMismatch);
-                        }
-                        let _total_length = total_length;
-                        store
-                            .finish_content_addressed_upload(upload, &temp_key, &canonical_key)
-                            .await?
-                    }
-                };
-            if canonical_key == *object_key {
-                return Ok(canonical_outcome);
-            }
-            Ok(object_store.copy_if_absent(&canonical_key, object_key)?)
-        }
-        ServerObjectStore::Local(_) | ServerObjectStore::Blackhole => {
-            let bytes = read_body_to_bytes(&mut body).await?;
-            let observed = hex::encode(Sha256::digest(&bytes));
-            if observed != digest_hex {
-                return Err(ServerError::ExpectedBodyHashMismatch);
-            }
-            let integrity = ObjectIntegrity::new(
-                ShardlineHash::from_bytes(*blake3::hash(&bytes).as_bytes()),
-                u64::try_from(bytes.len())?,
-            );
-            let canonical_outcome = object_store.put_if_absent(
-                &canonical_key,
-                ObjectBody::from_vec(bytes),
-                &integrity,
-            )?;
-            if canonical_key == *object_key {
-                return Ok(canonical_outcome);
-            }
-            Ok(object_store.copy_if_absent(&canonical_key, object_key)?)
-        }
     }
 }
 
@@ -996,8 +1130,9 @@ mod tests {
         BenchmarkBackend, REPOSITORY_REFERENCE_PROBE_COUNT, REPOSITORY_REFERENCE_PROBE_FILTER,
         ServerBackend, clear_repository_reference_probe_filter,
         compose_benchmark_object_key_prefix, count_repository_reference_probe_for_tests,
-        lock_repository_reference_probe_test, repository_reference_probe_count,
-        reset_repository_reference_probe_count_for_hash, server_error_to_oci,
+        lock_repository_reference_probe_test, protocol_object_file_id,
+        repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
+        server_error_to_oci,
     };
 
     /// Poison the static probe-filter mutex by panicking in a helper thread
@@ -1023,8 +1158,12 @@ mod tests {
     use crate::ServerError;
     use crate::error::ObjectStoreError;
     use crate::local_backend::LocalBackend;
+    use crate::upload_ingest::RequestBodyReader;
+    use futures_util::TryStreamExt;
+    use sha2::{Digest, Sha256};
     use shardline_oci_adapter::OciAdapterError;
-    use shardline_storage::{DeleteOutcome, ObjectKey, ObjectPrefix};
+    use shardline_protocol::ByteRange;
+    use shardline_storage::{DeleteOutcome, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome};
 
     #[test]
     fn benchmark_object_key_prefix_appends_namespace() {
@@ -1310,7 +1449,9 @@ mod tests {
     async fn server_backend_put_object_bytes_if_absent_stores_and_returns_outcome() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-test-key").unwrap();
-        let result = backend.put_object_bytes_if_absent(&key, b"hello-backend".to_vec());
+        let result = backend
+            .put_object_bytes_if_absent(&key, b"hello-backend".to_vec())
+            .await;
         assert!(result.is_ok());
         let length = backend.object_length(&key).await.unwrap();
         assert_eq!(length, 13);
@@ -1320,9 +1461,13 @@ mod tests {
     async fn server_backend_put_object_bytes_if_absent_idempotent() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-idempotent").unwrap();
-        let first = backend.put_object_bytes_if_absent(&key, b"data".to_vec());
+        let first = backend
+            .put_object_bytes_if_absent(&key, b"data".to_vec())
+            .await;
         assert!(first.is_ok());
-        let second = backend.put_object_bytes_if_absent(&key, b"data".to_vec());
+        let second = backend
+            .put_object_bytes_if_absent(&key, b"data".to_vec())
+            .await;
         assert!(second.is_ok());
     }
 
@@ -1330,7 +1475,9 @@ mod tests {
     async fn server_backend_put_object_bytes_overwrite_stores_object() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-overwrite").unwrap();
-        let result = backend.put_object_bytes_overwrite(&key, b"overwrite-data".to_vec());
+        let result = backend
+            .put_object_bytes_overwrite(&key, b"overwrite-data".to_vec())
+            .await;
         assert!(result.is_ok());
         // Verify stored content
         let read_back = backend.read_object(&key).await.unwrap();
@@ -1341,16 +1488,25 @@ mod tests {
     async fn server_backend_put_sha256_addressed_object_bytes_if_absent_stores_object() {
         let (backend, _tmp) = make_backend().await;
         let body = b"sha256-payload-backend";
-        let digest_hex = "ab".repeat(32);
+        let digest_hex = hex::encode(Sha256::digest(body));
         let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
-        let result = backend.put_sha256_addressed_object_bytes_if_absent(
-            &canonical_key,
-            &digest_hex,
-            body.to_vec(),
-        );
+        let result = backend
+            .put_sha256_addressed_object_bytes_if_absent(&canonical_key, &digest_hex, body.to_vec())
+            .await;
         assert!(result.is_ok());
         let length = backend.object_length(&canonical_key).await.unwrap();
         assert_eq!(length, body.len() as u64);
+        let ServerBackend::Local(local) = &backend else {
+            return;
+        };
+        assert!(
+            local
+                .object_store()
+                .metadata(&canonical_key)
+                .unwrap()
+                .is_none(),
+            "new digest-addressed byte uploads must not create legacy whole objects"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1360,8 +1516,9 @@ mod tests {
         let dst = ObjectKey::parse("backend-dst").unwrap();
         backend
             .put_object_bytes_if_absent(&src, b"copy-source".to_vec())
+            .await
             .unwrap();
-        let result = backend.copy_object_if_absent(&src, &dst);
+        let result = backend.copy_object_if_absent(&src, &dst).await;
         assert!(result.is_ok());
         let src_len = backend.object_length(&src).await.unwrap();
         let dst_len = backend.object_length(&dst).await.unwrap();
@@ -1375,6 +1532,7 @@ mod tests {
         let data = b"readable-content";
         backend
             .put_object_bytes_if_absent(&key, data.to_vec())
+            .await
             .unwrap();
         let result = backend.read_object(&key).await.unwrap();
         assert_eq!(result.as_slice(), data);
@@ -1395,6 +1553,7 @@ mod tests {
         let data = b"length-check";
         backend
             .put_object_bytes_if_absent(&key, data.to_vec())
+            .await
             .unwrap();
         let length = backend.object_length(&key).await.unwrap();
         assert_eq!(length, data.len() as u64);
@@ -1414,6 +1573,7 @@ mod tests {
         let key = ObjectKey::parse("backend-delete").unwrap();
         backend
             .put_object_bytes_if_absent(&key, b"to-delete".to_vec())
+            .await
             .unwrap();
         let outcome = backend.delete_object_if_present(&key).await.unwrap();
         assert_eq!(outcome, DeleteOutcome::Deleted);
@@ -1436,9 +1596,11 @@ mod tests {
         let k2 = ObjectKey::parse("prefix-a/obj2").unwrap();
         backend
             .put_object_bytes_if_absent(&k1, b"d1".to_vec())
+            .await
             .unwrap();
         backend
             .put_object_bytes_if_absent(&k2, b"d2".to_vec())
+            .await
             .unwrap();
         let prefix = ObjectPrefix::parse("prefix-a").unwrap();
         let mut keys = Vec::new();
@@ -1459,6 +1621,7 @@ mod tests {
             let key = ObjectKey::parse(&format!("list-be/obj{i}")).unwrap();
             backend
                 .put_object_bytes_if_absent(&key, b"d".to_vec())
+                .await
                 .unwrap();
         }
         let page = backend
@@ -1474,11 +1637,120 @@ mod tests {
         let data = b"stream-content-backend";
         backend
             .put_object_bytes_if_absent(&key, data.to_vec())
+            .await
             .unwrap();
         let result = backend
             .read_object_stream(&key, data.len() as u64, None)
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_objects_use_chunk_records_with_compatibility_reads_and_sparse_dedupe() {
+        let (backend, _tmp) = make_backend().await;
+        let mut first = vec![b'a'; 65_536];
+        first.extend(vec![b'b'; 65_536]);
+        let mut second = vec![b'a'; 65_536];
+        second.extend(vec![b'c'; 65_536]);
+        let first_digest = hex::encode(Sha256::digest(&first));
+        let second_digest = hex::encode(Sha256::digest(&second));
+        let first_key = ObjectKey::parse(&format!("lfs/repo/objects/{first_digest}")).unwrap();
+        let second_key = ObjectKey::parse(&format!("lfs/repo/objects/{second_digest}")).unwrap();
+
+        let first_outcome = backend
+            .put_sha256_addressed_object_stream_if_absent(
+                &first_key,
+                &first_digest,
+                RequestBodyReader::from_bytes(first.clone().into()),
+            )
+            .await
+            .unwrap();
+        let second_outcome = backend
+            .put_sha256_addressed_object_stream_if_absent(
+                &second_key,
+                &second_digest,
+                RequestBodyReader::from_bytes(second.clone().into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_outcome, PutOutcome::Inserted);
+        assert_eq!(second_outcome, PutOutcome::Inserted);
+
+        let ServerBackend::Local(local) = &backend else {
+            return;
+        };
+        assert!(local.object_store().metadata(&first_key).unwrap().is_none());
+        assert!(
+            local
+                .object_store()
+                .metadata(&second_key)
+                .unwrap()
+                .is_none()
+        );
+        let stats = backend.stats().await.unwrap();
+        assert_eq!(stats.chunks, 3);
+
+        assert_eq!(backend.object_length(&second_key).await.unwrap(), 131_072);
+        let range = ByteRange::new(65_530, 65_541).unwrap();
+        let stream = backend
+            .read_object_stream(&second_key, 131_072, Some(range))
+            .await
+            .unwrap();
+        let bytes = stream
+            .try_fold(Vec::new(), |mut output, bytes| async move {
+                output.extend_from_slice(&bytes);
+                Ok(output)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            bytes,
+            [&second[65_530..65_536], &second[65_536..65_542]].concat()
+        );
+        assert_eq!(backend.read_object(&second_key).await.unwrap(), second);
+        let second_file_id = protocol_object_file_id(&second_key);
+        let second_record = local
+            .file_record(&second_file_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.delete_object_if_present(&second_key).await.unwrap(),
+            DeleteOutcome::Deleted
+        );
+        assert!(matches!(
+            backend.object_length(&second_key).await,
+            Err(ServerError::NotFound)
+        ));
+        assert!(matches!(
+            local
+                .file_record(&second_file_id, Some(&second_record.content_hash), None)
+                .await,
+            Err(ServerError::NotFound)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_public_object_uploads_commit_without_sqlite_lock_errors() {
+        let (backend, _tmp) = make_backend().await;
+        let uploads = (0..10).map(|index| {
+            let backend = backend.clone();
+            async move {
+                let body = format!("concurrent public object {index}").into_bytes();
+                let digest = hex::encode(Sha256::digest(&body));
+                let key = ObjectKey::parse(&format!("lfs/repo/objects/{digest}")).unwrap();
+                backend
+                    .put_sha256_addressed_object_stream_if_absent(
+                        &key,
+                        &digest,
+                        RequestBodyReader::from_bytes(body.into()),
+                    )
+                    .await
+            }
+        });
+        let outcomes = futures_util::future::join_all(uploads).await;
+        for outcome in outcomes {
+            assert_eq!(outcome.unwrap(), PutOutcome::Inserted);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1571,6 +1843,7 @@ mod tests {
         let key = ObjectKey::parse("oci-delete-key").unwrap();
         backend
             .put_object_bytes_if_absent(&key, b"oci-delete".to_vec())
+            .await
             .unwrap();
         let outcome = OciBackend::delete_object_if_present(&backend, &key).await;
         assert!(outcome.is_ok());
@@ -1585,6 +1858,7 @@ mod tests {
         let dst = ObjectKey::parse("oci-copy-dst").unwrap();
         backend
             .put_object_bytes_if_absent(&src, b"oci-copy-data".to_vec())
+            .await
             .unwrap();
         let result = OciBackend::copy_object_if_absent(&backend, &src, &dst);
         assert!(result.is_ok());
@@ -1597,7 +1871,7 @@ mod tests {
         use shardline_oci_adapter::OciBackend;
         let (backend, _tmp) = make_backend().await;
         let body = b"oci-sha256-payload";
-        let digest_hex = "cd".repeat(32);
+        let digest_hex = hex::encode(Sha256::digest(body));
         let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
         let result = OciBackend::put_sha256_addressed_object_bytes_if_absent(
             &backend,

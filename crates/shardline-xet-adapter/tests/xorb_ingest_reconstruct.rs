@@ -40,6 +40,19 @@ use tempfile::TempDir;
 // helpers
 // ---------------------------------------------------------------------------
 
+fn store_xorb_bytes_sync(
+    store: &ServerObjectStore,
+    hash: &str,
+    body: &[u8],
+) -> Result<shardline_xet_adapter::XorbUploadResponse, shardline_xet_adapter::XetAdapterError> {
+    let rt = tokio::runtime::Runtime::new().map_err(shardline_xet_adapter::XetAdapterError::Io)?;
+    rt.block_on(store_uploaded_xorb_bytes(store, hash, body))
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
 /// Build a serialized xorb with `num_chunks` chunks of `chunk_size` bytes each
 /// using `build_raw_xorb` + `from_xorb_with_compression` (the same pattern
 /// used by all existing unit tests).
@@ -117,7 +130,7 @@ fn xorb_full_round_trip_content_verification() {
         build_xorb_with_content(3, 1024, CompressionScheme::LZ4);
 
     // --- store ---
-    let response = store_uploaded_xorb_bytes(&object_store, &hash_hex, &serialized)
+    let response = store_xorb_bytes_sync(&object_store, &hash_hex, &serialized)
         .expect("store_uploaded_xorb_bytes should succeed");
     assert!(response.was_inserted, "xorb should be newly inserted");
 
@@ -174,11 +187,11 @@ fn xorb_store_is_idempotent() {
 
     let (serialized, hash_hex, _expected_hash) = build_xorb_simple(1, 256, CompressionScheme::None);
 
-    let first = store_uploaded_xorb_bytes(&object_store, &hash_hex, &serialized)
+    let first = store_xorb_bytes_sync(&object_store, &hash_hex, &serialized)
         .expect("first store should succeed");
     assert!(first.was_inserted, "first store should insert");
 
-    let second = store_uploaded_xorb_bytes(&object_store, &hash_hex, &serialized)
+    let second = store_xorb_bytes_sync(&object_store, &hash_hex, &serialized)
         .expect("second store should succeed");
     assert!(
         !second.was_inserted,
@@ -200,7 +213,7 @@ fn xorb_rejects_wrong_hash() {
         build_xorb_simple(1, 256, CompressionScheme::None);
     let wrong_hash = "00".repeat(32);
 
-    let result = store_uploaded_xorb_bytes(&object_store, &wrong_hash, &serialized);
+    let result = store_xorb_bytes_sync(&object_store, &wrong_hash, &serialized);
     assert!(result.is_err(), "store with wrong hash should be rejected");
 }
 
@@ -259,7 +272,7 @@ fn xorb_store_rejects_empty_body() {
         ServerObjectStore::local(temp.path().join("objects")).expect("local object store");
 
     let hash = "ab".repeat(32);
-    let result = store_uploaded_xorb_bytes(&object_store, &hash, b"");
+    let result = store_xorb_bytes_sync(&object_store, &hash, b"");
     assert!(
         result.is_err(),
         "store with empty body and valid hash must fail"
@@ -278,8 +291,8 @@ fn xorb_round_trip_no_compression() {
 
     let (serialized, hash_hex, expected_hash) = build_xorb_simple(4, 128, CompressionScheme::None);
 
-    let response = store_uploaded_xorb_bytes(&object_store, &hash_hex, &serialized)
-        .expect("store should succeed");
+    let response =
+        store_xorb_bytes_sync(&object_store, &hash_hex, &serialized).expect("store should succeed");
     assert!(response.was_inserted);
 
     let mut reader = Cursor::new(serialized.as_slice());
@@ -309,8 +322,8 @@ fn xorb_round_trip_bg4lz4_compression() {
     let (serialized, hash_hex, expected_hash) =
         build_xorb_simple(2, 256, CompressionScheme::ByteGrouping4LZ4);
 
-    let response = store_uploaded_xorb_bytes(&object_store, &hash_hex, &serialized)
-        .expect("store should succeed");
+    let response =
+        store_xorb_bytes_sync(&object_store, &hash_hex, &serialized).expect("store should succeed");
     assert!(response.was_inserted);
 
     let mut reader = Cursor::new(serialized.as_slice());

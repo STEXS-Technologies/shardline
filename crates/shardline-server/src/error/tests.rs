@@ -1390,6 +1390,19 @@ fn into_response_not_found_has_no_www_auth() {
     );
 }
 
+#[test]
+fn into_response_saturated_includes_retry_guidance() {
+    let response = ServerError::WorkQueueSaturated.into_response();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        response.headers().get(axum::http::header::RETRY_AFTER),
+        Some(&axum::http::HeaderValue::from_static("1"))
+    );
+}
+
 // ---- OciError tests ----
 
 #[test]

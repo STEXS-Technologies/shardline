@@ -232,6 +232,33 @@ impl LocalRecordStore {
         .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
     }
 
+    /// Atomically removes a visible file reference and its immutable version record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalIndexStoreError`] when the transaction cannot be completed.
+    pub async fn delete_file_version_metadata(
+        &self,
+        record: &FileRecord,
+    ) -> Result<(), LocalIndexStoreError> {
+        let store = self.clone();
+        let record = record.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.open_connection()?;
+            let transaction = connection.unchecked_transaction()?;
+            let latest = store.latest_record_locator(&record);
+            let version = store.version_record_locator(&record);
+            transaction.execute(
+                "DELETE FROM shardline_file_records WHERE record_key IN (?1, ?2)",
+                params![latest.record_key(), version.record_key()],
+            )?;
+            transaction.commit()?;
+            Ok::<_, LocalIndexStoreError>(())
+        })
+        .await
+        .map_err(|e| LocalIndexStoreError::BlockingTask(e.to_string()))?
+    }
+
     /// Atomically commits native shard metadata.
     ///
     /// # Errors

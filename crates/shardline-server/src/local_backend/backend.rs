@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, path::PathBuf};
+use std::{num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use shardline_index::{
     FileChunkRecord, LocalIndexStore, LocalRecordStore, ReconstructionStore, RecordTraversal,
@@ -27,6 +27,8 @@ pub struct LocalBackend {
     pub(super) index_store: LocalIndexStore,
     pub(super) record_store: LocalRecordStore,
     pub(super) object_store: ServerObjectStore,
+    pub(super) metadata_write_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) protocol_upload_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LocalBackend {
@@ -111,13 +113,18 @@ impl LocalBackend {
     ) -> Result<Self, ServerError> {
         ensure_directory_path_components_are_not_symlinked(&root)?;
         let backend = Self {
-            index_store: LocalIndexStore::open(root.clone()),
+            // Initialize and migrate SQLite before the server begins accepting
+            // concurrent protocol requests. Lazy first-use initialization lets
+            // simultaneous uploads race while creating the schema/import marker.
+            index_store: LocalIndexStore::new(root.clone())?,
             record_store: LocalRecordStore::open(root),
             public_base_url,
             chunk_size,
             upload_max_in_flight_chunks,
             server_frontends: server_frontends.to_vec(),
             object_store,
+            metadata_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            protocol_upload_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         Ok(backend)
     }
@@ -194,6 +201,116 @@ impl LocalBackend {
         self.index_store.probe()
     }
 
+    pub(crate) async fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
+        self.reconcile_stuck_upload_intents_older_than(std::time::Duration::from_secs(30))
+            .await
+    }
+
+    async fn reconcile_stuck_upload_intents_older_than(
+        &self,
+        minimum_age: std::time::Duration,
+    ) -> Result<(), ServerError> {
+        use shardline_index::{UploadIntentState, UploadIntentStore};
+        use shardline_storage::{AsyncObjectStore, ObjectKey};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let mut reconciled = 0u64;
+        for state in &[
+            UploadIntentState::Created,
+            UploadIntentState::Storing,
+            UploadIntentState::Stored,
+            UploadIntentState::MetadataCommitted,
+        ] {
+            let intents = match self.index_store.intents_by_state(*state).await {
+                Ok(intents) => intents,
+                Err(e) => {
+                    // If the intents table does not exist yet (no migration has created it),
+                    // there is nothing to reconcile. Log and continue.
+                    tracing::debug!("intent query skipped (table may not exist): {e}");
+                    continue;
+                }
+            };
+            for intent in &intents {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO);
+                let age = now.saturating_sub(intent.created_at());
+                if age < minimum_age {
+                    continue;
+                }
+                tracing::warn!(
+                    intent_id = %intent.intent_id(),
+                    state = ?intent.state(),
+                    age_secs = age.as_secs(),
+                    "reconciling stuck intent"
+                );
+                let visible_file_record =
+                    if let Some(file_id) = intent.object_key().strip_prefix("record/") {
+                        match self.read_record(file_id, None, None).await {
+                            Ok(_record) => true,
+                            Err(ServerError::NotFound) => false,
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        false
+                    };
+                if visible_file_record {
+                    // The atomic file-record commit is the visibility boundary.
+                    // Walk every durable boundary so recovery remains valid even
+                    // when the process stopped while the intent was still Stored.
+                    for recovery_state in [
+                        UploadIntentState::Storing,
+                        UploadIntentState::Stored,
+                        UploadIntentState::MetadataCommitted,
+                        UploadIntentState::Visible,
+                    ] {
+                        if let Err(error) = self
+                            .index_store
+                            .transition_intent(intent.intent_id(), recovery_state)
+                            .await
+                        {
+                            tracing::warn!(
+                                intent_id = %intent.intent_id(),
+                                %error,
+                                "intent recovery transition failed"
+                            );
+                            return Err(error.into());
+                        }
+                    }
+                    reconciled = reconciled.saturating_add(1);
+                    continue;
+                }
+                let target_state = if intent.state() == UploadIntentState::MetadataCommitted {
+                    match ObjectKey::parse(intent.object_key()) {
+                        Ok(key)
+                            if AsyncObjectStore::metadata(&self.object_store, &key)
+                                .await?
+                                .is_some() =>
+                        {
+                            UploadIntentState::Visible
+                        }
+                        Ok(_) | Err(_) => UploadIntentState::Failed,
+                    }
+                } else {
+                    UploadIntentState::Failed
+                };
+                if let Err(e) = self
+                    .index_store
+                    .transition_intent(intent.intent_id(), target_state)
+                    .await
+                {
+                    tracing::warn!(intent_id = %intent.intent_id(), error = %e, "intent transition failed, skipping");
+                } else {
+                    reconciled = reconciled.saturating_add(1);
+                }
+            }
+        }
+        if reconciled > 0 {
+            tracing::info!(count = reconciled, "intent reconciliation complete");
+        }
+        Ok(())
+    }
+
     pub(super) async fn read_record(
         &self,
         file_id: &str,
@@ -230,8 +347,9 @@ pub(crate) fn content_hash(
 mod tests {
     use std::num::NonZeroUsize;
 
-    use shardline_index::FileChunkRecord;
-    use shardline_storage::{ObjectKey, ObjectStore};
+    use shardline_index::{FileChunkRecord, UploadIntent, UploadIntentState, UploadIntentStore};
+    use shardline_protocol::ShardlineHash;
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
 
     use super::LocalBackend;
     use super::{chunk_hash, content_hash};
@@ -338,6 +456,123 @@ mod tests {
         )
         .await;
         assert!(backend.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconciliation_promotes_visible_storage_across_crash_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:8080".to_owned(),
+            NonZeroUsize::new(65_536).unwrap(),
+        )
+        .await
+        .unwrap();
+        let key = ObjectKey::parse("xorbs/reconcile-test").unwrap();
+        let bytes = b"reconciled";
+        let integrity = ObjectIntegrity::new(
+            ShardlineHash::from_bytes(*blake3::hash(bytes).as_bytes()),
+            bytes.len() as u64,
+        );
+        backend
+            .object_store
+            .put_if_absent(&key, ObjectBody::from_slice(bytes), &integrity)
+            .unwrap();
+
+        let intent = UploadIntent::new(
+            "committed-reconcile".to_owned(),
+            key.as_str().to_owned(),
+            "hash".to_owned(),
+            bytes.len() as u64,
+        );
+        backend.index_store.create_intent(&intent).await.unwrap();
+        for state in [
+            UploadIntentState::Storing,
+            UploadIntentState::Stored,
+            UploadIntentState::MetadataCommitted,
+        ] {
+            assert!(
+                backend
+                    .index_store
+                    .transition_intent(intent.intent_id(), state)
+                    .await
+                    .unwrap()
+            );
+        }
+        let missing = UploadIntent::new(
+            "missing-reconcile".to_owned(),
+            "xorbs/missing-reconcile-test".to_owned(),
+            "hash".to_owned(),
+            1,
+        );
+        backend.index_store.create_intent(&missing).await.unwrap();
+        for state in [
+            UploadIntentState::Storing,
+            UploadIntentState::Stored,
+            UploadIntentState::MetadataCommitted,
+        ] {
+            assert!(
+                backend
+                    .index_store
+                    .transition_intent(missing.intent_id(), state)
+                    .await
+                    .unwrap()
+            );
+        }
+        backend
+            .upload_file(
+                "stored-record-reconcile",
+                axum::body::Bytes::from_static(b"visible record"),
+                None,
+            )
+            .await
+            .unwrap();
+        let stored_record = UploadIntent::new(
+            "stored-record-intent".to_owned(),
+            "record/stored-record-reconcile".to_owned(),
+            "sha256".to_owned(),
+            14,
+        );
+        backend
+            .index_store
+            .create_intent(&stored_record)
+            .await
+            .unwrap();
+        for state in [UploadIntentState::Storing, UploadIntentState::Stored] {
+            assert!(
+                backend
+                    .index_store
+                    .transition_intent(stored_record.intent_id(), state)
+                    .await
+                    .unwrap()
+            );
+        }
+
+        backend
+            .reconcile_stuck_upload_intents_older_than(std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        let reconciled = backend
+            .index_store
+            .intent_by_id(intent.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconciled.state(), UploadIntentState::Visible);
+        let missing = backend
+            .index_store
+            .intent_by_id(missing.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing.state(), UploadIntentState::Failed);
+        let stored_record = backend
+            .index_store
+            .intent_by_id(stored_record.intent_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_record.state(), UploadIntentState::Visible);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

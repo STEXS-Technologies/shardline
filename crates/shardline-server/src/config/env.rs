@@ -15,7 +15,7 @@ use super::secrets::{
 use super::{
     AuthProviderKind, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_MAX_SHARD_FILES,
     DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
-    MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
+    DeploymentMode, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
     ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
     default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks,
 };
@@ -262,7 +262,8 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         .with_reconstruction_cache_memory(
             reconstruction_cache_ttl_seconds,
             reconstruction_cache_memory_max_entries,
-        );
+        )
+        .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
     config.cache.redis_tls = reconstruction_cache_redis_tls;
@@ -336,6 +337,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
         config = config.with_metrics_token(metrics_token)?;
     }
 
+    if let Some(deployment_mode) = deployment_mode_from_env() {
+        config = config.with_deployment_mode(deployment_mode);
+    }
+
     // Validate Hub frontend requires auth configuration.
     if config.server_frontends().contains(&ServerFrontend::Hub)
         && config.token_signing_key().is_none()
@@ -362,6 +367,52 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
     )?;
 
     Ok(config)
+}
+
+/// Loads a bounded pool size from an environment variable, falling back to `default`.
+pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroUsize {
+    let fallback = NonZeroUsize::new(default).unwrap_or(NonZeroUsize::MIN);
+    var(name).map_or_else(
+        |_| fallback,
+        |v| {
+            v.parse().unwrap_or_else(|_| {
+                tracing::warn!("invalid {name} value '{v}', using default {default}");
+                fallback
+            })
+        },
+    )
+}
+
+/// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
+pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
+    let fallback = NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
+    var("SHARDLINE_ADMISSION_MAX_WEIGHT").map_or_else(
+        |_| fallback,
+        |v| {
+            v.parse().unwrap_or_else(|_| {
+                tracing::warn!(
+                    "invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256"
+                );
+                fallback
+            })
+        },
+    )
+}
+
+/// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.
+pub(crate) fn deployment_mode_from_env() -> Option<DeploymentMode> {
+    match var("SHARDLINE_DEPLOYMENT_MODE") {
+        Ok(v) if v.eq_ignore_ascii_case("insecure") => Some(DeploymentMode::Insecure),
+        Ok(v) if v.eq_ignore_ascii_case("authenticated") => Some(DeploymentMode::Authenticated),
+        Ok(v) if v.eq_ignore_ascii_case("strict") => Some(DeploymentMode::Strict),
+        Ok(other) => {
+            tracing::warn!(
+                "unknown SHARDLINE_DEPLOYMENT_MODE value '{other}', falling back to default"
+            );
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 fn parse_server_frontends_env(value: &str) -> Result<Vec<ServerFrontend>, ServerConfigError> {

@@ -2,12 +2,13 @@ use std::io::{Error as IoError, Read};
 use std::num::TryFromIntError;
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
 use shardline_index::{LocalRecordStore, PostgresRecordStore, RecordStore, RecordTraversal};
 use shardline_protocol::ByteRange;
 use shardline_storage::{
-    DeleteOutcome, LocalObjectStore, LocalObjectStoreError, ObjectBody, ObjectIntegrity, ObjectKey,
-    ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome, S3ObjectStore, S3ObjectStoreConfig,
-    S3ObjectStoreError,
+    AsyncObjectStore, DeleteOutcome, LocalObjectStore, LocalObjectStoreError, ObjectBody,
+    ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore, PutOutcome,
+    S3ObjectStore, S3ObjectStoreConfig, S3ObjectStoreError,
 };
 use thiserror::Error;
 
@@ -61,48 +62,130 @@ impl ObjectStore for ServerObjectStore {
         integrity: &ObjectIntegrity,
     ) -> Result<PutOutcome, Self::Error> {
         match self {
-            Self::Local(store) => Ok(store.put_if_absent(key, body, integrity)?),
-            Self::S3(store) => Ok(store.put_if_absent(key, body, integrity)?),
+            Self::Local(store) => Ok(ObjectStore::put_if_absent(store, key, body, integrity)?),
+            Self::S3(store) => Ok(ObjectStore::put_if_absent(store, key, body, integrity)?),
             Self::Blackhole => Ok(PutOutcome::Inserted),
         }
     }
 
     fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         match self {
-            Self::Local(store) => Ok(store.read_range(key, range)?),
-            Self::S3(store) => Ok(store.read_range(key, range)?),
+            Self::Local(store) => Ok(ObjectStore::read_range(store, key, range)?),
+            Self::S3(store) => Ok(ObjectStore::read_range(store, key, range)?),
             Self::Blackhole => Err(ServerObjectStoreError::NotFound),
         }
     }
 
     fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
         match self {
-            Self::Local(store) => Ok(store.contains(key)?),
-            Self::S3(store) => Ok(store.contains(key)?),
+            Self::Local(store) => Ok(ObjectStore::contains(store, key)?),
+            Self::S3(store) => Ok(ObjectStore::contains(store, key)?),
             Self::Blackhole => Ok(false),
         }
     }
 
     fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
         match self {
-            Self::Local(store) => Ok(store.metadata(key)?),
-            Self::S3(store) => Ok(store.metadata(key)?),
+            Self::Local(store) => Ok(ObjectStore::metadata(store, key)?),
+            Self::S3(store) => Ok(ObjectStore::metadata(store, key)?),
             Self::Blackhole => Ok(None),
         }
     }
 
     fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
         match self {
-            Self::Local(store) => Ok(store.list_prefix(prefix)?),
-            Self::S3(store) => Ok(store.list_prefix(prefix)?),
+            Self::Local(store) => Ok(ObjectStore::list_prefix(store, prefix)?),
+            Self::S3(store) => Ok(ObjectStore::list_prefix(store, prefix)?),
             Self::Blackhole => Ok(Vec::new()),
         }
     }
 
     fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
         match self {
-            Self::Local(store) => Ok(store.delete_if_present(key)?),
-            Self::S3(store) => Ok(store.delete_if_present(key)?),
+            Self::Local(store) => Ok(ObjectStore::delete_if_present(store, key)?),
+            Self::S3(store) => Ok(ObjectStore::delete_if_present(store, key)?),
+            Self::Blackhole => Ok(DeleteOutcome::NotFound),
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncObjectStore for ServerObjectStore {
+    type Error = ServerObjectStoreError;
+
+    async fn put_if_absent(
+        &self,
+        key: &ObjectKey,
+        body: ObjectBody<'_>,
+        integrity: &ObjectIntegrity,
+    ) -> Result<PutOutcome, Self::Error> {
+        match self {
+            Self::Local(store) => AsyncObjectStore::put_if_absent(store, key, body, integrity)
+                .await
+                .map_err(Into::into),
+            Self::S3(store) => AsyncObjectStore::put_if_absent(store, key, body, integrity)
+                .await
+                .map_err(Into::into),
+            Self::Blackhole => Ok(PutOutcome::Inserted),
+        }
+    }
+
+    async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
+        match self {
+            Self::Local(store) => AsyncObjectStore::read_range(store, key, range)
+                .await
+                .map_err(Into::into),
+            Self::S3(store) => AsyncObjectStore::read_range(store, key, range)
+                .await
+                .map_err(Into::into),
+            Self::Blackhole => Err(ServerObjectStoreError::NotFound),
+        }
+    }
+
+    async fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
+        match self {
+            Self::Local(store) => AsyncObjectStore::contains(store, key)
+                .await
+                .map_err(Into::into),
+            Self::S3(store) => AsyncObjectStore::contains(store, key)
+                .await
+                .map_err(Into::into),
+            Self::Blackhole => Ok(false),
+        }
+    }
+
+    async fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
+        match self {
+            Self::Local(store) => AsyncObjectStore::metadata(store, key)
+                .await
+                .map_err(Into::into),
+            Self::S3(store) => AsyncObjectStore::metadata(store, key)
+                .await
+                .map_err(Into::into),
+            Self::Blackhole => Ok(None),
+        }
+    }
+
+    async fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
+        match self {
+            Self::Local(store) => AsyncObjectStore::list_prefix(store, prefix)
+                .await
+                .map_err(Into::into),
+            Self::S3(store) => AsyncObjectStore::list_prefix(store, prefix)
+                .await
+                .map_err(Into::into),
+            Self::Blackhole => Ok(Vec::new()),
+        }
+    }
+
+    async fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
+        match self {
+            Self::Local(store) => AsyncObjectStore::delete_if_present(store, key)
+                .await
+                .map_err(Into::into),
+            Self::S3(store) => AsyncObjectStore::delete_if_present(store, key)
+                .await
+                .map_err(Into::into),
             Self::Blackhole => Ok(DeleteOutcome::NotFound),
         }
     }
@@ -166,8 +249,8 @@ impl ServerObjectStore {
         E: From<LocalObjectStoreError> + From<S3ObjectStoreError>,
     {
         match self {
-            Self::Local(store) => store.visit_prefix(prefix, &mut visitor),
-            Self::S3(store) => store.visit_prefix(prefix, &mut visitor),
+            Self::Local(store) => ObjectStore::visit_prefix(store, prefix, &mut visitor),
+            Self::S3(store) => ObjectStore::visit_prefix(store, prefix, &mut visitor),
             Self::Blackhole => Ok(()),
         }
     }
@@ -314,8 +397,7 @@ impl ServerObjectStore {
                 // Attempt a lightweight list with an empty prefix to verify connectivity
                 let empty_prefix = ObjectPrefix::parse("")
                     .map_err(|e| format!("failed to create probe prefix: {e}"))?;
-                store
-                    .list_prefix(&empty_prefix)
+                ObjectStore::list_prefix(store, &empty_prefix)
                     .map_err(|e| format!("s3 storage probe failed: {e}"))?;
                 Ok(())
             }
@@ -358,7 +440,7 @@ impl ServerObjectStore {
             .checked_sub(1)
             .ok_or(ServerObjectStoreError::Overflow)?;
         let range = ByteRange::new(0, end).map_err(|_error| ServerObjectStoreError::Overflow)?;
-        self.read_range(object_key, range)
+        ObjectStore::read_range(self, object_key, range)
     }
 }
 

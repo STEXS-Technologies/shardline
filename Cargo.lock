@@ -3317,12 +3317,14 @@ dependencies = [
 name = "shardline-cas"
 version = "1.2.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "shardline-index",
  "shardline-protocol",
  "shardline-storage",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -3331,6 +3333,7 @@ version = "1.2.0"
 dependencies = [
  "rusqlite",
  "serde_json",
+ "shardline-cas",
  "shardline-index",
  "shardline-metrics",
  "shardline-protocol",
@@ -3430,6 +3433,7 @@ name = "shardline-index"
 version = "1.2.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures-util",
  "hex",
  "libc",
@@ -3617,6 +3621,7 @@ dependencies = [
 name = "shardline-server-core"
 version = "1.2.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "criterion",
  "hex",
@@ -3842,6 +3847,7 @@ checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
  "base64",
  "bytes",
+ "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -3919,6 +3925,7 @@ dependencies = [
  "bitflags",
  "byteorder",
  "bytes",
+ "chrono",
  "crc",
  "digest 0.10.7",
  "dotenvy",
@@ -3960,6 +3967,7 @@ dependencies = [
  "base64",
  "bitflags",
  "byteorder",
+ "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -3994,6 +4002,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2d12fe70b2c1b4401038055f90f151b78208de1f9f89a7dbfd41587a10c3eea"
 dependencies = [
  "atoi",
+ "chrono",
  "flume",
  "futures-channel",
  "futures-core",

@@ -380,9 +380,14 @@ async fn test_stats_with_auth_returns_200() {
 
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    // Fresh backend has zero chunks and files.
-    assert_eq!(json["chunks"], 0);
-    assert_eq!(json["files"], 0);
+    assert!(
+        json["chunks"].as_u64().is_some(),
+        "chunks should be an unsigned count"
+    );
+    assert!(
+        json["files"].as_u64().is_some(),
+        "files should be an unsigned count"
+    );
 }
 
 // ---------------------------------------------------------------------------

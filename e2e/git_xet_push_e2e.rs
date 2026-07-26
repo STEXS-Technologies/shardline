@@ -103,7 +103,8 @@ async fn exercise_git_xet_push_flow() -> Result<(), TestError> {
         b"provider-bootstrap".to_vec(),
         "generic-bridge".to_owned(),
         NonZeroU64::new(300).ok_or("token ttl")?,
-    )?.with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
+    )?
+    .with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
     let shardline_server =
         spawn(async move { serve_with_listener(shardline_config, shardline_listener).await });
 
@@ -359,7 +360,8 @@ async fn exercise_git_xet_clone_flow() -> Result<(), TestError> {
         b"provider-bootstrap".to_vec(),
         "generic-bridge".to_owned(),
         NonZeroU64::new(300).ok_or("token ttl")?,
-    )?.with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
+    )?
+    .with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
     let shardline_server =
         spawn(async move { serve_with_listener(shardline_config, shardline_listener).await });
 
@@ -775,7 +777,8 @@ async fn exercise_git_xet_multi_repo_flow() -> Result<(), TestError> {
         b"provider-bootstrap".to_vec(),
         "generic-bridge".to_owned(),
         NonZeroU64::new(300).ok_or("token ttl")?,
-    )?.with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
+    )?
+    .with_max_request_body_bytes(NonZeroUsize::new(1024 * 1024 * 1024).ok_or("max body size")?);
     let shardline_server =
         spawn(async move { serve_with_listener(shardline_config, shardline_listener).await });
 
@@ -1226,7 +1229,8 @@ async fn reconstruct_record_through_cas(
         .await?;
     let mut output = Vec::with_capacity(usize::try_from(record.total_bytes)?);
     for term in &record.chunks {
-        append_record_term_through_cas(state, issued.token.expose_secret(), term, &mut output).await?;
+        append_record_term_through_cas(state, issued.token.expose_secret(), term, &mut output)
+            .await?;
     }
     if u64::try_from(output.len())? != record.total_bytes {
         return Err(

@@ -1,4 +1,8 @@
 use axum::body::Bytes;
+use std::num::NonZeroU64;
+
+use shardline_cas::{CasCoordinator, CasLimits};
+use shardline_index::UploadIntent;
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::ObjectStore;
 
@@ -40,9 +44,28 @@ impl LocalBackend {
         mut body: RequestBodyReader,
     ) -> Result<XorbUploadResponse, ServerError> {
         let uploaded_body = read_body_to_bytes(&mut body).await?;
+        let intent_id = format!("xorb-{expected_hash}");
+        let object_key = xorb_object_key(expected_hash).map_err(ServerError::from)?;
+        let intent = UploadIntent::new(
+            intent_id.clone(),
+            object_key.as_str().to_owned(),
+            expected_hash.to_owned(),
+            uploaded_body.len() as u64,
+        );
         let object_store = self.object_store();
-        store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
-            .map_err(ServerError::from)
+        let coordinator = CasCoordinator::new(
+            self.index_store.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        coordinator
+            .with_upload_intent(&intent, move || async move {
+                store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+                    .await
+                    .map_err(ServerError::from)
+            })
+            .await
     }
 
     pub(crate) async fn read_dedupe_shard_stream(

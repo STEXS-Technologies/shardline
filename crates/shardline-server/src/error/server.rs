@@ -5,11 +5,15 @@ use std::{
 
 use axum::{
     Error as AxumError, Json,
-    http::{HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
+    http::{
+        HeaderValue, StatusCode,
+        header::{RETRY_AFTER, WWW_AUTHENTICATE},
+    },
     response::{IntoResponse, Response},
 };
 use serde_json::Error as JsonError;
 use shardline_cache::ReconstructionCacheError;
+use shardline_cas::CasError;
 use shardline_gc::GcError;
 use shardline_index::{
     FileRecordInvariantError, LocalIndexStoreError, MemoryIndexStoreError, MemoryRecordStoreError,
@@ -215,6 +219,9 @@ pub enum ServerError {
     /// Too many OCI registry token exchanges are currently active.
     #[error("too many active oci registry token requests")]
     TooManyRegistryTokenRequests,
+    /// A durable upload intent could not advance through its lifecycle.
+    #[error("upload intent state conflict")]
+    UploadIntentConflict,
     /// Redis reconstruction cache was selected without a URL.
     #[error("redis reconstruction cache requires a redis url")]
     MissingReconstructionCacheRedisUrl,
@@ -224,6 +231,12 @@ pub enum ServerError {
     /// The transfer concurrency limiter timed out waiting for capacity.
     #[error("transfer concurrency limiter timed out")]
     TransferLimiterTimedOut,
+    /// A bounded execution pool had no remaining capacity.
+    #[error("server work queue is saturated")]
+    WorkQueueSaturated,
+    /// A request exceeded the server's total execution deadline.
+    #[error("request exceeded the server execution deadline")]
+    RequestTimedOut,
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
@@ -271,6 +284,7 @@ impl ServerError {
             | Self::MissingReferencedXorb
             | Self::TooManyShardTerms
             | Self::TooManyBatchReconstructionFileIds
+            | Self::UploadIntentConflict
             | Self::Overflow
             | Self::InvalidRangeHeader
             | Self::RangeNotSatisfiable
@@ -292,6 +306,8 @@ impl ServerError {
             | Self::MissingReconstructionCacheRedisUrl
             | Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
+            | Self::WorkQueueSaturated
+            | Self::RequestTimedOut
             | Self::BlockingTask(_) => "INTERNAL",
         }
     }
@@ -339,9 +355,11 @@ impl ServerError {
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
                 StatusCode::TOO_MANY_REQUESTS
             }
-            Self::TransferLimiterClosed | Self::TransferLimiterTimedOut => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::UploadIntentConflict => StatusCode::CONFLICT,
+            Self::TransferLimiterClosed
+            | Self::TransferLimiterTimedOut
+            | Self::WorkQueueSaturated
+            | Self::RequestTimedOut => StatusCode::SERVICE_UNAVAILABLE,
             Self::Io(_)
             | Self::Json(_)
             | Self::NumericConversion(_)
@@ -356,6 +374,20 @@ impl ServerError {
             | Self::BlockingTask(_)
             | Self::SigningKeyError(_)
             | Self::Provider(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<CasError> for ServerError {
+    fn from(value: CasError) -> Self {
+        match value {
+            CasError::BodyTooLarge { .. } => Self::RequestBodyTooLarge,
+            CasError::InvalidUploadTransition => Self::UploadIntentConflict,
+            CasError::Overflow => Self::Overflow,
+            CasError::ObjectStore(message)
+            | CasError::Index(message)
+            | CasError::Record(message)
+            | CasError::Internal(message) => Self::Io(IoError::other(message)),
         }
     }
 }
@@ -387,6 +419,14 @@ impl IntoResponse for ServerError {
                 WWW_AUTHENTICATE,
                 HeaderValue::from_static("Bearer realm=\"shardline\""),
             );
+        }
+        if matches!(
+            self,
+            Self::TransferLimiterTimedOut | Self::WorkQueueSaturated | Self::RequestTimedOut
+        ) {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
         }
         response
     }

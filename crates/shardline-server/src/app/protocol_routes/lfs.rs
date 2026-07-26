@@ -26,6 +26,7 @@ use crate::app::{AppState, authorize, scope_from_auth};
 use crate::{
     LFS_CONTENT_TYPE, LfsBatchRequest, LfsBatchResponse, LfsObjectError, LfsObjectResponse,
     ServerError,
+    admission::weights,
     cas_headers::{ACCESS_TOKEN, TOKEN_EXPIRATION, URL},
     lfs_object_key, metrics,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
@@ -34,6 +35,7 @@ use crate::{
 /// Maximum LFS object size allowed for server-side verification (1 GiB).
 /// Objects above this threshold are rejected with a 413 to prevent OOM.
 const MAX_LFS_VERIFY_BYTES: u64 = 1_073_741_824; // 1 GiB
+const MAX_LFS_PATCH_RANGES: usize = 65_536;
 
 /// Returns a 422 UNPROCESSABLE_ENTITY response for LFS validation errors.
 fn lfs_validation_response(message: &str) -> Response {
@@ -56,6 +58,87 @@ fn acquire_lfs_patch_lock(oid: &str) -> Arc<Mutex<()>> {
     map.entry(oid.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+fn record_lfs_patch_range(
+    ranges_path: &std::path::Path,
+    start: u64,
+    end_exclusive: u64,
+    total: u64,
+) -> Result<bool, ServerError> {
+    let mut ranges = Vec::new();
+    if ranges_path.exists() {
+        let stored = fs::read_to_string(ranges_path)?;
+        let mut lines = stored.lines();
+        let stored_total = lines
+            .next()
+            .and_then(|line| line.parse::<u64>().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid LFS patch range metadata",
+                )
+            })?;
+        if stored_total != total {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "inconsistent LFS patch total length",
+            )
+            .into());
+        }
+        for line in lines {
+            let (range_start, range_end) = line.split_once(' ').ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid LFS patch range entry",
+                )
+            })?;
+            let range_start = range_start.parse::<u64>().map_err(|_error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid LFS patch range start",
+                )
+            })?;
+            let range_end = range_end.parse::<u64>().map_err(|_error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid LFS patch range end",
+                )
+            })?;
+            ranges.push((range_start, range_end));
+        }
+    }
+    ranges.push((start, end_exclusive));
+    ranges.sort_unstable_by_key(|range| range.0);
+
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (range_start, range_end) in ranges {
+        if let Some(last) = merged.last_mut()
+            && range_start <= last.1
+        {
+            last.1 = last.1.max(range_end);
+        } else {
+            merged.push((range_start, range_end));
+        }
+    }
+    if merged.len() > MAX_LFS_PATCH_RANGES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "too many disjoint LFS patch ranges",
+        )
+        .into());
+    }
+
+    let mut encoded = format!("{total}\n");
+    for (range_start, range_end) in &merged {
+        use std::fmt::Write as _;
+        writeln!(encoded, "{range_start} {range_end}").map_err(|_error| ServerError::Overflow)?;
+    }
+    let temporary_ranges_path = ranges_path.with_extension("ranges.tmp");
+    fs::write(&temporary_ranges_path, encoded)?;
+    fs::rename(temporary_ranges_path, ranges_path)?;
+
+    Ok(merged.as_slice() == [(0, total)])
 }
 
 #[tracing::instrument(skip(state, headers, request))]
@@ -299,6 +382,10 @@ pub(crate) async fn lfs_put_object(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
 
     // The LFS specification does not require a specific Content-Type for
     // object upload. The body content is verified by its SHA-256 digest
@@ -352,8 +439,8 @@ pub(crate) async fn lfs_delete_object(
 /// PATCH /v1/lfs/objects/{oid} — Chunked upload (Content-Range)
 ///
 /// Accepts a chunk of bytes and stores it at the specified offset using a temp
-/// file keyed by OID.  When the final chunk arrives (offset + chunk_size ==
-/// total), the accumulated file is promoted to the permanent object store.
+/// file keyed by OID. Once the persisted ranges cover the complete object, the
+/// accumulated file is promoted to the permanent object store.
 #[tracing::instrument(skip(state, headers, body), fields(oid))]
 pub(crate) async fn lfs_patch_object(
     State(state): State<Arc<AppState>>,
@@ -395,6 +482,14 @@ pub(crate) async fn lfs_patch_object(
                 .into_response());
         }
     };
+    if total == 0 || end >= total {
+        return Ok((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
+            Json(json!({ "message": "Content-Range exceeds object length" })),
+        )
+            .into_response());
+    }
 
     let expected_chunk_size = end
         .checked_sub(offset)
@@ -431,6 +526,19 @@ pub(crate) async fn lfs_patch_object(
             .into_response());
     }
 
+    match state.backend.object_length(&object_key).await {
+        Ok(_length) => {
+            return Ok((
+                StatusCode::CONFLICT,
+                [(CONTENT_TYPE, LFS_CONTENT_TYPE)],
+                Json(json!({ "message": "object upload is already complete" })),
+            )
+                .into_response());
+        }
+        Err(ServerError::NotFound) => {}
+        Err(error) => return Err(error),
+    }
+
     // Write the chunk to a temp file at the correct offset.
     // Use a deterministic path based on OID so multiple chunks accumulate in the same file.
     // The temp directory is per-server-instance, avoiding cross-session conflicts.
@@ -439,7 +547,6 @@ pub(crate) async fn lfs_patch_object(
     // starving the async runtime.  A per-OID Mutex serializes concurrent PATCH
     // requests for the same object, preventing data corruption in the shared
     // temp file.
-    let is_final = offset.checked_add(chunk_size) == Some(total);
     let root_dir = state.config.root_dir().to_path_buf();
     let backend = state.backend.clone();
     let oid_for_closure = oid.clone();
@@ -457,6 +564,7 @@ pub(crate) async fn lfs_patch_object(
         let tmp_dir = root_dir.join("tmp").join("lfs-patch");
         fs::create_dir_all(&tmp_dir).ok();
         let tmp_path = tmp_dir.join(&oid_for_closure);
+        let ranges_path = tmp_dir.join(format!("{oid_for_closure}.ranges"));
         {
             let mut file = fs::OpenOptions::new()
                 .create(true)
@@ -468,14 +576,20 @@ pub(crate) async fn lfs_patch_object(
             file.write_all(&chunk_bytes)?;
         }
 
-        if is_final {
+        let end_exclusive = end.checked_add(1).ok_or(ServerError::Overflow)?;
+        if record_lfs_patch_range(&ranges_path, offset, end_exclusive, total)? {
             let assembled: Vec<u8> = fs::read(&tmp_path)?;
+            let stored = tokio::runtime::Handle::current().block_on(
+                crate::ServerBackend::put_sha256_addressed_object_stream_if_absent(
+                    &backend,
+                    &object_key_for_closure,
+                    &oid_for_closure,
+                    RequestBodyReader::from_bytes(assembled.into()),
+                ),
+            );
             drop(fs::remove_file(&tmp_path));
-            let _stored = backend.put_sha256_addressed_object_bytes_if_absent(
-                &object_key_for_closure,
-                &oid_for_closure,
-                assembled,
-            )?;
+            drop(fs::remove_file(&ranges_path));
+            stored?;
         }
 
         Ok::<_, ServerError>(())
@@ -527,12 +641,25 @@ pub(crate) async fn lfs_verify_object(
     // Stream the object through a SHA-256 hasher in fixed-size chunks
     // to avoid loading the entire object into memory (OOM prevention).
     let mut hasher = Sha256::new();
-    let mut byte_stream = state
+    let mut byte_stream = match state
         .backend
         .read_object_stream(&object_key, total_length, None)
-        .await?;
+        .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::warn!(%error, ?object_key, "LFS verification could not read stored object");
+            return Ok(lfs_validation_response("stored object is corrupt"));
+        }
+    };
     while let Some(chunk_result) = byte_stream.next().await {
-        let chunk = chunk_result?;
+        let chunk = match chunk_result {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                tracing::warn!(%error, ?object_key, "LFS verification encountered corrupt storage");
+                return Ok(lfs_validation_response("stored object is corrupt"));
+            }
+        };
         hasher.update(&chunk);
     }
     let computed_hash = hex::encode(hasher.finalize());
@@ -639,6 +766,10 @@ mod tests {
             reconstruction_cache: crate::ReconstructionCacheService::disabled(),
             transfer_limiter,
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::ProtocolMetrics::default(),
         });
 
@@ -674,6 +805,10 @@ mod tests {
             reconstruction_cache: crate::ReconstructionCacheService::disabled(),
             transfer_limiter,
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::ProtocolMetrics::default(),
         });
 
@@ -2085,6 +2220,7 @@ mod tests {
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .await
             .expect("insert mismatched data");
 
         // Verify with second_oid — content hash won't match
@@ -2118,6 +2254,7 @@ mod tests {
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .await
             .expect("store initial object");
 
         // Send PATCH with Content-Range claiming 10 bytes but body only has 5
@@ -2170,6 +2307,7 @@ mod tests {
         state
             .backend
             .put_object_bytes_if_absent(&object_key, content.to_vec())
+            .await
             .expect("insert object");
 
         // Inflate the file size on disk beyond MAX_LFS_VERIFY_BYTES.

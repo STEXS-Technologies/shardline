@@ -98,6 +98,10 @@ async fn test_app_for_frontends_with_role(
         reconstruction_cache: ReconstructionCacheService::disabled(),
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
 
@@ -319,6 +323,10 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         reconstruction_cache: ReconstructionCacheService::disabled(),
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
 
@@ -552,6 +560,10 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
         reconstruction_cache: ReconstructionCacheService::disabled(),
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::new(64).expect("limiter")),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(100)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
 
@@ -1654,6 +1666,31 @@ async fn reconstruction_requires_auth() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ============================================================================
+// Admission Control E2E Test
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_control_allows_request_when_capacity_is_available() {
+    let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
+
+    let content = b"test-data-for-admission-test";
+    let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/xorbs/default/{xorb_hash}"))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::from(xorb_bytes.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 // ============================================================================
@@ -6505,18 +6542,17 @@ async fn lfs_verify_detects_corrupted_storage() {
         .unwrap();
     assert_eq!(verify_ok.status(), StatusCode::OK);
 
-    // Find and corrupt the stored file on disk
+    // Find and corrupt the authoritative stored chunk on disk.
+    let chunk_hash =
+        shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(content));
     let stored_path = tmp
         .path()
         .join("chunks")
-        .join("protocols")
-        .join("lfs")
-        .join("global")
-        .join("objects")
-        .join(&oid);
+        .join(&chunk_hash[..2])
+        .join(&chunk_hash);
     assert!(
         stored_path.exists(),
-        "stored LFS object should exist at {:?}",
+        "stored LFS chunk should exist at {:?}",
         stored_path
     );
 

@@ -2,8 +2,6 @@
 
 mod support;
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::{
     error::Error as StdError,
     fs,
@@ -25,7 +23,7 @@ use shardline_protocol::{RepositoryProvider, TokenScope};
 use shardline_server::{
     BazelCacheKind, FileReconstructionResponse, ServerConfig, ServerError, ServerFrontend,
     ServerObjectStore, bazel_cache_object_key, chunk_hash, lfs_object_key, oci_blob_key,
-    oci_manifest_key, oci_manifest_media_type_key, serve_with_listener, shared_sha256_object_key,
+    oci_manifest_key, oci_manifest_media_type_key, serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
@@ -708,7 +706,6 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
     let bazel_key =
         bazel_cache_object_key(BazelCacheKind::Cas, &digest_hex, Some(&repository_scope))?;
     let oci_key = oci_blob_key("team/assets", &digest_hex, Some(&repository_scope))?;
-    let shared_key = shared_sha256_object_key(&digest_hex)?;
     let lfs_path = object_store
         .local_path_for_key(&lfs_key)
         .ok_or("expected local object path for lfs object")?;
@@ -718,20 +715,30 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
     let oci_path = object_store
         .local_path_for_key(&oci_key)
         .ok_or("expected local object path for oci object")?;
-    let shared_path = object_store
-        .local_path_for_key(&shared_key)
-        .ok_or("expected local object path for shared object")?;
-
-    #[cfg(unix)]
-    {
-        let lfs_metadata = fs::metadata(&lfs_path)?;
-        let bazel_metadata = fs::metadata(&bazel_path)?;
-        let oci_metadata = fs::metadata(&oci_path)?;
-        let shared_metadata = fs::metadata(&shared_path)?;
-        assert_eq!(lfs_metadata.ino(), bazel_metadata.ino());
-        assert_eq!(lfs_metadata.ino(), oci_metadata.ino());
-        assert_eq!(lfs_metadata.ino(), shared_metadata.ino());
-        assert!(shared_metadata.nlink() >= 4);
+    assert!(
+        !lfs_path.exists(),
+        "LFS should not retain a legacy whole object"
+    );
+    assert!(
+        !bazel_path.exists(),
+        "Bazel CAS should not retain a legacy whole object"
+    );
+    assert!(
+        !oci_path.exists(),
+        "OCI should not retain a legacy whole object"
+    );
+    for chunk in shared_bytes.chunks(4) {
+        let hash = shardline_index::xet_hash_hex_string(chunk_hash(chunk));
+        let chunk_path = runtime
+            .storage_path()
+            .join("chunks")
+            .join(&hash[..2])
+            .join(&hash);
+        assert!(
+            chunk_path.exists(),
+            "shared frontend chunk should exist at {}",
+            chunk_path.display()
+        );
     }
 
     let hub_repo = client
@@ -833,10 +840,7 @@ async fn every_nonempty_frontend_combination_starts_and_serves_its_routes()
             let body = format!("frontend-matrix-bazel-{mask}").into_bytes();
             let hash = hex::encode(Sha256::digest(&body));
             let response = client
-                .put(format!(
-                    "{}/v1/bazel/cache/cas/{hash}",
-                    runtime.base_url()
-                ))
+                .put(format!("{}/v1/bazel/cache/cas/{hash}", runtime.base_url()))
                 .bearer_auth(&write_token)
                 .body(body)
                 .send()
