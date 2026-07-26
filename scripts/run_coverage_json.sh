@@ -51,7 +51,9 @@ cargo run -p shardline -- db migrate up --database-url "${coverage_database_url}
 # Reuse the workspace coverage profile and profraw directory for the
 # database-gated suites. Running these filters sequentially keeps migration
 # and shared-schema tests from interfering with the normal parallel suite.
-eval "$(CARGO_TARGET_DIR=target/llvm-cov-target cargo llvm-cov show-env --sh)"
+coverage_target_dir="$(pwd)/target/llvm-cov-target"
+eval "$(CARGO_TARGET_DIR="${coverage_target_dir}" cargo llvm-cov show-env --sh)"
+export CARGO_TARGET_DIR="${coverage_target_dir}"
 
 DATABASE_URL="${coverage_database_url}" \
     cargo test -p shardline-index --lib -- hub_postgres

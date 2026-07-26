@@ -5,7 +5,10 @@ use std::{
     io::{Error as IoError, ErrorKind},
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{Mutex, Once, OnceLock},
+    sync::{
+        Mutex, Once, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     thread::sleep,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -36,6 +39,7 @@ const DEFAULT_S3_BUCKET: &str = "shardline-e2e";
 
 static PROCESS_CLEANUP_CONTAINERS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static PROCESS_CLEANUP_REGISTERED: Once = Once::new();
+static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Containerized service stack for self-contained end-to-end tests.
 #[derive(Debug)]
@@ -537,7 +541,8 @@ fn unique_run_id() -> String {
     let unix_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0_u128, |duration| duration.as_nanos());
-    format!("{}-{unix_nanos}", std::process::id())
+    let sequence = RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{unix_nanos}-{sequence}", std::process::id())
 }
 
 fn docker_published_port(container_name: &str, container_port: u16) -> Result<u16, IoError> {
