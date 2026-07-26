@@ -400,6 +400,21 @@ mod tests {
         assert!(permit.is_none());
     }
 
+    #[tokio::test]
+    async fn admission_async_acquire_succeeds() {
+        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
+        let permit = ctrl.acquire(3).await;
+        assert!(permit.is_some(), "async acquire should return permit when capacity available");
+        assert_eq!(ctrl.available_permits(), 7);
+    }
+
+    #[tokio::test]
+    async fn admission_async_acquire_zero_weight_returns_none() {
+        let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
+        let permit = ctrl.acquire(0).await;
+        assert!(permit.is_none(), "acquire with weight 0 should return None");
+    }
+
     // ── BoundedPool tests ──────────────────────────────────────────────────
 
     #[test]

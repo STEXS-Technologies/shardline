@@ -416,6 +416,15 @@ mod tests {
     }
 
     #[test]
+    fn bridge_read_range_missing_returns_error() {
+        let bridge = SyncObjectStoreBridge::new(TestStore::default());
+        let key = ObjectKey::parse("test/missing").unwrap();
+        let range = ByteRange::new(0, 0).unwrap();
+        let result = rt().block_on(bridge.read_range(&key, range));
+        assert!(result.is_err(), "read_range on missing key should error");
+    }
+
+    #[test]
     fn bridge_list_prefix_returns_filtered_keys() {
         let bridge = SyncObjectStoreBridge::new(TestStore::default());
         let integrity = ObjectIntegrity::new(ShardlineHash::from_bytes([1; 32]), 4);
