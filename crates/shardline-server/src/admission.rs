@@ -159,16 +159,12 @@ impl ExecutionPools {
 pub mod timeouts {
     use std::time::Duration;
 
-    /// Deadline for object-storage read operations.
-    pub const STORAGE_READ: Duration = Duration::from_secs(30);
-    /// Deadline for object-storage write operations.
-    pub const STORAGE_WRITE: Duration = Duration::from_secs(60);
-    /// Deadline for metadata database reads.
-    pub const DATABASE_QUERY: Duration = Duration::from_secs(10);
-    /// Deadline for metadata database writes.
-    pub const DATABASE_WRITE: Duration = Duration::from_secs(30);
-    /// Deadline for receiving HTTP request headers.
-    pub const REQUEST_HEADERS: Duration = Duration::from_secs(10);
+    /// Upper bound for work performed while serving one HTTP request.
+    ///
+    /// This does not replace lower-level client and database deadlines; it is
+    /// the final server-side guard that prevents an accepted request from
+    /// running indefinitely.
+    pub const REQUEST_TOTAL: Duration = Duration::from_secs(300);
 }
 
 /// Admission metrics counters tracked via atomics (used when prometheus metrics are unavailable).

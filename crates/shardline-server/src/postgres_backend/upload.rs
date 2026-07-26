@@ -1,7 +1,6 @@
 use axum::body::Bytes;
 use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
 use shardline_protocol::RepositoryScope;
-use shardline_storage::{ObjectIntegrity, ObjectStore};
 
 use crate::{
     ServerError, ShardMetadataLimits,
@@ -228,7 +227,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use sha2::Digest;
-    use shardline_storage::{ObjectBody, ObjectKey, PutOutcome};
+    use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 
     use super::super::PostgresBackend;
     use std::env::var as env_var;

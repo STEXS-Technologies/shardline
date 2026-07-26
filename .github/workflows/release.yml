@@ -126,7 +126,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
             echo "CARGO_REGISTRY_TOKEN secret is required to publish crates" >&2
             exit 1
@@ -150,12 +150,33 @@ jobs:
               echo "${crate} ${version} already exists on crates.io; skipping"
               continue
             fi
-            if cargo publish --locked -p "${crate}"; then
-              echo "${crate} ${version} published successfully"
-              sleep 15
-            else
-              echo "::warning::Failed to publish ${crate} ${version} (may already exist from a parallel run); continuing"
+            if ! cargo publish --locked -p "${crate}"; then
+              # A concurrent, restartable release may have completed this exact
+              # publish between the preflight check and cargo publish. Only
+              # tolerate that verified outcome; every other failure aborts.
+              if crate_version_published "${crate}" "${version}"; then
+                echo "${crate} ${version} was published concurrently; continuing"
+                continue
+              fi
+              echo "Failed to publish ${crate} ${version}" >&2
+              exit 1
             fi
+            echo "${crate} ${version} published successfully"
+            sleep 15
+          done
+
+      - name: Verify published crates.io packages
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate_version() {
+            cargo pkgid -p "$1" | sed -E 's/.*#([^#]+)$/\1/'
+          }
+          for crate in ${CRATE_PACKAGES}; do
+            version="$(crate_version "${crate}")"
+            curl --fail --silent --show-error --retry 5 --retry-delay 3 \
+              "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null
           done
 
       - name: Login to GHCR
@@ -174,7 +195,6 @@ jobs:
           push: true
           tags: |
             ${{ steps.ghcr.outputs.image }}:${{ github.ref_name }}
-            ${{ steps.ghcr.outputs.image }}:latest
 
       - name: Publish GitHub release assets
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
@@ -183,3 +203,12 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+
+      - name: Promote verified image to latest
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${{ steps.ghcr.outputs.image }}:latest" \
+            "${{ steps.ghcr.outputs.image }}:${{ github.ref_name }}"

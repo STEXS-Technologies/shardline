@@ -45,7 +45,7 @@ fn store_xorb_bytes_sync(
     hash: &str,
     body: &[u8],
 ) -> Result<shardline_xet_adapter::XorbUploadResponse, shardline_xet_adapter::XetAdapterError> {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().map_err(shardline_xet_adapter::XetAdapterError::Io)?;
     rt.block_on(store_uploaded_xorb_bytes(store, hash, body))
 }
 

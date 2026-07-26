@@ -742,6 +742,8 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::MissingReconstructionCacheRedisUrl
         | ServerError::TransferLimiterClosed
         | ServerError::TransferLimiterTimedOut
+        | ServerError::WorkQueueSaturated
+        | ServerError::RequestTimedOut
         | ServerError::SigningKeyError(_)) => OciAdapterError::Io(Error::other(other.to_string())),
     }
 }

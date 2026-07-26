@@ -28,6 +28,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderMap, Method, header},
     middleware::{self, Next},
+    response::IntoResponse,
     routing::{get, head, post},
     serve as serve_http,
 };
@@ -40,7 +41,7 @@ use shardline_server_core::auth::Ed25519AuthProvider;
 
 use crate::{
     ServerConfig, ServerError,
-    admission::{ExecutionPools, QuotaTracker, WeightedAdmission},
+    admission::{ExecutionPools, QuotaTracker, WeightedAdmission, timeouts},
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
     config::{
@@ -235,6 +236,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
         .route("/readyz", get(ready))
         .route("/metrics", get(metrics))
         .layer(MetricsLayer)
+        .layer(middleware::from_fn(request_timeout_middleware))
         .layer(middleware::from_fn(security_headers_middleware));
     if role.serves_api() {
         app = app
@@ -672,6 +674,15 @@ pub(super) async fn security_headers_middleware(
         );
     }
     axum::response::Response::from_parts(parts, body)
+}
+
+async fn request_timeout_middleware(
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    tokio::time::timeout(timeouts::REQUEST_TOTAL, next.run(request))
+        .await
+        .unwrap_or_else(|_| ServerError::RequestTimedOut.into_response())
 }
 
 #[cfg(test)]

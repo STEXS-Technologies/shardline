@@ -275,7 +275,7 @@ mod tests {
         hash: &str,
         bytes: &[u8],
     ) -> Result<super::StoredXorbUpload, XetAdapterError> {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().map_err(XetAdapterError::Io)?;
         rt.block_on(super::store_uploaded_xorb(store, hash, bytes))
     }
 
@@ -284,7 +284,7 @@ mod tests {
         hash: &str,
         bytes: &[u8],
     ) -> Result<super::StoredXorbUpload, XetAdapterError> {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().map_err(XetAdapterError::Io)?;
         rt.block_on(super::store_uploaded_xorb_with_metrics(store, hash, bytes))
     }
 
