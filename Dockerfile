@@ -18,13 +18,14 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --home-dir /var/lib/shardline shardline \
+    && groupadd --system --gid 10001 shardline \
+    && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /var/lib/shardline shardline \
     && mkdir -p /var/lib/shardline \
     && chown -R shardline:shardline /var/lib/shardline
 
 COPY --from=builder /tmp/shardline /usr/local/bin/shardline
 
-USER shardline
+USER 10001:10001
 # Ensure the container can run with arbitrary non-root UIDs
 ENV SHARDLINE_BIND_ADDR=0.0.0.0:8080
 ENV SHARDLINE_PUBLIC_BASE_URL=http://127.0.0.1:8080

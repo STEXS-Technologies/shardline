@@ -243,7 +243,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
     use tokio::runtime::Runtime;
 
     use crate::{
@@ -258,15 +258,21 @@ mod tests {
         objects: std::sync::Arc<Mutex<HashMap<ObjectKey, Vec<u8>>>>,
     }
 
+    impl TestStore {
+        fn objects(&self) -> MutexGuard<'_, HashMap<ObjectKey, Vec<u8>>> {
+            self.objects.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
     impl ObjectStore for TestStore {
         type Error = std::io::Error;
         fn put_if_absent(
             &self,
             key: &ObjectKey,
             body: ObjectBody<'_>,
-            integrity: &ObjectIntegrity,
+            _integrity: &ObjectIntegrity,
         ) -> Result<PutOutcome, Self::Error> {
-            let mut map = self.objects.lock().unwrap();
+            let mut map = self.objects();
             if map.contains_key(key) {
                 return Ok(PutOutcome::AlreadyExists);
             }
@@ -274,25 +280,36 @@ mod tests {
             Ok(PutOutcome::Inserted)
         }
         fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
-            let map = self.objects.lock().unwrap();
+            let map = self.objects();
             let data = map
                 .get(key)
-                .ok_or(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))?;
-            let start = range.start() as usize;
-            let end = (range.start() + range.len().unwrap_or(0)) as usize;
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))?;
+            let start = usize::try_from(range.start()).map_err(|_error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "range start exceeds usize",
+                )
+            })?;
+            let end = range
+                .end_inclusive()
+                .checked_add(1)
+                .and_then(|end| usize::try_from(end).ok())
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid range end")
+                })?;
             Ok(data[start..end].to_vec())
         }
         fn contains(&self, key: &ObjectKey) -> Result<bool, Self::Error> {
-            Ok(self.objects.lock().unwrap().contains_key(key))
+            Ok(self.objects().contains_key(key))
         }
         fn metadata(&self, key: &ObjectKey) -> Result<Option<ObjectMetadata>, Self::Error> {
-            let map = self.objects.lock().unwrap();
+            let map = self.objects();
             Ok(map
                 .get(key)
                 .map(|d| ObjectMetadata::new(key.clone(), d.len() as u64, None)))
         }
         fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
-            let map = self.objects.lock().unwrap();
+            let map = self.objects();
             let mut items: Vec<_> = map
                 .iter()
                 .filter(|(k, _)| k.as_str().starts_with(prefix.as_str()))
@@ -302,7 +319,7 @@ mod tests {
             Ok(items)
         }
         fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
-            Ok(if self.objects.lock().unwrap().remove(key).is_some() {
+            Ok(if self.objects().remove(key).is_some() {
                 DeleteOutcome::Deleted
             } else {
                 DeleteOutcome::NotFound

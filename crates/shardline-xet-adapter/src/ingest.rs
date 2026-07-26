@@ -100,7 +100,7 @@ mod tests {
         hash: &str,
         body: &[u8],
     ) -> Result<XorbUploadResponse, XetAdapterError> {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().map_err(XetAdapterError::Io)?;
         rt.block_on(store_uploaded_xorb_bytes(store, hash, body))
     }
 

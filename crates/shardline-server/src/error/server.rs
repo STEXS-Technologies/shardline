@@ -224,6 +224,12 @@ pub enum ServerError {
     /// The transfer concurrency limiter timed out waiting for capacity.
     #[error("transfer concurrency limiter timed out")]
     TransferLimiterTimedOut,
+    /// A bounded execution pool had no remaining capacity.
+    #[error("server work queue is saturated")]
+    WorkQueueSaturated,
+    /// A request exceeded the server's total execution deadline.
+    #[error("request exceeded the server execution deadline")]
+    RequestTimedOut,
     /// A blocking worker task failed before it could finish storage work.
     #[error("blocking worker task failed")]
     BlockingTask(#[source] JoinError),
@@ -292,6 +298,8 @@ impl ServerError {
             | Self::MissingReconstructionCacheRedisUrl
             | Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
+            | Self::WorkQueueSaturated
+            | Self::RequestTimedOut
             | Self::BlockingTask(_) => "INTERNAL",
         }
     }
@@ -339,9 +347,10 @@ impl ServerError {
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
                 StatusCode::TOO_MANY_REQUESTS
             }
-            Self::TransferLimiterClosed | Self::TransferLimiterTimedOut => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::TransferLimiterClosed
+            | Self::TransferLimiterTimedOut
+            | Self::WorkQueueSaturated
+            | Self::RequestTimedOut => StatusCode::SERVICE_UNAVAILABLE,
             Self::Io(_)
             | Self::Json(_)
             | Self::NumericConversion(_)

@@ -107,6 +107,11 @@ pub(super) async fn upload_xorb(
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
     // Acquire admission permit for xorb upload
     let _admit = state.admission.acquire(weights::XORB_UPLOAD).await;
+    let _hashing = state
+        .pools
+        .hashing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     authorize(&state, &headers, TokenScope::Write)?;
     validate_hash_path(&hash)?;
     let mut body_reader =
@@ -193,6 +198,12 @@ pub(super) async fn write_xorb_transfer(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
+    let _admit = state.admission.acquire(weights::XORB_UPLOAD).await;
+    let _hashing = state
+        .pools
+        .hashing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     authorize(&state, &headers, TokenScope::Write)?;
     validate_xorb_transfer_namespace(&prefix)?;
     validate_hash_path(&hash)?;
@@ -208,6 +219,11 @@ pub(super) async fn upload_shard(
 ) -> Result<Json<ShardUploadResponse>, ServerError> {
     // Acquire admission permit for shard upload
     let _admit = state.admission.acquire(weights::SHARD_UPLOAD).await;
+    let _parsing = state
+        .pools
+        .parsing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let response = state
