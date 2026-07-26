@@ -89,6 +89,29 @@ fn production_scaled_profile_keeps_default_deny_and_explicit_ingress_routes() {
     assert!(ingress.contains("name: shardline-api"));
 }
 
+#[test]
+fn production_workloads_enforce_restricted_runtime_defaults() {
+    for manifest_path in [
+        "docs/k8s/production-scaled/api-deployment.yaml",
+        "docs/k8s/production-scaled/transfer-deployment.yaml",
+        "docs/k8s/production-scaled/gc-cronjob.yaml",
+    ] {
+        let manifest = read_manifest(manifest_path);
+        assert!(manifest.contains("runAsNonRoot: true"));
+        assert!(manifest.contains("readOnlyRootFilesystem: true"));
+        assert!(manifest.contains("allowPrivilegeEscalation: false"));
+        assert!(manifest.contains("drop: [\"ALL\"]"));
+        assert!(manifest.contains("seccompProfile:"));
+        assert!(manifest.contains("type: RuntimeDefault"));
+    }
+}
+
+#[test]
+fn production_image_does_not_bake_in_a_loopback_public_url() {
+    let dockerfile = read_manifest("Dockerfile");
+    assert!(!dockerfile.contains("ENV SHARDLINE_PUBLIC_BASE_URL="));
+}
+
 fn read_manifest(path: &str) -> String {
     let result = read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
