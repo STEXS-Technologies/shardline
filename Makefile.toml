@@ -258,12 +258,12 @@ command = "cargo"
 args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--html", "${@}"]
 
 [tasks.coverage-json]
-description = "Write an LLVM source-based JSON coverage summary to target/coverage.json"
+description = "Write workspace and database-gated LLVM coverage to target/coverage.json"
 workspace = false
 install_crate = "cargo-llvm-cov"
 install_crate_args = ["--locked"]
-command = "cargo"
-args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuzz", "--json", "--summary-only", "--output-path", "target/coverage.json", "${@}"]
+command = "bash"
+args = ["scripts/run_coverage_json.sh", "${@}"]
 
 [tasks.coverage-check]
 description = "Generate coverage and enforce the checked-in line-coverage ratchet"
