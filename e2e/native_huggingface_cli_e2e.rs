@@ -41,7 +41,10 @@ async fn native_huggingface_cli_model_and_dataset_flows_work_against_shardline()
 
     let result = exercise_huggingface_cli_flows().await;
     let error = result.as_ref().err().map(ToString::to_string);
-    assert!(result.is_ok(), "native Hugging Face CLI e2e failed: {error:?}");
+    assert!(
+        result.is_ok(),
+        "native Hugging Face CLI e2e failed: {error:?}"
+    );
 }
 
 async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
@@ -89,7 +92,10 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
     let folder = working.path().join("folder");
     create_dir_all(folder.join("nested"))?;
     write(folder.join("config.json"), b"{\"layers\": 3}\n")?;
-    write(folder.join("nested").join("weights.json"), b"{\"weight\": 7}\n")?;
+    write(
+        folder.join("nested").join("weights.json"),
+        b"{\"weight\": 7}\n",
+    )?;
     write(folder.join("ignored.bin"), b"must not be uploaded")?;
     run_hf(
         &runtime,
@@ -152,8 +158,16 @@ async fn exercise_huggingface_cli_flows() -> Result<(), TestError> {
             "quiet",
         ],
     )?;
-    assert_eq!(read(filtered_download.join("config.json"))?, b"{\"layers\": 3}\n");
-    assert!(!filtered_download.join("nested").join("weights.json").exists());
+    assert_eq!(
+        read(filtered_download.join("config.json"))?,
+        b"{\"layers\": 3}\n"
+    );
+    assert!(
+        !filtered_download
+            .join("nested")
+            .join("weights.json")
+            .exists()
+    );
 
     run_hf(
         &runtime,
@@ -337,10 +351,8 @@ fn run_hf<const N: usize>(
 }
 
 fn path_as_str(path: &Path) -> Result<&str, TestError> {
-    path.to_str().ok_or_else(|| {
-        IoError::other("test path was not valid UTF-8")
-            .into()
-    })
+    path.to_str()
+        .ok_or_else(|| IoError::other("test path was not valid UTF-8").into())
 }
 
 fn command_available(program: &str) -> bool {

@@ -103,7 +103,6 @@ async fn test_app_for_frontends_with_role(
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
-        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     let mut app = Router::new()
@@ -329,7 +328,6 @@ async fn test_app_with_auth(frontends: &[ServerFrontend]) -> (Router, TempDir) {
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
-        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     let mut app = Router::new()
@@ -567,7 +565,6 @@ async fn test_app_with_provider_tokens(frontends: &[ServerFrontend]) -> (Router,
         ),
         pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
-        quota_tracker: crate::admission::QuotaTracker::new(),
     });
 
     let mut app = Router::new()
@@ -1676,14 +1673,9 @@ async fn reconstruction_requires_auth() {
 // ============================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn admission_control_blocks_when_saturated() {
+async fn admission_control_allows_request_when_capacity_is_available() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
 
-    // Acquire all admission permits to saturate the controller
-    // The WeightedAdmission has default max_weight=256
-    // We can verify this by checking the available_permits
-
-    // Send a valid xorb upload — it should succeed (admission has capacity)
     let content = b"test-data-for-admission-test";
     let (xorb_bytes, xorb_hash) = test_fixtures::single_chunk_xorb(content);
     let resp = app
@@ -6550,18 +6542,17 @@ async fn lfs_verify_detects_corrupted_storage() {
         .unwrap();
     assert_eq!(verify_ok.status(), StatusCode::OK);
 
-    // Find and corrupt the stored file on disk
+    // Find and corrupt the authoritative stored chunk on disk.
+    let chunk_hash =
+        shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(content));
     let stored_path = tmp
         .path()
         .join("chunks")
-        .join("protocols")
-        .join("lfs")
-        .join("global")
-        .join("objects")
-        .join(&oid);
+        .join(&chunk_hash[..2])
+        .join(&chunk_hash);
     assert!(
         stored_path.exists(),
-        "stored LFS object should exist at {:?}",
+        "stored LFS chunk should exist at {:?}",
         stored_path
     );
 

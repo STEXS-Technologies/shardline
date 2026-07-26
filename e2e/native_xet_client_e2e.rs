@@ -87,14 +87,17 @@ fn shardline_accepts_native_xet_upload_and_download_flows_with_s3_when_configure
     let Ok(Some(services)) = services else {
         return;
     };
-    let Some(raw) =
-        services.s3_raw_config(Some(&services.unique_s3_key_prefix("native-xet-e2e")))
+    let Some(raw) = services.s3_raw_config(Some(&services.unique_s3_key_prefix("native-xet-e2e")))
     else {
         return;
     };
     let s3_config = shardline_storage::S3ObjectStoreConfig::new(raw.bucket, raw.region)
         .with_endpoint(raw.endpoint)
-        .with_credentials(raw.access_key.map(SecretString::new), raw.secret_key.map(SecretString::new), raw.session_token.map(SecretString::new))
+        .with_credentials(
+            raw.access_key.map(SecretString::new),
+            raw.secret_key.map(SecretString::new),
+            raw.session_token.map(SecretString::new),
+        )
         .with_key_prefix(raw.key_prefix.as_deref())
         .with_allow_http(raw.allow_http);
 
@@ -678,19 +681,23 @@ async fn handle_native_xet_proxy(
             );
         }
     };
-    let rewritten_body = match rewrite_reconstruction_body(
-        &path_and_query,
-        body_bytes,
-        &state.proxy_base_url,
-        &state.upstream_base_url,
-    ) {
-        Ok(rewritten) => rewritten,
-        Err(error) => {
-            return response_with_status(
-                StatusCode::BAD_GATEWAY,
-                format!("native xet proxy rewrite failed: {error}"),
-            );
+    let rewritten_body = if status.is_success() {
+        match rewrite_reconstruction_body(
+            &path_and_query,
+            body_bytes,
+            &state.proxy_base_url,
+            &state.upstream_base_url,
+        ) {
+            Ok(rewritten) => rewritten,
+            Err(error) => {
+                return response_with_status(
+                    StatusCode::BAD_GATEWAY,
+                    format!("native xet proxy rewrite failed: {error}"),
+                );
+            }
         }
+    } else {
+        body_bytes
     };
     let transfer_bytes = if path_and_query.starts_with("/transfer/xorb/")
         || path_and_query.starts_with("/v1/chunks/default/")

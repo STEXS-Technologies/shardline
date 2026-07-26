@@ -782,10 +782,9 @@ fn validate_integrity_missing_quarantine_object_auto_released() {
     // in the object store, the candidate should be auto-released.
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let dir = std::env::temp_dir().join(format!("gc-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("chunks")).unwrap();
-        let object_store = ServerObjectStore::local(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("chunks")).unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
         let index_store = MemoryIndexStore::new();
 
         let key =
@@ -818,7 +817,6 @@ fn validate_integrity_missing_quarantine_object_auto_released() {
             !found,
             "quarantine candidate should have been auto-released"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     });
 }
 
@@ -828,10 +826,9 @@ fn validate_integrity_quarantine_length_mismatch_errors() {
     // validate_gc_index_integrity should return an error.
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let dir = std::env::temp_dir().join(format!("gc-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("chunks")).unwrap();
-        let object_store = ServerObjectStore::local(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("chunks")).unwrap();
+        let object_store = ServerObjectStore::local(dir.path()).unwrap();
         let index_store = MemoryIndexStore::new();
 
         let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -864,7 +861,6 @@ fn validate_integrity_quarantine_length_mismatch_errors() {
             ),
             "expected QuarantineCandidateLengthMismatch, got: {err:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     });
 }
 

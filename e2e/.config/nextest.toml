@@ -1,4 +1,15 @@
-[profile.default]
 # Never allow one stalled E2E process to consume the workflow's 45-minute
 # budget. Individual tests still report as slow every minute for diagnostics.
+[profile.default]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# These tests reset and migrate the same Docker-backed Postgres service.
+# Nextest runs tests in separate processes, so the in-process mutex in the
+# test binary cannot prevent concurrent service restarts.
+
+[[profile.default.overrides]]
+filter = 'test(postgres_backend_lfs_round_trip) | test(postgres_backend_oci_manifest_push_pull)'
+test-group = "postgres-e2e"
+
+[test-groups.postgres-e2e]
+max-threads = 1

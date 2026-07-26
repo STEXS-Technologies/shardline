@@ -79,13 +79,16 @@ pub(crate) fn ensure_sqlite_database_path_is_safe(path: &Path) -> Result<(), Loc
 }
 
 pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), LocalIndexStoreError> {
+    // Install the busy handler before any PRAGMA that may need a database lock.
+    // Concurrent protocol uploads open independent connections, and setting WAL
+    // mode can otherwise fail immediately while another connection is writing.
+    connection.busy_timeout(Duration::from_secs(5))?;
     let _enabled = connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "trusted_schema", "OFF")?;
     connection.pragma_update(None, "cell_size_check", "ON")?;
-    connection.busy_timeout(Duration::from_secs(5))?;
     Ok(())
 }
 

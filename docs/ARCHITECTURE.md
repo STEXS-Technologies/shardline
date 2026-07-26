@@ -203,6 +203,21 @@ tag, manifest, and token-service routes.
 object upload, blob transfer, cache object transfer, and Xet xorb range transfer.
 `all` keeps the single-node behavior and serves both route sets from one process.
 
+### Protocol object storage
+
+Digest-addressed Git LFS objects, Bazel CAS entries, and OCI blobs use the same
+bounded streaming chunk ingestor as native file uploads. Their protocol object key
+is mapped to an opaque internal file-record identifier; the authoritative visible
+reference is the atomically committed `FileRecord`, while immutable chunk objects
+are shared across protocols and repositories. Full and ranged responses stream the
+referenced chunks without assembling the complete object in memory.
+
+Upgrades are lazy and backward compatible. Reads and existence checks probe legacy
+whole-object keys first and then the chunk-backed record. New uploads do not create
+a second whole-object copy. OCI cross-repository mounts create another metadata
+reference to the same chunks, and deletion atomically removes both latest and
+version references before ordinary mark-and-sweep can collect unreferenced chunks.
+
 ## Source Layout
 
 The workspace contains 22 product crates organized in a layered dependency graph.

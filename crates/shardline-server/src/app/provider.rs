@@ -1067,7 +1067,6 @@ mod provider_tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
-            quota_tracker: crate::admission::QuotaTracker::new(),
         }
     }
 

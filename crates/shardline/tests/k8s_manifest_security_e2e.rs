@@ -112,6 +112,18 @@ fn production_image_does_not_bake_in_a_loopback_public_url() {
     assert!(!dockerfile.contains("ENV SHARDLINE_PUBLIC_BASE_URL="));
 }
 
+#[test]
+fn production_and_kind_configs_use_a_supported_auth_provider() {
+    for manifest_path in [
+        "docs/k8s/production-scaled/configmap.yaml",
+        "tests/k8s/kind/configmap.patch.yaml",
+    ] {
+        let manifest = read_manifest(manifest_path);
+        assert!(manifest.contains("provider = \"local\""));
+        assert!(!manifest.contains("provider = \"local-hmac\""));
+    }
+}
+
 fn read_manifest(path: &str) -> String {
     let result = read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -9,7 +9,9 @@ use axum::{
 use shardline_protocol::TokenScope;
 
 use crate::{
-    BazelCacheKind, ServerError, bazel_cache_object_key,
+    BazelCacheKind, ServerError,
+    admission::weights,
+    bazel_cache_object_key,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -50,6 +52,10 @@ pub(crate) async fn bazel_put_ac(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let object_key = bazel_cache_object_key(
         BazelCacheKind::Ac,
         &hash,
@@ -127,6 +133,10 @@ pub(crate) async fn bazel_put_cas(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let object_key = bazel_cache_object_key(
         BazelCacheKind::Cas,
         &hash,
@@ -225,6 +235,10 @@ pub(crate) async fn bazel_put(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let object_key = bazel_cache_object_key(
         BazelCacheKind::Cas,
         &hash,
@@ -344,7 +358,6 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
-            quota_tracker: crate::admission::QuotaTracker::new(),
         });
 
         (state, tmp)

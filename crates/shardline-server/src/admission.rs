@@ -1,7 +1,6 @@
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Weighted admission controller for request work.
@@ -198,85 +197,6 @@ impl Clone for AdmissionCounters {
     }
 }
 
-/// Tracks storage quotas per repository scope.
-#[derive(Debug, Clone)]
-pub struct QuotaTracker {
-    inner: Arc<Mutex<QuotaState>>,
-}
-
-#[derive(Debug, Default)]
-struct QuotaState {
-    /// Bytes stored per repository (key format: "{provider}/{owner}/{repo}").
-    storage_bytes: HashMap<String, u64>,
-    /// Upload operations count per repository.
-    upload_count: HashMap<String, u64>,
-}
-
-impl QuotaTracker {
-    /// Creates a new quota tracker.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(QuotaState::default())),
-        }
-    }
-
-    /// Records a storage operation for a repository.
-    pub fn record_store(&self, repo_key: &str, bytes: u64) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let stored = state.storage_bytes.entry(repo_key.to_owned()).or_insert(0);
-        *stored = stored.saturating_add(bytes);
-        let uploads = state.upload_count.entry(repo_key.to_owned()).or_insert(0);
-        *uploads = uploads.saturating_add(1);
-    }
-
-    /// Returns the total bytes stored for a repository.
-    #[must_use]
-    pub fn storage_bytes(&self, repo_key: &str) -> u64 {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .storage_bytes
-            .get(repo_key)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Returns the upload count for a repository.
-    #[must_use]
-    pub fn upload_count(&self, repo_key: &str) -> u64 {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .upload_count
-            .get(repo_key)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Checks if a storage operation would exceed the per-repo quota (default 100 GiB).
-    #[must_use]
-    pub fn would_exceed_quota(
-        &self,
-        repo_key: &str,
-        additional_bytes: u64,
-        max_bytes: u64,
-    ) -> bool {
-        self.storage_bytes(repo_key)
-            .saturating_add(additional_bytes)
-            > max_bytes
-    }
-}
-
-impl Default for QuotaTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Standard request weights for admission control.
 pub mod weights {
     /// Weight for a xorb upload (stores chunks + metadata).
@@ -305,48 +225,6 @@ mod tests {
         assert_eq!(counters.admitted.load(Ordering::Relaxed), 1);
         assert_eq!(counters.queued.load(Ordering::Relaxed), 1);
         assert_eq!(counters.rejected.load(Ordering::Relaxed), 1);
-    }
-
-    // ── QuotaTracker tests ──────────────────────────────────────────────
-
-    #[test]
-    fn quota_tracker_tracks_bytes() {
-        let qt = QuotaTracker::new();
-        qt.record_store("github/owner/repo", 1000);
-        assert_eq!(qt.storage_bytes("github/owner/repo"), 1000);
-    }
-
-    #[test]
-    fn quota_tracker_would_exceed() {
-        let qt = QuotaTracker::new();
-        qt.record_store("github/owner/repo", 90);
-        assert!(!qt.would_exceed_quota("github/owner/repo", 5, 100));
-        assert!(qt.would_exceed_quota("github/owner/repo", 15, 100));
-    }
-
-    #[test]
-    fn quota_tracker_default_zero_for_unknown_key() {
-        let qt = QuotaTracker::new();
-        assert_eq!(qt.storage_bytes("nonexistent"), 0);
-        assert_eq!(qt.upload_count("nonexistent"), 0);
-    }
-
-    #[test]
-    fn quota_tracker_upload_count_increments() {
-        let qt = QuotaTracker::new();
-        qt.record_store("repo/x", 50);
-        qt.record_store("repo/x", 30);
-        assert_eq!(qt.storage_bytes("repo/x"), 80);
-        assert_eq!(qt.upload_count("repo/x"), 2);
-    }
-
-    #[test]
-    fn quota_tracker_multiple_repos_independent() {
-        let qt = QuotaTracker::new();
-        qt.record_store("repo/a", 100);
-        qt.record_store("repo/b", 200);
-        assert_eq!(qt.storage_bytes("repo/a"), 100);
-        assert_eq!(qt.storage_bytes("repo/b"), 200);
     }
 
     // ── WeightedAdmission tests ─────────────────────────────────────────

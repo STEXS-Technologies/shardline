@@ -50,6 +50,27 @@ impl super::PostgresRecordStore {
         Ok(())
     }
 
+    /// Atomically removes a visible file reference and its immutable version record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PostgresMetadataStoreError`] when the transaction cannot be completed.
+    pub async fn delete_file_version_metadata(
+        &self,
+        record: &FileRecord,
+    ) -> Result<(), PostgresMetadataStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let latest = self.latest_record_locator(record);
+        let version = self.version_record_locator(record);
+        query("DELETE FROM shardline_file_records WHERE record_key = $1 OR record_key = $2")
+            .bind(&latest.record_key)
+            .bind(&version.record_key)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Atomically commits native shard metadata.
     ///
     /// # Errors

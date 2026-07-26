@@ -207,8 +207,8 @@ impl DockerLocalStack {
             .as_mut()
             .ok_or_else(|| IoError::new(ErrorKind::NotFound, "postgres is not configured"))?;
         start_container(&service.container_name)?;
-        wait_for_postgres(&service.container_name)?;
         service.host_port = docker_published_port(&service.container_name, 5432)?;
+        wait_for_postgres(&service.container_name, service.host_port)?;
         Ok(())
     }
 
@@ -393,7 +393,7 @@ fn start_postgres_service(run_id: &str) -> Result<PostgresService, IoError> {
     )?;
     let service = (|| {
         let host_port = docker_published_port(&container_name, 5432)?;
-        wait_for_postgres(&container_name)?;
+        wait_for_postgres(&container_name, host_port)?;
 
         Ok(PostgresService {
             container_name: container_name.clone(),
@@ -587,10 +587,10 @@ fn start_container(container_name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn wait_for_postgres(container_name: &str) -> Result<(), IoError> {
+fn wait_for_postgres(container_name: &str, host_port: u16) -> Result<(), IoError> {
     wait_for(
         || {
-            run_command(
+            let container_ready = run_command(
                 Command::new("docker")
                     .arg("exec")
                     .arg(container_name)
@@ -600,7 +600,20 @@ fn wait_for_postgres(container_name: &str) -> Result<(), IoError> {
                     .arg("-d")
                     .arg(POSTGRES_DATABASE),
             )
-            .is_ok_and(|output| output.status.success())
+            .is_ok_and(|output| output.status.success());
+            let published_port_ready = run_command(
+                Command::new("pg_isready")
+                    .arg("-h")
+                    .arg("127.0.0.1")
+                    .arg("-p")
+                    .arg(host_port.to_string())
+                    .arg("-U")
+                    .arg(POSTGRES_USER)
+                    .arg("-d")
+                    .arg(POSTGRES_DATABASE),
+            )
+            .is_ok_and(|output| output.status.success());
+            container_ready && published_port_ready
         },
         "postgres readiness",
     )
