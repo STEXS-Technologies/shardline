@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-27
+
+Patch release establishing recoverable upload lifecycles, shared chunk-backed storage,
+bounded runtime resource use, and hardened release and deployment boundaries. Public LFS,
+Bazel CAS, OCI, Hub, and Xet protocol surfaces remain compatible.
+
+### Changed
+
+- **Shared chunk-backed storage**: standard bulk-data frontends now use the shared CAS
+  coordinator and fixed-size chunks, while native Xet retains content-defined chunking.
+- **Authoritative upload lifecycle**: memory, SQLite, and PostgreSQL index stores persist
+  legal upload-intent transitions so incomplete writes can be reconciled deterministically.
+- **Bounded runtime behavior**: asynchronous object I/O, admission control, quotas, timeouts,
+  and explicit overload responses bound memory, blocking work, and request concurrency.
+
+### Fixed
+
+- **Visibility and recovery consistency**: file records now form the publication boundary,
+  and GC, FSCK, repair, and protocol handlers share the same reachability model.
+- **Legacy read compatibility**: existing whole-object records remain readable while new
+  writes use chunk-backed records.
+- **CI reliability**: database-gated coverage is included in the coverage ratchet, shared
+  backend assertions tolerate parallel test state, and Docker test identifiers are unique.
+
+### Security
+
+- Authentication and route policies fail closed, object and filesystem boundaries use typed
+  validation, and production containers run with non-root security defaults.
+- Release artifacts and container images are verified, provenance-attested, and published
+  through restartable release steps with expiring dependency exceptions.
+
+### Operations
+
+- Apply migration `20260721000000_upload_intents` before accepting writes with this version.
+- Roll API and transfer roles together. Preserve database and object-store backups if an
+  emergency rollback is required after new chunk-backed records have been published.
+
 ## [1.2.0] - 2026-07-24
 
 Minor release adding Ed25519 asymmetric token verification, Hub authentication coverage,
@@ -264,7 +301,8 @@ There are no intentional breaking API or configuration changes from `1.0.0`.
 - Documented async storage TOCTOU races with 1.2M-run fuzz validation (`40ef000`)
 - Updated all architecture, deployment, and Hub API docs for 20-crate structure (`1203d8e`)
 
-[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/STEXS-Technologies/shardline/compare/v1.0.0...v1.0.1
