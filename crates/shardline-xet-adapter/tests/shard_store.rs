@@ -69,8 +69,12 @@ fn store_simple_xorb(
             .expect("xorb serialization");
     let hash_hex = serialized.hash.hex();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    rt.block_on(store_uploaded_xorb_bytes(object_store, &hash_hex, &serialized.serialized_data))
-        .expect("store xorb for shard test");
+    rt.block_on(store_uploaded_xorb_bytes(
+        object_store,
+        &hash_hex,
+        &serialized.serialized_data,
+    ))
+    .expect("store xorb for shard test");
     serialized.hash
 }
 

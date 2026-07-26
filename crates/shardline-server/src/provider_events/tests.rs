@@ -444,7 +444,8 @@ async fn exercise_repository_deleted_holds_native_xet_xorb_and_unpacked_chunks()
         Ok::<(), ServerError>(())
     })?;
     let unique_chunk_count = u64::try_from(chunk_hashes.len())?;
-    let upload = store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data).await?;
+    let upload =
+        store_uploaded_xorb(&object_store, &xorb_hash, &serialized.serialized_data).await?;
     assert!(upload.was_inserted);
 
     let scope = RepositoryScope::new(RepositoryProvider::GitHub, "team", "assets", Some("main"))?;

@@ -313,12 +313,7 @@ impl AsyncObjectStore for LocalObjectStore {
         let integrity = *integrity;
         let body_bytes = body.as_slice().to_vec();
         tokio::task::spawn_blocking(move || {
-            ObjectStore::put_if_absent(
-                &this,
-                &key,
-                ObjectBody::from_vec(body_bytes),
-                &integrity,
-            )
+            ObjectStore::put_if_absent(&this, &key, ObjectBody::from_vec(body_bytes), &integrity)
         })
         .await
         .map_err(|join| {
@@ -329,11 +324,7 @@ impl AsyncObjectStore for LocalObjectStore {
         })?
     }
 
-    async fn read_range(
-        &self,
-        key: &ObjectKey,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, Self::Error> {
+    async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         let this = self.clone();
         let key = key.clone();
         tokio::task::spawn_blocking(move || ObjectStore::read_range(&this, &key, range))
@@ -372,10 +363,7 @@ impl AsyncObjectStore for LocalObjectStore {
             })?
     }
 
-    async fn list_prefix(
-        &self,
-        prefix: &ObjectPrefix,
-    ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+    async fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
         let this = self.clone();
         let prefix = prefix.clone();
         tokio::task::spawn_blocking(move || ObjectStore::list_prefix(&this, &prefix))
@@ -388,10 +376,7 @@ impl AsyncObjectStore for LocalObjectStore {
             })?
     }
 
-    async fn delete_if_present(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<DeleteOutcome, Self::Error> {
+    async fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
         let this = self.clone();
         let key = key.clone();
         tokio::task::spawn_blocking(move || ObjectStore::delete_if_present(&this, &key))
@@ -436,13 +421,13 @@ pub enum LocalObjectStoreError {
 
 #[cfg(test)]
 mod async_tests {
-    use tempfile::TempDir;
-    use tokio::runtime::Runtime;
-    use shardline_protocol::{ByteRange, ShardlineHash};
     use crate::{
         AsyncObjectStore, DeleteOutcome, LocalObjectStore, ObjectBody, ObjectIntegrity, ObjectKey,
         ObjectPrefix, PutOutcome,
     };
+    use shardline_protocol::{ByteRange, ShardlineHash};
+    use tempfile::TempDir;
+    use tokio::runtime::Runtime;
 
     fn setup() -> (LocalObjectStore, TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -460,7 +445,12 @@ mod async_tests {
         let key = ObjectKey::parse("test/key").unwrap();
         let hash = ShardlineHash::from_bytes(*blake3::hash(b"test data").as_bytes());
         let integrity = ObjectIntegrity::new(hash, 9);
-        let result = rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"test data"), &integrity));
+        let result = rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(b"test data"),
+            &integrity,
+        ));
         assert!(matches!(result, Ok(PutOutcome::Inserted)));
     }
 
@@ -470,8 +460,19 @@ mod async_tests {
         let key = ObjectKey::parse("test/key").unwrap();
         let hash = ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes());
         let integrity = ObjectIntegrity::new(hash, 4);
-        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity)).unwrap();
-        let second = rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity));
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(b"data"),
+            &integrity,
+        ))
+        .unwrap();
+        let second = rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(b"data"),
+            &integrity,
+        ));
         assert!(matches!(second, Ok(PutOutcome::AlreadyExists)));
     }
 
@@ -481,8 +482,17 @@ mod async_tests {
         let key = ObjectKey::parse("test/key").unwrap();
         let hash = ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes());
         let integrity = ObjectIntegrity::new(hash, 4);
-        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity)).unwrap();
-        assert!(matches!(rt().block_on(AsyncObjectStore::contains(&store, &key)), Ok(true)));
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(b"data"),
+            &integrity,
+        ))
+        .unwrap();
+        assert!(matches!(
+            rt().block_on(AsyncObjectStore::contains(&store, &key)),
+            Ok(true)
+        ));
     }
 
     #[test]
@@ -491,7 +501,13 @@ mod async_tests {
         let key = ObjectKey::parse("test/key").unwrap();
         let hash = ShardlineHash::from_bytes(*blake3::hash(b"data").as_bytes());
         let integrity = ObjectIntegrity::new(hash, 4);
-        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"data"), &integrity)).unwrap();
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(b"data"),
+            &integrity,
+        ))
+        .unwrap();
         let deleted = rt().block_on(AsyncObjectStore::delete_if_present(&store, &key));
         assert!(matches!(deleted, Ok(DeleteOutcome::Deleted)));
     }
@@ -502,7 +518,13 @@ mod async_tests {
         let key = ObjectKey::parse("test/key").unwrap();
         let hash = ShardlineHash::from_bytes(*blake3::hash(b"12345").as_bytes());
         let integrity = ObjectIntegrity::new(hash, 5);
-        rt().block_on(AsyncObjectStore::put_if_absent(&store, &key, ObjectBody::from_slice(b"12345"), &integrity)).unwrap();
+        rt().block_on(AsyncObjectStore::put_if_absent(
+            &store,
+            &key,
+            ObjectBody::from_slice(b"12345"),
+            &integrity,
+        ))
+        .unwrap();
         let meta = rt().block_on(AsyncObjectStore::metadata(&store, &key));
         assert!(matches!(meta, Ok(Some(ref m)) if m.length() == 5));
     }
@@ -521,8 +543,9 @@ mod async_tests {
         ))
         .unwrap();
         let range = ByteRange::new(0, 4).unwrap();
-        let data =
-            rt().block_on(AsyncObjectStore::read_range(&store, &key, range)).unwrap();
+        let data = rt()
+            .block_on(AsyncObjectStore::read_range(&store, &key, range))
+            .unwrap();
         assert_eq!(data, b"hello");
     }
 
@@ -553,8 +576,9 @@ mod async_tests {
         ))
         .unwrap();
         let prefix = ObjectPrefix::parse("ns/").unwrap();
-        let items =
-            rt().block_on(AsyncObjectStore::list_prefix(&store, &prefix)).unwrap();
+        let items = rt()
+            .block_on(AsyncObjectStore::list_prefix(&store, &prefix))
+            .unwrap();
         assert_eq!(items.len(), 2);
     }
 }

@@ -43,9 +43,9 @@ mod provider;
 mod reconstruction;
 mod record;
 mod record_key;
-mod upload_intent;
 #[cfg(test)]
 mod test_invariant_error;
+mod upload_intent;
 mod xet_hash;
 
 pub use dedupe::DedupeShardMapping;
@@ -65,7 +65,6 @@ pub use postgres::{
     PostgresIndexStore, PostgresMetadataStoreError, PostgresRecordLocator, PostgresRecordStore,
 };
 pub use reconstruction::{FileReconstruction, ReconstructionTerm};
-pub use upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
 pub use record::{
     FileChunkRecord, FileRecord, FileRecordInvariantError, FileRecordStorageLayout, RecordMutation,
     RecordStore, RecordStoreFuture, RecordTraversal, RepositoryRecordScope, StoredRecord,
@@ -74,4 +73,5 @@ pub use store::{
     AsyncIndexStore, DedupeStore, IndexStore, IndexStoreFuture, LifecycleStore,
     ReconstructionStore, Repository,
 };
+pub use upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
 pub use xet_hash::{parse_xet_hash_hex, xet_hash_hex_string};

@@ -628,7 +628,8 @@ mod tests {
 
     fn store_xorb_sync(store: &ServerObjectStore, hash: &str, body: &[u8]) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(crate::store_uploaded_xorb(store, hash, body)).unwrap();
+        rt.block_on(crate::store_uploaded_xorb(store, hash, body))
+            .unwrap();
     }
 
     #[test]
@@ -1251,7 +1252,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_with_metrics_delegates_success() {
-                use shardline_xet_core::xorb_object::{
+        use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
@@ -1313,7 +1314,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_success_with_xorb_lookup() {
-                use shardline_xet_core::xorb_object::{
+        use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
@@ -1365,7 +1366,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_already_exists_returns_result_zero() {
-                use shardline_xet_core::xorb_object::{
+        use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };
@@ -1495,7 +1496,7 @@ mod tests {
 
     #[test]
     fn parse_uploaded_shard_with_verification_and_no_metadata_ext() {
-                use shardline_xet_core::xorb_object::{
+        use shardline_xet_core::xorb_object::{
             CompressionScheme, SerializedXorbObject,
             xorb_format_test_utils::{ChunkSize, build_raw_xorb},
         };

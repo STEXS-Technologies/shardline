@@ -3,9 +3,9 @@
 //! All lifecycle tools must use this trait to determine whether an object is
 //! reachable instead of querying storage or index internals directly.
 
-use shardline_index::{AsyncIndexStore, StoredObjectId};
 #[cfg(test)]
 use shardline_index::MemoryIndexStore;
+use shardline_index::{AsyncIndexStore, StoredObjectId};
 
 use crate::CasError;
 
@@ -40,9 +40,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use shardline_protocol::ShardlineHash;
     use super::{MemoryIndexStore, StoredObjectId};
     use crate::ObjectReachability;
+    use shardline_protocol::ShardlineHash;
 
     #[tokio::test]
     async fn reachability_returns_false_for_unknown() {

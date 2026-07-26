@@ -16,6 +16,8 @@ pub enum CasError {
     Index(String),
     /// RecordStore operation failed.
     Record(String),
+    /// A persisted upload intent is missing or cannot move to the requested state.
+    InvalidUploadTransition,
     /// Numeric overflow.
     Overflow,
     /// Internal error.
@@ -31,6 +33,7 @@ impl fmt::Display for CasError {
             Self::ObjectStore(msg) => write!(f, "object store error: {msg}"),
             Self::Index(msg) => write!(f, "index error: {msg}"),
             Self::Record(msg) => write!(f, "record store error: {msg}"),
+            Self::InvalidUploadTransition => write!(f, "invalid upload intent state transition"),
             Self::Overflow => write!(f, "numeric overflow"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
@@ -62,8 +65,14 @@ mod tests {
 
     #[test]
     fn cas_error_body_too_large_display() {
-        let err = CasError::BodyTooLarge { actual: 100, max: 50 };
-        assert_eq!(err.to_string(), "body too large: 100 bytes exceeds max 50 bytes");
+        let err = CasError::BodyTooLarge {
+            actual: 100,
+            max: 50,
+        };
+        assert_eq!(
+            err.to_string(),
+            "body too large: 100 bytes exceeds max 50 bytes"
+        );
     }
 
     #[test]

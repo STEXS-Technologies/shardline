@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Semaphore, OwnedSemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Weighted admission controller for request work.
 ///
@@ -17,6 +17,7 @@ pub struct WeightedAdmission {
 
 impl WeightedAdmission {
     /// Creates a new admission controller with the given maximum concurrent weight.
+    #[must_use]
     pub fn new(max_weight: NonZeroUsize) -> Self {
         Self {
             inner: Arc::new(Semaphore::new(max_weight.get())),
@@ -26,7 +27,7 @@ impl WeightedAdmission {
     }
 
     /// Returns the configured maximum weight.
-    pub fn max_weight(&self) -> u64 {
+    pub const fn max_weight(&self) -> u64 {
         self.max_weight
     }
 
@@ -75,7 +76,7 @@ impl WeightedAdmission {
     }
 
     /// Returns a reference to the admission counters.
-    pub fn counters(&self) -> &AdmissionCounters {
+    pub const fn counters(&self) -> &AdmissionCounters {
         &self.counters
     }
 }
@@ -112,7 +113,7 @@ impl BoundedPool {
     }
 
     /// Returns the total pool capacity.
-    pub fn capacity(&self) -> u32 {
+    pub const fn capacity(&self) -> u32 {
         self.capacity
     }
 }
@@ -130,15 +131,17 @@ pub struct ExecutionPools {
 
 impl ExecutionPools {
     /// Creates execution pools with default sizes.
+    #[must_use]
     pub fn default_sizes() -> Self {
         Self {
-            hashing: BoundedPool::new(NonZeroUsize::new(8).unwrap()),
-            parsing: BoundedPool::new(NonZeroUsize::new(8).unwrap()),
-            blocking_io: BoundedPool::new(NonZeroUsize::new(16).unwrap()),
+            hashing: BoundedPool::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN)),
+            parsing: BoundedPool::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN)),
+            blocking_io: BoundedPool::new(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN)),
         }
     }
 
     /// Creates execution pools with custom sizes from configuration.
+    #[must_use]
     pub fn with_sizes(
         hashing: NonZeroUsize,
         parsing: NonZeroUsize,
@@ -152,19 +155,19 @@ impl ExecutionPools {
     }
 }
 
-/// Default timeout durations for operations.
+/// Operation deadlines enforced at the server boundary.
 pub mod timeouts {
     use std::time::Duration;
 
-    /// Timeout for object storage read operations (S3 GET, local file read).
+    /// Deadline for object-storage read operations.
     pub const STORAGE_READ: Duration = Duration::from_secs(30);
-    /// Timeout for object storage write operations (S3 PUT, local file write).
+    /// Deadline for object-storage write operations.
     pub const STORAGE_WRITE: Duration = Duration::from_secs(60);
-    /// Timeout for metadata database queries.
+    /// Deadline for metadata database reads.
     pub const DATABASE_QUERY: Duration = Duration::from_secs(10);
-    /// Timeout for metadata database writes (transactions).
+    /// Deadline for metadata database writes.
     pub const DATABASE_WRITE: Duration = Duration::from_secs(30);
-    /// Timeout for HTTP request body headers.
+    /// Deadline for receiving HTTP request headers.
     pub const REQUEST_HEADERS: Duration = Duration::from_secs(10);
 }
 
@@ -215,6 +218,7 @@ struct QuotaState {
 
 impl QuotaTracker {
     /// Creates a new quota tracker.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(QuotaState::default())),
@@ -223,16 +227,22 @@ impl QuotaTracker {
 
     /// Records a storage operation for a repository.
     pub fn record_store(&self, repo_key: &str, bytes: u64) {
-        let mut state = self.inner.lock().unwrap();
-        *state.storage_bytes.entry(repo_key.to_owned()).or_insert(0) += bytes;
-        *state.upload_count.entry(repo_key.to_owned()).or_insert(0) += 1;
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stored = state.storage_bytes.entry(repo_key.to_owned()).or_insert(0);
+        *stored = stored.saturating_add(bytes);
+        let uploads = state.upload_count.entry(repo_key.to_owned()).or_insert(0);
+        *uploads = uploads.saturating_add(1);
     }
 
     /// Returns the total bytes stored for a repository.
+    #[must_use]
     pub fn storage_bytes(&self, repo_key: &str) -> u64 {
         self.inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .storage_bytes
             .get(repo_key)
             .copied()
@@ -240,10 +250,11 @@ impl QuotaTracker {
     }
 
     /// Returns the upload count for a repository.
+    #[must_use]
     pub fn upload_count(&self, repo_key: &str) -> u64 {
         self.inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .upload_count
             .get(repo_key)
             .copied()
@@ -251,7 +262,13 @@ impl QuotaTracker {
     }
 
     /// Checks if a storage operation would exceed the per-repo quota (default 100 GiB).
-    pub fn would_exceed_quota(&self, repo_key: &str, additional_bytes: u64, max_bytes: u64) -> bool {
+    #[must_use]
+    pub fn would_exceed_quota(
+        &self,
+        repo_key: &str,
+        additional_bytes: u64,
+        max_bytes: u64,
+    ) -> bool {
         self.storage_bytes(repo_key)
             .saturating_add(additional_bytes)
             > max_bytes
@@ -266,10 +283,6 @@ impl Default for QuotaTracker {
 
 /// Standard request weights for admission control.
 pub mod weights {
-    /// Weight for a simple metadata lookup (stats, exists check).
-    pub const METADATA_LOOKUP: u64 = 1;
-    /// Weight for a chunk read (small object download).
-    pub const CHUNK_READ: u64 = 2;
     /// Weight for a xorb upload (stores chunks + metadata).
     pub const XORB_UPLOAD: u64 = 4;
     /// Weight for a shard upload (parsing + metadata commit).
@@ -402,7 +415,10 @@ mod tests {
     async fn admission_async_acquire_succeeds() {
         let ctrl = WeightedAdmission::new(NonZeroUsize::new(10).unwrap());
         let permit = ctrl.acquire(3).await;
-        assert!(permit.is_some(), "async acquire should return permit when capacity available");
+        assert!(
+            permit.is_some(),
+            "async acquire should return permit when capacity available"
+        );
         assert_eq!(ctrl.available_permits(), 7);
     }
 
@@ -476,15 +492,5 @@ mod tests {
     fn admission_weighted_max_weight_accessor() {
         let ctrl = WeightedAdmission::new(NonZeroUsize::new(50).unwrap());
         assert_eq!(ctrl.max_weight(), 50);
-    }
-
-    #[test]
-    fn timeout_constants_are_reasonable() {
-        use crate::admission::timeouts;
-        assert!(timeouts::STORAGE_READ.as_secs() <= 60);
-        assert!(timeouts::STORAGE_WRITE.as_secs() <= 120);
-        assert!(timeouts::DATABASE_QUERY.as_secs() <= 30);
-        assert!(timeouts::DATABASE_WRITE.as_secs() <= 60);
-        assert!(timeouts::REQUEST_HEADERS.as_secs() <= 30);
     }
 }

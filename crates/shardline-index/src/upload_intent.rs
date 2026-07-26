@@ -31,9 +31,9 @@ impl UploadIntentState {
         }
     }
 
-    /// Parses from a database string.
+    /// Parses a database string.
     #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "created" => Some(Self::Created),
             "storing" => Some(Self::Storing),
@@ -43,6 +43,29 @@ impl UploadIntentState {
             "failed" => Some(Self::Failed),
             _ => None,
         }
+    }
+
+    /// Returns whether a durable intent may move to the requested next state.
+    ///
+    /// Repeating a state is permitted so retries are idempotent. A failed
+    /// operation is terminal and no state may skip a persistence boundary.
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Created, Self::Created | Self::Storing | Self::Failed)
+                | (Self::Storing, Self::Storing | Self::Stored | Self::Failed)
+                | (
+                    Self::Stored,
+                    Self::Stored | Self::MetadataCommitted | Self::Failed
+                )
+                | (
+                    Self::MetadataCommitted,
+                    Self::MetadataCommitted | Self::Visible | Self::Failed
+                )
+                | (Self::Visible, Self::Visible)
+                | (Self::Failed, Self::Failed)
+        )
     }
 }
 
@@ -186,7 +209,10 @@ pub trait UploadIntentStore: Send + Sync {
     /// # Errors
     ///
     /// Returns the adapter error when the query fails.
-    async fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error>;
+    async fn intents_by_state(
+        &self,
+        state: UploadIntentState,
+    ) -> Result<Vec<UploadIntent>, Self::Error>;
 
     /// Lists all intents that have been in a non-terminal state for longer than
     /// the given duration.
@@ -215,20 +241,24 @@ mod tests {
     ];
 
     #[test]
-    fn state_as_str_and_from_str_round_trip_all_variants() {
+    fn state_as_str_and_parse_round_trip_all_variants() {
         for state in ALL_STATES {
             let s = state.as_str();
-            let parsed = UploadIntentState::from_str(s);
-            assert_eq!(parsed, Some(*state), "round-trip failed for state {state:?}");
+            let parsed = UploadIntentState::parse(s);
+            assert_eq!(
+                parsed,
+                Some(*state),
+                "round-trip failed for state {state:?}"
+            );
         }
     }
 
     #[test]
-    fn from_str_returns_none_for_invalid_strings() {
-        assert_eq!(UploadIntentState::from_str(""), None);
-        assert_eq!(UploadIntentState::from_str("unknown"), None);
-        assert_eq!(UploadIntentState::from_str("CREATED"), None);
-        assert_eq!(UploadIntentState::from_str(" "), None);
+    fn parse_returns_none_for_invalid_strings() {
+        assert_eq!(UploadIntentState::parse(""), None);
+        assert_eq!(UploadIntentState::parse("unknown"), None);
+        assert_eq!(UploadIntentState::parse("CREATED"), None);
+        assert_eq!(UploadIntentState::parse(" "), None);
     }
 
     #[test]

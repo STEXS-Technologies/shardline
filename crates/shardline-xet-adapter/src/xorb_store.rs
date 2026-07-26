@@ -1,8 +1,8 @@
 use std::{
     borrow::Cow,
     io::Cursor,
-    sync::atomic::{AtomicU64, Ordering},
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
@@ -253,7 +253,7 @@ const fn map_object_key_error(error: ObjectKeyError) -> XetAdapterError {
 
 #[cfg(test)]
 mod tests {
-use std::{borrow::Cow, io::Cursor};
+    use std::{borrow::Cow, io::Cursor};
 
     use shardline_index::parse_xet_hash_hex;
     use shardline_protocol::ShardlineHash;
@@ -423,8 +423,7 @@ use std::{borrow::Cow, io::Cursor};
         let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
 
-        let second =
-            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(
             !second.was_inserted,
             "second store should report was_inserted=false"
@@ -1038,8 +1037,7 @@ use std::{borrow::Cow, io::Cursor};
         let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
 
-        let second =
-            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 
@@ -1088,14 +1086,12 @@ use std::{borrow::Cow, io::Cursor};
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let result =
-            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(result.was_inserted);
         assert!(result.stored_bytes > 0, "should count stored bytes");
 
         // Second store: chunks exist, xorb exists -> stored_bytes unchanged
-        let second =
-            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 
@@ -1563,8 +1559,7 @@ use std::{borrow::Cow, io::Cursor};
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        async_store_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data)
-            .unwrap();
+        async_store_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
         let mut count = 0_usize;
         visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
@@ -1635,8 +1630,7 @@ use std::{borrow::Cow, io::Cursor};
         let hash = serialized.hash.hex();
         let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
-        let second =
-            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 
@@ -1798,8 +1792,7 @@ use std::{borrow::Cow, io::Cursor};
         let hash = serialized.hash.hex();
         let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
-        let second =
-            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 

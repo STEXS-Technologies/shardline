@@ -310,13 +310,6 @@ impl ServerBackend {
         }
     }
 
-    pub(crate) async fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
-        match self {
-            Self::Local(backend) => backend.reconcile_stuck_upload_intents().await,
-            Self::Postgres(backend) => backend.reconcile_stuck_upload_intents().await,
-        }
-    }
-
     pub(crate) fn object_store(&self) -> ServerObjectStore {
         match self {
             Self::Local(backend) => backend.object_store(),
@@ -398,11 +391,9 @@ impl ServerBackend {
         let object_store = self.object_store();
         let source = source.clone();
         let destination = destination.clone();
-        tokio::task::spawn_blocking(move || {
-            Ok(object_store.copy_if_absent(&source, &destination)?)
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
+        tokio::task::spawn_blocking(move || Ok(object_store.copy_if_absent(&source, &destination)?))
+            .await
+            .map_err(ServerError::BlockingTask)?
     }
 
     pub(crate) async fn put_object_bytes_overwrite(
@@ -417,11 +408,7 @@ impl ServerBackend {
             u64::try_from(bytes.len())?,
         );
         tokio::task::spawn_blocking(move || {
-            Ok(object_store.put_overwrite(
-                &object_key,
-                ObjectBody::from_vec(bytes),
-                &integrity,
-            )?)
+            Ok(object_store.put_overwrite(&object_key, ObjectBody::from_vec(bytes), &integrity)?)
         })
         .await
         .map_err(ServerError::BlockingTask)?
@@ -440,11 +427,8 @@ impl ServerBackend {
         let path = path.to_path_buf();
         let integrity = ObjectIntegrity::new(integrity.hash(), integrity.length());
         tokio::task::spawn_blocking(move || {
-            let canonical_outcome = object_store.put_content_addressed_file(
-                &canonical_key,
-                &path,
-                &integrity,
-            )?;
+            let canonical_outcome =
+                object_store.put_content_addressed_file(&canonical_key, &path, &integrity)?;
             if canonical_key == object_key {
                 return Ok(canonical_outcome);
             }
@@ -665,9 +649,11 @@ impl shardline_oci_adapter::OciBackend for ServerBackend {
         let source = source.clone();
         let destination = destination.clone();
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                ServerBackend::copy_object_if_absent(self, &source, &destination),
-            )
+            tokio::runtime::Handle::current().block_on(ServerBackend::copy_object_if_absent(
+                self,
+                &source,
+                &destination,
+            ))
         });
         result.map_err(server_error_to_oci)
     }
@@ -1371,7 +1357,9 @@ mod tests {
     async fn server_backend_put_object_bytes_if_absent_stores_and_returns_outcome() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-test-key").unwrap();
-        let result = backend.put_object_bytes_if_absent(&key, b"hello-backend".to_vec()).await;
+        let result = backend
+            .put_object_bytes_if_absent(&key, b"hello-backend".to_vec())
+            .await;
         assert!(result.is_ok());
         let length = backend.object_length(&key).await.unwrap();
         assert_eq!(length, 13);
@@ -1381,9 +1369,13 @@ mod tests {
     async fn server_backend_put_object_bytes_if_absent_idempotent() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-idempotent").unwrap();
-        let first = backend.put_object_bytes_if_absent(&key, b"data".to_vec()).await;
+        let first = backend
+            .put_object_bytes_if_absent(&key, b"data".to_vec())
+            .await;
         assert!(first.is_ok());
-        let second = backend.put_object_bytes_if_absent(&key, b"data".to_vec()).await;
+        let second = backend
+            .put_object_bytes_if_absent(&key, b"data".to_vec())
+            .await;
         assert!(second.is_ok());
     }
 
@@ -1391,7 +1383,9 @@ mod tests {
     async fn server_backend_put_object_bytes_overwrite_stores_object() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("backend-overwrite").unwrap();
-        let result = backend.put_object_bytes_overwrite(&key, b"overwrite-data".to_vec()).await;
+        let result = backend
+            .put_object_bytes_overwrite(&key, b"overwrite-data".to_vec())
+            .await;
         assert!(result.is_ok());
         // Verify stored content
         let read_back = backend.read_object(&key).await.unwrap();

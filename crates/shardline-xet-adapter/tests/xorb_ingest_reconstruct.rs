@@ -291,8 +291,8 @@ fn xorb_round_trip_no_compression() {
 
     let (serialized, hash_hex, expected_hash) = build_xorb_simple(4, 128, CompressionScheme::None);
 
-    let response = store_xorb_bytes_sync(&object_store, &hash_hex, &serialized)
-        .expect("store should succeed");
+    let response =
+        store_xorb_bytes_sync(&object_store, &hash_hex, &serialized).expect("store should succeed");
     assert!(response.was_inserted);
 
     let mut reader = Cursor::new(serialized.as_slice());
@@ -322,8 +322,8 @@ fn xorb_round_trip_bg4lz4_compression() {
     let (serialized, hash_hex, expected_hash) =
         build_xorb_simple(2, 256, CompressionScheme::ByteGrouping4LZ4);
 
-    let response = store_xorb_bytes_sync(&object_store, &hash_hex, &serialized)
-        .expect("store should succeed");
+    let response =
+        store_xorb_bytes_sync(&object_store, &hash_hex, &serialized).expect("store should succeed");
     assert!(response.was_inserted);
 
     let mut reader = Cursor::new(serialized.as_slice());

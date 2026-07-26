@@ -18,9 +18,10 @@ use shardline_protocol::{RepositoryProvider, TokenScope};
 use tokio::{net::TcpListener, spawn, sync::Semaphore, time::timeout};
 
 use shardline_server::{
-    AppState, FileReconstructionResponse, LocalBackend, ProtocolMetrics, ReadyResponse,
-    ReconstructionCacheService, STREAM_READ_BUFFER_BYTES, ServerBackend, ServerConfig, ServerRole,
-    TransferLimiter, XorbUploadResponse, acquire_chunk_transfer_permit, chunk_hash,
+    AppState, ExecutionPools, FileReconstructionResponse, LocalBackend, ProtocolMetrics,
+    QuotaTracker, ReadyResponse, ReconstructionCacheService, STREAM_READ_BUFFER_BYTES,
+    ServerBackend, ServerConfig, ServerRole, TransferLimiter, WeightedAdmission,
+    XorbUploadResponse, acquire_chunk_transfer_permit, chunk_hash,
     clear_repository_reference_probe_filter, full_byte_stream_response,
     lock_repository_reference_probe_test, repository_reference_probe_count,
     reset_repository_reference_probe_count_for_hash, serve_with_listener,
@@ -937,8 +938,11 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
         provider_tokens: None,
         reconstruction_cache,
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::MIN),
+        admission: WeightedAdmission::new(NonZeroUsize::MIN),
+        pools: ExecutionPools::default_sizes(),
         oci_registry_token_limiter: Arc::new(Semaphore::new(1)),
         protocol_metrics: ProtocolMetrics::default(),
+        quota_tracker: QuotaTracker::new(),
     };
 
     let first = acquire_chunk_transfer_permit(&state, &hash).await;

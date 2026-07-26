@@ -68,9 +68,9 @@ mod provider;
 mod provider_events;
 mod rebuild;
 mod reconstruction_cache;
-mod route_policy;
 mod record_store;
 mod repository_scope_path;
+mod route_policy;
 mod runtime_check;
 mod server_frontend;
 mod server_role;
@@ -78,6 +78,7 @@ mod storage_migration;
 pub mod test_fixtures;
 pub mod test_invariant_error;
 
+pub use admission::{ExecutionPools, QuotaTracker, WeightedAdmission};
 pub use app::ProtocolMetrics;
 pub use app::{
     AppState, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
