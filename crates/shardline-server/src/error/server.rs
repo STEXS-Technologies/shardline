@@ -10,6 +10,7 @@ use axum::{
 };
 use serde_json::Error as JsonError;
 use shardline_cache::ReconstructionCacheError;
+use shardline_cas::CasError;
 use shardline_gc::GcError;
 use shardline_index::{
     FileRecordInvariantError, LocalIndexStoreError, MemoryIndexStoreError, MemoryRecordStoreError,
@@ -215,6 +216,9 @@ pub enum ServerError {
     /// Too many OCI registry token exchanges are currently active.
     #[error("too many active oci registry token requests")]
     TooManyRegistryTokenRequests,
+    /// A durable upload intent could not advance through its lifecycle.
+    #[error("upload intent state conflict")]
+    UploadIntentConflict,
     /// Redis reconstruction cache was selected without a URL.
     #[error("redis reconstruction cache requires a redis url")]
     MissingReconstructionCacheRedisUrl,
@@ -277,6 +281,7 @@ impl ServerError {
             | Self::MissingReferencedXorb
             | Self::TooManyShardTerms
             | Self::TooManyBatchReconstructionFileIds
+            | Self::UploadIntentConflict
             | Self::Overflow
             | Self::InvalidRangeHeader
             | Self::RangeNotSatisfiable
@@ -347,6 +352,7 @@ impl ServerError {
             Self::TooManyUploadSessions | Self::TooManyRegistryTokenRequests => {
                 StatusCode::TOO_MANY_REQUESTS
             }
+            Self::UploadIntentConflict => StatusCode::CONFLICT,
             Self::TransferLimiterClosed
             | Self::TransferLimiterTimedOut
             | Self::WorkQueueSaturated
@@ -365,6 +371,20 @@ impl ServerError {
             | Self::BlockingTask(_)
             | Self::SigningKeyError(_)
             | Self::Provider(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<CasError> for ServerError {
+    fn from(value: CasError) -> Self {
+        match value {
+            CasError::BodyTooLarge { .. } => Self::RequestBodyTooLarge,
+            CasError::InvalidUploadTransition => Self::UploadIntentConflict,
+            CasError::Overflow => Self::Overflow,
+            CasError::ObjectStore(message)
+            | CasError::Index(message)
+            | CasError::Record(message)
+            | CasError::Internal(message) => Self::Io(IoError::other(message)),
         }
     }
 }

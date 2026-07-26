@@ -1,9 +1,11 @@
 use axum::body::Bytes;
+use shardline_cas::{CasCoordinator, CasLimits};
 #[cfg(test)]
 use shardline_index::FileRecord;
-use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+use shardline_index::UploadIntent;
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::ObjectStore;
+use std::num::NonZeroU64;
 use tokio::task;
 
 use super::LocalBackend;
@@ -101,44 +103,32 @@ impl LocalBackend {
             body_hash_hex,
             uploaded_body.len() as u64,
         );
-        self.index_store
-            .create_intent(&intent)
-            .await
-            .map_err(ServerError::from)?;
-
         let record_store = self.record_store.clone();
         let object_store = self.object_store();
-        let result = register_uploaded_shard_bytes(
-            &object_store,
-            &uploaded_body,
-            repository_scope,
-            shard_metadata_limits,
-            move |records, mappings| async move {
-                record_store
-                    .commit_native_shard_metadata(&records, &mappings)
-                    .await?;
-                Ok(())
-            },
-        )
-        .await
-        .map_err(ServerError::from);
-
-        match result {
-            Ok(response) => {
-                self.index_store
-                    .transition_intent(&intent_id, UploadIntentState::Visible)
-                    .await
-                    .map_err(ServerError::from)?;
-                Ok(response)
-            }
-            Err(e) => {
-                self.index_store
-                    .transition_intent(&intent_id, UploadIntentState::Failed)
-                    .await
-                    .ok();
-                Err(e)
-            }
-        }
+        let coordinator = CasCoordinator::new(
+            self.index_store.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        coordinator
+            .with_upload_intent(&intent, move || async move {
+                register_uploaded_shard_bytes(
+                    &object_store,
+                    &uploaded_body,
+                    repository_scope,
+                    shard_metadata_limits,
+                    move |records, mappings| async move {
+                        record_store
+                            .commit_native_shard_metadata(&records, &mappings)
+                            .await?;
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(ServerError::from)
+            })
+            .await
     }
 
     /// Loads reconstruction metadata for a file.

@@ -1,5 +1,8 @@
 use axum::body::Bytes;
-use shardline_index::{UploadIntent, UploadIntentState, UploadIntentStore};
+use std::num::NonZeroU64;
+
+use shardline_cas::{CasCoordinator, CasLimits};
+use shardline_index::UploadIntent;
 use shardline_protocol::{ByteRange, RepositoryScope};
 use shardline_storage::ObjectStore;
 
@@ -49,44 +52,20 @@ impl LocalBackend {
             expected_hash.to_owned(),
             uploaded_body.len() as u64,
         );
-        self.index_store
-            .create_intent(&intent)
-            .await
-            .map_err(ServerError::from)?;
-        self.index_store
-            .transition_intent(&intent_id, UploadIntentState::Storing)
-            .await
-            .map_err(ServerError::from)?;
-
         let object_store = self.object_store();
-        let result = store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+        let coordinator = CasCoordinator::new(
+            self.index_store.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        coordinator
+            .with_upload_intent(&intent, move || async move {
+                store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
+                    .await
+                    .map_err(ServerError::from)
+            })
             .await
-            .map_err(ServerError::from);
-
-        match result {
-            Ok(response) => {
-                self.index_store
-                    .transition_intent(&intent_id, UploadIntentState::Stored)
-                    .await
-                    .map_err(ServerError::from)?;
-                self.index_store
-                    .transition_intent(&intent_id, UploadIntentState::MetadataCommitted)
-                    .await
-                    .map_err(ServerError::from)?;
-                self.index_store
-                    .transition_intent(&intent_id, UploadIntentState::Visible)
-                    .await
-                    .map_err(ServerError::from)?;
-                Ok(response)
-            }
-            Err(e) => {
-                self.index_store
-                    .transition_intent(&intent_id, UploadIntentState::Failed)
-                    .await
-                    .ok();
-                Err(e)
-            }
-        }
     }
 
     pub(crate) async fn read_dedupe_shard_stream(
