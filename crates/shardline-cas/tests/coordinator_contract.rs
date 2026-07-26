@@ -1181,7 +1181,6 @@ fn coordinator_store_content_addressed_blob_accepts_body_at_max_boundary() {
 fn with_upload_intent_create_intent_error_returns_record_error() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let storage = tempfile::tempdir().unwrap();
-    let index = shardline_index::MemoryIndexStore::new();
     let object_store =
         SyncObjectStoreBridge::new(LocalObjectStore::new(storage.path().join("objects")).unwrap());
     let limits = CasLimits::new(
@@ -1189,9 +1188,8 @@ fn with_upload_intent_create_intent_error_returns_record_error() {
         NonZeroU64::new(100).unwrap(),
         NonZeroU64::new(100).unwrap(),
     );
-    let coordinator = CasCoordinator::new(index, object_store, (), limits);
-
     let failing_store = FailingIntentStore;
+    let coordinator = CasCoordinator::new(failing_store, object_store, (), limits);
     let intent = UploadIntent::new(
         "failing-intent".to_owned(),
         "objects/test".to_owned(),
@@ -1200,7 +1198,7 @@ fn with_upload_intent_create_intent_error_returns_record_error() {
     );
 
     let result: Result<i32, CasError> =
-        rt.block_on(coordinator.with_upload_intent(&failing_store, &intent, || async { Ok(42) }));
+        rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
 
     assert!(
         matches!(&result, Err(CasError::Record(msg)) if msg.contains("create_intent failed")),

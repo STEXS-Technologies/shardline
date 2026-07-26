@@ -739,6 +739,7 @@ fn server_error_to_oci(error: ServerError) -> shardline_oci_adapter::OciAdapterE
         | ServerError::NotAcceptable
         | ServerError::UnauthorizedChallenge(_)
         | ServerError::TooManyRegistryTokenRequests
+        | ServerError::UploadIntentConflict
         | ServerError::MissingReconstructionCacheRedisUrl
         | ServerError::TransferLimiterClosed
         | ServerError::TransferLimiterTimedOut

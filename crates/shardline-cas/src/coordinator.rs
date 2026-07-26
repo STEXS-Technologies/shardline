@@ -68,71 +68,6 @@ where
             .await
             .map_err(CasError::from_object_store)
     }
-
-    /// # Errors
-    ///
-    /// Returns CasError when the intent cannot be persisted or transitioned,
-    /// or when the supplied work fails.
-    pub async fn with_upload_intent<U, F, Fut, T>(
-        &self,
-        intent_store: &U,
-        intent: &shardline_index::UploadIntent,
-        work: F,
-    ) -> Result<T, CasError>
-    where
-        U: shardline_index::UploadIntentStore,
-        U::Error: std::error::Error + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<T, CasError>>,
-    {
-        intent_store
-            .create_intent(intent)
-            .await
-            .map_err(CasError::from_record)?;
-        intent_store
-            .transition_intent(
-                intent.intent_id(),
-                shardline_index::UploadIntentState::Storing,
-            )
-            .await
-            .map_err(CasError::from_record)?;
-        match work().await {
-            Ok(result) => {
-                intent_store
-                    .transition_intent(
-                        intent.intent_id(),
-                        shardline_index::UploadIntentState::Stored,
-                    )
-                    .await
-                    .map_err(CasError::from_record)?;
-                intent_store
-                    .transition_intent(
-                        intent.intent_id(),
-                        shardline_index::UploadIntentState::MetadataCommitted,
-                    )
-                    .await
-                    .map_err(CasError::from_record)?;
-                intent_store
-                    .transition_intent(
-                        intent.intent_id(),
-                        shardline_index::UploadIntentState::Visible,
-                    )
-                    .await
-                    .map_err(CasError::from_record)?;
-                Ok(result)
-            }
-            Err(e) => {
-                intent_store
-                    .transition_intent(
-                        intent.intent_id(),
-                        shardline_index::UploadIntentState::Failed,
-                    )
-                    .await
-                    .ok();
-                Err(e)
-            }
-        }
-    }
 }
 
 impl<I, O, R> CasCoordinator<I, O, R>
@@ -140,6 +75,79 @@ where
     I: shardline_index::UploadIntentStore + Send + Sync,
     <I as shardline_index::UploadIntentStore>::Error: std::error::Error + Send + Sync + 'static,
 {
+    /// Executes upload work within the coordinator-owned durable intent lifecycle.
+    ///
+    /// The configured index is the only store used for the lifecycle, preventing
+    /// intent creation and state transitions from being split across stores.
+    ///
+    /// # Errors
+    ///
+    /// Returns the caller's work error, or an error converted from [`CasError`]
+    /// when an intent persistence boundary fails.
+    pub async fn with_upload_intent<F, Fut, T, E>(
+        &self,
+        intent: &shardline_index::UploadIntent,
+        work: F,
+    ) -> Result<T, E>
+    where
+        E: From<CasError>,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        self.begin_upload(intent).await.map_err(E::from)?;
+        let current = self
+            .index
+            .intent_by_id(intent.intent_id())
+            .await
+            .map_err(CasError::from_record)
+            .map_err(E::from)?
+            .ok_or_else(|| E::from(CasError::InvalidUploadTransition))?;
+
+        // Content-addressed upload retries are idempotent. Once an intent is
+        // visible, repeat the storage work only to obtain the protocol response;
+        // never reopen the completed durable lifecycle.
+        if current.state() == shardline_index::UploadIntentState::Visible {
+            return work().await;
+        }
+        if !matches!(
+            current.state(),
+            shardline_index::UploadIntentState::Created
+                | shardline_index::UploadIntentState::Storing
+        ) {
+            return Err(E::from(CasError::InvalidUploadTransition));
+        }
+        self.transition_upload(
+            intent.intent_id(),
+            shardline_index::UploadIntentState::Storing,
+        )
+        .await
+        .map_err(E::from)?;
+
+        match work().await {
+            Ok(result) => {
+                for state in [
+                    shardline_index::UploadIntentState::Stored,
+                    shardline_index::UploadIntentState::MetadataCommitted,
+                    shardline_index::UploadIntentState::Visible,
+                ] {
+                    self.transition_upload(intent.intent_id(), state)
+                        .await
+                        .map_err(E::from)?;
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                self.transition_upload(
+                    intent.intent_id(),
+                    shardline_index::UploadIntentState::Failed,
+                )
+                .await
+                .ok();
+                Err(error)
+            }
+        }
+    }
+
     /// Creates a durable upload intent before any object-store mutation.
     ///
     /// # Errors
@@ -281,8 +289,8 @@ mod tests {
             42,
         );
 
-        let result =
-            rt.block_on(coordinator.with_upload_intent(&index, &intent, || async { Ok(42) }));
+        let result: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
 
         assert_eq!(result, Ok(42));
 
@@ -315,11 +323,9 @@ mod tests {
             42,
         );
 
-        let result: Result<i32, CasError> = rt.block_on(coordinator.with_upload_intent(
-            &index,
-            &intent,
-            || async { Err(CasError::Overflow) },
-        ));
+        let result: Result<i32, CasError> = rt.block_on(
+            coordinator.with_upload_intent(&intent, || async { Err(CasError::Overflow) }),
+        );
 
         assert_eq!(result, Err(CasError::Overflow));
 
@@ -328,5 +334,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.state(), UploadIntentState::Failed);
+    }
+
+    #[test]
+    fn with_upload_intent_retry_does_not_reopen_visible_intent() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let index = MemoryIndexStore::new();
+        let coordinator = CasCoordinator::new(
+            index.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        let intent = UploadIntent::new(
+            "visible-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let first: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
+        let retry: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
+
+        assert_eq!(first, Ok(42));
+        assert_eq!(retry, Ok(42));
+        let stored = rt
+            .block_on(index.intent_by_id("visible-intent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Visible);
     }
 }
