@@ -97,6 +97,9 @@ jobs:
       - name: Run contributor CI matrix
         run: cargo make ci
 
+      - name: Run release-candidate infrastructure matrix
+        run: cargo make test-infrastructure
+
       - name: Build release archive
         run: bash scripts/build-release-archive.sh x86_64-unknown-linux-gnu dist
 

@@ -235,6 +235,12 @@ install_crate = "cargo-deny"
 command = "cargo"
 args = ["deny", "check"]
 
+[tasks.check-dependency-exceptions]
+description = "Fail CI when a dependency-security exception lacks ownership or has expired"
+workspace = false
+command = "bash"
+args = ["scripts/check_dependency_exceptions.sh"]
+
 [tasks.coverage]
 description = "Print LLVM source-based workspace coverage summary"
 workspace = false
@@ -269,7 +275,7 @@ args = ["scripts/check_coverage_ratchet.sh"]
 [tasks.ci]
 description = "Run the core contributor CI checks"
 workspace = false
-dependencies = ["format-check", "clippy", "deny", "test", "verify-release-binary", "check-migration-sync"]
+dependencies = ["format-check", "clippy", "check-dependency-exceptions", "deny", "test", "verify-release-binary", "check-migration-sync"]
 
 [tasks.ci-full]
 description = "Run contributor CI plus dependency policy checks"
