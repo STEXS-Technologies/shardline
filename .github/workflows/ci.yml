@@ -58,6 +58,7 @@ jobs:
           DATABASE_URL: postgres://shardline:shardline-dev-password@localhost:5432/shardline
         run: |
           cargo test -p shardline-index -- hub_postgres 2>&1
+          cargo test -p shardline-index -- pg_upload_intent 2>&1
           cargo test -p shardline-server -- postgres_backend::tests 2>&1
           cargo test -p shardline-server -- database_migration 2>&1
           cargo test -p shardline-server -- lifecycle_repair::tests 2>&1
