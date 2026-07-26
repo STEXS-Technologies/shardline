@@ -122,7 +122,7 @@ impl ServerConfig {
                 token_ttl_seconds: None,
             },
             shutdown_timeout: None,
-            admission_max_weight: NonZeroUsize::new(256).unwrap(),
+            admission_max_weight: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
         }
     }
 

@@ -371,24 +371,32 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
 
 /// Loads a bounded pool size from an environment variable, falling back to `default`.
 pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroUsize {
-    match var(name) {
-        Ok(v) => v.parse().unwrap_or_else(|_| {
-            tracing::warn!("invalid {name} value '{v}', using default {default}");
-            NonZeroUsize::new(default).unwrap()
-        }),
-        Err(_) => NonZeroUsize::new(default).unwrap(),
-    }
+    let fallback = NonZeroUsize::new(default).unwrap_or(NonZeroUsize::MIN);
+    var(name).map_or_else(
+        |_| fallback,
+        |v| {
+            v.parse().unwrap_or_else(|_| {
+                tracing::warn!("invalid {name} value '{v}', using default {default}");
+                fallback
+            })
+        },
+    )
 }
 
 /// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
 pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
-    match var("SHARDLINE_ADMISSION_MAX_WEIGHT") {
-        Ok(v) => v.parse().unwrap_or_else(|_| {
-            tracing::warn!("invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256");
-            NonZeroUsize::new(256).unwrap()
-        }),
-        Err(_) => NonZeroUsize::new(256).unwrap(),
-    }
+    let fallback = NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
+    var("SHARDLINE_ADMISSION_MAX_WEIGHT").map_or_else(
+        |_| fallback,
+        |v| {
+            v.parse().unwrap_or_else(|_| {
+                tracing::warn!(
+                    "invalid SHARDLINE_ADMISSION_MAX_WEIGHT value '{v}', using default 256"
+                );
+                fallback
+            })
+        },
+    )
 }
 
 /// Parses the `SHARDLINE_DEPLOYMENT_MODE` environment variable.

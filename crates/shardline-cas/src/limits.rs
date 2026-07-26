@@ -62,7 +62,11 @@ mod tests {
 
     #[test]
     fn limits_debug_format() {
-        let limits = CasLimits::new(NonZeroU64::new(1).unwrap(), NonZeroU64::new(2).unwrap(), NonZeroU64::new(3).unwrap());
+        let limits = CasLimits::new(
+            NonZeroU64::new(1).unwrap(),
+            NonZeroU64::new(2).unwrap(),
+            NonZeroU64::new(3).unwrap(),
+        );
         let debug = format!("{limits:?}");
         assert!(debug.contains("CasLimits"));
         assert!(debug.contains("max_xorb_bytes"));
@@ -72,7 +76,11 @@ mod tests {
 
     #[test]
     fn limits_clone_produces_equal_copy() {
-        let limits = CasLimits::new(NonZeroU64::new(100).unwrap(), NonZeroU64::new(200).unwrap(), NonZeroU64::new(300).unwrap());
+        let limits = CasLimits::new(
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(200).unwrap(),
+            NonZeroU64::new(300).unwrap(),
+        );
         let cloned = limits;
         assert_eq!(limits, cloned);
         assert_eq!(limits.max_xorb_bytes(), cloned.max_xorb_bytes());
@@ -92,15 +100,31 @@ mod tests {
 
     #[test]
     fn limits_different_bounds_are_not_equal() {
-        let a = CasLimits::new(NonZeroU64::new(1).unwrap(), NonZeroU64::new(2).unwrap(), NonZeroU64::new(3).unwrap());
-        let b = CasLimits::new(NonZeroU64::new(4).unwrap(), NonZeroU64::new(5).unwrap(), NonZeroU64::new(6).unwrap());
+        let a = CasLimits::new(
+            NonZeroU64::new(1).unwrap(),
+            NonZeroU64::new(2).unwrap(),
+            NonZeroU64::new(3).unwrap(),
+        );
+        let b = CasLimits::new(
+            NonZeroU64::new(4).unwrap(),
+            NonZeroU64::new(5).unwrap(),
+            NonZeroU64::new(6).unwrap(),
+        );
         assert_ne!(a, b);
     }
 
     #[test]
     fn limits_same_bounds_are_equal() {
-        let a = CasLimits::new(NonZeroU64::new(42).unwrap(), NonZeroU64::new(99).unwrap(), NonZeroU64::new(101).unwrap());
-        let b = CasLimits::new(NonZeroU64::new(42).unwrap(), NonZeroU64::new(99).unwrap(), NonZeroU64::new(101).unwrap());
+        let a = CasLimits::new(
+            NonZeroU64::new(42).unwrap(),
+            NonZeroU64::new(99).unwrap(),
+            NonZeroU64::new(101).unwrap(),
+        );
+        let b = CasLimits::new(
+            NonZeroU64::new(42).unwrap(),
+            NonZeroU64::new(99).unwrap(),
+            NonZeroU64::new(101).unwrap(),
+        );
         assert_eq!(a, b);
     }
 }

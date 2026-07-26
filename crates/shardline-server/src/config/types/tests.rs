@@ -6,7 +6,7 @@ use std::{
 
 use super::*;
 use crate::reconstruction_cache::ReconstructionCacheAdapter;
-use crate::route_policy::{register_route_policies, RouteAuthPolicy, RoutePolicyRegistry};
+use crate::route_policy::{RouteAuthPolicy, RoutePolicyRegistry, register_route_policies};
 use crate::server_frontend::ServerFrontend;
 use crate::server_role::ServerRole;
 
@@ -1855,7 +1855,10 @@ fn deployment_mode_authenticated_accepts_config_with_signing_key() {
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
     .unwrap();
     let result = config.validate_runtime_requirements();
-    assert!(result.is_ok(), "authenticated mode with valid signing key should pass validation");
+    assert!(
+        result.is_ok(),
+        "authenticated mode with valid signing key should pass validation"
+    );
 }
 
 #[test]
@@ -1870,7 +1873,10 @@ fn deployment_mode_authenticated_warns_with_passthrough() {
     // No signing key, no auth — the original missing-signing-key check
     // applies for non-Insecure modes
     let result = config.validate_runtime_requirements();
-    assert!(result.is_err(), "authenticated mode without signing key may fail validation");
+    assert!(
+        result.is_err(),
+        "authenticated mode without signing key may fail validation"
+    );
 }
 
 #[test]
@@ -1883,7 +1889,10 @@ fn deployment_mode_insecure_allows_missing_signing_key() {
     )
     .with_deployment_mode(DeploymentMode::Insecure);
     let result = config.validate_runtime_requirements();
-    assert!(result.is_ok(), "insecure mode should pass without signing key");
+    assert!(
+        result.is_ok(),
+        "insecure mode should pass without signing key"
+    );
 }
 
 #[test]
@@ -1900,7 +1909,10 @@ fn strict_mode_rejects_missing_metrics_token() {
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
     .unwrap();
     let result = config.validate_runtime_requirements();
-    assert!(result.is_ok(), "strict mode with signing key should pass even without metrics token");
+    assert!(
+        result.is_ok(),
+        "strict mode with signing key should pass even without metrics token"
+    );
 }
 
 #[test]
@@ -1908,11 +1920,32 @@ fn route_policy_registry_has_all_expected_policies() {
     let mut registry = RoutePolicyRegistry::new();
     register_route_policies(&mut registry);
     // Verify specific routes have expected policies
-    assert_eq!(registry.policy("GET", "/healthz"), Some(RouteAuthPolicy::Open));
-    assert_eq!(registry.policy("GET", "/readyz"), Some(RouteAuthPolicy::Open));
-    assert_eq!(registry.policy("GET", "/v1/stats"), Some(RouteAuthPolicy::Authenticated));
-    assert_eq!(registry.policy("POST", "/v1/shards"), Some(RouteAuthPolicy::AuthenticatedWrite));
-    assert_eq!(registry.policy("POST", "/v1/providers/{provider}/tokens"), Some(RouteAuthPolicy::SeparatelyProtected));
-    assert_eq!(registry.policy("PUT", "/v1/lfs/objects/{oid}"), Some(RouteAuthPolicy::AuthenticatedWrite));
-    assert_eq!(registry.policy("GET", "/v1/reconstructions/{file_id}"), Some(RouteAuthPolicy::Authenticated));
+    assert_eq!(
+        registry.policy("GET", "/healthz"),
+        Some(RouteAuthPolicy::Open)
+    );
+    assert_eq!(
+        registry.policy("GET", "/readyz"),
+        Some(RouteAuthPolicy::Open)
+    );
+    assert_eq!(
+        registry.policy("GET", "/v1/stats"),
+        Some(RouteAuthPolicy::Authenticated)
+    );
+    assert_eq!(
+        registry.policy("POST", "/v1/shards"),
+        Some(RouteAuthPolicy::AuthenticatedWrite)
+    );
+    assert_eq!(
+        registry.policy("POST", "/v1/providers/{provider}/tokens"),
+        Some(RouteAuthPolicy::SeparatelyProtected)
+    );
+    assert_eq!(
+        registry.policy("PUT", "/v1/lfs/objects/{oid}"),
+        Some(RouteAuthPolicy::AuthenticatedWrite)
+    );
+    assert_eq!(
+        registry.policy("GET", "/v1/reconstructions/{file_id}"),
+        Some(RouteAuthPolicy::Authenticated)
+    );
 }

@@ -43,6 +43,7 @@
 #[cfg(unix)]
 #[cfg_attr(docsrs, doc(cfg(unix)))]
 pub(crate) mod anchored_fs;
+mod async_store;
 mod key;
 mod local;
 mod local_fs;
@@ -50,7 +51,6 @@ pub(crate) mod local_path;
 mod object;
 #[cfg(feature = "s3")]
 mod s3;
-mod async_store;
 mod store;
 
 #[cfg(unix)]
@@ -59,6 +59,7 @@ pub use anchored_fs::{
     open_anchored_target, open_directory_chain, open_new_file, remove_at, remove_if_present,
     rename_at, temporary_file_name, write_anchored_temporary_file,
 };
+pub use async_store::{AsyncObjectStore, SyncObjectStoreBridge};
 pub use key::{ObjectKey, ObjectKeyError, ObjectPrefix, ObjectPrefixError};
 pub use local::{LocalObjectStore, LocalObjectStoreError};
 pub use local_path::{
@@ -71,5 +72,4 @@ pub use s3::{
     BeginMultipartUploadResult, S3ByteStream, S3MultipartUploadWriter, S3ObjectStore,
     S3ObjectStoreConfig, S3ObjectStoreError,
 };
-pub use async_store::{AsyncObjectStore, SyncObjectStoreBridge};
 pub use store::ObjectStore;

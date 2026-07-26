@@ -235,7 +235,7 @@ impl LocalBackend {
                 {
                     tracing::warn!(intent_id = %intent.intent_id(), error = %e, "intent transition failed, skipping");
                 } else {
-                    reconciled += 1;
+                    reconciled = reconciled.saturating_add(1);
                 }
             }
         }

@@ -53,6 +53,10 @@ impl LocalBackend {
             .create_intent(&intent)
             .await
             .map_err(ServerError::from)?;
+        self.index_store
+            .transition_intent(&intent_id, UploadIntentState::Storing)
+            .await
+            .map_err(ServerError::from)?;
 
         let object_store = self.object_store();
         let result = store_uploaded_xorb_bytes(&object_store, expected_hash, &uploaded_body)
@@ -61,6 +65,14 @@ impl LocalBackend {
 
         match result {
             Ok(response) => {
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::Stored)
+                    .await
+                    .map_err(ServerError::from)?;
+                self.index_store
+                    .transition_intent(&intent_id, UploadIntentState::MetadataCommitted)
+                    .await
+                    .map_err(ServerError::from)?;
                 self.index_store
                     .transition_intent(&intent_id, UploadIntentState::Visible)
                     .await

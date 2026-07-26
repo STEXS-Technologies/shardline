@@ -34,13 +34,14 @@ impl RoutePolicyRegistry {
     }
 
     /// Returns the policy for a route, if registered.
+    #[cfg(test)]
     #[must_use]
     pub fn policy(&self, method: &str, path: &str) -> Option<RouteAuthPolicy> {
         self.routes.get(&format!("{method} {path}")).copied()
     }
 
     /// Returns all registered routes sorted by key.
-    #[must_use]
+    #[cfg(test)]
     pub fn entries(&self) -> impl Iterator<Item = (&str, RouteAuthPolicy)> {
         self.routes
             .iter()
@@ -54,6 +55,7 @@ impl RoutePolicyRegistry {
     }
 
     /// Returns true if no routes are registered.
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty()
@@ -111,11 +113,7 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
     );
 
     // Reconstruction routes — authenticated
-    registry.register(
-        "GET",
-        "/v1/reconstructions",
-        RouteAuthPolicy::Authenticated,
-    );
+    registry.register("GET", "/v1/reconstructions", RouteAuthPolicy::Authenticated);
     registry.register(
         "GET",
         "/v1/reconstructions/{file_id}",
@@ -187,11 +185,7 @@ pub(crate) fn register_route_policies(registry: &mut RoutePolicyRegistry) {
 
     // OCI routes — authenticated
     registry.register("GET", "/v2/", RouteAuthPolicy::Authenticated);
-    registry.register(
-        "GET",
-        "/v2/token",
-        RouteAuthPolicy::SeparatelyProtected,
-    );
+    registry.register("GET", "/v2/token", RouteAuthPolicy::SeparatelyProtected);
 
     // Reconstruction v2
     registry.register(

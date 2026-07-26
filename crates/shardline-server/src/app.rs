@@ -43,7 +43,9 @@ use crate::{
     admission::{ExecutionPools, QuotaTracker, WeightedAdmission},
     auth::{AuthContext, ServerAuth},
     backend::ServerBackend,
-    config::{AuthProviderKind, DeploymentMode, ServerConfigError, env::bounded_pool_size_from_env},
+    config::{
+        AuthProviderKind, DeploymentMode, ServerConfigError, env::bounded_pool_size_from_env,
+    },
     jwks_provider::JwksProvider,
     metrics::MetricsLayer,
     oidc_provider::OidcProvider,
@@ -291,10 +293,7 @@ pub async fn router(config: ServerConfig) -> Result<Router, ServerError> {
     // Register route auth policies for auditability and fail-closed enforcement.
     let mut policy_registry = RoutePolicyRegistry::new();
     register_route_policies(&mut policy_registry);
-    tracing::debug!(
-        "registered {} route auth policies",
-        policy_registry.len()
-    );
+    tracing::debug!("registered {} route auth policies", policy_registry.len());
 
     Ok(app)
 }

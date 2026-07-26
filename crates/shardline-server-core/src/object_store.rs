@@ -130,11 +130,7 @@ impl AsyncObjectStore for ServerObjectStore {
         }
     }
 
-    async fn read_range(
-        &self,
-        key: &ObjectKey,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, Self::Error> {
+    async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         match self {
             Self::Local(store) => AsyncObjectStore::read_range(store, key, range)
                 .await
@@ -170,10 +166,7 @@ impl AsyncObjectStore for ServerObjectStore {
         }
     }
 
-    async fn list_prefix(
-        &self,
-        prefix: &ObjectPrefix,
-    ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+    async fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
         match self {
             Self::Local(store) => AsyncObjectStore::list_prefix(store, prefix)
                 .await
@@ -185,10 +178,7 @@ impl AsyncObjectStore for ServerObjectStore {
         }
     }
 
-    async fn delete_if_present(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<DeleteOutcome, Self::Error> {
+    async fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
         match self {
             Self::Local(store) => AsyncObjectStore::delete_if_present(store, key)
                 .await

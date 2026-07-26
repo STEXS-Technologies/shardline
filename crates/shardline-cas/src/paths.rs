@@ -32,7 +32,7 @@ pub const FUZZ_NAMESPACE_PREFIX: &str = "fuzz/";
 ///
 /// Panics if the constructed key contains invalid characters or is too long
 /// for an object key. In practice this never happens because the format
-    #[allow(clippy::expect_used)]
+#[allow(clippy::expect_used)]
 /// `{prefix}/{name}` with hex characters always produces a valid object key.
 #[must_use]
 pub fn xorb_key(prefix: &str, name: &str) -> ObjectKey {
@@ -47,7 +47,7 @@ pub fn xorb_key(prefix: &str, name: &str) -> ObjectKey {
 ///
 /// # Panics
 ///
-    #[allow(clippy::expect_used)]
+#[allow(clippy::expect_used)]
 /// Panics if the constructed key is invalid. This never happens in practice
 /// since the format produces valid keys from hex strings.
 #[must_use]
@@ -62,7 +62,7 @@ pub fn shard_key(prefix: &str, name: &str) -> ObjectKey {
 /// `name` is the full hex hash or logical chunk identifier.
 ///
 /// # Panics
-    #[allow(clippy::expect_used)]
+#[allow(clippy::expect_used)]
 ///
 /// Panics if the constructed key is invalid. This never happens in practice
 /// since the format produces valid keys from hex strings.

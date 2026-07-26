@@ -8,8 +8,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use shardline_cas::{CasCoordinator, CasError, CasLimits};
 use shardline_cas::paths::xorb_key;
+use shardline_cas::{CasCoordinator, CasError, CasLimits};
 use shardline_index::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore, LocalIndexStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
@@ -1060,7 +1060,11 @@ fn delete_provider_repository_state_returns_false_for_missing() {
 
 #[test]
 fn cas_limits_new_constructs_with_provided_bounds() {
-    let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::new(3).unwrap());
+    let limits = CasLimits::new(
+        NonZeroU64::MIN,
+        NonZeroU64::MAX,
+        NonZeroU64::new(3).unwrap(),
+    );
     assert_eq!(limits.max_xorb_bytes(), NonZeroU64::MIN);
     assert_eq!(limits.max_shard_bytes(), NonZeroU64::MAX);
     assert_eq!(limits.max_object_bytes().get(), 3);
@@ -1110,9 +1114,8 @@ fn coordinator_store_content_addressed_blob_rejects_oversized_body() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
-    let object_store = SyncObjectStoreBridge::new(
-        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
-    );
+    let object_store =
+        SyncObjectStoreBridge::new(LocalObjectStore::new(storage.path().join("objects")).unwrap());
     let limits = CasLimits::new(
         NonZeroU64::new(100).unwrap(),
         NonZeroU64::new(100).unwrap(),
@@ -1122,11 +1125,8 @@ fn coordinator_store_content_addressed_blob_rejects_oversized_body() {
     let key = shardline_cas::paths::xorb_key("ab", "test-key");
     let hash = ShardlineHash::from_bytes([1; 32]);
     let integrity = ObjectIntegrity::new(hash, 10); // 10 > 5
-    let result = rt.block_on(coordinator.store_content_addressed_blob(
-        &key,
-        &integrity,
-        vec![0u8; 10],
-    ));
+    let result =
+        rt.block_on(coordinator.store_content_addressed_blob(&key, &integrity, vec![0u8; 10]));
     assert!(result.is_err(), "should reject oversized body");
 }
 
@@ -1135,9 +1135,8 @@ fn coordinator_store_content_addressed_blob_accepts_valid_body() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
-    let object_store = SyncObjectStoreBridge::new(
-        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
-    );
+    let object_store =
+        SyncObjectStoreBridge::new(LocalObjectStore::new(storage.path().join("objects")).unwrap());
     let limits = CasLimits::new(
         NonZeroU64::new(100).unwrap(),
         NonZeroU64::new(100).unwrap(),
@@ -1148,11 +1147,8 @@ fn coordinator_store_content_addressed_blob_accepts_valid_body() {
     let body = b"hello world";
     let hash = ShardlineHash::from_bytes(*blake3::hash(body).as_bytes());
     let integrity = ObjectIntegrity::new(hash, body.len() as u64);
-    let result = rt.block_on(coordinator.store_content_addressed_blob(
-        &key,
-        &integrity,
-        body.to_vec(),
-    ));
+    let result =
+        rt.block_on(coordinator.store_content_addressed_blob(&key, &integrity, body.to_vec()));
     assert!(result.is_ok(), "should accept valid body: {result:?}");
 }
 
@@ -1161,9 +1157,8 @@ fn coordinator_store_content_addressed_blob_accepts_body_at_max_boundary() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let index = LocalIndexStore::new(storage.path().join("index")).unwrap();
-    let object_store = SyncObjectStoreBridge::new(
-        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
-    );
+    let object_store =
+        SyncObjectStoreBridge::new(LocalObjectStore::new(storage.path().join("objects")).unwrap());
     let limits = CasLimits::new(
         NonZeroU64::new(100).unwrap(),
         NonZeroU64::new(100).unwrap(),
@@ -1174,11 +1169,8 @@ fn coordinator_store_content_addressed_blob_accepts_body_at_max_boundary() {
     let body = b"hello"; // exactly 5 bytes (equals max)
     let hash = blake3_hash(body);
     let integrity = ObjectIntegrity::new(hash, body.len() as u64);
-    let result = rt.block_on(coordinator.store_content_addressed_blob(
-        &key,
-        &integrity,
-        body.to_vec(),
-    ));
+    let result =
+        rt.block_on(coordinator.store_content_addressed_blob(&key, &integrity, body.to_vec()));
     assert!(
         result.is_ok(),
         "should accept body at max boundary: {result:?}"
@@ -1190,9 +1182,8 @@ fn with_upload_intent_create_intent_error_returns_record_error() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let index = shardline_index::MemoryIndexStore::new();
-    let object_store = SyncObjectStoreBridge::new(
-        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
-    );
+    let object_store =
+        SyncObjectStoreBridge::new(LocalObjectStore::new(storage.path().join("objects")).unwrap());
     let limits = CasLimits::new(
         NonZeroU64::new(100).unwrap(),
         NonZeroU64::new(100).unwrap(),
@@ -1208,11 +1199,8 @@ fn with_upload_intent_create_intent_error_returns_record_error() {
         42,
     );
 
-    let result: Result<i32, CasError> = rt.block_on(coordinator.with_upload_intent(
-        &failing_store,
-        &intent,
-        || async { Ok(42) },
-    ));
+    let result: Result<i32, CasError> =
+        rt.block_on(coordinator.with_upload_intent(&failing_store, &intent, || async { Ok(42) }));
 
     assert!(
         matches!(&result, Err(CasError::Record(msg)) if msg.contains("create_intent failed")),
@@ -1228,9 +1216,8 @@ fn coordinator_store_content_addressed_blob_overflow_returns_error() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let index = shardline_index::MemoryIndexStore::new();
-    let object_store = SyncObjectStoreBridge::new(
-        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
-    );
+    let object_store =
+        SyncObjectStoreBridge::new(LocalObjectStore::new(storage.path().join("objects")).unwrap());
     let limits = CasLimits::new(
         NonZeroU64::new(100).unwrap(),
         NonZeroU64::new(100).unwrap(),
@@ -1242,8 +1229,12 @@ fn coordinator_store_content_addressed_blob_overflow_returns_error() {
     let hash = blake3_hash(body);
     let integrity = ObjectIntegrity::new(hash, body.len() as u64);
     // Body with 3 bytes should be accepted (max is 5)
-    let result = rt.block_on(coordinator.store_content_addressed_blob(&key, &integrity, body.to_vec()));
-    assert!(result.is_ok(), "body within limits should succeed: {result:?}");
+    let result =
+        rt.block_on(coordinator.store_content_addressed_blob(&key, &integrity, body.to_vec()));
+    assert!(
+        result.is_ok(),
+        "body within limits should succeed: {result:?}"
+    );
 }
 
 fn blake3_hash(bytes: &[u8]) -> ShardlineHash {

@@ -13,8 +13,9 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, DedupeStore, FileId, FileReconstruction, FileRecord,
     IndexStoreFuture, LifecycleStore, ProviderRepositoryState, QuarantineCandidate,
     ReconstructionStore, RecordMutation, RecordStoreFuture, RecordTraversal, RepositoryRecordScope,
-    RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId, xet_hash_hex_string,
+    RetentionHold, StoredObjectId, StoredRecord, WebhookDelivery, XorbId,
     upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
+    xet_hash_hex_string,
 };
 
 /// In-memory implementation of [`IndexStore`].
@@ -381,9 +382,17 @@ impl UploadIntentStore for MemoryIndexStore {
         Ok(())
     }
 
-    async fn transition_intent(&self, intent_id: &str, new_state: UploadIntentState) -> Result<bool, Self::Error> {
+    async fn transition_intent(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+    ) -> Result<bool, Self::Error> {
         let mut state = self.lock_state()?;
-        if let Some(intent) = state.upload_intents.get(intent_id) {
+        let intent = state.upload_intents.get(intent_id).cloned();
+        intent.map_or(Ok(false), |intent| {
+            if !intent.state().can_transition_to(new_state) {
+                return Ok(false);
+            }
             let updated = UploadIntent::from_parts(
                 intent.intent_id().to_owned(),
                 intent.object_key().to_owned(),
@@ -395,16 +404,17 @@ impl UploadIntentStore for MemoryIndexStore {
             );
             state.upload_intents.insert(intent_id.to_owned(), updated);
             Ok(true)
-        } else {
-            Ok(false)
-        }
+        })
     }
 
     async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
         Ok(self.lock_state()?.upload_intents.get(intent_id).cloned())
     }
 
-    async fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
+    async fn intents_by_state(
+        &self,
+        state: UploadIntentState,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
         Ok(self
             .lock_state()?
             .upload_intents
@@ -414,7 +424,11 @@ impl UploadIntentStore for MemoryIndexStore {
             .collect())
     }
 
-    async fn stale_intents(&self, state: UploadIntentState, older_than: Duration) -> Result<Vec<UploadIntent>, Self::Error> {
+    async fn stale_intents(
+        &self,
+        state: UploadIntentState,
+        older_than: Duration,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO);

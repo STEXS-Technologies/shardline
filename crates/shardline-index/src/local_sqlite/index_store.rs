@@ -7,9 +7,9 @@ use super::{LocalIndexStore, LocalIndexStoreError, collect_rows, u64_to_i64};
 use crate::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, RetentionHold,
-    StoredObjectId, WebhookDelivery, parse_xet_hash_hex, upload_intent::{
-        UploadIntent, UploadIntentState, UploadIntentStore,
-    }, xet_hash_hex_string,
+    StoredObjectId, WebhookDelivery, parse_xet_hash_hex,
+    upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
+    xet_hash_hex_string,
 };
 
 impl ReconstructionStore for LocalIndexStore {
@@ -543,9 +543,21 @@ impl UploadIntentStore for super::LocalIndexStore {
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
     }
 
-    async fn transition_intent(&self, intent_id: &str, new_state: UploadIntentState) -> Result<bool, Self::Error> {
+    async fn transition_intent(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+    ) -> Result<bool, Self::Error> {
+        let current = self.intent_by_id(intent_id).await?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        if !current.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
         let store = self.clone();
         let intent_id = intent_id.to_owned();
+        let current_state = current.state();
         tokio::task::spawn_blocking(move || {
             let conn = store.open_connection()?;
             let now = SystemTime::now()
@@ -553,8 +565,8 @@ impl UploadIntentStore for super::LocalIndexStore {
                 .unwrap_or(Duration::ZERO)
                 .as_secs() as i64;
             let rows = conn.execute(
-                "UPDATE shardline_upload_intents SET state = ?1, updated_at_unix_seconds = ?2 WHERE intent_id = ?3",
-                rusqlite::params![new_state.as_str(), now, intent_id],
+                "UPDATE shardline_upload_intents SET state = ?1, updated_at_unix_seconds = ?2 WHERE intent_id = ?3 AND state = ?4",
+                rusqlite::params![new_state.as_str(), now, intent_id, current_state.as_str()],
             )?;
             Ok(rows > 0)
         })
@@ -572,7 +584,7 @@ impl UploadIntentStore for super::LocalIndexStore {
             )?;
             let result = stmt.query_row(rusqlite::params![intent_id], |row| {
                 let state_str: String = row.get(4)?;
-                let state = UploadIntentState::from_str(&state_str).ok_or_else(|| {
+                let state = UploadIntentState::parse(&state_str).ok_or_else(|| {
                     rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_str}"), rusqlite::types::Type::Text)
                 })?;
                 Ok(UploadIntent::from_parts(
@@ -595,7 +607,10 @@ impl UploadIntentStore for super::LocalIndexStore {
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
     }
 
-    async fn intents_by_state(&self, state: UploadIntentState) -> Result<Vec<UploadIntent>, Self::Error> {
+    async fn intents_by_state(
+        &self,
+        state: UploadIntentState,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
             let conn = store.open_connection()?;
@@ -605,7 +620,7 @@ impl UploadIntentStore for super::LocalIndexStore {
             let intents = stmt
                 .query_map(rusqlite::params![state.as_str()], |row| {
                     let state_str: String = row.get(4)?;
-                    let s = UploadIntentState::from_str(&state_str).ok_or_else(|| {
+                    let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
                         rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_str}"), rusqlite::types::Type::Text)
                     })?;
                     Ok(UploadIntent::from_parts(
@@ -627,7 +642,11 @@ impl UploadIntentStore for super::LocalIndexStore {
         .map_err(|e| LocalIndexStoreError::Io(std::io::Error::other(e)))?
     }
 
-    async fn stale_intents(&self, state: UploadIntentState, older_than: Duration) -> Result<Vec<UploadIntent>, Self::Error> {
+    async fn stale_intents(
+        &self,
+        state: UploadIntentState,
+        older_than: Duration,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
             let conn = store.open_connection()?;
@@ -642,7 +661,7 @@ impl UploadIntentStore for super::LocalIndexStore {
             let intents = stmt
                 .query_map(rusqlite::params![state.as_str(), cutoff], |row| {
                     let state_str: String = row.get(4)?;
-                    let s = UploadIntentState::from_str(&state_str).ok_or_else(|| {
+                    let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
                         rusqlite::Error::InvalidColumnType(4, format!("invalid state: {state_str}"), rusqlite::types::Type::Text)
                     })?;
                     Ok(UploadIntent::from_parts(

@@ -421,7 +421,7 @@ impl S3ObjectStore {
             Err(S3ObjectStoreError::External(ExternalObjectStoreError::AlreadyExists {
                 ..
             }))
-            |             Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
+            | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
             })) => {
                 let existing_length = ObjectStore::metadata(self, key)?
@@ -836,11 +836,7 @@ impl AsyncObjectStore for S3ObjectStore {
         }
     }
 
-    async fn read_range(
-        &self,
-        key: &ObjectKey,
-        range: ByteRange,
-    ) -> Result<Vec<u8>, Self::Error> {
+    async fn read_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Vec<u8>, Self::Error> {
         let location = self.location_for_key(key)?;
         let external_range = validated_external_range(range)?;
         let result = self
@@ -878,10 +874,7 @@ impl AsyncObjectStore for S3ObjectStore {
         }
     }
 
-    async fn list_prefix(
-        &self,
-        prefix: &ObjectPrefix,
-    ) -> Result<Vec<ObjectMetadata>, Self::Error> {
+    async fn list_prefix(&self, prefix: &ObjectPrefix) -> Result<Vec<ObjectMetadata>, Self::Error> {
         let mut metadata = Vec::new();
         AsyncObjectStore::visit_prefix(self, prefix, |entry| {
             metadata.push(entry);
@@ -920,10 +913,7 @@ impl AsyncObjectStore for S3ObjectStore {
         Ok(())
     }
 
-    async fn delete_if_present(
-        &self,
-        key: &ObjectKey,
-    ) -> Result<DeleteOutcome, Self::Error> {
+    async fn delete_if_present(&self, key: &ObjectKey) -> Result<DeleteOutcome, Self::Error> {
         let location = self.location_for_key(key)?;
         match self.inner.delete(&location).await {
             Ok(()) => Ok(DeleteOutcome::Deleted),

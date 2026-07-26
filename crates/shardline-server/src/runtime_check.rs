@@ -69,10 +69,7 @@ mod tests {
     };
 
     use super::run_config_check;
-    use crate::{
-        ServerConfig, ServerConfigError, ServerError, ServerRole,
-        config::DeploymentMode,
-    };
+    use crate::{ServerConfig, ServerConfigError, ServerError, ServerRole, config::DeploymentMode};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_check_reports_local_backend_for_initialized_storage() {
