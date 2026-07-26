@@ -274,4 +274,19 @@ mod tests {
         assert_eq!(entries[0].0, "A /route");
         assert_eq!(entries[1].0, "Z /route");
     }
+
+    #[test]
+    fn policy_is_empty_when_new() {
+        let registry = RoutePolicyRegistry::new();
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn policy_entries_sorted() {
+        let mut reg = RoutePolicyRegistry::new();
+        reg.register("Z", "/last", RouteAuthPolicy::Open);
+        reg.register("A", "/first", RouteAuthPolicy::Authenticated);
+        let entries: Vec<_> = reg.entries().map(|(k, _)| k.to_owned()).collect();
+        assert_eq!(entries, vec!["A /first", "Z /last"]);
+    }
 }

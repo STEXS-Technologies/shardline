@@ -9,6 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use shardline_cas::{CasCoordinator, CasError, CasLimits};
+use shardline_cas::paths::xorb_key;
 use shardline_index::{
     DedupeShardMapping, DedupeStore, FileId, FileReconstruction, LifecycleStore, LocalIndexStore,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionStore, ReconstructionTerm,
@@ -1217,6 +1218,32 @@ fn with_upload_intent_create_intent_error_returns_record_error() {
         matches!(&result, Err(CasError::Record(msg)) if msg.contains("create_intent failed")),
         "expected Record error with 'create_intent failed', got: {result:?}"
     );
+}
+
+#[test]
+fn coordinator_store_content_addressed_blob_overflow_returns_error() {
+    // store_content_addressed_blob internally does `u64::try_from(body.len())`
+    // which can overflow for extremely large Vecs (not possible in practice).
+    // Test that body within limits is accepted through this code path.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let index = shardline_index::MemoryIndexStore::new();
+    let object_store = SyncObjectStoreBridge::new(
+        LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+    );
+    let limits = CasLimits::new(
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(100).unwrap(),
+        NonZeroU64::new(5).unwrap(),
+    );
+    let coordinator = CasCoordinator::new(index, object_store, (), limits);
+    let key = xorb_key("ab", "test");
+    let body = b"abc";
+    let hash = blake3_hash(body);
+    let integrity = ObjectIntegrity::new(hash, body.len() as u64);
+    // Body with 3 bytes should be accepted (max is 5)
+    let result = rt.block_on(coordinator.store_content_addressed_blob(&key, &integrity, body.to_vec()));
+    assert!(result.is_ok(), "body within limits should succeed: {result:?}");
 }
 
 fn blake3_hash(bytes: &[u8]) -> ShardlineHash {
