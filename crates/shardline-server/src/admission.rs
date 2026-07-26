@@ -166,8 +166,6 @@ pub mod timeouts {
     pub const DATABASE_WRITE: Duration = Duration::from_secs(30);
     /// Timeout for HTTP request body headers.
     pub const REQUEST_HEADERS: Duration = Duration::from_secs(10);
-    /// Timeout for the total HTTP request (upload or download).
-    pub const REQUEST_TOTAL: Duration = Duration::from_secs(300);
 }
 
 /// Admission metrics counters tracked via atomics (used when prometheus metrics are unavailable).
@@ -488,6 +486,5 @@ mod tests {
         assert!(timeouts::DATABASE_QUERY.as_secs() <= 30);
         assert!(timeouts::DATABASE_WRITE.as_secs() <= 60);
         assert!(timeouts::REQUEST_HEADERS.as_secs() <= 30);
-        assert!(timeouts::REQUEST_TOTAL.as_secs() >= 60);
     }
 }
