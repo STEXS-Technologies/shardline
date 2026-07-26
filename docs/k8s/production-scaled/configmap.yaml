@@ -27,6 +27,6 @@ data:
     ttl_seconds = 30
 
     [auth]
-    provider = "local-hmac"
+    provider = "local"
     provider_token_issuer = "shardline-provider"
     provider_token_ttl_seconds = 300

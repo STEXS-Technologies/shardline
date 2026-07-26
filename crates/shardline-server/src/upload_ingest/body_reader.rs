@@ -1,14 +1,11 @@
 use std::{num::NonZeroUsize, pin::Pin};
 
-use axum::{
-    Error as AxumError,
-    body::{Body, Bytes, HttpBody},
-};
+use axum::body::{Body, Bytes, HttpBody};
 use futures_util::stream::{self, Stream, StreamExt};
 
 use crate::{ServerError, overflow::checked_add};
 
-type BodyChunkResult = Result<Bytes, AxumError>;
+type BodyChunkResult = Result<Bytes, ServerError>;
 type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
 
 pub(super) enum ChunkBuffer {
@@ -53,7 +50,10 @@ impl RequestBodyReader {
             return Err(ServerError::RequestBodyTooLarge);
         }
         Ok(Self {
-            stream: Box::pin(body.into_data_stream()),
+            stream: Box::pin(
+                body.into_data_stream()
+                    .map(|chunk| chunk.map_err(ServerError::RequestBodyRead)),
+            ),
             max_bytes: Some(u64::try_from(max_bytes.get())?),
             expected_total_bytes,
             read_bytes: 0,
@@ -70,12 +70,24 @@ impl RequestBodyReader {
         }
     }
 
+    /// Creates a reader over an internal byte stream.
+    pub(crate) fn from_stream(
+        stream: impl Stream<Item = Result<Bytes, ServerError>> + Send + 'static,
+    ) -> Self {
+        Self {
+            stream: Box::pin(stream),
+            max_bytes: None,
+            expected_total_bytes: None,
+            read_bytes: 0,
+        }
+    }
+
     /// Reads the next body chunk while enforcing the configured total byte limit.
     pub(crate) async fn next_bytes(&mut self) -> Result<Option<Bytes>, ServerError> {
         let Some(chunk) = self.stream.next().await else {
             return Ok(None);
         };
-        let chunk = chunk.map_err(ServerError::RequestBodyRead)?;
+        let chunk = chunk?;
         let chunk_len = u64::try_from(chunk.len())?;
         self.read_bytes = checked_add(self.read_bytes, chunk_len)?;
         if self

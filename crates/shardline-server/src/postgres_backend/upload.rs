@@ -2,13 +2,13 @@ use axum::body::Bytes;
 use std::num::NonZeroU64;
 
 use shardline_cas::{CasCoordinator, CasLimits};
-use shardline_index::UploadIntent;
+use shardline_index::{UploadIntent, UploadIntentState};
 use shardline_protocol::RepositoryScope;
 
 use crate::{
     ServerError, ShardMetadataLimits,
     model::UploadFileResponse,
-    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes},
+    upload_ingest::{FileUploadIngestor, RequestBodyReader, read_body_to_bytes, upload_attempt_id},
     validation::validate_identifier,
     xet_adapter::{
         ShardUploadResponse, XorbUploadResponse, register_uploaded_shard_bytes,
@@ -53,6 +53,26 @@ impl super::PostgresBackend {
     ) -> Result<UploadFileResponse, ServerError> {
         validate_identifier(file_id)?;
 
+        let intent = expected_sha256.map(|expected_hash| {
+            UploadIntent::new(
+                upload_attempt_id(file_id),
+                format!("record/{file_id}"),
+                expected_hash.to_owned(),
+                0,
+            )
+        });
+        let coordinator = CasCoordinator::new(
+            self.index_store.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        if let Some(intent) = &intent {
+            coordinator.begin_upload(intent).await?;
+            coordinator
+                .transition_upload(intent.intent_id(), UploadIntentState::Storing)
+                .await?;
+        }
         let object_store = self.object_store();
         let mut ingestor = FileUploadIngestor::new_with_parallelism(
             self.chunk_size,
@@ -63,14 +83,37 @@ impl super::PostgresBackend {
             ingestor.ingest_body_chunk(&object_store, &bytes).await?;
         }
 
-        let (record, response) = ingestor
-            .finish(&object_store, file_id, repository_scope, expected_sha256)
-            .await?;
-        self.record_store
-            .commit_file_version_metadata(&record)
-            .await?;
-
-        Ok(response)
+        let result = async {
+            let (record, response) = ingestor
+                .finish(&object_store, file_id, repository_scope, expected_sha256)
+                .await?;
+            if let Some(intent) = &intent {
+                coordinator
+                    .transition_upload(intent.intent_id(), UploadIntentState::Stored)
+                    .await?;
+            }
+            self.record_store
+                .commit_file_version_metadata(&record)
+                .await?;
+            if let Some(intent) = &intent {
+                coordinator
+                    .transition_upload(intent.intent_id(), UploadIntentState::MetadataCommitted)
+                    .await?;
+                coordinator
+                    .transition_upload(intent.intent_id(), UploadIntentState::Visible)
+                    .await?;
+            }
+            Ok(response)
+        }
+        .await;
+        if result.is_err()
+            && let Some(intent) = &intent
+        {
+            let _ignored = coordinator
+                .transition_upload(intent.intent_id(), UploadIntentState::Failed)
+                .await;
+        }
+        result
     }
 
     /// Stores a raw xorb body under its content hash.

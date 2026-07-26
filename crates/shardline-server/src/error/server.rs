@@ -5,7 +5,10 @@ use std::{
 
 use axum::{
     Error as AxumError, Json,
-    http::{HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
+    http::{
+        HeaderValue, StatusCode,
+        header::{RETRY_AFTER, WWW_AUTHENTICATE},
+    },
     response::{IntoResponse, Response},
 };
 use serde_json::Error as JsonError;
@@ -416,6 +419,14 @@ impl IntoResponse for ServerError {
                 WWW_AUTHENTICATE,
                 HeaderValue::from_static("Bearer realm=\"shardline\""),
             );
+        }
+        if matches!(
+            self,
+            Self::TransferLimiterTimedOut | Self::WorkQueueSaturated | Self::RequestTimedOut
+        ) {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
         }
         response
     }

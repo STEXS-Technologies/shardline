@@ -75,7 +75,7 @@ async fn local_backend_reuses_unchanged_chunks() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_backend_stats_fail_closed_on_symlinked_file_inventory_escape() {
+async fn local_backend_stats_ignore_non_authoritative_legacy_file_inventory() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
     let Ok(temp) = temp else {
@@ -112,11 +112,8 @@ async fn local_backend_stats_fail_closed_on_symlinked_file_inventory_escape() {
 
     let stats = backend.stats().await;
 
-    assert!(matches!(
-        stats,
-        Err(ServerError::Index(IndexError::Local(LocalIndexStoreError::Io(error))))
-            if error.kind() == ErrorKind::InvalidData
-    ));
+    assert!(stats.is_ok());
+    assert_eq!(stats.unwrap().files, 0);
 }
 
 #[cfg(unix)]
@@ -142,6 +139,8 @@ async fn local_backend_ready_rejects_symlinked_metadata_database_path() {
     let Ok(_backend) = backend else {
         return;
     };
+    let removed = fs::remove_file(temp.path().join("metadata.sqlite3")).await;
+    assert!(removed.is_ok());
     let external_database = temp.path().join("external-metadata.sqlite3");
     let linked = symlink(&external_database, temp.path().join("metadata.sqlite3"));
     assert!(linked.is_ok());
@@ -152,15 +151,8 @@ async fn local_backend_ready_rejects_symlinked_metadata_database_path() {
         chunk_size,
     )
     .await;
-    assert!(restarted.is_ok());
-    let Ok(restarted) = restarted else {
-        return;
-    };
-
-    let ready = restarted.ready().await;
-
     assert!(matches!(
-        ready,
+        restarted,
         Err(ServerError::Index(IndexError::Local(LocalIndexStoreError::Io(error))))
             if error.kind() == ErrorKind::InvalidData
     ));
@@ -214,16 +206,6 @@ async fn local_backend_file_record_rejects_oversized_metadata_before_reading() {
     let Some(chunk_size) = chunk_size else {
         return;
     };
-    let backend = LocalBackend::new(
-        temp.path().to_path_buf(),
-        "http://127.0.0.1:8080".to_owned(),
-        chunk_size,
-    )
-    .await;
-    assert!(backend.is_ok());
-    let Ok(backend) = backend else {
-        return;
-    };
     let latest_path = temp.path().join("files").join("asset.bin");
     let created_parent = fs::create_dir_all(temp.path().join("files")).await;
     assert!(created_parent.is_ok());
@@ -235,10 +217,15 @@ async fn local_backend_file_record_rejects_oversized_metadata_before_reading() {
     let resized = file.set_len(MAX_LOCAL_RECORD_METADATA_BYTES + 1).await;
     assert!(resized.is_ok());
 
-    let record = backend.file_record("asset.bin", None, None).await;
+    let backend = LocalBackend::new(
+        temp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+    )
+    .await;
 
     assert!(matches!(
-        record,
+        backend,
         Err(ServerError::Index(IndexError::Local(
             LocalIndexStoreError::MetadataTooLarge {
                 maximum_bytes: MAX_LOCAL_RECORD_METADATA_BYTES,
@@ -525,7 +512,7 @@ async fn repository_scope_namespaces_records_for_same_file_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repository_references_xorb_fails_closed_on_misplaced_legacy_scope_metadata() {
+async fn repository_references_xorb_ignores_non_authoritative_legacy_scope_metadata() {
     let temp = tempfile::tempdir();
     assert!(temp.is_ok());
     let Ok(temp) = temp else {
@@ -592,11 +579,7 @@ async fn repository_references_xorb_fails_closed_on_misplaced_legacy_scope_metad
         .repository_references_xorb(&xorb_hash, &left_scope)
         .await;
 
-    assert!(matches!(
-        reachable,
-        Err(ServerError::Index(IndexError::Local(LocalIndexStoreError::Io(error))))
-            if error.kind() == ErrorKind::InvalidData
-    ));
+    assert!(matches!(reachable, Ok(false)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -731,6 +714,8 @@ async fn local_backend_ready_fails_when_metadata_database_path_is_directory() {
     let Ok(backend) = backend else {
         return;
     };
+    let removed = fs::remove_file(temp.path().join("metadata.sqlite3")).await;
+    assert!(removed.is_ok());
     let created = fs::create_dir_all(temp.path().join("metadata.sqlite3")).await;
     assert!(created.is_ok());
 

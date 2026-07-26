@@ -243,7 +243,6 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
-            quota_tracker: crate::admission::QuotaTracker::new(),
         });
 
         let result = super::handle_provider_webhook(
@@ -308,7 +307,6 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
-            quota_tracker: crate::admission::QuotaTracker::new(),
         });
 
         let result = super::handle_provider_webhook(

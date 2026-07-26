@@ -108,7 +108,10 @@ pub(crate) async fn oci_put_manifest(
     let media_type_key = oci_manifest_media_type_key(repository, &digest_hex, scope)?;
     let _stored_manifest = state
         .backend
-        .put_sha256_addressed_object_bytes_if_absent(&manifest_key, &digest_hex, bytes)
+        // Manifests are authoritative, repository-enumerable metadata. Keep
+        // them in the manifest namespace so reference checks can inventory
+        // every digest; large blob payloads use chunk-backed file records.
+        .put_object_bytes_if_absent(&manifest_key, bytes)
         .await?;
     let _stored_media_type = state
         .backend

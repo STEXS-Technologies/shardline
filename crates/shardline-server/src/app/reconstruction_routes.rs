@@ -41,7 +41,10 @@ pub(super) async fn reconstruction(
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
     // Acquire admission permit for reconstruction
-    let _admit = state.admission.acquire(weights::RECONSTRUCTION).await;
+    let _admit = state
+        .admission
+        .try_acquire(weights::RECONSTRUCTION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let _parsing = state
         .pools
         .parsing
@@ -88,7 +91,10 @@ pub(super) async fn reconstruction_v2(
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
     // Acquire admission permit for reconstruction
-    let _admit = state.admission.acquire(weights::RECONSTRUCTION).await;
+    let _admit = state
+        .admission
+        .try_acquire(weights::RECONSTRUCTION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let _parsing = state
         .pools
         .parsing
@@ -134,7 +140,10 @@ pub(super) async fn batch_reconstruction(
     uri: Uri,
 ) -> Result<Json<BatchReconstructionResponse>, ServerError> {
     // Acquire admission permit for batch reconstruction
-    let _admit = state.admission.acquire(weights::BATCH_OPERATION).await;
+    let _admit = state
+        .admission
+        .try_acquire(weights::BATCH_OPERATION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let _parsing = state
         .pools
         .parsing
@@ -285,7 +294,6 @@ mod tests {
             ),
             pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
-            quota_tracker: crate::admission::QuotaTracker::new(),
         });
 
         (state, tmp)

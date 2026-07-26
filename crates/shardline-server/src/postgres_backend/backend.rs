@@ -126,7 +126,16 @@ impl PostgresBackend {
     }
 
     pub(crate) async fn reconcile_stuck_upload_intents(&self) -> Result<(), ServerError> {
+        self.reconcile_stuck_upload_intents_older_than(std::time::Duration::from_secs(30))
+            .await
+    }
+
+    async fn reconcile_stuck_upload_intents_older_than(
+        &self,
+        minimum_age: std::time::Duration,
+    ) -> Result<(), ServerError> {
         use shardline_index::{UploadIntentState, UploadIntentStore};
+        use shardline_storage::{AsyncObjectStore, ObjectKey};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         let mut reconciled = 0u64;
@@ -150,7 +159,7 @@ impl PostgresBackend {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or(Duration::ZERO);
                 let age = now.saturating_sub(intent.created_at());
-                if age < Duration::from_secs(30) {
+                if age < minimum_age {
                     continue;
                 }
                 tracing::warn!(
@@ -159,9 +168,59 @@ impl PostgresBackend {
                     age_secs = age.as_secs(),
                     "reconciling stuck intent"
                 );
+                let visible_file_record =
+                    if let Some(file_id) = intent.object_key().strip_prefix("record/") {
+                        match self.read_record(file_id, None, None).await {
+                            Ok(_record) => true,
+                            Err(ServerError::NotFound) => false,
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        false
+                    };
+                if visible_file_record {
+                    // The atomic file-record commit is the visibility boundary.
+                    // Walk every durable boundary so recovery remains valid even
+                    // when the process stopped while the intent was still Stored.
+                    for recovery_state in [
+                        UploadIntentState::Storing,
+                        UploadIntentState::Stored,
+                        UploadIntentState::MetadataCommitted,
+                        UploadIntentState::Visible,
+                    ] {
+                        if let Err(error) = self
+                            .index_store
+                            .transition_intent(intent.intent_id(), recovery_state)
+                            .await
+                        {
+                            tracing::warn!(
+                                intent_id = %intent.intent_id(),
+                                %error,
+                                "intent recovery transition failed"
+                            );
+                            return Err(error.into());
+                        }
+                    }
+                    reconciled = reconciled.saturating_add(1);
+                    continue;
+                }
+                let target_state = if intent.state() == UploadIntentState::MetadataCommitted {
+                    match ObjectKey::parse(intent.object_key()) {
+                        Ok(key)
+                            if AsyncObjectStore::metadata(&self.object_store, &key)
+                                .await?
+                                .is_some() =>
+                        {
+                            UploadIntentState::Visible
+                        }
+                        Ok(_) | Err(_) => UploadIntentState::Failed,
+                    }
+                } else {
+                    UploadIntentState::Failed
+                };
                 if let Err(e) = self
                     .index_store
-                    .transition_intent(intent.intent_id(), UploadIntentState::Failed)
+                    .transition_intent(intent.intent_id(), target_state)
                     .await
                 {
                     tracing::warn!(intent_id = %intent.intent_id(), error = %e, "intent transition failed, skipping");

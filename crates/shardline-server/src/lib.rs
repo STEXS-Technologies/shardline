@@ -78,7 +78,7 @@ mod storage_migration;
 pub mod test_fixtures;
 pub mod test_invariant_error;
 
-pub use admission::{ExecutionPools, QuotaTracker, WeightedAdmission};
+pub use admission::{ExecutionPools, WeightedAdmission};
 pub use app::ProtocolMetrics;
 pub use app::{
     AppState, MAX_PROVIDER_NAME_BYTES, MAX_PROVIDER_SUBJECT_BYTES,
@@ -144,8 +144,8 @@ pub(crate) mod xet_adapter {
 pub use app::{serve, serve_with_listener};
 pub use backup::{BackupManifestReport, write_backup_manifest};
 pub use config::{
-    AuthProviderKind, ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
-    file::load_toml_config, load_server_config_from_env_with_toml,
+    AuthProviderKind, DeploymentMode, ObjectStorageAdapter, ServerConfig, ServerConfigError,
+    ShardMetadataLimits, file::load_toml_config, load_server_config_from_env_with_toml,
 };
 pub use database_migration::{
     DatabaseMigration, DatabaseMigrationCommand, DatabaseMigrationError, DatabaseMigrationOptions,

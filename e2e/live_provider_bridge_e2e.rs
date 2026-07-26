@@ -817,7 +817,13 @@ async fn reconstruct_record_through_shardline(
         .await?;
     let mut output = Vec::with_capacity(usize::try_from(record.total_bytes)?);
     for term in &record.chunks {
-        append_record_term_through_shardline(state, issued.token.expose_secret(), term, &mut output).await?;
+        append_record_term_through_shardline(
+            state,
+            issued.token.expose_secret(),
+            term,
+            &mut output,
+        )
+        .await?;
     }
     if u64::try_from(output.len())? != record.total_bytes {
         return Err(

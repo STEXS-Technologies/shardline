@@ -90,7 +90,12 @@ async fn transfer_role_serves_transfer_routes_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_roles_support_native_xet_through_path_routed_proxy() {
-    match timeout(Duration::from_secs(60), exercise_split_role_native_xet_flow()).await {
+    match timeout(
+        Duration::from_secs(60),
+        exercise_split_role_native_xet_flow(),
+    )
+    .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(error)) => panic!("split role native xet e2e failed: {error}"),
         Err(_elapsed) => panic!(
@@ -362,16 +367,15 @@ async fn exercise_split_role_native_xet_flow() -> Result<(), Box<dyn Error>> {
         Some("main"),
     )?;
 
-    let proxy_router =
-        Router::new()
-            .fallback(any(handle_split_proxy))
-            .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
-            .with_state(SplitProxyState {
-                access_token: write_token.clone(),
-                api_base_url,
-                client: client.clone(),
-                transfer_base_url,
-            });
+    let proxy_router = Router::new()
+        .fallback(any(handle_split_proxy))
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
+        .with_state(SplitProxyState {
+            access_token: write_token.clone(),
+            api_base_url,
+            client: client.clone(),
+            transfer_base_url,
+        });
     let proxy_server = spawn(async move { serve_http(proxy_listener, proxy_router).await });
 
     let translator = authenticated_translator(&proxy_base_url, client_root.path(), &write_token)?;

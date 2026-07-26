@@ -106,7 +106,10 @@ pub(super) async fn upload_xorb(
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
     // Acquire admission permit for xorb upload
-    let _admit = state.admission.acquire(weights::XORB_UPLOAD).await;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let _hashing = state
         .pools
         .hashing
@@ -198,7 +201,10 @@ pub(super) async fn write_xorb_transfer(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
-    let _admit = state.admission.acquire(weights::XORB_UPLOAD).await;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let _hashing = state
         .pools
         .hashing
@@ -218,7 +224,10 @@ pub(super) async fn upload_shard(
     body: Body,
 ) -> Result<Json<ShardUploadResponse>, ServerError> {
     // Acquire admission permit for shard upload
-    let _admit = state.admission.acquire(weights::SHARD_UPLOAD).await;
+    let _admit = state
+        .admission
+        .try_acquire(weights::SHARD_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let _parsing = state
         .pools
         .parsing

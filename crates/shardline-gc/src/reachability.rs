@@ -186,15 +186,12 @@ pub(super) fn scan_orphan_objects(
 ) -> Result<HashMap<String, OrphanObject>, GcError> {
     let mut orphans = HashMap::new();
     let prefix = ObjectPrefix::parse("").map_err(|_error| GcError::InvalidContentHash)?;
-    for metadata in object_store
-        .list_prefix(&prefix)
-        .map_err(GcError::ObjectStore)?
-    {
+    object_store.visit_prefix(&prefix, |metadata| {
         let Some(hash) = managed_object_hash(metadata.key(), frontends)? else {
-            continue;
+            return Ok(());
         };
         if referenced_object_keys.contains(metadata.key().as_str()) {
-            continue;
+            return Ok(());
         }
 
         orphans.insert(
@@ -205,7 +202,8 @@ pub(super) fn scan_orphan_objects(
                 bytes: metadata.length(),
             },
         );
-    }
+        Ok::<(), GcError>(())
+    })?;
 
     Ok(orphans)
 }
