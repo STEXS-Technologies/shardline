@@ -16,8 +16,8 @@ use shardline_protocol::SecretString;
 use shardline_storage::S3ObjectStoreConfig;
 
 use super::{
-    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHARD_METADATA_LIMITS, ObjectStorageAdapter,
-    PendingS3ObjectStoreConfig, ServerConfig, ShardMetadataLimits,
+    DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHARD_METADATA_LIMITS, DeploymentMode,
+    ObjectStorageAdapter, PendingS3ObjectStoreConfig, ServerConfig, ShardMetadataLimits,
     adaptive_default_in_flight_chunks_for_parallelism, configure_provider_runtime_from_paths,
     configure_s3_object_store_config, default_transfer_max_in_flight_chunks,
     default_upload_max_in_flight_chunks, optional_s3_secret_from_sources,
@@ -1138,7 +1138,8 @@ fn server_config_runtime_validation_rejects_missing_signing_key_for_all_role() {
         "https://assets.example.test".to_owned(),
         root_dir,
         chunk_size,
-    );
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated);
 
     let validation = config.validate_runtime_requirements();
 

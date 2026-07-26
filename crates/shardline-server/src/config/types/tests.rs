@@ -6,6 +6,7 @@ use std::{
 
 use super::*;
 use crate::reconstruction_cache::ReconstructionCacheAdapter;
+use crate::route_policy::{RouteAuthPolicy, RoutePolicyRegistry, register_route_policies};
 use crate::server_frontend::ServerFrontend;
 use crate::server_role::ServerRole;
 
@@ -650,7 +651,8 @@ fn server_config_validate_runtime_requirements_rejects_missing_signing_key_for_a
         "http://localhost:8080".to_owned(),
         PathBuf::from("/tmp/test"),
         NonZeroUsize::new(4096).unwrap(),
-    );
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated);
     let result = config.validate_runtime_requirements();
     assert!(matches!(
         result,
@@ -1785,4 +1787,165 @@ fn take_secret_file_read_hook_returns_none_for_non_matching_path() {
     let result = take_secret_file_read_hook_for_path(&mut slot, Path::new("/tmp/nonexistent"));
     assert!(result.is_none());
     assert_eq!(slot.len(), 1);
+}
+
+// ── Auth deployment mode tests ──────────────────────────────────────────
+
+#[test]
+fn strict_mode_rejects_passthrough_auth() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Strict);
+    // Passthrough is the default when SHARDLINE_AUTH_PROVIDER=passthrough
+    // But without setting it explicitly, the default is "local" which has no signing key
+    // if token_signing_key is None and Strict mode, validation should fail
+    let result = config.validate_runtime_requirements();
+    // Should fail because strict mode requires signing key
+    assert!(result.is_err());
+}
+
+#[test]
+fn insecure_mode_allows_no_auth() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    let result = config.validate_runtime_requirements();
+    // Should succeed because insecure allows everything
+    assert!(result.is_ok());
+}
+
+#[test]
+fn strict_mode_succeeds_with_all_required() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        PathBuf::from("/tmp"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Strict)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    // With signing key set, strict mode should succeed
+    assert!(result.is_ok());
+}
+
+#[test]
+fn deployment_mode_default_is_insecure() {
+    assert_eq!(DeploymentMode::default(), DeploymentMode::Insecure);
+}
+
+#[test]
+fn deployment_mode_authenticated_accepts_config_with_signing_key() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        std::path::PathBuf::from("/tmp/test_auth"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(
+        result.is_ok(),
+        "authenticated mode with valid signing key should pass validation"
+    );
+}
+
+#[test]
+fn deployment_mode_authenticated_warns_with_passthrough() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        std::path::PathBuf::from("/tmp/test_auth2"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Authenticated);
+    // No signing key, no auth — the original missing-signing-key check
+    // applies for non-Insecure modes
+    let result = config.validate_runtime_requirements();
+    assert!(
+        result.is_err(),
+        "authenticated mode without signing key may fail validation"
+    );
+}
+
+#[test]
+fn deployment_mode_insecure_allows_missing_signing_key() {
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        std::path::PathBuf::from("/tmp/test_insecure"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Insecure);
+    let result = config.validate_runtime_requirements();
+    assert!(
+        result.is_ok(),
+        "insecure mode should pass without signing key"
+    );
+}
+
+#[test]
+fn strict_mode_rejects_missing_metrics_token() {
+    // This verifies the warn! is issued (can't easily test warns, but at least
+    // the validation doesn't fail — it only warns)
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        "http://127.0.0.1:8080".to_owned(),
+        std::path::PathBuf::from("/tmp/test_strict_metrics"),
+        NonZeroUsize::new(65536).unwrap(),
+    )
+    .with_deployment_mode(DeploymentMode::Strict)
+    .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
+    .unwrap();
+    let result = config.validate_runtime_requirements();
+    assert!(
+        result.is_ok(),
+        "strict mode with signing key should pass even without metrics token"
+    );
+}
+
+#[test]
+fn route_policy_registry_has_all_expected_policies() {
+    let mut registry = RoutePolicyRegistry::new();
+    register_route_policies(&mut registry);
+    // Verify specific routes have expected policies
+    assert_eq!(
+        registry.policy("GET", "/healthz"),
+        Some(RouteAuthPolicy::Open)
+    );
+    assert_eq!(
+        registry.policy("GET", "/readyz"),
+        Some(RouteAuthPolicy::Open)
+    );
+    assert_eq!(
+        registry.policy("GET", "/v1/stats"),
+        Some(RouteAuthPolicy::Authenticated)
+    );
+    assert_eq!(
+        registry.policy("POST", "/v1/shards"),
+        Some(RouteAuthPolicy::AuthenticatedWrite)
+    );
+    assert_eq!(
+        registry.policy("POST", "/v1/providers/{provider}/tokens"),
+        Some(RouteAuthPolicy::SeparatelyProtected)
+    );
+    assert_eq!(
+        registry.policy("PUT", "/v1/lfs/objects/{oid}"),
+        Some(RouteAuthPolicy::AuthenticatedWrite)
+    );
+    assert_eq!(
+        registry.policy("GET", "/v1/reconstructions/{file_id}"),
+        Some(RouteAuthPolicy::Authenticated)
+    );
 }

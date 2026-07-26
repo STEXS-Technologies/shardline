@@ -9,7 +9,9 @@ use axum::{
 use shardline_protocol::TokenScope;
 
 use crate::{
-    BazelCacheKind, ServerError, bazel_cache_object_key,
+    BazelCacheKind, ServerError,
+    admission::weights,
+    bazel_cache_object_key,
     upload_ingest::{RequestBodyReader, read_body_to_bytes},
 };
 
@@ -50,6 +52,10 @@ pub(crate) async fn bazel_put_ac(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let object_key = bazel_cache_object_key(
         BazelCacheKind::Ac,
         &hash,
@@ -61,7 +67,8 @@ pub(crate) async fn bazel_put_ac(
     // Unlike CAS, the action key is therefore not expected to hash the body.
     let _stored = state
         .backend
-        .put_object_bytes_if_absent(&object_key, bytes)?;
+        .put_object_bytes_if_absent(&object_key, bytes)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -126,6 +133,10 @@ pub(crate) async fn bazel_put_cas(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let object_key = bazel_cache_object_key(
         BazelCacheKind::Cas,
         &hash,
@@ -224,6 +235,10 @@ pub(crate) async fn bazel_put(
     body: Body,
 ) -> Result<impl IntoResponse, ServerError> {
     let auth = authorize(&state, &headers, TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let object_key = bazel_cache_object_key(
         BazelCacheKind::Cas,
         &hash,
@@ -338,6 +353,10 @@ mod tests {
             reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter,
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
         });
 

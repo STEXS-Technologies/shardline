@@ -91,6 +91,7 @@ impl From<FsckError> for ServerError {
                 observed_bytes,
                 maximum_bytes,
             },
+            FsckError::Cas(e) => Self::Io(std::io::Error::other(e)),
         }
     }
 }

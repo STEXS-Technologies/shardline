@@ -9,6 +9,7 @@ use std::{
 use shardline_cache::RedisTlsConfig;
 use shardline_protocol::{SecretBytes, SecretString};
 use shardline_storage::S3ObjectStoreConfig;
+use tracing;
 
 use super::super::secrets::ensure_secret_size_within_limit;
 use super::defaults::{
@@ -21,7 +22,8 @@ use super::defaults::{
     MIN_DEFAULT_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
 };
 use super::enums::{
-    AuthConfig, AuthProviderKind, CacheConfig, ObjectStorageAdapter, OciConfig, ProviderConfig,
+    AuthConfig, AuthProviderKind, CacheConfig, DeploymentMode, ObjectStorageAdapter, OciConfig,
+    ProviderConfig,
 };
 use super::error::ServerConfigError;
 use crate::{
@@ -56,11 +58,13 @@ pub struct ServerConfig {
     pub(crate) transfer_max_in_flight_chunks: NonZeroUsize,
     pub(crate) index_postgres_url: Option<SecretString>,
     pub(crate) metrics_token: Option<SecretBytes>,
+    pub(crate) deployment_mode: DeploymentMode,
     pub(crate) auth: AuthConfig,
     pub(crate) oci: OciConfig,
     pub(crate) cache: CacheConfig,
     pub(crate) provider: ProviderConfig,
     pub(crate) shutdown_timeout: Option<Duration>,
+    pub(crate) admission_max_weight: NonZeroUsize,
 }
 
 impl ServerConfig {
@@ -87,6 +91,7 @@ impl ServerConfig {
             transfer_max_in_flight_chunks: default_transfer_max_in_flight_chunks(),
             index_postgres_url: None,
             metrics_token: None,
+            deployment_mode: DeploymentMode::default(),
             auth: AuthConfig {
                 token_signing_key: None,
                 auth_provider: AuthProviderKind::Local,
@@ -117,6 +122,7 @@ impl ServerConfig {
                 token_ttl_seconds: None,
             },
             shutdown_timeout: None,
+            admission_max_weight: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
         }
     }
 
@@ -505,6 +511,19 @@ impl ServerConfig {
         self.metrics_token.as_ref().map(SecretBytes::expose_secret)
     }
 
+    /// Returns the deployment security mode.
+    #[must_use]
+    pub const fn deployment_mode(&self) -> DeploymentMode {
+        self.deployment_mode
+    }
+
+    /// Overrides the deployment security mode.
+    #[must_use]
+    pub const fn with_deployment_mode(mut self, mode: DeploymentMode) -> Self {
+        self.deployment_mode = mode;
+        self
+    }
+
     /// Returns the optional provider configuration path.
     #[must_use]
     pub fn provider_config_path(&self) -> Option<&Path> {
@@ -542,6 +561,12 @@ impl ServerConfig {
         self.shutdown_timeout
     }
 
+    /// Returns the admission control max weight.
+    #[must_use]
+    pub const fn admission_max_weight(&self) -> NonZeroUsize {
+        self.admission_max_weight
+    }
+
     /// Sets a maximum drain duration after the shutdown signal is received.
     ///
     /// Once the shutdown signal fires, the server stops accepting new
@@ -550,6 +575,13 @@ impl ServerConfig {
     #[must_use]
     pub const fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = Some(timeout);
+        self
+    }
+
+    /// Overrides the admission control max weight.
+    #[must_use]
+    pub const fn with_admission_max_weight(mut self, max_weight: NonZeroUsize) -> Self {
+        self.admission_max_weight = max_weight;
         self
     }
 
@@ -742,17 +774,22 @@ impl ServerConfig {
         Ok(self)
     }
 
-    /// Validates runtime requirements implied by the selected route surface.
+    /// Validates runtime requirements implied by the selected route surface and
+    /// deployment mode.
     ///
     /// # Errors
     ///
     /// Returns [`ServerConfigError::MissingTokenSigningKeyForServedRoutes`] when the
     /// selected role uses the local HMAC provider and would expose authenticated
     /// CAS routes without a signing key.
-    pub const fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
+    ///
+    /// Returns [`ServerConfigError::ConfigFileError`] when the deployment mode
+    /// constraints are not satisfied.
+    pub fn validate_runtime_requirements(&self) -> Result<(), ServerConfigError> {
         if self.auth.token_signing_key.is_none()
             && (self.server_role.serves_api() || self.server_role.serves_transfer())
             && matches!(self.auth.auth_provider, AuthProviderKind::Local)
+            && self.deployment_mode != DeploymentMode::Insecure
         {
             return Err(ServerConfigError::MissingTokenSigningKeyForServedRoutes);
         }
@@ -778,6 +815,50 @@ impl ServerConfig {
             }
         }
 
+        self.validate_deployment_mode_requirements()?;
+
+        Ok(())
+    }
+
+    /// Validates deployment-mode-specific constraints.
+    fn validate_deployment_mode_requirements(&self) -> Result<(), ServerConfigError> {
+        match self.deployment_mode {
+            DeploymentMode::Strict => {
+                // Passthrough auth is forbidden in strict mode
+                if self.auth.auth_provider == AuthProviderKind::Passthrough {
+                    return Err(ServerConfigError::ConfigFileError(
+                        "strict deployment mode does not allow passthrough auth provider".into(),
+                    ));
+                }
+                // Signing key is required for token minting
+                if self.token_signing_key().is_none() {
+                    return Err(ServerConfigError::ConfigFileError(
+                        "strict deployment mode requires a token signing key".into(),
+                    ));
+                }
+                // Metrics token should be configured
+                if self.metrics_token().is_none() {
+                    tracing::warn!(
+                        "strict deployment mode recommends configuring SHARDLINE_METRICS_TOKEN_FILE"
+                    );
+                }
+            }
+            DeploymentMode::Authenticated => {
+                // Some auth provider must be configured (not None)
+                if self.auth.auth_provider == AuthProviderKind::Passthrough {
+                    // Passthrough is allowed in authenticated mode but warn
+                    tracing::warn!(
+                        "authenticated mode with passthrough auth: only use behind a trusted proxy"
+                    );
+                }
+            }
+            DeploymentMode::Insecure => {
+                // Allow everything — warn that this is not for production
+                tracing::warn!(
+                    "insecure deployment mode: all requests are allowed without authentication"
+                );
+            }
+        }
         Ok(())
     }
 }

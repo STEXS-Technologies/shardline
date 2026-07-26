@@ -818,10 +818,15 @@ async fn test_s3_streaming_content_addressed_via_backend() {
     .unwrap();
     assert_eq!(outcome, PutOutcome::Inserted);
 
-    // Verify via S3 store directly
+    // The protocol object is a metadata reference; S3 stores its shared chunk,
+    // not another whole-object copy under the protocol digest key.
     let store = s3_store().await;
-    assert!(store.contains(&canonical_key).unwrap());
-    let meta = store.metadata(&canonical_key).unwrap().unwrap();
+    assert!(!store.contains(&canonical_key).unwrap());
+    let chunk_hash = shardline_server_core::chunk_hash(content);
+    let chunk_hash_hex = shardline_index::xet_hash_hex_string(chunk_hash);
+    let chunk_key = shardline_server_core::chunk_object_key(&chunk_hash_hex).unwrap();
+    assert!(store.contains(&chunk_key).unwrap());
+    let meta = store.metadata(&chunk_key).unwrap().unwrap();
     assert_eq!(meta.length(), content.len() as u64);
 }
 
@@ -1174,13 +1179,14 @@ async fn test_s3_backend_delete_via_oci() {
     let _key = ObjectKey::parse("oci/delete-via-oci").unwrap();
 
     // Store via OCI
-    let digest_hex = "dd".repeat(32);
+    let body = b"oci-delete-test";
+    let digest_hex = hex::encode(Sha256::digest(body));
     let canonical_key = shared_sha256_object_key(&digest_hex).unwrap();
     OciBackend::put_sha256_addressed_object_bytes_if_absent(
         &backend,
         &canonical_key,
         &digest_hex,
-        b"oci-delete-test".to_vec(),
+        body.to_vec(),
     )
     .unwrap();
 

@@ -18,12 +18,13 @@ use shardline_protocol::{RepositoryProvider, TokenScope};
 use tokio::{net::TcpListener, spawn, sync::Semaphore, time::timeout};
 
 use shardline_server::{
-    AppState, FileReconstructionResponse, LocalBackend, ProtocolMetrics, ReadyResponse,
-    ReconstructionCacheService, STREAM_READ_BUFFER_BYTES, ServerBackend, ServerConfig, ServerRole,
-    TransferLimiter, XorbUploadResponse, acquire_chunk_transfer_permit, chunk_hash,
-    clear_repository_reference_probe_filter, full_byte_stream_response,
-    lock_repository_reference_probe_test, repository_reference_probe_count,
-    reset_repository_reference_probe_count_for_hash, serve_with_listener,
+    AppState, ExecutionPools, FileReconstructionResponse, LocalBackend, ProtocolMetrics,
+    ReadyResponse, ReconstructionCacheService, STREAM_READ_BUFFER_BYTES, ServerBackend,
+    ServerConfig, ServerRole, TransferLimiter, WeightedAdmission, XorbUploadResponse,
+    acquire_chunk_transfer_permit, chunk_hash, clear_repository_reference_probe_filter,
+    full_byte_stream_response, lock_repository_reference_probe_test,
+    repository_reference_probe_count, reset_repository_reference_probe_count_for_hash,
+    serve_with_listener,
     test_fixtures::{single_chunk_xorb, single_file_shard},
 };
 use support::{bearer_token, test_byte_stream, wait_for_health};
@@ -937,6 +938,8 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
         provider_tokens: None,
         reconstruction_cache,
         transfer_limiter: TransferLimiter::new(chunk_size, NonZeroUsize::MIN),
+        admission: WeightedAdmission::new(NonZeroUsize::MIN),
+        pools: ExecutionPools::default_sizes(),
         oci_registry_token_limiter: Arc::new(Semaphore::new(1)),
         protocol_metrics: ProtocolMetrics::default(),
     };
@@ -1058,9 +1061,8 @@ async fn health_route_boots_with_postgres_metadata_config() {
     let Ok(addr) = addr else {
         return;
     };
-    let pg_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://shardline:change-me@localhost:5432/shardline".to_owned()
-    });
+    let pg_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://shardline:change-me@localhost:5432/shardline".to_owned());
     let config = ServerConfig::new(
         addr,
         format!("http://{addr}"),

@@ -1,107 +1,14 @@
-use std::path::Path;
-
 use shardline_protocol::ByteRange;
-use shardline_storage::{
-    DeleteOutcome, ObjectBody, ObjectIntegrity, ObjectKey, ObjectMetadata, ObjectPrefix,
-    ObjectStore, PutOutcome,
-};
+use shardline_storage::{DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
 
 use super::LocalBackend;
 use crate::{
     ServerError,
     download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
     object_store::{read_full_object, visit_object_prefix},
-    protocol_support::shared_sha256_object_key,
 };
 
 impl LocalBackend {
-    pub(crate) fn put_object_bytes_if_absent(
-        &self,
-        object_key: &ObjectKey,
-        bytes: Vec<u8>,
-    ) -> Result<PutOutcome, ServerError> {
-        tokio::task::block_in_place(|| {
-            let integrity =
-                ObjectIntegrity::new(super::chunk_hash(&bytes), u64::try_from(bytes.len())?);
-            Ok(self.object_store().put_if_absent(
-                object_key,
-                ObjectBody::from_vec(bytes),
-                &integrity,
-            )?)
-        })
-    }
-
-    pub(crate) fn put_sha256_addressed_object_bytes_if_absent(
-        &self,
-        object_key: &ObjectKey,
-        digest_hex: &str,
-        bytes: Vec<u8>,
-    ) -> Result<PutOutcome, ServerError> {
-        tokio::task::block_in_place(|| {
-            let canonical_key = shared_sha256_object_key(digest_hex)?;
-            let integrity =
-                ObjectIntegrity::new(super::chunk_hash(&bytes), u64::try_from(bytes.len())?);
-            let canonical_outcome = self.object_store().put_if_absent(
-                &canonical_key,
-                ObjectBody::from_vec(bytes),
-                &integrity,
-            )?;
-            if canonical_key == *object_key {
-                return Ok(canonical_outcome);
-            }
-            Ok(self
-                .object_store()
-                .copy_if_absent(&canonical_key, object_key)?)
-        })
-    }
-
-    pub(crate) fn copy_object_if_absent(
-        &self,
-        source: &ObjectKey,
-        destination: &ObjectKey,
-    ) -> Result<PutOutcome, ServerError> {
-        tokio::task::block_in_place(|| {
-            Ok(self.object_store().copy_if_absent(source, destination)?)
-        })
-    }
-
-    pub(crate) fn put_object_bytes_overwrite(
-        &self,
-        object_key: &ObjectKey,
-        bytes: Vec<u8>,
-    ) -> Result<(), ServerError> {
-        tokio::task::block_in_place(|| {
-            let integrity =
-                ObjectIntegrity::new(super::chunk_hash(&bytes), u64::try_from(bytes.len())?);
-            Ok(self.object_store().put_overwrite(
-                object_key,
-                ObjectBody::from_vec(bytes),
-                &integrity,
-            )?)
-        })
-    }
-
-    pub(crate) fn put_sha256_addressed_object_file(
-        &self,
-        object_key: &ObjectKey,
-        digest_hex: &str,
-        path: &Path,
-        integrity: &ObjectIntegrity,
-    ) -> Result<PutOutcome, ServerError> {
-        tokio::task::block_in_place(|| {
-            let canonical_key = shared_sha256_object_key(digest_hex)?;
-            let canonical_outcome =
-                self.object_store()
-                    .put_content_addressed_file(&canonical_key, path, integrity)?;
-            if canonical_key == *object_key {
-                return Ok(canonical_outcome);
-            }
-            Ok(self
-                .object_store()
-                .copy_if_absent(&canonical_key, object_key)?)
-        })
-    }
-
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
         let object_store = self.object_store();
         let object_key = object_key.clone();
@@ -185,9 +92,63 @@ impl LocalBackend {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use shardline_storage::{ObjectKey, ObjectPrefix};
+    use shardline_storage::{
+        ObjectBody, ObjectIntegrity, ObjectKey, ObjectPrefix, ObjectStore, PutOutcome,
+    };
 
     use super::LocalBackend;
+
+    trait ObjectStoreFixture {
+        fn put_fixture(
+            &self,
+            key: &ObjectKey,
+            bytes: Vec<u8>,
+        ) -> Result<PutOutcome, crate::ServerError>;
+        fn copy_fixture(
+            &self,
+            source: &ObjectKey,
+            destination: &ObjectKey,
+        ) -> Result<PutOutcome, crate::ServerError>;
+        fn overwrite_fixture(
+            &self,
+            key: &ObjectKey,
+            bytes: Vec<u8>,
+        ) -> Result<(), crate::ServerError>;
+    }
+
+    impl ObjectStoreFixture for LocalBackend {
+        fn put_fixture(
+            &self,
+            key: &ObjectKey,
+            bytes: Vec<u8>,
+        ) -> Result<PutOutcome, crate::ServerError> {
+            let integrity =
+                ObjectIntegrity::new(super::super::chunk_hash(&bytes), bytes.len() as u64);
+            Ok(self
+                .object_store()
+                .put_if_absent(key, ObjectBody::from_vec(bytes), &integrity)?)
+        }
+
+        fn copy_fixture(
+            &self,
+            source: &ObjectKey,
+            destination: &ObjectKey,
+        ) -> Result<PutOutcome, crate::ServerError> {
+            Ok(self.object_store().copy_if_absent(source, destination)?)
+        }
+
+        fn overwrite_fixture(
+            &self,
+            key: &ObjectKey,
+            bytes: Vec<u8>,
+        ) -> Result<(), crate::ServerError> {
+            let integrity =
+                ObjectIntegrity::new(super::super::chunk_hash(&bytes), bytes.len() as u64);
+            Ok(self
+                .object_store()
+                .put_overwrite(key, ObjectBody::from_vec(bytes), &integrity)?)
+        }
+    }
 
     async fn make_backend() -> (LocalBackend, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -203,42 +164,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_object_bytes_if_absent_inserts_new_object() {
+    async fn put_fixture_inserts_new_object() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("test-key").unwrap();
-        let result = backend.put_object_bytes_if_absent(&key, b"hello".to_vec());
+        let result = backend.put_fixture(&key, b"hello".to_vec());
         assert!(result.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_object_bytes_if_absent_idempotent() {
+    async fn put_fixture_idempotent() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("test-key2").unwrap();
-        let first = backend.put_object_bytes_if_absent(&key, b"hello".to_vec());
+        let first = backend.put_fixture(&key, b"hello".to_vec());
         assert!(first.is_ok());
-        let second = backend.put_object_bytes_if_absent(&key, b"hello".to_vec());
+        let second = backend.put_fixture(&key, b"hello".to_vec());
         assert!(second.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_sha256_addressed_object_bytes_if_absent_stores_object() {
+    async fn canonical_key_fixture_stores_object() {
         let (backend, _tmp) = make_backend().await;
         let body = b"sha256-payload";
         let digest_hex = "ab".repeat(32);
         let canonical_key = crate::protocol_support::shared_sha256_object_key(&digest_hex).unwrap();
-        let result = backend.put_sha256_addressed_object_bytes_if_absent(
-            &canonical_key,
-            &digest_hex,
-            body.to_vec(),
-        );
+        let result = backend.put_fixture(&canonical_key, body.to_vec());
         assert!(result.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_object_bytes_overwrite_stores_object() {
+    async fn overwrite_fixture_stores_object() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("overwrite-key").unwrap();
-        let result = backend.put_object_bytes_overwrite(&key, b"overwrite-data".to_vec());
+        let result = backend.overwrite_fixture(&key, b"overwrite-data".to_vec());
         assert!(result.is_ok());
     }
 
@@ -259,13 +216,9 @@ mod tests {
     async fn visit_object_prefix_lists_stored_objects() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("prefix1/obj1").unwrap();
-        backend
-            .put_object_bytes_if_absent(&key, b"data1".to_vec())
-            .unwrap();
+        backend.put_fixture(&key, b"data1".to_vec()).unwrap();
         let key2 = ObjectKey::parse("prefix1/obj2").unwrap();
-        backend
-            .put_object_bytes_if_absent(&key2, b"data2".to_vec())
-            .unwrap();
+        backend.put_fixture(&key2, b"data2".to_vec()).unwrap();
 
         let prefix = ObjectPrefix::parse("prefix1").unwrap();
         let mut keys = Vec::new();
@@ -283,9 +236,7 @@ mod tests {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("len-key").unwrap();
         let body = b"length-check";
-        backend
-            .put_object_bytes_if_absent(&key, body.to_vec())
-            .unwrap();
+        backend.put_fixture(&key, body.to_vec()).unwrap();
         let length = backend.object_length(&key).await.unwrap();
         assert_eq!(length, body.len() as u64);
     }
@@ -302,9 +253,7 @@ mod tests {
     async fn delete_object_if_present_removes_object() {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("delete-me").unwrap();
-        backend
-            .put_object_bytes_if_absent(&key, b"to-delete".to_vec())
-            .unwrap();
+        backend.put_fixture(&key, b"to-delete".to_vec()).unwrap();
         let outcome = backend.delete_object_if_present(&key).await.unwrap();
         assert_eq!(outcome, shardline_storage::DeleteOutcome::Deleted);
         let length = backend.object_length(&key).await;
@@ -320,14 +269,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn copy_object_if_absent_copies_new_object() {
+    async fn copy_fixture_copies_new_object() {
         let (backend, _tmp) = make_backend().await;
         let src = ObjectKey::parse("src-key").unwrap();
         let dst = ObjectKey::parse("dst-key").unwrap();
-        backend
-            .put_object_bytes_if_absent(&src, b"copy-source".to_vec())
-            .unwrap();
-        let result = backend.copy_object_if_absent(&src, &dst);
+        backend.put_fixture(&src, b"copy-source".to_vec()).unwrap();
+        let result = backend.copy_fixture(&src, &dst);
         assert!(result.is_ok());
         let src_len = backend.object_length(&src).await.unwrap();
         let dst_len = backend.object_length(&dst).await.unwrap();
@@ -339,9 +286,7 @@ mod tests {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("read-test-key").unwrap();
         let data = b"readable-content";
-        backend
-            .put_object_bytes_if_absent(&key, data.to_vec())
-            .unwrap();
+        backend.put_fixture(&key, data.to_vec()).unwrap();
         let result = backend.read_object(&key).await.unwrap();
         assert_eq!(result.as_slice(), data);
     }
@@ -359,9 +304,7 @@ mod tests {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("stream-test-key").unwrap();
         let data = b"stream-content";
-        backend
-            .put_object_bytes_if_absent(&key, data.to_vec())
-            .unwrap();
+        backend.put_fixture(&key, data.to_vec()).unwrap();
         let result = backend
             .read_object_stream(&key, data.len() as u64, None)
             .await;
@@ -374,9 +317,7 @@ mod tests {
         let prefix = ObjectPrefix::parse("list-prefix").unwrap();
         for i in 0..3 {
             let key = ObjectKey::parse(&format!("list-prefix/obj{i}")).unwrap();
-            backend
-                .put_object_bytes_if_absent(&key, b"data".to_vec())
-                .unwrap();
+            backend.put_fixture(&key, b"data".to_vec()).unwrap();
         }
         let page = backend
             .list_object_flat_namespace_page(&prefix, None, 10)
@@ -389,9 +330,7 @@ mod tests {
         let (backend, _tmp) = make_backend().await;
         let key = ObjectKey::parse("range-stream-key").unwrap();
         let data = b"hello-world-range";
-        backend
-            .put_object_bytes_if_absent(&key, data.to_vec())
-            .unwrap();
+        backend.put_fixture(&key, data.to_vec()).unwrap();
         use shardline_protocol::ByteRange;
         let range = ByteRange::new(0, 4).unwrap();
         let result = backend
@@ -401,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_sha256_addressed_object_file_uses_canonical_key_when_matching() {
+    async fn canonical_key_file_fixture_is_readable() {
         use sha2::Digest;
         use std::io::Write;
         let (backend, _tmp) = make_backend().await;
@@ -416,20 +355,15 @@ mod tests {
         tmpfile.sync_all().unwrap();
         drop(tmpfile);
 
-        // When object_key == canonical_key, the function should return
-        // the canonical outcome directly (without copy_if_absent).
-        use shardline_storage::ObjectIntegrity;
-        let integrity =
-            ObjectIntegrity::new(crate::local_backend::chunk_hash(data), data.len() as u64);
-        let result = backend.put_sha256_addressed_object_file(
-            &canonical_key,
-            &digest_hex,
-            &tmp_path,
-            &integrity,
-        );
+        let bytes = std::fs::read(&tmp_path);
+        assert!(bytes.is_ok());
+        let Ok(bytes) = bytes else {
+            return;
+        };
+        let result = backend.put_fixture(&canonical_key, bytes);
         assert!(
             result.is_ok(),
-            "put_sha256_addressed_object_file failed: {:?}",
+            "canonical fixture write failed: {:?}",
             result.err()
         );
         let length = backend.object_length(&canonical_key).await.unwrap();

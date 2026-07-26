@@ -1,92 +1,369 @@
-use crate::CasLimits;
+use shardline_index::{AsyncIndexStore, StoredObjectId};
+use shardline_storage::{AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, PutOutcome};
 
-/// CAS coordinator with pluggable index and object storage.
+use crate::reachability::ObjectReachability;
+use crate::{CasError, CasLimits};
+
 #[derive(Debug)]
-pub struct CasCoordinator<I, O> {
+pub struct CasCoordinator<I, O, R> {
     index: I,
     object_store: O,
+    record_store: R,
     limits: CasLimits,
 }
 
-impl<I, O> CasCoordinator<I, O> {
-    /// Creates a CAS coordinator.
-    #[must_use]
-    pub const fn new(index: I, object_store: O, limits: CasLimits) -> Self {
+impl<I, O, R> CasCoordinator<I, O, R> {
+    pub const fn new(index: I, object_store: O, record_store: R, limits: CasLimits) -> Self {
         Self {
             index,
             object_store,
+            record_store,
             limits,
         }
     }
 
-    /// Returns the metadata index adapter.
-    #[must_use]
     pub const fn index(&self) -> &I {
         &self.index
     }
 
-    /// Returns the object storage adapter.
-    #[must_use]
     pub const fn object_store(&self) -> &O {
         &self.object_store
     }
 
-    /// Returns the active coordinator limits.
-    #[must_use]
+    pub const fn record_store(&self) -> &R {
+        &self.record_store
+    }
+
     pub const fn limits(&self) -> CasLimits {
         self.limits
     }
 }
 
+impl<I, O, R> CasCoordinator<I, O, R>
+where
+    I: AsyncIndexStore + Send + Sync,
+    <I as AsyncIndexStore>::Error: std::error::Error + Send + Sync + 'static,
+    O: AsyncObjectStore + Clone + 'static,
+    <O as AsyncObjectStore>::Error: std::error::Error + Send + Sync + 'static,
+{
+    /// # Errors
+    ///
+    /// Returns CasError when the body exceeds the configured limit or the
+    /// object store rejects the write.
+    pub async fn store_content_addressed_blob(
+        &self,
+        key: &ObjectKey,
+        integrity: &ObjectIntegrity,
+        body: Vec<u8>,
+    ) -> Result<PutOutcome, CasError> {
+        let body_len = u64::try_from(body.len()).map_err(|_err| CasError::Overflow)?;
+        if body_len > self.limits.max_object_bytes().get() {
+            return Err(CasError::BodyTooLarge {
+                actual: body_len,
+                max: self.limits.max_object_bytes().get(),
+            });
+        }
+        self.object_store
+            .put_if_absent(key, ObjectBody::from_vec(body), integrity)
+            .await
+            .map_err(CasError::from_object_store)
+    }
+}
+
+impl<I, O, R> CasCoordinator<I, O, R>
+where
+    I: shardline_index::UploadIntentStore + Send + Sync,
+    <I as shardline_index::UploadIntentStore>::Error: std::error::Error + Send + Sync + 'static,
+{
+    /// Executes upload work within the coordinator-owned durable intent lifecycle.
+    ///
+    /// The configured index is the only store used for the lifecycle, preventing
+    /// intent creation and state transitions from being split across stores.
+    ///
+    /// # Errors
+    ///
+    /// Returns the caller's work error, or an error converted from [`CasError`]
+    /// when an intent persistence boundary fails.
+    pub async fn with_upload_intent<F, Fut, T, E>(
+        &self,
+        intent: &shardline_index::UploadIntent,
+        work: F,
+    ) -> Result<T, E>
+    where
+        E: From<CasError>,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        self.begin_upload(intent).await.map_err(E::from)?;
+        let current = self
+            .index
+            .intent_by_id(intent.intent_id())
+            .await
+            .map_err(CasError::from_record)
+            .map_err(E::from)?
+            .ok_or_else(|| E::from(CasError::InvalidUploadTransition))?;
+
+        // Content-addressed upload retries are idempotent. Once an intent is
+        // visible, repeat the storage work only to obtain the protocol response;
+        // never reopen the completed durable lifecycle.
+        if current.state() == shardline_index::UploadIntentState::Visible {
+            return work().await;
+        }
+        if !matches!(
+            current.state(),
+            shardline_index::UploadIntentState::Created
+                | shardline_index::UploadIntentState::Storing
+        ) {
+            return Err(E::from(CasError::InvalidUploadTransition));
+        }
+        self.transition_upload(
+            intent.intent_id(),
+            shardline_index::UploadIntentState::Storing,
+        )
+        .await
+        .map_err(E::from)?;
+
+        match work().await {
+            Ok(result) => {
+                for state in [
+                    shardline_index::UploadIntentState::Stored,
+                    shardline_index::UploadIntentState::MetadataCommitted,
+                    shardline_index::UploadIntentState::Visible,
+                ] {
+                    self.transition_upload(intent.intent_id(), state)
+                        .await
+                        .map_err(E::from)?;
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                self.transition_upload(
+                    intent.intent_id(),
+                    shardline_index::UploadIntentState::Failed,
+                )
+                .await
+                .ok();
+                Err(error)
+            }
+        }
+    }
+
+    /// Creates a durable upload intent before any object-store mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns CasError when the intent cannot be persisted.
+    pub async fn begin_upload(
+        &self,
+        intent: &shardline_index::UploadIntent,
+    ) -> Result<(), CasError> {
+        self.index
+            .create_intent(intent)
+            .await
+            .map_err(CasError::from_record)
+    }
+
+    /// Records one validated persistence boundary for an upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns CasError when the transition is invalid, missing, or cannot be
+    /// persisted.
+    pub async fn transition_upload(
+        &self,
+        intent_id: &str,
+        next: shardline_index::UploadIntentState,
+    ) -> Result<(), CasError> {
+        let transitioned = self
+            .index
+            .transition_intent(intent_id, next)
+            .await
+            .map_err(CasError::from_record)?;
+        if transitioned {
+            Ok(())
+        } else {
+            Err(CasError::InvalidUploadTransition)
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<I, O, R> ObjectReachability for CasCoordinator<I, O, R>
+where
+    I: AsyncIndexStore + Send + Sync,
+    <I as AsyncIndexStore>::Error: std::error::Error + Send + Sync + 'static,
+    O: Sync,
+    R: Sync,
+{
+    async fn is_object_reachable(&self, object_id: &StoredObjectId) -> Result<bool, CasError> {
+        let object_id = *object_id;
+        AsyncIndexStore::contains_object(&self.index, &object_id)
+            .await
+            .map_err(CasError::from_index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use shardline_index::{MemoryIndexStore, UploadIntent, UploadIntentState, UploadIntentStore};
+    use shardline_storage::{LocalObjectStore, SyncObjectStoreBridge};
     use std::num::NonZeroU64;
 
     use super::CasCoordinator;
-    use crate::CasLimits;
+    use crate::{CasError, CasLimits};
 
     #[derive(Debug, PartialEq, Eq)]
     struct IndexProbe;
-
     #[derive(Debug, PartialEq, Eq)]
     struct ObjectStoreProbe;
+    #[derive(Debug, PartialEq, Eq)]
+    struct RecordStoreProbe;
 
     #[test]
     fn coordinator_keeps_adapters_and_limits() {
-        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX);
-        let coordinator = CasCoordinator::new(IndexProbe, ObjectStoreProbe, limits);
-
-        assert_eq!(coordinator.index(), &IndexProbe);
-        assert_eq!(coordinator.object_store(), &ObjectStoreProbe);
-        assert_eq!(coordinator.limits(), limits);
+        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MAX, NonZeroU64::MIN);
+        let c = CasCoordinator::new(IndexProbe, ObjectStoreProbe, RecordStoreProbe, limits);
+        assert_eq!(c.index(), &IndexProbe);
+        assert_eq!(c.object_store(), &ObjectStoreProbe);
+        assert_eq!(c.record_store(), &RecordStoreProbe);
+        assert_eq!(c.limits(), limits);
     }
 
     #[test]
     fn coordinator_debug_format() {
-        let limits = CasLimits::new(NonZeroU64::new(1).unwrap(), NonZeroU64::new(2).unwrap());
-        let coordinator = CasCoordinator::new(IndexProbe, ObjectStoreProbe, limits);
-        let debug = format!("{coordinator:?}");
+        let limits = CasLimits::new(
+            NonZeroU64::new(1).unwrap(),
+            NonZeroU64::new(2).unwrap(),
+            NonZeroU64::new(3).unwrap(),
+        );
+        let c = CasCoordinator::new(IndexProbe, ObjectStoreProbe, RecordStoreProbe, limits);
+        let debug = format!("{c:?}");
         assert!(debug.contains("CasCoordinator"));
-        assert!(debug.contains("IndexProbe"));
-        assert!(debug.contains("ObjectStoreProbe"));
-        assert!(debug.contains("CasLimits"));
+        assert!(debug.contains("RecordStoreProbe"));
     }
 
     #[test]
-    fn coordinator_with_different_type_combinations() {
-        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
-        let coordinator = CasCoordinator::new(42_usize, String::from("store"), limits);
-        assert_eq!(coordinator.index(), &42_usize);
-        assert_eq!(coordinator.object_store(), &"store");
-        assert_eq!(coordinator.limits(), limits);
+    fn coordinator_with_different_types() {
+        let limits = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN);
+        let c = CasCoordinator::new(
+            42_usize,
+            String::from("store"),
+            String::from("records"),
+            limits,
+        );
+        assert_eq!(c.index(), &42_usize);
+        assert_eq!(c.object_store(), &"store");
+        assert_eq!(c.record_store(), &"records");
+        assert_eq!(c.limits(), limits);
     }
 
     #[test]
-    fn coordinator_limits_are_independent_of_adapters() {
-        let limits_a = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN);
-        let limits_b = CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX);
-        let coord_a = CasCoordinator::new((), (), limits_a);
-        let coord_b = CasCoordinator::new((), (), limits_b);
-        assert_ne!(coord_a.limits(), coord_b.limits());
+    fn coordinator_limits_independent() {
+        let a = CasLimits::new(NonZeroU64::MIN, NonZeroU64::MIN, NonZeroU64::MIN);
+        let b = CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX);
+        assert_ne!(
+            CasCoordinator::new((), (), (), a).limits(),
+            CasCoordinator::new((), (), (), b).limits()
+        );
+    }
+
+    #[test]
+    fn with_upload_intent_success_transitions_to_visible() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let index = MemoryIndexStore::new();
+        let object_store = SyncObjectStoreBridge::new(
+            LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+        );
+        let limits = CasLimits::new(
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+        );
+        let coordinator = CasCoordinator::new(index.clone(), object_store, (), limits);
+
+        let intent = UploadIntent::new(
+            "success-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let result: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
+
+        assert_eq!(result, Ok(42));
+
+        let stored = rt
+            .block_on(index.intent_by_id("success-intent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Visible);
+    }
+
+    #[test]
+    fn with_upload_intent_failure_transitions_to_failed() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let index = MemoryIndexStore::new();
+        let object_store = SyncObjectStoreBridge::new(
+            LocalObjectStore::new(storage.path().join("objects")).unwrap(),
+        );
+        let limits = CasLimits::new(
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+            NonZeroU64::new(100).unwrap(),
+        );
+        let coordinator = CasCoordinator::new(index.clone(), object_store, (), limits);
+
+        let intent = UploadIntent::new(
+            "failure-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let result: Result<i32, CasError> = rt.block_on(
+            coordinator.with_upload_intent(&intent, || async { Err(CasError::Overflow) }),
+        );
+
+        assert_eq!(result, Err(CasError::Overflow));
+
+        let stored = rt
+            .block_on(index.intent_by_id("failure-intent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Failed);
+    }
+
+    #[test]
+    fn with_upload_intent_retry_does_not_reopen_visible_intent() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let index = MemoryIndexStore::new();
+        let coordinator = CasCoordinator::new(
+            index.clone(),
+            (),
+            (),
+            CasLimits::new(NonZeroU64::MAX, NonZeroU64::MAX, NonZeroU64::MAX),
+        );
+        let intent = UploadIntent::new(
+            "visible-intent".to_owned(),
+            "objects/test".to_owned(),
+            "abcdef".to_owned(),
+            42,
+        );
+
+        let first: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
+        let retry: Result<i32, CasError> =
+            rt.block_on(coordinator.with_upload_intent(&intent, || async { Ok(42) }));
+
+        assert_eq!(first, Ok(42));
+        assert_eq!(retry, Ok(42));
+        let stored = rt
+            .block_on(index.intent_by_id("visible-intent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state(), UploadIntentState::Visible);
     }
 }

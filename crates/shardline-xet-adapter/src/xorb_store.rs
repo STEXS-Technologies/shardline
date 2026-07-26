@@ -1,10 +1,16 @@
-use std::{borrow::Cow, io::Cursor};
+use std::{
+    borrow::Cow,
+    io::Cursor,
+    sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use shardline_index::{parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ShardlineHash;
 use shardline_server_core::{ServerObjectStore, chunk_hash, read_full_object};
 use shardline_storage::{
-    ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore, PutOutcome,
+    AsyncObjectStore, ObjectBody, ObjectIntegrity, ObjectKey, ObjectKeyError, ObjectStore,
+    PutOutcome,
 };
 use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer;
 
@@ -23,7 +29,7 @@ use crate::error::XetAdapterError;
 
 use super::{
     ValidatedXorb, map_xorb_visit_error, try_for_each_serialized_xorb_chunk,
-    validate_serialized_xorb,
+    try_for_each_serialized_xorb_chunk_async, validate_serialized_xorb,
 };
 
 #[derive(Debug)]
@@ -97,7 +103,7 @@ pub fn visit_stored_xorb_chunk_hashes<Visitor>(
 where
     Visitor: FnMut(String) -> Result<(), XetAdapterError>,
 {
-    let Some(metadata) = object_store.metadata(object_key)? else {
+    let Some(metadata) = ObjectStore::metadata(object_store, object_key)? else {
         return Ok(());
     };
     let Some(xorb_hash_hex) = xorb_hash_from_object_key_if_present(object_key)? else {
@@ -116,7 +122,7 @@ where
 /// # Errors
 ///
 /// Returns an error when the upload fails validation or storage.
-pub fn store_uploaded_xorb(
+pub async fn store_uploaded_xorb(
     object_store: &ServerObjectStore,
     expected_hash: &str,
     uploaded_bytes: &[u8],
@@ -126,30 +132,41 @@ pub fn store_uploaded_xorb(
         canonicalize_uploaded_xorb(expected_hash_value, uploaded_bytes)?;
     let canonical_length = u64::try_from(canonical_bytes.len())?;
     let mut cursor = Cursor::new(canonical_bytes.as_ref());
-    let mut unpacked_length = 0_u64;
-    let mut stored_bytes = 0_u64;
+    let unpacked_length = Arc::new(AtomicU64::new(0));
+    let stored_bytes = Arc::new(AtomicU64::new(0));
 
-    try_for_each_serialized_xorb_chunk(&mut cursor, &validated, |decoded_chunk| {
-        let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
-        let chunk_length = u64::try_from(decoded_chunk.data().len())?;
-        unpacked_length = unpacked_length
-            .checked_add(chunk_length)
-            .ok_or(XetAdapterError::Overflow)?;
-        let chunk_integrity = ObjectIntegrity::new(chunk_hash(decoded_chunk.data()), chunk_length);
-        let chunk_key = chunk_object_key_local(&chunk_hash_hex)?;
-        let outcome = object_store.put_if_absent(
-            &chunk_key,
-            ObjectBody::from_slice(decoded_chunk.data()),
-            &chunk_integrity,
-        )?;
-        if matches!(outcome, PutOutcome::Inserted) {
-            stored_bytes = stored_bytes
-                .checked_add(chunk_length)
-                .ok_or(XetAdapterError::Overflow)?;
+    try_for_each_serialized_xorb_chunk_async(&mut cursor, &validated, {
+        let unpacked_length = Arc::clone(&unpacked_length);
+        let stored_bytes = Arc::clone(&stored_bytes);
+        move |decoded_chunk| {
+            let unpacked_length = Arc::clone(&unpacked_length);
+            let stored_bytes = Arc::clone(&stored_bytes);
+            async move {
+                let chunk_hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
+                let chunk_length = u64::try_from(decoded_chunk.data().len())?;
+                unpacked_length.fetch_add(chunk_length, Ordering::Relaxed);
+                let chunk_integrity =
+                    ObjectIntegrity::new(chunk_hash(decoded_chunk.data()), chunk_length);
+                let chunk_key = chunk_object_key_local(&chunk_hash_hex)?;
+                let outcome = AsyncObjectStore::put_if_absent(
+                    object_store,
+                    &chunk_key,
+                    ObjectBody::from_slice(decoded_chunk.data()),
+                    &chunk_integrity,
+                )
+                .await?;
+                if matches!(outcome, PutOutcome::Inserted) {
+                    stored_bytes.fetch_add(chunk_length, Ordering::Relaxed);
+                }
+                Ok::<(), XetAdapterError>(())
+            }
         }
-        Ok::<(), XetAdapterError>(())
     })
+    .await
     .map_err(map_xorb_visit_error)?;
+
+    let unpacked_length = unpacked_length.load(Ordering::Relaxed);
+    let mut stored_bytes = stored_bytes.load(Ordering::Relaxed);
 
     if unpacked_length != validated.unpacked_length() {
         return Err(XetAdapterError::InvalidSerializedXorb);
@@ -158,11 +175,13 @@ pub fn store_uploaded_xorb(
     let serialized_key = xorb_object_key(expected_hash)?;
     let serialized_integrity =
         ObjectIntegrity::new(chunk_hash(canonical_bytes.as_ref()), canonical_length);
-    let serialized_outcome = object_store.put_if_absent(
+    let serialized_outcome = AsyncObjectStore::put_if_absent(
+        object_store,
         &serialized_key,
         ObjectBody::from_vec(canonical_bytes.into_owned()),
         &serialized_integrity,
-    )?;
+    )
+    .await?;
     if matches!(serialized_outcome, PutOutcome::Inserted) {
         stored_bytes = stored_bytes
             .checked_add(canonical_length)
@@ -178,12 +197,12 @@ pub fn store_uploaded_xorb(
 /// # Errors
 ///
 /// Returns an error when the upload fails validation or storage.
-pub fn store_uploaded_xorb_with_metrics(
+pub async fn store_uploaded_xorb_with_metrics(
     object_store: &ServerObjectStore,
     expected_hash: &str,
     uploaded_bytes: &[u8],
 ) -> Result<StoredXorbUpload, XetAdapterError> {
-    let result = store_uploaded_xorb(object_store, expected_hash, uploaded_bytes)?;
+    let result = store_uploaded_xorb(object_store, expected_hash, uploaded_bytes).await?;
     shardline_metrics::record_xet_xorb_upload(uploaded_bytes.len() as u64);
     Ok(result)
 }
@@ -244,13 +263,30 @@ mod tests {
     };
 
     use super::{
-        canonicalize_uploaded_xorb, normalize_serialized_xorb, store_uploaded_xorb,
-        store_uploaded_xorb_with_metrics, validate_serialized_xorb, visit_stored_xorb_chunk_hashes,
-        xorb_hash_from_object_key_if_present, xorb_object_key,
+        canonicalize_uploaded_xorb, normalize_serialized_xorb, validate_serialized_xorb,
+        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
     use shardline_server_core::ServerObjectStore;
     use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
+
+    fn async_store_xorb(
+        store: &ServerObjectStore,
+        hash: &str,
+        bytes: &[u8],
+    ) -> Result<super::StoredXorbUpload, XetAdapterError> {
+        let rt = tokio::runtime::Runtime::new().map_err(XetAdapterError::Io)?;
+        rt.block_on(super::store_uploaded_xorb(store, hash, bytes))
+    }
+
+    fn async_store_xorb_with_metrics(
+        store: &ServerObjectStore,
+        hash: &str,
+        bytes: &[u8],
+    ) -> Result<super::StoredXorbUpload, XetAdapterError> {
+        let rt = tokio::runtime::Runtime::new().map_err(XetAdapterError::Io)?;
+        rt.block_on(super::store_uploaded_xorb_with_metrics(store, hash, bytes))
+    }
 
     #[test]
     fn normalize_serialized_xorb_accepts_footerless_uploads() {
@@ -362,7 +398,7 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(result.is_ok(), "store_uploaded_xorb failed: {result:?}");
         let stored = result.unwrap();
         assert!(stored.was_inserted, "xorb should be newly inserted");
@@ -384,11 +420,10 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let first = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
 
-        let second =
-            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(
             !second.was_inserted,
             "second store should report was_inserted=false"
@@ -406,7 +441,7 @@ mod tests {
                 .unwrap();
         let wrong_hash = "00".repeat(32);
 
-        let result = store_uploaded_xorb(&object_store, &wrong_hash, &serialized.serialized_data);
+        let result = async_store_xorb(&object_store, &wrong_hash, &serialized.serialized_data);
         assert!(result.is_err(), "expected error for wrong hash");
     }
 
@@ -422,7 +457,7 @@ mod tests {
         let hash = serialized.hash.hex();
 
         let result =
-            store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
+            async_store_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
         assert!(
             result.is_ok(),
             "store_uploaded_xorb_with_metrics failed: {result:?}"
@@ -566,7 +601,7 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
 
         let mut visited = Vec::new();
@@ -633,7 +668,7 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
 
         let result = visit_stored_xorb_chunk_hashes(
@@ -687,7 +722,7 @@ mod tests {
                 .unwrap();
         // Store it normally first to get the proper format
         let hash = serialized.hash.hex();
-        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(result.is_ok());
     }
 
@@ -696,7 +731,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
-        let result = store_uploaded_xorb(&object_store, "not-a-hash", b"data");
+        let result = async_store_xorb(&object_store, "not-a-hash", b"data");
         assert!(result.is_err());
     }
 
@@ -707,7 +742,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
-        let result = store_uploaded_xorb_with_metrics(&object_store, "invalid-hash", b"data");
+        let result = async_store_xorb_with_metrics(&object_store, "invalid-hash", b"data");
         assert!(result.is_err(), "expected error for invalid hash");
     }
 
@@ -861,7 +896,7 @@ mod tests {
         let hash = "ab".repeat(32);
 
         // Completely invalid xorb bytes - should fail validation
-        let result = store_uploaded_xorb(&object_store, &hash, b"\x00\x01\x02\x03");
+        let result = async_store_xorb(&object_store, &hash, b"\x00\x01\x02\x03");
         assert!(result.is_err(), "expected error for invalid xorb bytes");
     }
 
@@ -878,7 +913,7 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
 
         let mut count = 0_usize;
@@ -909,7 +944,7 @@ mod tests {
         let hash = serialized.hash.hex();
 
         let result =
-            store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
+            async_store_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
         assert!(
             result.is_ok(),
             "store_uploaded_xorb_with_metrics(footerless) failed: {result:?}"
@@ -999,11 +1034,10 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let first = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
 
-        let second =
-            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 
@@ -1052,14 +1086,12 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let result =
-            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(result.was_inserted);
         assert!(result.stored_bytes > 0, "should count stored bytes");
 
         // Second store: chunks exist, xorb exists -> stored_bytes unchanged
-        let second =
-            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 
@@ -1074,7 +1106,7 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(result.is_ok(), "lz4 xorb store failed: {result:?}");
         let stored = result.unwrap();
         assert!(stored.was_inserted);
@@ -1105,7 +1137,7 @@ mod tests {
         .unwrap();
         let hash = serialized.hash.hex();
 
-        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(result.is_ok(), "bg4lz4 xorb store failed: {result:?}");
         let stored = result.unwrap();
         assert!(stored.was_inserted);
@@ -1127,7 +1159,7 @@ mod tests {
             )
             .unwrap();
             let hash = serialized.hash.hex();
-            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+            async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
             let key = xorb_object_key(&hash).unwrap();
 
             let mut count = 0_usize;
@@ -1191,7 +1223,7 @@ mod tests {
     fn store_uploaded_xorb_rejects_empty_expected_hash() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let result = store_uploaded_xorb(&object_store, "", b"data");
+        let result = async_store_xorb(&object_store, "", b"data");
         assert!(result.is_err(), "expected error for empty hash");
     }
 
@@ -1207,7 +1239,7 @@ mod tests {
         let hash = serialized.hash.hex();
 
         // Store it once - should succeed
-        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(result.is_ok(), "first store should succeed: {result:?}");
         let stored = result.unwrap();
         assert!(stored.was_inserted);
@@ -1218,7 +1250,7 @@ mod tests {
         );
 
         // Store again (idempotent) - stored_bytes should only count chunks+xorb once
-        let second = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(second.is_ok(), "second store should succeed: {second:?}");
         // was_inserted = false because AlreadyExists
         // stored_bytes might be positive because chunks were already stored
@@ -1238,7 +1270,7 @@ mod tests {
         let hash = serialized.hash.hex();
 
         let result =
-            store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
+            async_store_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data);
         assert!(result.is_ok());
         let stored = result.unwrap();
         assert!(stored.was_inserted);
@@ -1270,7 +1302,7 @@ mod tests {
         let hash = serialized.hash.hex();
 
         // Store footerless bytes -> triggers normalization
-        let result = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data);
+        let result = async_store_xorb(&object_store, &hash, &serialized.serialized_data);
         assert!(result.is_ok(), "footerless store failed: {result:?}");
         let stored = result.unwrap();
         assert!(stored.was_inserted);
@@ -1323,7 +1355,7 @@ mod tests {
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
 
         let hash = "ab".repeat(32);
-        let result = store_uploaded_xorb(&object_store, &hash, b"\x00");
+        let result = async_store_xorb(&object_store, &hash, b"\x00");
         assert!(result.is_err(), "expected error for tiny body");
     }
 
@@ -1334,7 +1366,7 @@ mod tests {
 
         let hash = "ab".repeat(32);
         let garbage = vec![0xFFu8; 4096];
-        let result = store_uploaded_xorb(&object_store, &hash, &garbage);
+        let result = async_store_xorb(&object_store, &hash, &garbage);
         assert!(result.is_err(), "expected error for garbage body");
     }
 
@@ -1369,7 +1401,7 @@ mod tests {
                 .unwrap();
         let hash = serialized.hash.hex();
 
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
 
         // Collect all chunk hashes
@@ -1473,7 +1505,7 @@ mod tests {
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
-        let result = store_uploaded_xorb(
+        let result = async_store_xorb(
             &object_store,
             &serialized.hash.hex(),
             &serialized.serialized_data,
@@ -1490,7 +1522,7 @@ mod tests {
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
-        let result = store_uploaded_xorb(
+        let result = async_store_xorb(
             &object_store,
             &serialized.hash.hex(),
             &serialized.serialized_data,
@@ -1507,7 +1539,7 @@ mod tests {
         let serialized =
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
-        let result = store_uploaded_xorb(
+        let result = async_store_xorb(
             &object_store,
             &serialized.hash.hex(),
             &serialized.serialized_data,
@@ -1527,8 +1559,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        store_uploaded_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data)
-            .unwrap();
+        async_store_xorb_with_metrics(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
         let mut count = 0_usize;
         visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
@@ -1597,10 +1628,9 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        let first = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
-        let second =
-            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 
@@ -1618,9 +1648,9 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw2, CompressionScheme::None, true)
                 .unwrap();
 
-        let r1 = store_uploaded_xorb(&object_store, &s1.hash.hex(), &s1.serialized_data).unwrap();
+        let r1 = async_store_xorb(&object_store, &s1.hash.hex(), &s1.serialized_data).unwrap();
         assert!(r1.was_inserted);
-        let r2 = store_uploaded_xorb(&object_store, &s2.hash.hex(), &s2.serialized_data).unwrap();
+        let r2 = async_store_xorb(&object_store, &s2.hash.hex(), &s2.serialized_data).unwrap();
         assert!(r2.was_inserted);
 
         // Both should be visitable
@@ -1718,7 +1748,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
         let mut visited = Vec::new();
         visit_stored_xorb_chunk_hashes(&object_store, &key, |h| {
@@ -1738,7 +1768,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
         let mut count = 0_usize;
         visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
@@ -1760,10 +1790,9 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        let first = store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let first = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(first.was_inserted);
-        let second =
-            store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        let second = async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         assert!(!second.was_inserted);
     }
 
@@ -1842,7 +1871,7 @@ mod tests {
             .unwrap();
             let hash = serialized.hash.hex();
             let result =
-                store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+                async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
             assert!(result.was_inserted, "chunks={num_chunks}");
             assert!(result.stored_bytes > 0, "chunks={num_chunks}");
         }
@@ -1854,7 +1883,7 @@ mod tests {
     fn store_uploaded_xorb_with_metrics_rejects_bad_hash() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let result = store_uploaded_xorb_with_metrics(&object_store, "invalid", b"test");
+        let result = async_store_xorb_with_metrics(&object_store, "invalid", b"test");
         assert!(result.is_err());
     }
 
@@ -1862,7 +1891,7 @@ mod tests {
     fn store_uploaded_xorb_with_metrics_rejects_wrong_hash_format() {
         let temp = tempfile::tempdir().unwrap();
         let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
-        let result = store_uploaded_xorb_with_metrics(&object_store, "", b"data");
+        let result = async_store_xorb_with_metrics(&object_store, "", b"data");
         assert!(result.is_err());
     }
 
@@ -1897,7 +1926,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::None, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         // Visit once
         let key = xorb_object_key(&hash).unwrap();
         let mut v1 = 0_usize;
@@ -1926,7 +1955,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, true)
                 .unwrap();
         let hash = serialized.hash.hex();
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
         let mut count = 0_usize;
         visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {
@@ -1948,7 +1977,7 @@ mod tests {
             SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, false)
                 .unwrap();
         let hash = serialized.hash.hex();
-        store_uploaded_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
         let key = xorb_object_key(&hash).unwrap();
         let mut count = 0_usize;
         visit_stored_xorb_chunk_hashes(&object_store, &key, |_h| {

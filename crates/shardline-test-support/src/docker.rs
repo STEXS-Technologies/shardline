@@ -5,7 +5,10 @@ use std::{
     io::{Error as IoError, ErrorKind},
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{Mutex, Once, OnceLock},
+    sync::{
+        Mutex, Once, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     thread::sleep,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -36,6 +39,7 @@ const DEFAULT_S3_BUCKET: &str = "shardline-e2e";
 
 static PROCESS_CLEANUP_CONTAINERS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static PROCESS_CLEANUP_REGISTERED: Once = Once::new();
+static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Containerized service stack for self-contained end-to-end tests.
 #[derive(Debug)]
@@ -207,8 +211,8 @@ impl DockerLocalStack {
             .as_mut()
             .ok_or_else(|| IoError::new(ErrorKind::NotFound, "postgres is not configured"))?;
         start_container(&service.container_name)?;
-        wait_for_postgres(&service.container_name)?;
         service.host_port = docker_published_port(&service.container_name, 5432)?;
+        wait_for_postgres(&service.container_name, service.host_port)?;
         Ok(())
     }
 
@@ -393,7 +397,7 @@ fn start_postgres_service(run_id: &str) -> Result<PostgresService, IoError> {
     )?;
     let service = (|| {
         let host_port = docker_published_port(&container_name, 5432)?;
-        wait_for_postgres(&container_name)?;
+        wait_for_postgres(&container_name, host_port)?;
 
         Ok(PostgresService {
             container_name: container_name.clone(),
@@ -537,7 +541,8 @@ fn unique_run_id() -> String {
     let unix_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0_u128, |duration| duration.as_nanos());
-    format!("{}-{unix_nanos}", std::process::id())
+    let sequence = RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{unix_nanos}-{sequence}", std::process::id())
 }
 
 fn docker_published_port(container_name: &str, container_port: u16) -> Result<u16, IoError> {
@@ -587,10 +592,10 @@ fn start_container(container_name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn wait_for_postgres(container_name: &str) -> Result<(), IoError> {
+fn wait_for_postgres(container_name: &str, host_port: u16) -> Result<(), IoError> {
     wait_for(
         || {
-            run_command(
+            let container_ready = run_command(
                 Command::new("docker")
                     .arg("exec")
                     .arg(container_name)
@@ -600,7 +605,20 @@ fn wait_for_postgres(container_name: &str) -> Result<(), IoError> {
                     .arg("-d")
                     .arg(POSTGRES_DATABASE),
             )
-            .is_ok_and(|output| output.status.success())
+            .is_ok_and(|output| output.status.success());
+            let published_port_ready = run_command(
+                Command::new("pg_isready")
+                    .arg("-h")
+                    .arg("127.0.0.1")
+                    .arg("-p")
+                    .arg(host_port.to_string())
+                    .arg("-U")
+                    .arg(POSTGRES_USER)
+                    .arg("-d")
+                    .arg(POSTGRES_DATABASE),
+            )
+            .is_ok_and(|output| output.status.success());
+            container_ready && published_port_ready
         },
         "postgres readiness",
     )

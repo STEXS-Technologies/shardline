@@ -12,6 +12,7 @@ use shardline_protocol::TokenScope;
 
 use crate::{
     ServerError,
+    admission::weights,
     xet_adapter::{
         BatchReconstructionResponse, build_batch_reconstruction_response, validate_hash_path,
         validate_optional_content_hash,
@@ -39,6 +40,16 @@ pub(super) async fn reconstruction(
     headers: HeaderMap,
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
+    // Acquire admission permit for reconstruction
+    let _admit = state
+        .admission
+        .try_acquire(weights::RECONSTRUCTION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _parsing = state
+        .pools
+        .parsing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
@@ -79,6 +90,16 @@ pub(super) async fn reconstruction_v2(
     headers: HeaderMap,
     Query(query): Query<FileVersionQuery>,
 ) -> Result<impl IntoResponse, ServerError> {
+    // Acquire admission permit for reconstruction
+    let _admit = state
+        .admission
+        .try_acquire(weights::RECONSTRUCTION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _parsing = state
+        .pools
+        .parsing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     validate_hash_path(&file_id)?;
     validate_optional_content_hash(query.content_hash.as_deref())?;
@@ -118,6 +139,16 @@ pub(super) async fn batch_reconstruction(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Json<BatchReconstructionResponse>, ServerError> {
+    // Acquire admission permit for batch reconstruction
+    let _admit = state
+        .admission
+        .try_acquire(weights::BATCH_OPERATION)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _parsing = state
+        .pools
+        .parsing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let auth = authorize(&state, &headers, TokenScope::Read)?;
     let repository_scope = auth.as_ref().map(scope_from_auth);
     let file_ids = parse_batch_reconstruction_file_ids(&uri)?;
@@ -258,6 +289,10 @@ mod tests {
             reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter,
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
         });
 

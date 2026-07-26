@@ -50,7 +50,8 @@ pub use shard_store::{
 };
 pub use xorb::{
     DecodedXorbChunk, ValidatedXorb, ValidatedXorbChunk, XorbParseError, XorbVisitError,
-    decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk, validate_serialized_xorb,
+    decode_serialized_xorb_chunks, try_for_each_serialized_xorb_chunk,
+    try_for_each_serialized_xorb_chunk_async, validate_serialized_xorb,
 };
 pub use xorb_store::{
     normalize_serialized_xorb, store_uploaded_xorb, store_uploaded_xorb_with_metrics,

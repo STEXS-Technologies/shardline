@@ -18,6 +18,8 @@ on:
 permissions:
   contents: write
   packages: write
+  attestations: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -54,7 +56,7 @@ jobs:
         shardline
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
 
@@ -97,14 +99,17 @@ jobs:
       - name: Run contributor CI matrix
         run: cargo make ci
 
+      - name: Run release-candidate infrastructure matrix
+        run: cargo make test-infrastructure
+
       - name: Build release archive
         run: bash scripts/build-release-archive.sh x86_64-unknown-linux-gnu dist
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Build Docker image for verification
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           load: true
@@ -126,7 +131,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
             echo "CARGO_REGISTRY_TOKEN secret is required to publish crates" >&2
             exit 1
@@ -150,17 +155,38 @@ jobs:
               echo "${crate} ${version} already exists on crates.io; skipping"
               continue
             fi
-            if cargo publish --locked -p "${crate}"; then
-              echo "${crate} ${version} published successfully"
-              sleep 15
-            else
-              echo "::warning::Failed to publish ${crate} ${version} (may already exist from a parallel run); continuing"
+            if ! cargo publish --locked -p "${crate}"; then
+              # A concurrent, restartable release may have completed this exact
+              # publish between the preflight check and cargo publish. Only
+              # tolerate that verified outcome; every other failure aborts.
+              if crate_version_published "${crate}" "${version}"; then
+                echo "${crate} ${version} was published concurrently; continuing"
+                continue
+              fi
+              echo "Failed to publish ${crate} ${version}" >&2
+              exit 1
             fi
+            echo "${crate} ${version} published successfully"
+            sleep 15
+          done
+
+      - name: Verify published crates.io packages
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate_version() {
+            cargo pkgid -p "$1" | sed -E 's/.*#([^#]+)$/\1/'
+          }
+          for crate in ${CRATE_PACKAGES}; do
+            version="$(crate_version "${crate}")"
+            curl --fail --silent --show-error --retry 5 --retry-delay 3 \
+              "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null
           done
 
       - name: Login to GHCR
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -168,18 +194,36 @@ jobs:
 
       - name: Build and push GHCR image
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             ${{ steps.ghcr.outputs.image }}:${{ github.ref_name }}
-            ${{ steps.ghcr.outputs.image }}:latest
+
+      - name: Attest release archive provenance
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.sha256
 
       - name: Publish GitHub release assets
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+
+      - name: Promote verified image to latest
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish == 'true')
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${{ steps.ghcr.outputs.image }}:latest" \
+            "${{ steps.ghcr.outputs.image }}:${{ github.ref_name }}"

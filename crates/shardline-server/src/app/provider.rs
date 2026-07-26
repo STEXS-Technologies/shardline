@@ -1062,6 +1062,10 @@ mod provider_tests {
             reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(chunk_size, chunk_size),
             oci_registry_token_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: ProtocolMetrics::default(),
         }
     }

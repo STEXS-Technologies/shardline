@@ -2,11 +2,11 @@
 
 mod support;
 
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
 };
-use std::num::{NonZeroU64, NonZeroUsize};
 
 use reqwest::Client;
 use shardline_server::{ServerConfig, ServerFrontend, serve_with_listener};
@@ -54,7 +54,9 @@ fn create_hub_db(storage: &std::path::Path) {
 }
 
 /// Writes a provider config matching the test token's scope (test-owner/test-repo).
-fn write_provider_config(root: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+fn write_provider_config(
+    root: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let path = root.join("providers.json");
     let bytes = serde_json::to_vec(&serde_json::json!({
         "providers": [
@@ -135,13 +137,8 @@ fn mint_token_with_key(
         "test-repo",
         Some("main"),
     )?;
-    let claims = shardline_protocol::TokenClaims::new(
-        "local",
-        "test-subject",
-        scope,
-        repository,
-        u64::MAX,
-    )?;
+    let claims =
+        shardline_protocol::TokenClaims::new("local", "test-subject", scope, repository, u64::MAX)?;
     Ok(signer.sign(&claims)?)
 }
 
@@ -163,11 +160,7 @@ async fn try_start_hub_server() -> Result<ServerGuard, Box<dyn std::error::Error
     let storage = tempfile::tempdir()?;
     let config_path = write_provider_config(storage.path())?;
     create_hub_db(storage.path());
-    let listener = TcpListener::bind(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        0,
-    ))
-    .await?;
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let addr = listener.local_addr()?;
     let base_url = format!("http://{addr}");
     let config = ServerConfig::new(
@@ -187,14 +180,24 @@ async fn try_start_hub_server() -> Result<ServerGuard, Box<dyn std::error::Error
     let server = tokio::spawn(async move { serve_with_listener(config, listener).await });
     wait_for_health(&base_url).await?;
     let token = mint_token(shardline_protocol::TokenScope::Write)?;
-    Ok(ServerGuard { base_url, token, _storage: storage, server })
+    Ok(ServerGuard {
+        base_url,
+        token,
+        _storage: storage,
+        server,
+    })
 }
 
 async fn start_hub_server_with_signing_key(
     storage: &Path,
     signing_key: &[u8],
-) -> Result<(String, tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>), Box<dyn std::error::Error>>
-{
+) -> Result<
+    (
+        String,
+        tokio::task::JoinHandle<Result<(), shardline_server::ServerError>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     create_hub_db(storage);
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
     let addr = listener.local_addr()?;
@@ -255,7 +258,9 @@ async fn commit_inline_file(
         "{{\"header\":{{\"summary\":\"add {file_path}\"}}}}\n{{\"file\":{{\"path\":\"{file_path}\",\"content\":\"{b64}\"}}}}"
     );
     let resp = client
-        .post(format!("{base_url}/api/{repo_type}/{ns}/{repo}/commit/{rev}"))
+        .post(format!(
+            "{base_url}/api/{repo_type}/{ns}/{repo}/commit/{rev}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-ndjson")
         .body(ndjson)
@@ -280,7 +285,9 @@ async fn commit_inline_file(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn whoami_returns_authenticated_user() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/whoami-v2"))
@@ -296,7 +303,8 @@ async fn whoami_returns_authenticated_user() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn whoami_rejects_missing_token_when_auth_is_configured() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/whoami-v2"))
@@ -316,7 +324,9 @@ async fn whoami_rejects_missing_token_when_auth_is_configured() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_create_model_returns_201() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .post(format!("{base_url}/api/repos/create"))
@@ -329,7 +339,12 @@ async fn repo_create_model_returns_201() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "repo create should return 201: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        201,
+        "repo create should return 201: {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["type"], "model", "repo type mismatch");
     assert_eq!(body["id"], "test-owner/new-model", "repo id mismatch");
@@ -337,7 +352,9 @@ async fn repo_create_model_returns_201() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_create_dataset_returns_201() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .post(format!("{base_url}/api/repos/create"))
@@ -350,14 +367,21 @@ async fn repo_create_dataset_returns_201() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "dataset repo create should return 201: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        201,
+        "dataset repo create should return 201: {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["type"], "dataset");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_create_duplicate_returns_conflict_with_native_huggingface_url() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let payload = serde_json::json!({
         "name": "test-owner/dupe-repo",
@@ -371,7 +395,12 @@ async fn repo_create_duplicate_returns_conflict_with_native_huggingface_url() {
         .send()
         .await
         .unwrap();
-    assert_eq!(first.status(), 201, "first creation should succeed: {}", first.status());
+    assert_eq!(
+        first.status(),
+        201,
+        "first creation should succeed: {}",
+        first.status()
+    );
     let second = client
         .post(format!("{base_url}/api/repos/create"))
         .header("Authorization", format!("Bearer {token}"))
@@ -391,7 +420,8 @@ async fn repo_create_duplicate_returns_conflict_with_native_huggingface_url() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_create_without_auth_returns_401() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
     let resp = client
         .post(format!("{base_url}/api/repos/create"))
@@ -411,12 +441,18 @@ async fn repo_create_without_auth_returns_401() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_list_returns_created_repos() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
 
     // Create two repos
     for name in ["test-owner/list-model", "test-owner/list-dataset"] {
-        let typ = if name.contains("model") { "model" } else { "dataset" };
+        let typ = if name.contains("model") {
+            "model"
+        } else {
+            "dataset"
+        };
         client
             .post(format!("{base_url}/api/repos/create"))
             .header("Authorization", format!("Bearer {token}"))
@@ -435,12 +471,18 @@ async fn repo_list_returns_created_repos() {
     assert_eq!(resp.status(), 200, "repo list failed: {}", resp.status());
     let body: serde_json::Value = resp.json().await.unwrap();
     let repos = body["repos"].as_array().expect("repos array missing");
-    assert!(repos.len() >= 2, "expected at least 2 repos, got {}", repos.len());
+    assert!(
+        repos.len() >= 2,
+        "expected at least 2 repos, got {}",
+        repos.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_list_empty_when_no_repos() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/repos"))
@@ -460,7 +502,9 @@ async fn repo_list_empty_when_no_repos() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_search_finds_matching_repos() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
 
     client
@@ -481,14 +525,18 @@ async fn repo_search_finds_matching_repos() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let repos = body["repos"].as_array().expect("repos array missing");
     assert!(
-        repos.iter().any(|r| r["id"].as_str() == Some("test-owner/alpha-search")),
+        repos
+            .iter()
+            .any(|r| r["id"].as_str() == Some("test-owner/alpha-search")),
         "search should find alpha-search: {body:?}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_search_returns_empty_for_non_match() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
 
     let resp = client
@@ -505,7 +553,9 @@ async fn repo_search_returns_empty_for_non_match() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_search_short_query_returns_400() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/models/search?q=a"))
@@ -522,7 +572,9 @@ async fn repo_search_short_query_returns_400() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_info_returns_model_info() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     let client = Client::new();
 
@@ -540,7 +592,9 @@ async fn repo_info_returns_model_info() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_info_nonexistent_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/models/test-owner/nonexistent"))
@@ -557,34 +611,52 @@ async fn repo_info_nonexistent_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn modelcard_nonexistent_repo_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/no-such-model/modelcard"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/no-such-model/modelcard"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "modelcard on non-existent repo should 404");
+    assert_eq!(
+        resp.status(),
+        404,
+        "modelcard on non-existent repo should 404"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn modelcard_empty_repo_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/modelcard"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "modelcard on empty repo should 404 (no README.md)");
+    assert_eq!(
+        resp.status(),
+        404,
+        "modelcard on empty repo should 404 (no README.md)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn modelcard_with_readme_returns_200() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
 
     // Commit a README.md
@@ -602,14 +674,24 @@ async fn modelcard_with_readme_returns_200() {
 
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/modelcard"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "modelcard with README should return 200: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "modelcard with README should return 200: {}",
+        resp.status()
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("My Model"), "modelcard should contain README content: {body}");
+    assert!(
+        body.contains("My Model"),
+        "modelcard should contain README content: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -618,25 +700,37 @@ async fn modelcard_with_readme_returns_200() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revisions_empty_repo_returns_empty() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     let client = Client::new();
 
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/revisions"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/revisions"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "revisions failed: {}", resp.status());
     let body: serde_json::Value = resp.json().await.unwrap();
-    let revisions = body["revisions"].as_array().expect("revisions array missing");
-    assert_eq!(revisions.len(), 1, "newly created repo should have 1 initial revision");
+    let revisions = body["revisions"]
+        .as_array()
+        .expect("revisions array missing");
+    assert_eq!(
+        revisions.len(),
+        1,
+        "newly created repo should have 1 initial revision"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revisions_after_commit_contains_main() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     commit_inline_file(
         &base_url,
@@ -652,15 +746,23 @@ async fn revisions_after_commit_contains_main() {
 
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/revisions"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/revisions"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let revisions = body["revisions"].as_array().expect("revisions array missing");
-    assert_eq!(revisions.len(), 2, "expected 2 revisions (initial + commit)");
+    let revisions = body["revisions"]
+        .as_array()
+        .expect("revisions array missing");
+    assert_eq!(
+        revisions.len(),
+        2,
+        "expected 2 revisions (initial + commit)"
+    );
     assert_eq!(revisions[0]["ref_name"], "main");
     assert!(
         revisions[0]["sha"].as_str().is_some_and(|s| !s.is_empty()),
@@ -670,15 +772,23 @@ async fn revisions_after_commit_contains_main() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revisions_nonexistent_repo_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/nonexistent/revisions"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/nonexistent/revisions"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "revisions on non-existent repo should 404");
+    assert_eq!(
+        resp.status(),
+        404,
+        "revisions on non-existent repo should 404"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +797,9 @@ async fn revisions_nonexistent_repo_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preupload_returns_file_existence_flags() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     commit_inline_file(
         &base_url,
@@ -721,15 +833,23 @@ async fn preupload_returns_file_existence_flags() {
     let results = body["result"].as_array().expect("result array missing");
     assert_eq!(results.len(), 2);
     // existing.txt should be marked as exists
-    let existing = results.iter().find(|r| r["path"] == "existing.txt").unwrap();
+    let existing = results
+        .iter()
+        .find(|r| r["path"] == "existing.txt")
+        .unwrap();
     assert_eq!(existing["exists"], true, "existing file should be flagged");
-    let new_file = results.iter().find(|r| r["path"] == "new_file.txt").unwrap();
+    let new_file = results
+        .iter()
+        .find(|r| r["path"] == "new_file.txt")
+        .unwrap();
     assert_eq!(new_file["exists"], false, "new file should not exist yet");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preupload_nonexistent_revision_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     let client = Client::new();
     let resp = client
@@ -750,7 +870,9 @@ async fn preupload_nonexistent_revision_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_single_file_returns_200() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
 
     let client = Client::new();
@@ -779,7 +901,9 @@ async fn commit_single_file_returns_200() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_multiple_files() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
 
     let client = Client::new();
@@ -800,12 +924,19 @@ async fn commit_multiple_files() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "multi-file commit failed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "multi-file commit failed: {}",
+        resp.status()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_missing_header_returns_error() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
 
     let client = Client::new();
@@ -831,7 +962,9 @@ async fn commit_missing_header_returns_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_delete_file() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     // First commit creates a file
     commit_inline_file(
@@ -859,7 +992,12 @@ async fn commit_delete_file() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "delete commit failed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "delete commit failed: {}",
+        resp.status()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -868,7 +1006,9 @@ async fn commit_delete_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tree_root_after_commit_lists_files() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     commit_inline_file(
         &base_url,
@@ -894,12 +1034,17 @@ async fn tree_root_after_commit_lists_files() {
     assert_eq!(resp.status(), 200, "tree failed: {}", resp.status());
     let body: serde_json::Value = resp.json().await.unwrap();
     let entries = body.as_array().expect("tree entries should be an array");
-    assert!(entries.iter().any(|e| e["path"] == "README.md"), "tree should include README.md: {body:?}");
+    assert!(
+        entries.iter().any(|e| e["path"] == "README.md"),
+        "tree should include README.md: {body:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tree_subdirectory() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     commit_inline_file(
         &base_url,
@@ -942,7 +1087,9 @@ async fn tree_subdirectory() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tree_nonexistent_revision_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     let client = Client::new();
     let resp = client
@@ -962,7 +1109,8 @@ async fn tree_nonexistent_revision_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_api_rejects_request_without_auth() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/repos"))
@@ -974,7 +1122,8 @@ async fn hub_api_rejects_request_without_auth() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_api_rejects_expired_token() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let expired = mint_expired_token(shardline_protocol::TokenScope::Read).unwrap();
     let client = Client::new();
     let resp = client
@@ -983,12 +1132,17 @@ async fn hub_api_rejects_expired_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "expired token should be rejected with 401");
+    assert_eq!(
+        resp.status(),
+        401,
+        "expired token should be rejected with 401"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_api_rejects_wrong_scope_token() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     // Read token should not be able to create repos (requires Write scope).
     let read_token = mint_token(shardline_protocol::TokenScope::Read).unwrap();
     let client = Client::new();
@@ -999,12 +1153,17 @@ async fn hub_api_rejects_wrong_scope_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403, "read-only token should get 403 on write endpoint");
+    assert_eq!(
+        resp.status(),
+        403,
+        "read-only token should get 403 on write endpoint"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_api_rejects_malformed_bearer() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/repos"))
@@ -1017,7 +1176,8 @@ async fn hub_api_rejects_malformed_bearer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hub_api_rejects_token_signed_with_wrong_key() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let bad_token = mint_wrong_key_token(shardline_protocol::TokenScope::Read).unwrap();
     let client = Client::new();
     let resp = client
@@ -1035,8 +1195,8 @@ async fn hub_signing_key_rotation_revokes_old_tokens_without_losing_metadata() {
     const NEW_KEY: &[u8] = b"new-test-signing-key-32-bytes-long!!";
 
     let storage = tempfile::tempdir().unwrap();
-    let old_write_token = mint_token_with_key(OLD_KEY, shardline_protocol::TokenScope::Write)
-        .unwrap();
+    let old_write_token =
+        mint_token_with_key(OLD_KEY, shardline_protocol::TokenScope::Write).unwrap();
     let (old_base_url, old_server) = start_hub_server_with_signing_key(storage.path(), OLD_KEY)
         .await
         .unwrap();
@@ -1058,8 +1218,8 @@ async fn hub_signing_key_rotation_revokes_old_tokens_without_losing_metadata() {
     old_server.abort();
     let _ = old_server.await;
 
-    let new_read_token = mint_token_with_key(NEW_KEY, shardline_protocol::TokenScope::Read)
-        .unwrap();
+    let new_read_token =
+        mint_token_with_key(NEW_KEY, shardline_protocol::TokenScope::Read).unwrap();
     let (new_base_url, new_server) = start_hub_server_with_signing_key(storage.path(), NEW_KEY)
         .await
         .unwrap();
@@ -1070,7 +1230,11 @@ async fn hub_signing_key_rotation_revokes_old_tokens_without_losing_metadata() {
         .send()
         .await
         .unwrap();
-    assert_eq!(stale.status(), 401, "rotated signing key must revoke old tokens");
+    assert_eq!(
+        stale.status(),
+        401,
+        "rotated signing key must revoke old tokens"
+    );
 
     let retained = client
         .get(format!("{new_base_url}/api/repos"))
@@ -1095,7 +1259,9 @@ async fn hub_signing_key_rotation_revokes_old_tokens_without_losing_metadata() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collections_create_not_implemented_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .post(format!("{base_url}/api/collections/my-collection"))
@@ -1104,7 +1270,11 @@ async fn collections_create_not_implemented_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "collections endpoint not implemented yet");
+    assert_eq!(
+        resp.status(),
+        404,
+        "collections endpoint not implemented yet"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1283,9 @@ async fn collections_create_not_implemented_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collections_list_not_implemented_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/collections"))
@@ -1121,7 +1293,11 @@ async fn collections_list_not_implemented_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "collections list endpoint not implemented yet");
+    assert_eq!(
+        resp.status(),
+        404,
+        "collections list endpoint not implemented yet"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,7 +1306,9 @@ async fn collections_list_not_implemented_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_profile_not_implemented_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .get(format!("{base_url}/api/user/profile"))
@@ -1138,7 +1316,11 @@ async fn user_profile_not_implemented_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "user profile endpoint not implemented yet");
+    assert_eq!(
+        resp.status(),
+        404,
+        "user profile endpoint not implemented yet"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,7 +1366,12 @@ fn build_receive_pack_request_for_ref(
     let tree_sha = tree.sha1();
 
     // 3. Build the commit.
-    let commit = create_commit_object(&tree_sha, None, "Test User <test@example.com>", commit_message);
+    let commit = create_commit_object(
+        &tree_sha,
+        None,
+        "Test User <test@example.com>",
+        commit_message,
+    );
     let commit_sha = commit.sha1();
     let commit_sha_hex = hex::encode(commit_sha);
 
@@ -1201,7 +1388,11 @@ fn build_receive_pack_request_for_ref(
     //
     let ref_line = format!("{old_sha_hex} {commit_sha_hex} {ref_name}\n");
     let mut body = Vec::new();
-    body.extend_from_slice(pktline::encode_line(&ref_line).expect("pkt-line too large").as_bytes());
+    body.extend_from_slice(
+        pktline::encode_line(&ref_line)
+            .expect("pkt-line too large")
+            .as_bytes(),
+    );
     body.extend_from_slice(pktline::FLUSH.as_bytes());
     body.extend_from_slice(&pack_data);
 
@@ -1210,7 +1401,9 @@ fn build_receive_pack_request_for_ref(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_push_clone_roundtrip_via_smart_http() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
 
     // 1. Create a model repo.
@@ -1218,7 +1411,9 @@ async fn git_push_clone_roundtrip_via_smart_http() {
 
     // 2. Verify the repo has initial refs via info/refs (repo creation seeds an initial revision).
     let resp = client
-        .get(format!("{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"))
+        .get(format!(
+            "{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -1232,7 +1427,9 @@ async fn git_push_clone_roundtrip_via_smart_http() {
 
     // 3. Test upload-pack on empty repo — should succeed with an empty pack.
     let upload_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-upload-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
         .body(Vec::<u8>::new())
@@ -1256,7 +1453,9 @@ async fn git_push_clone_roundtrip_via_smart_http() {
     );
 
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_body)
@@ -1280,7 +1479,9 @@ async fn git_push_clone_roundtrip_via_smart_http() {
 
     // 5. Verify info/refs now advertises the pushed ref.
     let resp = client
-        .get(format!("{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"))
+        .get(format!(
+            "{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -1298,7 +1499,9 @@ async fn git_push_clone_roundtrip_via_smart_http() {
 
     // 6. Upload-pack should now return the pushed commit's objects.
     let upload_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-upload-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
         .body(Vec::<u8>::new())
@@ -1423,7 +1626,8 @@ async fn git_smart_http_ref_deletion_removes_branch_and_keeps_commit_available()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_receive_pack_rejects_unauthorized() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
 
     // Create a model repo first.
@@ -1432,7 +1636,9 @@ async fn git_receive_pack_rejects_unauthorized() {
 
     // Try push without auth — should fail.
     let resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(Vec::<u8>::new())
         .send()
@@ -1443,7 +1649,8 @@ async fn git_receive_pack_rejects_unauthorized() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_receive_pack_rejects_read_only_token() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
 
     // Create a model repo with write token.
@@ -1453,7 +1660,9 @@ async fn git_receive_pack_rejects_read_only_token() {
     // Try push with a read-only token — should fail.
     let read_token = mint_token(shardline_protocol::TokenScope::Read).unwrap();
     let resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {read_token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(Vec::<u8>::new())
@@ -1473,7 +1682,9 @@ async fn git_receive_pack_rejects_read_only_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_delete_removes_repo() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     create_model_repo(&base_url, &token).await;
     let client = Client::new();
 
@@ -1484,7 +1695,12 @@ async fn repo_delete_removes_repo() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204, "repo delete should return 204: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        204,
+        "repo delete should return 204: {}",
+        resp.status()
+    );
 
     // Verify GET returns 404.
     let resp = client
@@ -1493,21 +1709,35 @@ async fn repo_delete_removes_repo() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "GET after delete should return 404: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        404,
+        "GET after delete should return 404: {}",
+        resp.status()
+    );
 
     // Verify revisions endpoint returns 404.
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/revisions"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/revisions"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "revisions after delete should return 404: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        404,
+        "revisions after delete should return 404: {}",
+        resp.status()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_delete_nonexistent_returns_404() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
     let resp = client
         .delete(format!("{base_url}/api/models/test-owner/nonexistent"))
@@ -1515,12 +1745,17 @@ async fn repo_delete_nonexistent_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "delete nonexistent repo should return 404");
+    assert_eq!(
+        resp.status(),
+        404,
+        "delete nonexistent repo should return 404"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_delete_requires_auth() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
     let resp = client
         .delete(format!("{base_url}/api/models/test-owner/test-model"))
@@ -1532,7 +1767,8 @@ async fn repo_delete_requires_auth() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repo_delete_requires_write_scope() {
-    let srv = start_hub_server().await; let base_url = srv.base_url();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
     let client = Client::new();
 
     // Create the repo with a write token.
@@ -1547,12 +1783,18 @@ async fn repo_delete_requires_write_scope() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403, "delete with read-only token should be 403");
+    assert_eq!(
+        resp.status(),
+        403,
+        "delete with read-only token should be 403"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn git_info_refs_discover_refs_for_clone() {
-    let srv = start_hub_server().await; let base_url = srv.base_url(); let token = srv.token();
+    let srv = start_hub_server().await;
+    let base_url = srv.base_url();
+    let token = srv.token();
     let client = Client::new();
 
     // Create a model repo and push a commit.
@@ -1565,7 +1807,9 @@ async fn git_info_refs_discover_refs_for_clone() {
         "Add model weights",
     );
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_body)
@@ -1576,12 +1820,19 @@ async fn git_info_refs_discover_refs_for_clone() {
 
     // Test info/refs discovery for upload-pack (clone).
     let resp = client
-        .get(format!("{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"))
+        .get(format!(
+            "{base_url}/models/test-owner/test-model/info/refs?service=git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "info/refs should return 200: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "info/refs should return 200: {}",
+        resp.status()
+    );
     let body = resp.text().await.unwrap();
     assert!(
         body.contains("git-upload-pack"),
@@ -1614,17 +1865,24 @@ fn build_receive_pack_request_with_ref(
     let blob_sha = blob.sha1();
     let tree = create_tree_object(&[(0o100644u32, file_path, &blob_sha)]);
     let tree_sha = tree.sha1();
-    let commit =
-        create_commit_object(&tree_sha, None, "Test User <test@example.com>", commit_message);
+    let commit = create_commit_object(
+        &tree_sha,
+        None,
+        "Test User <test@example.com>",
+        commit_message,
+    );
     let commit_sha = commit.sha1();
     let commit_sha_hex = hex::encode(commit_sha);
 
-    let pack_data =
-        generate_pack(&[blob, tree, commit]).expect("pack generation should not fail");
+    let pack_data = generate_pack(&[blob, tree, commit]).expect("pack generation should not fail");
 
     let ref_line = format!("{old_sha_hex} {commit_sha_hex} {refname}\n");
     let mut body = Vec::new();
-    body.extend_from_slice(pktline::encode_line(&ref_line).expect("pkt-line too large").as_bytes());
+    body.extend_from_slice(
+        pktline::encode_line(&ref_line)
+            .expect("pkt-line too large")
+            .as_bytes(),
+    );
     body.extend_from_slice(pktline::FLUSH.as_bytes());
     body.extend_from_slice(&pack_data);
 
@@ -1649,7 +1907,9 @@ async fn git_receive_pack_rejects_dotdot_refname() {
     );
 
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_body)
@@ -1701,7 +1961,9 @@ async fn git_receive_pack_rejects_space_in_refname() {
     );
 
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_body)
@@ -1754,13 +2016,19 @@ async fn git_receive_pack_rejects_malformed_pack() {
     let fake_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     let ref_line = format!("{null_sha} {fake_sha} refs/heads/main\n");
     let mut body = Vec::new();
-    body.extend_from_slice(pktline::encode_line(&ref_line).expect("pkt-line too large").as_bytes());
+    body.extend_from_slice(
+        pktline::encode_line(&ref_line)
+            .expect("pkt-line too large")
+            .as_bytes(),
+    );
     body.extend_from_slice(pktline::FLUSH.as_bytes());
     // Append garbage pack data.
     body.extend_from_slice(b"NOT-A-VALID-PACK-FILE-GARBAGE");
 
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(body)
@@ -1795,7 +2063,10 @@ async fn hub_commit_rejects_oversized_inline_file() {
     // Build base64 for 10 MiB + 1 byte (MAX_INLINE_FILE_BYTES is 10 MiB).
     // This is expensive but necessary for correctness.
     let oversized_content = vec![0xABu8; 10 * 1024 * 1024 + 1];
-    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &oversized_content);
+    let b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &oversized_content,
+    );
     let ndjson = format!(
         "{{\"header\":{{\"summary\":\"oversized commit\"}}}}\n{{\"file\":{{\"path\":\"big.bin\",\"content\":\"{b64}\"}}}}"
     );
@@ -1840,15 +2111,13 @@ async fn git_clone_after_push_returns_correct_content() {
     // Push a commit with known file content.
     let file_content = b"Hello from Shardline e2e test!\n";
     let null_sha = "0000000000000000000000000000000000000000";
-    let (push_body, commit_sha) = build_receive_pack_request(
-        null_sha,
-        "greeting.txt",
-        file_content,
-        "Add greeting file",
-    );
+    let (push_body, commit_sha) =
+        build_receive_pack_request(null_sha, "greeting.txt", file_content, "Add greeting file");
 
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_body)
@@ -1859,7 +2128,9 @@ async fn git_clone_after_push_returns_correct_content() {
 
     // Fetch via upload-pack and verify the pack contains the file content.
     let upload_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-upload-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
         .body(Vec::<u8>::new())
@@ -1872,17 +2143,15 @@ async fn git_clone_after_push_returns_correct_content() {
         upload_resp.status()
     );
     let upload_response = upload_resp.bytes().await.unwrap();
-    let (pack_data, _messages) =
-        shardline_hub_api::git::pktline::decode_sideband(&upload_response);
+    let (pack_data, _messages) = shardline_hub_api::git::pktline::decode_sideband(&upload_response);
     assert!(
         !pack_data.is_empty(),
         "pack data should not be empty after push"
     );
     // Verify it's a valid pack file with objects.
     assert_eq!(&pack_data[0..4], b"PACK", "should be a valid pack file");
-    let num_objects = u32::from_be_bytes([
-        pack_data[8], pack_data[9], pack_data[10], pack_data[11],
-    ]);
+    let num_objects =
+        u32::from_be_bytes([pack_data[8], pack_data[9], pack_data[10], pack_data[11]]);
     assert!(
         num_objects >= 3,
         "pack should contain at least 3 objects (blob+tree+commit), got {num_objects}"
@@ -1924,9 +2193,7 @@ async fn hub_commit_multi_file_single_request() {
     create_model_repo(&base_url, &token).await;
 
     // Build NDJSON with 5 files in a subdirectory.
-    let mut ndjson = String::from(
-        "{\"header\":{\"summary\":\"five files\"}}\n",
-    );
+    let mut ndjson = String::from("{\"header\":{\"summary\":\"five files\"}}\n");
     for i in 0..5 {
         let path = format!("data/file_{i}.txt");
         let content = format!("content of file {i}");
@@ -1950,7 +2217,12 @@ async fn hub_commit_multi_file_single_request() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "multi-file commit should succeed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "multi-file commit should succeed: {}",
+        resp.status()
+    );
 
     // Verify all 5 files appear in the tree (via subdirectory listing).
     let resp = client
@@ -2016,8 +2288,7 @@ async fn hub_commit_delete_removes_from_tree() {
 
     // Delete the file in a second commit.
     let client = Client::new();
-    let ndjson =
-        "{\"header\":{\"summary\":\"delete file\"}}\n{\"deletedEntry\":{\"path\":\"data/ephemeral.txt\"}}";
+    let ndjson = "{\"header\":{\"summary\":\"delete file\"}}\n{\"deletedEntry\":{\"path\":\"data/ephemeral.txt\"}}";
     let resp = client
         .post(format!(
             "{base_url}/api/models/test-owner/test-model/commit/main"
@@ -2028,7 +2299,12 @@ async fn hub_commit_delete_removes_from_tree() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "delete commit should succeed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "delete commit should succeed: {}",
+        resp.status()
+    );
 
     // Verify the file is gone from the new tree.
     let resp = client
@@ -2075,7 +2351,9 @@ async fn hub_force_push_rejected_on_existing_branch() {
         "Commit A",
     );
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(objects_a)
@@ -2094,8 +2372,12 @@ async fn hub_force_push_rejected_on_existing_branch() {
     let blob_b_sha = blob_b.sha1();
     let tree_b = create_tree_object(&[(0o100644u32, "file_b.txt", &blob_b_sha)]);
     let tree_b_sha = tree_b.sha1();
-    let commit_b =
-        create_commit_object(&tree_b_sha, None, "Test User <test@example.com>", "Force push B");
+    let commit_b = create_commit_object(
+        &tree_b_sha,
+        None,
+        "Test User <test@example.com>",
+        "Force push B",
+    );
     let commit_b_sha = commit_b.sha1();
     let pack_b = generate_pack(&[blob_b, tree_b, commit_b]).expect("pack generation");
 
@@ -2112,7 +2394,9 @@ async fn hub_force_push_rejected_on_existing_branch() {
     force_body.extend_from_slice(&pack_b);
 
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(force_body)
@@ -2149,7 +2433,9 @@ async fn hub_tag_push_appears_in_revisions() {
         "Prepare release",
     );
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_body)
@@ -2169,7 +2455,9 @@ async fn hub_tag_push_appears_in_revisions() {
     );
 
     let tag_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(tag_body)
@@ -2189,14 +2477,18 @@ async fn hub_tag_push_appears_in_revisions() {
 
     // Verify revisions include the tag.
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/revisions"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/revisions"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let revisions = body["revisions"].as_array().expect("revisions array missing");
+    let revisions = body["revisions"]
+        .as_array()
+        .expect("revisions array missing");
     assert!(
         revisions
             .iter()
@@ -2218,7 +2510,9 @@ async fn git_upload_pack_empty_repo() {
 
     let client = Client::new();
     let upload_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-upload-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
         .body(Vec::<u8>::new())
@@ -2234,12 +2528,10 @@ async fn git_upload_pack_empty_repo() {
     // For an empty repo (no commits beyond the seed), the upload-pack should
     // succeed. The pack may contain the seed commit's objects (typically 1-2).
     if !upload_response.is_empty() {
-        let (pack_data, _) =
-            shardline_hub_api::git::pktline::decode_sideband(&upload_response);
+        let (pack_data, _) = shardline_hub_api::git::pktline::decode_sideband(&upload_response);
         if pack_data.len() >= 12 && &pack_data[0..4] == b"PACK" {
-            let num_objects = u32::from_be_bytes([
-                pack_data[8], pack_data[9], pack_data[10], pack_data[11],
-            ]);
+            let num_objects =
+                u32::from_be_bytes([pack_data[8], pack_data[9], pack_data[10], pack_data[11]]);
             // Empty repo seed objects should be minimal (tree + commit).
             assert!(
                 num_objects <= 5,
@@ -2271,7 +2563,9 @@ async fn git_receive_pack_multiple_refs() {
     let mut all_objects = Vec::new();
     let mut ref_lines = Vec::new();
 
-    for (i, refname) in ["refs/heads/main", "refs/heads/dev", "refs/heads/feat"].into_iter().enumerate()
+    for (i, refname) in ["refs/heads/main", "refs/heads/dev", "refs/heads/feat"]
+        .into_iter()
+        .enumerate()
     {
         let content = format!("File for ref {i}");
         let blob = create_blob_object(content.as_bytes());
@@ -2296,14 +2590,20 @@ async fn git_receive_pack_multiple_refs() {
     let pack_data = generate_pack(&all_objects).expect("pack generation");
     let mut body = Vec::new();
     for line in &ref_lines {
-        body.extend_from_slice(pktline::encode_line(line).expect("pkt-line too large").as_bytes());
+        body.extend_from_slice(
+            pktline::encode_line(line)
+                .expect("pkt-line too large")
+                .as_bytes(),
+        );
     }
     body.extend_from_slice(pktline::FLUSH.as_bytes());
     body.extend_from_slice(&pack_data);
 
     let client = Client::new();
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(body)
@@ -2339,9 +2639,18 @@ async fn git_receive_pack_multiple_refs() {
         .await
         .unwrap();
     let body = resp.text().await.unwrap();
-    assert!(body.contains("refs/heads/main"), "info/refs should have main: {body:?}");
-    assert!(body.contains("refs/heads/dev"), "info/refs should have dev: {body:?}");
-    assert!(body.contains("refs/heads/feat"), "info/refs should have feat: {body:?}");
+    assert!(
+        body.contains("refs/heads/main"),
+        "info/refs should have main: {body:?}"
+    );
+    assert!(
+        body.contains("refs/heads/dev"),
+        "info/refs should have dev: {body:?}"
+    );
+    assert!(
+        body.contains("refs/heads/feat"),
+        "info/refs should have feat: {body:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2370,7 +2679,9 @@ async fn hub_search_after_delete_returns_empty() {
 
     // Verify search finds it.
     let resp = client
-        .get(format!("{base_url}/api/models/search?q=test-owner/zzz-delete"))
+        .get(format!(
+            "{base_url}/api/models/search?q=test-owner/zzz-delete"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -2379,7 +2690,9 @@ async fn hub_search_after_delete_returns_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let repos = body["repos"].as_array().unwrap();
     assert!(
-        repos.iter().any(|r| r["id"].as_str() == Some("test-owner/zzz-delete-me")),
+        repos
+            .iter()
+            .any(|r| r["id"].as_str() == Some("test-owner/zzz-delete-me")),
         "search should find the repo before deletion: {body:?}"
     );
 
@@ -2394,7 +2707,9 @@ async fn hub_search_after_delete_returns_empty() {
 
     // Search again — should be empty.
     let resp = client
-        .get(format!("{base_url}/api/models/search?q=test-owner/zzz-delete"))
+        .get(format!(
+            "{base_url}/api/models/search?q=test-owner/zzz-delete"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -2403,7 +2718,9 @@ async fn hub_search_after_delete_returns_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let repos = body["repos"].as_array().unwrap();
     assert!(
-        !repos.iter().any(|r| r["id"].as_str() == Some("test-owner/zzz-delete-me")),
+        !repos
+            .iter()
+            .any(|r| r["id"].as_str() == Some("test-owner/zzz-delete-me")),
         "search should not find deleted repo: {body:?}"
     );
 }
@@ -2435,16 +2752,32 @@ async fn hub_modelcard_after_readme_commit() {
 
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/modelcard"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/modelcard"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "modelcard should return 200: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "modelcard should return 200: {}",
+        resp.status()
+    );
     let body = resp.text().await.unwrap();
-    assert!(body.contains("My Great Model"), "modelcard should contain model name: {body}");
-    assert!(body.contains("Vision"), "modelcard should contain capabilities: {body}");
-    assert!(body.contains("Language"), "modelcard should contain all capabilities: {body}");
+    assert!(
+        body.contains("My Great Model"),
+        "modelcard should contain model name: {body}"
+    );
+    assert!(
+        body.contains("Vision"),
+        "modelcard should contain capabilities: {body}"
+    );
+    assert!(
+        body.contains("Language"),
+        "modelcard should contain all capabilities: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2473,7 +2806,10 @@ async fn hub_repo_info_includes_hf_fields() {
     assert_eq!(body["type"], "model");
     assert_eq!(body["private"], false);
     assert!(body["url"].as_str().is_some(), "url should be present");
-    assert!(body["default_branch"].as_str().is_some(), "default_branch should be present");
+    assert!(
+        body["default_branch"].as_str().is_some(),
+        "default_branch should be present"
+    );
 
     // Verify new HF-compatible fields
     let tags = body["tags"].as_array().expect("tags should be an array");
@@ -2597,10 +2933,18 @@ async fn hub_tree_supports_recursive() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let entries = body.as_array().expect("tree should be an array");
     // Should have: directory "b" and file "shallow.txt"
-    assert_eq!(entries.len(), 2, "non-recursive should show 2 entries (dir b + file)");
-    let has_dir_b = entries.iter().any(|e| e["path"] == "b" && e["type"] == "directory");
+    assert_eq!(
+        entries.len(),
+        2,
+        "non-recursive should show 2 entries (dir b + file)"
+    );
+    let has_dir_b = entries
+        .iter()
+        .any(|e| e["path"] == "b" && e["type"] == "directory");
     assert!(has_dir_b, "should have directory 'b': {body:?}");
-    let has_shallow = entries.iter().any(|e| e["path"] == "shallow.txt" && e["type"] == "file");
+    let has_shallow = entries
+        .iter()
+        .any(|e| e["path"] == "shallow.txt" && e["type"] == "file");
     assert!(has_shallow, "should have file 'shallow.txt': {body:?}");
 
     // With recursive, listing "a" should show "b/deep.txt" and "shallow.txt"
@@ -2622,7 +2966,10 @@ async fn hub_tree_supports_recursive() {
     let has_shallow = entries
         .iter()
         .any(|e| e["path"].as_str() == Some("shallow.txt"));
-    assert!(has_shallow, "recursive should include 'shallow.txt': {body:?}");
+    assert!(
+        has_shallow,
+        "recursive should include 'shallow.txt': {body:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2769,17 +3116,29 @@ async fn hub_dataset_parquet_returns_file_list() {
 
     let client = Client::new();
     let resp = client
-        .get(format!("{base_url}/api/datasets/test-owner/test-dataset/parquet"))
+        .get(format!(
+            "{base_url}/api/datasets/test-owner/test-dataset/parquet"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "parquet endpoint failed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        200,
+        "parquet endpoint failed: {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     let files = body["files"].as_array().expect("files array missing");
-    assert!(!files.is_empty(), "parquet files should not be empty after committing jsonl");
     assert!(
-        files.iter().any(|f| f["path"].as_str() == Some("default/train/data.jsonl")),
+        !files.is_empty(),
+        "parquet files should not be empty after committing jsonl"
+    );
+    assert!(
+        files
+            .iter()
+            .any(|f| f["path"].as_str() == Some("default/train/data.jsonl")),
         "files should include committed jsonl: {body:?}"
     );
 }
@@ -2858,7 +3217,10 @@ async fn hub_dataset_viewer_returns_paginated_rows() {
     assert_eq!(rows.len(), 5, "first page should have 5 rows");
     // num_rows_total may be absent (null) if not computed; just verify the
     // core fields are present.
-    assert!(body.get("columns").is_some(), "response should include columns");
+    assert!(
+        body.get("columns").is_some(),
+        "response should include columns"
+    );
 
     // Second page: offset=5, length=5
     let resp = client
@@ -2896,7 +3258,9 @@ async fn hub_webhook_create_list_delete_roundtrip() {
 
     // POST webhook → 201
     let resp = client
-        .post(format!("{base_url}/api/models/test-owner/test-model/webhooks"))
+        .post(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "url": "https://example.com/hook",
@@ -2905,15 +3269,25 @@ async fn hub_webhook_create_list_delete_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "webhook create failed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        201,
+        "webhook create failed: {}",
+        resp.status()
+    );
     let wh: serde_json::Value = resp.json().await.unwrap();
     let wh_id = wh["id"].as_str().expect("webhook id missing");
     assert_eq!(wh["url"].as_str(), Some("https://example.com/hook"));
-    assert!(wh["active"].as_bool().unwrap_or(false), "webhook should be active");
+    assert!(
+        wh["active"].as_bool().unwrap_or(false),
+        "webhook should be active"
+    );
 
     // GET webhooks list → verify present
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/webhooks"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -2926,16 +3300,25 @@ async fn hub_webhook_create_list_delete_roundtrip() {
 
     // DELETE webhook → 204
     let resp = client
-        .delete(format!("{base_url}/api/models/test-owner/test-model/webhooks/{wh_id}"))
+        .delete(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks/{wh_id}"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204, "webhook delete failed: {}", resp.status());
+    assert_eq!(
+        resp.status(),
+        204,
+        "webhook delete failed: {}",
+        resp.status()
+    );
 
     // GET webhooks list → verify gone
     let resp = client
-        .get(format!("{base_url}/api/models/test-owner/test-model/webhooks"))
+        .get(format!(
+            "{base_url}/api/models/test-owner/test-model/webhooks"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -2980,9 +3363,21 @@ async fn hub_resolve_returns_inline_file_content() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "resolve endpoint failed: {}", resp.status());
-    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok());
-    assert_eq!(ct, Some("application/octet-stream"), "resolve should return octet-stream");
+    assert_eq!(
+        resp.status(),
+        200,
+        "resolve endpoint failed: {}",
+        resp.status()
+    );
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok());
+    assert_eq!(
+        ct,
+        Some("application/octet-stream"),
+        "resolve should return octet-stream"
+    );
     let body = resp.bytes().await.unwrap();
     assert_eq!(body.as_ref(), file_content, "resolved content mismatch");
 }
@@ -3004,15 +3399,13 @@ async fn git_smart_http_works_with_valid_token() {
     // 2. Push a commit via git-receive-pack with a valid write token.
     let file_content = b"token-gated content\nThis verifies auth-gated push works.\n";
     let null_sha = "0000000000000000000000000000000000000000";
-    let (push_body, commit_sha) = build_receive_pack_request(
-        null_sha,
-        "auth_test.txt",
-        file_content,
-        "Auth-gated push",
-    );
+    let (push_body, commit_sha) =
+        build_receive_pack_request(null_sha, "auth_test.txt", file_content, "Auth-gated push");
 
     let push_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_body)
@@ -3036,7 +3429,9 @@ async fn git_smart_http_works_with_valid_token() {
 
     // 3. Clone via git-upload-pack with the same token.
     let upload_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-upload-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-upload-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-upload-pack-request")
         .body(Vec::<u8>::new())
@@ -3051,16 +3446,14 @@ async fn git_smart_http_works_with_valid_token() {
 
     // 4. Verify the upload-pack response contains pack data with our objects.
     let upload_response = upload_resp.bytes().await.unwrap();
-    let (pack_data, _messages) =
-        shardline_hub_api::git::pktline::decode_sideband(&upload_response);
+    let (pack_data, _messages) = shardline_hub_api::git::pktline::decode_sideband(&upload_response);
     assert!(
         !pack_data.is_empty(),
         "pack data should not be empty after push"
     );
     assert_eq!(&pack_data[0..4], b"PACK", "should be a valid pack file");
-    let num_objects = u32::from_be_bytes([
-        pack_data[8], pack_data[9], pack_data[10], pack_data[11],
-    ]);
+    let num_objects =
+        u32::from_be_bytes([pack_data[8], pack_data[9], pack_data[10], pack_data[11]]);
     assert!(
         num_objects >= 3,
         "pack should contain at least 3 objects (blob+tree+commit), got {num_objects}"
@@ -3103,15 +3496,13 @@ async fn git_receive_pack_rejects_non_fast_forward() {
 
     // 2. Push commit A to main.
     let null_sha = "0000000000000000000000000000000000000000";
-    let (push_a_body, commit_a_sha) = build_receive_pack_request(
-        null_sha,
-        "file_a.txt",
-        b"content A",
-        "Commit A",
-    );
+    let (push_a_body, commit_a_sha) =
+        build_receive_pack_request(null_sha, "file_a.txt", b"content A", "Commit A");
 
     let push_a_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_a_body)
@@ -3141,12 +3532,8 @@ async fn git_receive_pack_rejects_non_fast_forward() {
         let blob_sha = blob.sha1();
         let tree = create_tree_object(&[(0o100644u32, "file_b.txt", &blob_sha)]);
         let tree_sha = tree.sha1();
-        let commit = create_commit_object(
-            &tree_sha,
-            None,
-            "Test User <test@example.com>",
-            "Commit B",
-        );
+        let commit =
+            create_commit_object(&tree_sha, None, "Test User <test@example.com>", "Commit B");
         let commit_sha = commit.sha1();
         let commit_sha_hex = hex::encode(commit_sha);
 
@@ -3168,7 +3555,9 @@ async fn git_receive_pack_rejects_non_fast_forward() {
     };
 
     let push_b_resp = client
-        .post(format!("{base_url}/models/test-owner/test-model/git-receive-pack"))
+        .post(format!(
+            "{base_url}/models/test-owner/test-model/git-receive-pack"
+        ))
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/x-git-receive-pack-request")
         .body(push_b_body)

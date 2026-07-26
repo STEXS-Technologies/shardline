@@ -216,3 +216,12 @@ script preserves Kubernetes diagnostics in a temporary directory (or in
 `SHARDLINE_KIND_LOG_DIR` when set) before deleting the cluster. Set
 `SHARDLINE_KIND_CLUSTER_NAME` only when a predictable, still-disposable name is required; the
 script refuses to reuse an existing cluster.
+
+## Runtime hardening
+
+The production-scaled manifests are designed for the Kubernetes `restricted`
+Pod Security Standard: containers run as non-root, drop every Linux capability,
+disallow privilege escalation, use a read-only root filesystem, and select the
+node's `RuntimeDefault` seccomp profile. Keep an equivalent AppArmor profile
+enabled where the cluster supports it; clusters without AppArmor support must
+enforce an equivalent runtime policy through their admission controller.

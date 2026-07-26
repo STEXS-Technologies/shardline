@@ -1,7 +1,8 @@
 use std::{io::SeekFrom, pin::Pin};
 
 use axum::body::Bytes;
-use futures_util::{Stream, TryStreamExt, stream};
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
+use shardline_index::FileRecord;
 use shardline_protocol::ByteRange;
 use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore};
 use tokio::{
@@ -10,13 +11,69 @@ use tokio::{
 };
 
 use crate::{
-    ServerError, error::ObjectStoreError, object_store::ServerObjectStore,
-    object_store::run_before_local_object_read_hook,
+    ServerError, chunk_store::chunk_object_key, error::ObjectStoreError,
+    object_store::ServerObjectStore, object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
+
+/// Streams a chunk-backed file record without materializing the complete object.
+pub(crate) async fn file_record_byte_stream(
+    object_store: ServerObjectStore,
+    record: FileRecord,
+    range: Option<ByteRange>,
+) -> Result<ServerByteStream, ServerError> {
+    record.validate_reconstruction_plan()?;
+    if record.total_bytes == 0 {
+        return Ok(Box::pin(stream::empty()));
+    }
+
+    let requested_start = range.map_or(0, |value| value.start());
+    let requested_end = range.map_or_else(
+        || {
+            record
+                .total_bytes
+                .checked_sub(1)
+                .ok_or(ServerError::Overflow)
+        },
+        |value| Ok(value.end_inclusive()),
+    )?;
+    if requested_end >= record.total_bytes {
+        return Err(ServerError::RangeNotSatisfiable);
+    }
+
+    let mut terms = Vec::new();
+    for chunk in record.chunks {
+        let chunk_end = chunk
+            .offset
+            .checked_add(chunk.length)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or(ServerError::Overflow)?;
+        let start = requested_start.max(chunk.offset);
+        let end = requested_end.min(chunk_end);
+        if start > end {
+            continue;
+        }
+        let relative_start = start
+            .checked_sub(chunk.offset)
+            .ok_or(ServerError::Overflow)?;
+        let relative_end = end.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?;
+        terms.push((
+            chunk_object_key(&chunk.hash)?,
+            chunk.length,
+            ByteRange::new(relative_start, relative_end)
+                .map_err(|_error| ServerError::RangeNotSatisfiable)?,
+        ));
+    }
+
+    let streams = stream::iter(terms).then(move |(key, length, term_range)| {
+        let object_store = object_store.clone();
+        async move { object_byte_range_stream(object_store, key, length, term_range).await }
+    });
+    Ok(Box::pin(streams.try_flatten()))
+}
 
 struct LocalObjectByteStreamState {
     file: File,

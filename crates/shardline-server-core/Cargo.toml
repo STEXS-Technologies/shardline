@@ -10,6 +10,7 @@ readme = "README.md"
 description = "Shared core types for the Shardline server ecosystem."
 
 [dependencies]
+async-trait.workspace = true
 blake3.workspace = true
 hex.workspace = true
 serde_json.workspace = true

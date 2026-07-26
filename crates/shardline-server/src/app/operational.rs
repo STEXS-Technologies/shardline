@@ -16,6 +16,7 @@ use shardline_protocol::TokenScope;
 
 use crate::{
     HealthResponse, ServerError, ShardUploadResponse, XorbUploadResponse,
+    admission::weights,
     app::{
         AppState, authorize,
         reconstruction_helpers::{
@@ -104,6 +105,16 @@ pub(super) async fn upload_xorb(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
+    // Acquire admission permit for xorb upload
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _hashing = state
+        .pools
+        .hashing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     authorize(&state, &headers, TokenScope::Write)?;
     validate_hash_path(&hash)?;
     let mut body_reader =
@@ -190,6 +201,15 @@ pub(super) async fn write_xorb_transfer(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<XorbUploadResponse>, ServerError> {
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _hashing = state
+        .pools
+        .hashing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     authorize(&state, &headers, TokenScope::Write)?;
     validate_xorb_transfer_namespace(&prefix)?;
     validate_hash_path(&hash)?;
@@ -203,6 +223,16 @@ pub(super) async fn upload_shard(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<ShardUploadResponse>, ServerError> {
+    // Acquire admission permit for shard upload
+    let _admit = state
+        .admission
+        .try_acquire(weights::SHARD_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
+    let _parsing = state
+        .pools
+        .parsing
+        .try_acquire()
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let auth = authorize(&state, &headers, TokenScope::Write)?;
     let body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
     let response = state

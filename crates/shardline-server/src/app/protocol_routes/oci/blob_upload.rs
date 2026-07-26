@@ -13,6 +13,7 @@ use shardline_protocol::TokenScope;
 
 use crate::{
     ServerError,
+    admission::weights,
     oci_adapter::{
         abort_s3_multipart_upload_session, append_s3_multipart_upload_bytes, append_upload_bytes,
         create_upload_session, delete_upload_session, finalize_s3_multipart_upload_session,
@@ -40,6 +41,10 @@ pub(crate) async fn oci_post_blob_upload(
     body: Body,
 ) -> Result<Response, ServerError> {
     let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let scope = auth.as_ref().map(scope_from_auth);
     validate_repository(repository)?;
     let query = parse_query_map(uri)?;
@@ -58,6 +63,7 @@ pub(crate) async fn oci_post_blob_upload(
         match state
             .backend
             .copy_object_if_absent(&source_key, &target_key)
+            .await
         {
             Ok(_stored) => {
                 return oci_created_response(
@@ -119,6 +125,10 @@ pub(crate) async fn oci_patch_blob_upload(
     body: Body,
 ) -> Result<Response, ServerError> {
     let auth = oci_authorize(state, auth_headers, Some(repository), TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let scope = auth.as_ref().map(scope_from_auth);
     validate_oci_repository_scope(repository, scope)?;
     let mut body = RequestBodyReader::from_body(body, state.config.max_request_body_bytes())?;
@@ -194,6 +204,10 @@ pub(crate) async fn oci_put_blob_upload(
     body: Body,
 ) -> Result<Response, ServerError> {
     let auth = oci_authorize(state, headers, Some(repository), TokenScope::Write)?;
+    let _admit = state
+        .admission
+        .try_acquire(weights::XORB_UPLOAD)
+        .ok_or(ServerError::WorkQueueSaturated)?;
     let scope = auth.as_ref().map(scope_from_auth);
     validate_oci_repository_scope(repository, scope)?;
     let query = parse_query_map(uri)?;
@@ -262,12 +276,10 @@ pub(crate) async fn oci_put_blob_upload(
         return Err(ServerError::ExpectedBodyHashMismatch);
     }
     let upload_path = upload_body_path_for_session(state.config.root_dir(), session_id)?;
-    let _stored = state.backend.put_sha256_addressed_object_file(
-        &object_key,
-        &digest_hex,
-        &upload_path,
-        &integrity,
-    )?;
+    let _stored = state
+        .backend
+        .put_sha256_addressed_object_file(&object_key, &digest_hex, &upload_path, &integrity)
+        .await?;
     delete_upload_session(state.config.root_dir(), session_id).await?;
     metrics().protocol.record_oci_upload();
     oci_created_response(
@@ -785,25 +797,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn blob_upload_mount_nonexistent_blob_returns_error() {
+    async fn blob_upload_mount_nonexistent_blob_falls_through_to_session_creation() {
         let ctx = build_oci_test_state().await;
         let app = oci_test_router(&ctx.state);
 
-        // Mount a blob that doesn't exist — the handler attempts
-        // copy_object_if_absent which on a local backend returns an IO error
-        // (not NotFound), so this currently returns 500.
         let some_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mount_uri = format!("/v2/{REPO}/blobs/uploads/?mount=sha256:{some_digest}&from={REPO}");
         let response = send(&app, Method::POST, &mount_uri, Body::empty()).await;
-        // The mount path should eventually fall through to session creation,
-        // but the local backend copy_object_if_absent returns Io error instead
-        // of NotFound for missing source files. This test documents the current
-        // behavior — it returns an error (not a panic).
-        assert!(
-            response.status().is_server_error(),
-            "mount non-existent blob should return an error, got {}",
-            response.status()
-        );
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1151,6 +1152,10 @@ mod tests {
                 NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
+            admission: crate::admission::WeightedAdmission::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
+            ),
+            pools: crate::admission::ExecutionPools::default_sizes(),
             protocol_metrics: crate::app::ProtocolMetrics::default(),
         });
         let app = oci_test_router(&state);

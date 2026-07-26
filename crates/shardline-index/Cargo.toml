@@ -14,6 +14,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+chrono.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 libc.workspace = true
@@ -28,6 +29,7 @@ sqlx = { workspace = true, features = [
     "tls-rustls",
     "postgres",
     "json",
+    "chrono",
 ] }
 thiserror.workspace = true
 async-trait.workspace = true

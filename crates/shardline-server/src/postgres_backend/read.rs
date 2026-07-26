@@ -2,14 +2,18 @@ use shardline_index::{
     FileRecord, PostgresMetadataStoreError, RecordStore, RecordTraversal, RepositoryRecordScope,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
-use shardline_storage::{DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix, ObjectStore};
+#[cfg(test)]
+use shardline_storage::ObjectStore;
+use shardline_storage::{AsyncObjectStore, DeleteOutcome, ObjectKey, ObjectMetadata, ObjectPrefix};
 use sqlx::query_scalar;
 use tokio::task;
 
 use crate::{
     ServerError,
     chunk_store::chunk_object_key,
-    download_stream::{ServerByteStream, object_byte_range_stream, object_byte_stream},
+    download_stream::{
+        ServerByteStream, file_record_byte_stream, object_byte_range_stream, object_byte_stream,
+    },
     error::IndexError,
     object_store::{read_full_object, reconstruct_file_record_bytes, visit_object_prefix},
     record_store::parse_stored_file_record_bytes,
@@ -30,6 +34,47 @@ const REQUIRED_METADATA_TABLES: [&str; 6] = [
 ];
 
 impl super::PostgresBackend {
+    pub(crate) async fn copy_file_reference(
+        &self,
+        source_file_id: &str,
+        destination_file_id: &str,
+    ) -> Result<bool, ServerError> {
+        match self.read_record(destination_file_id, None, None).await {
+            Ok(_record) => return Ok(false),
+            Err(ServerError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let mut record = self.read_record(source_file_id, None, None).await?;
+        record.file_id = destination_file_id.to_owned();
+        self.record_store
+            .commit_file_version_metadata(&record)
+            .await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn delete_file_reference(&self, file_id: &str) -> Result<bool, ServerError> {
+        let record = match self.read_record(file_id, None, None).await {
+            Ok(record) => record,
+            Err(ServerError::NotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        self.record_store
+            .delete_file_version_metadata(&record)
+            .await?;
+        Ok(true)
+    }
+
+    pub(crate) async fn read_file_stream(
+        &self,
+        file_id: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(ServerByteStream, u64), ServerError> {
+        let record = self.read_record(file_id, None, None).await?;
+        let total_bytes = record.total_bytes;
+        let stream = file_record_byte_stream(self.object_store(), record, range).await?;
+        Ok((stream, total_bytes))
+    }
+
     /// Verifies that the local object store and required Postgres metadata tables are
     /// reachable.
     ///
@@ -44,7 +89,8 @@ impl super::PostgresBackend {
         } else {
             let probe_key = ObjectKey::parse("health/probe")
                 .map_err(|_error| ServerError::InvalidContentHash)?;
-            let _object_store_reachable = object_store.metadata(&probe_key)?;
+            let _object_store_reachable =
+                AsyncObjectStore::metadata(&object_store, &probe_key).await?;
         }
         let _probe = query_scalar::<_, i32>("SELECT 1")
             .fetch_one(self.record_store.pool())
@@ -139,7 +185,7 @@ impl super::PostgresBackend {
     pub async fn read_chunk(&self, hash_hex: &str) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
         let object_key = chunk_object_key(hash_hex)?;
-        let metadata = object_store.metadata(&object_key)?;
+        let metadata = AsyncObjectStore::metadata(&object_store, &object_key).await?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
         };
@@ -152,7 +198,7 @@ impl super::PostgresBackend {
     }
 
     pub(crate) async fn object_length(&self, object_key: &ObjectKey) -> Result<u64, ServerError> {
-        let metadata = self.object_store().metadata(object_key)?;
+        let metadata = AsyncObjectStore::metadata(&self.object_store(), object_key).await?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
         };
@@ -161,7 +207,7 @@ impl super::PostgresBackend {
 
     pub(crate) async fn read_object(&self, object_key: &ObjectKey) -> Result<Vec<u8>, ServerError> {
         let object_store = self.object_store();
-        let metadata = object_store.metadata(object_key)?;
+        let metadata = AsyncObjectStore::metadata(&object_store, object_key).await?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
         };
@@ -214,7 +260,7 @@ impl super::PostgresBackend {
         &self,
         object_key: &ObjectKey,
     ) -> Result<DeleteOutcome, ServerError> {
-        Ok(self.object_store().delete_if_present(object_key)?)
+        Ok(AsyncObjectStore::delete_if_present(&self.object_store(), object_key).await?)
     }
 
     /// Loads the stored byte length for a chunk object.
@@ -225,7 +271,7 @@ impl super::PostgresBackend {
     pub async fn chunk_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
         let object_store = self.object_store();
         let object_key = chunk_object_key(hash_hex)?;
-        let metadata = object_store.metadata(&object_key)?;
+        let metadata = AsyncObjectStore::metadata(&object_store, &object_key).await?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
         };
@@ -295,7 +341,7 @@ impl super::PostgresBackend {
     pub async fn xorb_length(&self, hash_hex: &str) -> Result<u64, ServerError> {
         let object_store = self.object_store();
         let object_key = xorb_object_key(hash_hex)?;
-        let metadata = object_store.metadata(&object_key)?;
+        let metadata = AsyncObjectStore::metadata(&object_store, &object_key).await?;
         let Some(metadata) = metadata else {
             return Err(ServerError::NotFound);
         };
@@ -311,7 +357,7 @@ impl super::PostgresBackend {
         repository_references_hash_in_scope(&self.record_store, hash_hex, repository_scope).await
     }
 
-    async fn read_record(
+    pub(super) async fn read_record(
         &self,
         file_id: &str,
         content_hash: Option<&str>,
@@ -416,7 +462,9 @@ fn map_record_store_error(error: PostgresMetadataStoreError) -> ServerError {
         | PostgresMetadataStoreError::WebhookDelivery(_)
         | PostgresMetadataStoreError::IntegerOutOfRange(_)
         | PostgresMetadataStoreError::InvalidRecordKind
-        | PostgresMetadataStoreError::InvalidRepoType(_) => {
+        | PostgresMetadataStoreError::InvalidRepoType(_)
+        | PostgresMetadataStoreError::Unsupported(_)
+        | PostgresMetadataStoreError::InvalidUploadIntentState(_) => {
             ServerError::Index(IndexError::PostgresMetadata(error))
         }
     }
@@ -497,9 +545,13 @@ mod tests {
             shardline_protocol::ShardlineHash::from_bytes(*hash.as_bytes()),
             data.len() as u64,
         );
-        object_store
-            .put_if_absent(&object_key, ObjectBody::from_vec(data.to_vec()), &integrity)
-            .unwrap();
+        ObjectStore::put_if_absent(
+            object_store,
+            &object_key,
+            ObjectBody::from_vec(data.to_vec()),
+            &integrity,
+        )
+        .unwrap();
         (hash_hex, object_key)
     }
 
@@ -509,9 +561,13 @@ mod tests {
             shardline_protocol::ShardlineHash::from_bytes(*blake3::hash(data).as_bytes()),
             data.len() as u64,
         );
-        object_store
-            .put_if_absent(key, ObjectBody::from_vec(data.to_vec()), &integrity)
-            .unwrap();
+        ObjectStore::put_if_absent(
+            object_store,
+            key,
+            ObjectBody::from_vec(data.to_vec()),
+            &integrity,
+        )
+        .unwrap();
     }
 
     // ===== Pure function tests =====

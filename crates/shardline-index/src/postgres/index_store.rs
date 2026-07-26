@@ -9,7 +9,9 @@ use crate::{
     AsyncIndexStore, DedupeShardMapping, FileId, FileReconstruction, IndexStoreFuture,
     ProviderRepositoryState, QuarantineCandidate, ReconstructionTerm, RetentionHold,
     StoredObjectId, WebhookDelivery, WebhookDeliveryError, parse_xet_hash_hex,
-    provider::parse_repository_provider, xet_hash_hex_string,
+    provider::parse_repository_provider,
+    upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore},
+    xet_hash_hex_string,
 };
 
 impl AsyncIndexStore for super::PostgresIndexStore {
@@ -667,6 +669,146 @@ impl AsyncIndexStore for super::PostgresIndexStore {
     }
 }
 
+#[async_trait::async_trait]
+impl UploadIntentStore for super::PostgresIndexStore {
+    type Error = PostgresMetadataStoreError;
+
+    async fn create_intent(&self, intent: &UploadIntent) -> Result<(), Self::Error> {
+        sqlx::query(
+            "INSERT INTO shardline_upload_intents (intent_id, object_key, object_hash, object_length, state, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, now(), now()) ON CONFLICT (intent_id) DO NOTHING"
+        )
+        .bind(intent.intent_id())
+        .bind(intent.object_key())
+        .bind(intent.object_hash())
+        .bind(intent.object_length() as i64)
+        .bind(intent.state().as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn transition_intent(
+        &self,
+        intent_id: &str,
+        new_state: UploadIntentState,
+    ) -> Result<bool, Self::Error> {
+        let current = self.intent_by_id(intent_id).await?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        if !current.state().can_transition_to(new_state) {
+            return Ok(false);
+        }
+        let rows = sqlx::query(
+            "UPDATE shardline_upload_intents SET state = $1, updated_at = now() WHERE intent_id = $2 AND state = $3"
+        )
+        .bind(new_state.as_str())
+        .bind(intent_id)
+        .bind(current.state().as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(rows.rows_affected() > 0)
+    }
+
+    async fn intent_by_id(&self, intent_id: &str) -> Result<Option<UploadIntent>, Self::Error> {
+        let row = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE intent_id = $1"
+        )
+        .bind(intent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some((id, key, hash, length, state_str, created, updated)) => {
+                let state = UploadIntentState::parse(&state_str).ok_or_else(|| {
+                    PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
+                })?;
+                let created_dur = std::time::Duration::from_secs(created.timestamp() as u64);
+                let updated_dur = std::time::Duration::from_secs(updated.timestamp() as u64);
+                Ok(Some(UploadIntent::from_parts(
+                    id,
+                    key,
+                    hash,
+                    length as u64,
+                    state,
+                    created_dur,
+                    updated_dur,
+                )))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn intents_by_state(
+        &self,
+        state: UploadIntentState,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
+        let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 ORDER BY created_at"
+        )
+        .bind(state.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        let intents = rows
+            .into_iter()
+            .map(|(id, key, hash, length, state_str, created, updated)| {
+                let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
+                    PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
+                })?;
+                Ok(UploadIntent::from_parts(
+                    id,
+                    key,
+                    hash,
+                    length as u64,
+                    s,
+                    std::time::Duration::from_secs(created.timestamp() as u64),
+                    std::time::Duration::from_secs(updated.timestamp() as u64),
+                ))
+            })
+            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        Ok(intents)
+    }
+
+    async fn stale_intents(
+        &self,
+        state: UploadIntentState,
+        older_than: std::time::Duration,
+    ) -> Result<Vec<UploadIntent>, Self::Error> {
+        let duration = chrono::Duration::from_std(older_than).map_err(|_e| {
+            PostgresMetadataStoreError::InvalidUploadIntentState("invalid duration".into())
+        })?;
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(duration)
+            .ok_or_else(|| {
+                PostgresMetadataStoreError::InvalidUploadIntentState("invalid duration".into())
+            })?;
+        let rows = sqlx::query_as::<_, (String, String, String, i64, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+            "SELECT intent_id, object_key, object_hash, object_length, state, created_at, updated_at FROM shardline_upload_intents WHERE state = $1 AND created_at < $2 ORDER BY created_at"
+        )
+        .bind(state.as_str())
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+        let intents = rows
+            .into_iter()
+            .map(|(id, key, hash, length, state_str, created, updated)| {
+                let s = UploadIntentState::parse(&state_str).ok_or_else(|| {
+                    PostgresMetadataStoreError::InvalidUploadIntentState(state_str.clone())
+                })?;
+                Ok(UploadIntent::from_parts(
+                    id,
+                    key,
+                    hash,
+                    length as u64,
+                    s,
+                    std::time::Duration::from_secs(created.timestamp() as u64),
+                    std::time::Duration::from_secs(updated.timestamp() as u64),
+                ))
+            })
+            .collect::<Result<Vec<_>, PostgresMetadataStoreError>>()?;
+        Ok(intents)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PostgresFileReconstructionRecord {
     terms: Vec<PostgresReconstructionTermRecord>,
@@ -946,5 +1088,145 @@ mod tests {
             result,
             Err(super::PostgresMetadataStoreError::HashParse(_))
         ));
+    }
+
+    // ── Postgres UploadIntentStore integration tests ──────────────────────
+
+    use crate::upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
+    async fn connect_postgres() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        sqlx::PgPool::connect(&url).await.ok()
+    }
+
+    fn make_pg_store(pool: sqlx::PgPool) -> crate::PostgresIndexStore {
+        crate::PostgresIndexStore::new(pool)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_create_and_retrieve() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "test-intent-1".into(),
+            "test/key".into(),
+            "ab".repeat(32),
+            128,
+        );
+        store.create_intent(&intent).await.expect("create_intent");
+        let loaded = store
+            .intent_by_id("test-intent-1")
+            .await
+            .expect("intent_by_id");
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.intent_id(), "test-intent-1");
+        assert_eq!(loaded.state(), UploadIntentState::Created);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_create_idempotent() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "test-intent-idempotent".into(),
+            "test/key2".into(),
+            "cd".repeat(32),
+            64,
+        );
+        store.create_intent(&intent).await.expect("first create");
+        // Second create with same ID should not error (ON CONFLICT DO NOTHING)
+        store
+            .create_intent(&intent)
+            .await
+            .expect("second create (idempotent)");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_transition_to_visible() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "test-intent-transition".into(),
+            "test/key3".into(),
+            "ef".repeat(32),
+            256,
+        );
+        store.create_intent(&intent).await.expect("create_intent");
+        for state in [
+            UploadIntentState::Storing,
+            UploadIntentState::Stored,
+            UploadIntentState::MetadataCommitted,
+            UploadIntentState::Visible,
+        ] {
+            let transitioned = store
+                .transition_intent("test-intent-transition", state)
+                .await
+                .expect("transition_intent");
+            assert!(transitioned, "transition to {state:?} should succeed");
+        }
+        let loaded = store
+            .intent_by_id("test-intent-transition")
+            .await
+            .expect("intent_by_id");
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().state(), UploadIntentState::Visible);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_transition_missing_returns_false() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let result = store
+            .transition_intent("nonexistent-intent", UploadIntentState::Failed)
+            .await
+            .expect("transition_intent");
+        assert!(!result, "transitioning missing intent should return false");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_query_by_state() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        // Create two intents with different states
+        let a = UploadIntent::new("query-state-a".into(), "test/a".into(), "01".repeat(32), 10);
+        let b = UploadIntent::new("query-state-b".into(), "test/b".into(), "02".repeat(32), 20);
+        store.create_intent(&a).await.expect("create a");
+        store.create_intent(&b).await.expect("create b");
+        store
+            .transition_intent("query-state-b", UploadIntentState::Failed)
+            .await
+            .expect("transition b");
+
+        let created = store
+            .intents_by_state(UploadIntentState::Created)
+            .await
+            .expect("query created");
+        let failed = store
+            .intents_by_state(UploadIntentState::Failed)
+            .await
+            .expect("query failed");
+        assert!(
+            created.iter().any(|i| i.intent_id() == "query-state-a"),
+            "a should be in Created"
+        );
+        assert!(
+            failed.iter().any(|i| i.intent_id() == "query-state-b"),
+            "b should be in Failed"
+        );
     }
 }

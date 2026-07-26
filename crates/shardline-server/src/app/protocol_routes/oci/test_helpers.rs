@@ -58,6 +58,10 @@ pub(crate) async fn build_oci_test_state() -> OciTestContext {
             NonZeroUsize::new(16).unwrap(),
         ),
         oci_registry_token_limiter: Arc::new(Semaphore::new(64)),
+        admission: crate::admission::WeightedAdmission::new(
+            std::num::NonZeroUsize::new(256).unwrap(),
+        ),
+        pools: crate::admission::ExecutionPools::default_sizes(),
         protocol_metrics: ProtocolMetrics::default(),
     });
 

@@ -1,10 +1,14 @@
-use prometheus::{IntGauge, Registry};
+use prometheus::{IntCounter, IntGauge, Registry};
 
+use crate::must_counter;
 use crate::must_gauge;
 
 pub struct SystemMetrics {
     pub active_connections: IntGauge,
     pub server_uptime: IntGauge,
+    pub admitted_total: IntCounter,
+    pub queued_total: IntCounter,
+    pub rejected_total: IntCounter,
 }
 
 impl SystemMetrics {
@@ -18,13 +22,31 @@ impl SystemMetrics {
             "shardline_server_uptime_seconds",
             "Server uptime in seconds",
         );
+        let admitted_total = must_counter(
+            "shardline_admitted_total",
+            "Total number of admitted requests (permit granted)",
+        );
+        let queued_total = must_counter(
+            "shardline_queued_total",
+            "Total number of queued requests (waited for permit)",
+        );
+        let rejected_total = must_counter(
+            "shardline_rejected_total",
+            "Total number of rejected requests (permit denied)",
+        );
 
         registry.register(Box::new(active_connections.clone())).ok();
         registry.register(Box::new(server_uptime.clone())).ok();
+        registry.register(Box::new(admitted_total.clone())).ok();
+        registry.register(Box::new(queued_total.clone())).ok();
+        registry.register(Box::new(rejected_total.clone())).ok();
 
         Self {
             active_connections,
             server_uptime,
+            admitted_total,
+            queued_total,
+            rejected_total,
         }
     }
 
@@ -36,6 +58,21 @@ impl SystemMetrics {
     }
     pub fn set_uptime(&self, seconds: i64) {
         self.server_uptime.set(seconds);
+    }
+
+    /// Records an admitted request (permit granted).
+    pub fn record_admitted(&self) {
+        self.admitted_total.inc();
+    }
+
+    /// Records a queued request (waited for permit).
+    pub fn record_queued(&self) {
+        self.queued_total.inc();
+    }
+
+    /// Records a rejected request (permit denied).
+    pub fn record_rejected(&self) {
+        self.rejected_total.inc();
     }
 }
 
@@ -106,5 +143,34 @@ mod tests {
         let m = new_metrics();
         assert_eq!(m.active_connections.get(), 0);
         assert_eq!(m.server_uptime.get(), 0);
+    }
+
+    #[test]
+    fn record_admitted_increments_counter() {
+        let m = new_metrics();
+        m.record_admitted();
+        assert_eq!(m.admitted_total.get(), 1);
+    }
+
+    #[test]
+    fn record_queued_increments_counter() {
+        let m = new_metrics();
+        m.record_queued();
+        assert_eq!(m.queued_total.get(), 1);
+    }
+
+    #[test]
+    fn record_rejected_increments_counter() {
+        let m = new_metrics();
+        m.record_rejected();
+        assert_eq!(m.rejected_total.get(), 1);
+    }
+
+    #[test]
+    fn all_counters_start_at_zero() {
+        let m = new_metrics();
+        assert_eq!(m.admitted_total.get(), 0);
+        assert_eq!(m.queued_total.get(), 0);
+        assert_eq!(m.rejected_total.get(), 0);
     }
 }
