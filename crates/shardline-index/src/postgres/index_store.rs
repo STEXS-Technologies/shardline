@@ -1036,4 +1036,111 @@ mod tests {
             Err(super::PostgresMetadataStoreError::HashParse(_))
         ));
     }
+
+    // ── Postgres UploadIntentStore integration tests ──────────────────────
+
+    use crate::upload_intent::{UploadIntent, UploadIntentState, UploadIntentStore};
+    use std::time::Duration;
+
+    async fn connect_postgres() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        sqlx::PgPool::connect(&url).await.ok()
+    }
+
+    fn make_pg_store(pool: sqlx::PgPool) -> crate::PostgresIndexStore {
+        crate::PostgresIndexStore::new(pool)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_create_and_retrieve() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "test-intent-1".into(),
+            "test/key".into(),
+            "ab".repeat(32),
+            128,
+        );
+        store.create_intent(&intent).await.expect("create_intent");
+        let loaded = store.intent_by_id("test-intent-1").await.expect("intent_by_id");
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.intent_id(), "test-intent-1");
+        assert_eq!(loaded.state(), UploadIntentState::Created);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_create_idempotent() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "test-intent-idempotent".into(),
+            "test/key2".into(),
+            "cd".repeat(32),
+            64,
+        );
+        store.create_intent(&intent).await.expect("first create");
+        // Second create with same ID should not error (ON CONFLICT DO NOTHING)
+        store.create_intent(&intent).await.expect("second create (idempotent)");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_transition_to_visible() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let intent = UploadIntent::new(
+            "test-intent-transition".into(),
+            "test/key3".into(),
+            "ef".repeat(32),
+            256,
+        );
+        store.create_intent(&intent).await.expect("create_intent");
+        let transitioned = store.transition_intent("test-intent-transition", UploadIntentState::Visible)
+            .await.expect("transition_intent");
+        assert!(transitioned);
+        let loaded = store.intent_by_id("test-intent-transition").await.expect("intent_by_id");
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().state(), UploadIntentState::Visible);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_transition_missing_returns_false() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        let result = store.transition_intent("nonexistent-intent", UploadIntentState::Failed)
+            .await.expect("transition_intent");
+        assert!(!result, "transitioning missing intent should return false");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pg_upload_intent_query_by_state() {
+        let Some(pool) = connect_postgres().await else {
+            eprintln!("skipping: no DATABASE_URL");
+            return;
+        };
+        let store = make_pg_store(pool);
+        // Create two intents with different states
+        let a = UploadIntent::new("query-state-a".into(), "test/a".into(), "01".repeat(32), 10);
+        let b = UploadIntent::new("query-state-b".into(), "test/b".into(), "02".repeat(32), 20);
+        store.create_intent(&a).await.expect("create a");
+        store.create_intent(&b).await.expect("create b");
+        store.transition_intent("query-state-b", UploadIntentState::Failed).await.expect("transition b");
+
+        let created = store.intents_by_state(UploadIntentState::Created).await.expect("query created");
+        let failed = store.intents_by_state(UploadIntentState::Failed).await.expect("query failed");
+        assert!(created.iter().any(|i| i.intent_id() == "query-state-a"), "a should be in Created");
+        assert!(failed.iter().any(|i| i.intent_id() == "query-state-b"), "b should be in Failed");
+    }
 }
