@@ -260,8 +260,6 @@ args = ["llvm-cov", "--workspace", "--all-features", "--exclude", "shardline-fuz
 [tasks.coverage-json]
 description = "Write workspace and database-gated LLVM coverage to target/coverage.json"
 workspace = false
-install_crate = "cargo-llvm-cov"
-install_crate_args = ["--locked"]
 command = "bash"
 args = ["scripts/run_coverage_json.sh", "${@}"]
 
