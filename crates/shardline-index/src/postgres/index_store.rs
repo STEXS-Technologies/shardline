@@ -1161,11 +1161,18 @@ mod tests {
             256,
         );
         store.create_intent(&intent).await.expect("create_intent");
-        let transitioned = store
-            .transition_intent("test-intent-transition", UploadIntentState::Visible)
-            .await
-            .expect("transition_intent");
-        assert!(transitioned);
+        for state in [
+            UploadIntentState::Storing,
+            UploadIntentState::Stored,
+            UploadIntentState::MetadataCommitted,
+            UploadIntentState::Visible,
+        ] {
+            let transitioned = store
+                .transition_intent("test-intent-transition", state)
+                .await
+                .expect("transition_intent");
+            assert!(transitioned, "transition to {state:?} should succeed");
+        }
         let loaded = store
             .intent_by_id("test-intent-transition")
             .await
