@@ -72,7 +72,7 @@ args = ["test", "--workspace", "--lib", "${@}"]
 description = "Run integration tests (requires Docker: Postgres, MinIO, Redis)"
 workspace = false
 install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked"]
+install_crate_args = ["--locked", "--force"]
 command = "cargo"
 args = ["nextest", "run", "--workspace", "--all-features", "--no-tests=pass", "-E", "not package(shardline-xet-core)", "-E", "kind(test)", "${@}"]
 
@@ -86,7 +86,7 @@ args = ["-c", "cargo test -p shardline-index -- hub_postgres && cargo test -p sh
 description = "Run e2e integration tests from the e2e/ folder"
 workspace = false
 install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked"]
+install_crate_args = ["--locked", "--force"]
 command = "cargo"
 args = ["nextest", "run", "--all-features", "--no-tests=pass", "${@}"]
 cwd = "e2e"
@@ -95,7 +95,7 @@ cwd = "e2e"
 description = "Run Docker-backed server integration and end-to-end tests"
 workspace = false
 install_crate = "cargo-nextest@0.9.123"
-install_crate_args = ["--locked"]
+install_crate_args = ["--locked", "--force"]
 command = "bash"
 args = ["-c", "docker version >/dev/null && cargo nextest run -p shardline-server --features docker --no-tests=pass && (cd e2e && cargo nextest run --all-features --no-tests=pass)"]
 
