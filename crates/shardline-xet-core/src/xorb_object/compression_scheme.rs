@@ -4,6 +4,7 @@ use std::io::{Cursor, Read, Write, copy};
 use std::str::FromStr;
 
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
+use xet_core_structures::xorb_object::byte_grouping::bg4::{bg4_split, bg4_regroup};
 
 use crate::error::CoreError;
 
@@ -88,7 +89,7 @@ impl CompressionScheme {
             }
             CompressionScheme::None => data.into(),
             CompressionScheme::LZ4 => lz4_compress_from_slice(data).map(Cow::from)?,
-            CompressionScheme::ByteGrouping4LZ4 => lz4_compress_from_slice(data).map(Cow::from)?,
+            CompressionScheme::ByteGrouping4LZ4 => bg4_lz4_compress_from_slice(data).map(Cow::from)?,
         })
     }
 
@@ -102,7 +103,7 @@ impl CompressionScheme {
             CompressionScheme::None => data.into(),
             CompressionScheme::LZ4 => lz4_decompress_from_slice(data).map(Cow::from)?,
             CompressionScheme::ByteGrouping4LZ4 => {
-                lz4_decompress_from_slice(data).map(Cow::from)?
+                bg4_lz4_decompress_from_slice(data).map(Cow::from)?
             }
         })
     }
@@ -120,7 +121,7 @@ impl CompressionScheme {
             }
             CompressionScheme::None => copy(reader, writer)?,
             CompressionScheme::LZ4 => lz4_decompress_from_reader(reader, writer)?,
-            CompressionScheme::ByteGrouping4LZ4 => lz4_decompress_from_reader(reader, writer)?,
+            CompressionScheme::ByteGrouping4LZ4 => bg4_lz4_decompress_from_reader(reader, writer)?,
         })
     }
 
@@ -147,6 +148,30 @@ fn lz4_decompress_from_reader<R: Read, W: Write>(
 ) -> Result<u64, CoreError> {
     let mut dec = FrameDecoder::new(reader);
     Ok(copy(&mut dec, writer)?)
+}
+
+fn bg4_lz4_compress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let grouped = bg4_split(data);
+    let mut enc = FrameEncoder::new(Vec::new());
+    enc.write_all(&grouped)?;
+    Ok(enc.finish()?)
+}
+
+fn bg4_lz4_decompress_from_slice(data: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let mut dest = vec![];
+    bg4_lz4_decompress_from_reader(&mut Cursor::new(data), &mut dest)?;
+    Ok(dest)
+}
+
+fn bg4_lz4_decompress_from_reader<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<u64, CoreError> {
+    let mut grouped = vec![];
+    FrameDecoder::new(reader).read_to_end(&mut grouped)?;
+    let regrouped = bg4_regroup(&grouped);
+    writer.write_all(&regrouped)?;
+    Ok(regrouped.len() as u64)
 }
 
 #[cfg(test)]
