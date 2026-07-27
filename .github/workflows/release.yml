@@ -180,8 +180,11 @@ jobs:
           }
           for crate in ${CRATE_PACKAGES}; do
             version="$(crate_version "${crate}")"
-            curl --fail --silent --show-error --retry 5 --retry-delay 3 \
+            # crates.io API requires a User-Agent; retry on 403/rate-limit
+            curl --fail --silent --show-error --retry 5 --retry-delay 5 \
+              -H "User-Agent: shardline-release-ci (curl)" \
               "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null
+            sleep 2
           done
 
       - name: Login to GHCR
