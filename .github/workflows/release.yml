@@ -144,7 +144,8 @@ jobs:
           crate_version_published() {
             local crate="$1"
             local version="$2"
-            curl --fail --silent --show-error \
+            curl --fail --silent --show-error --retry 3 --retry-delay 3 \
+              -H "User-Agent: shardline-release-ci (curl)" \
               "https://crates.io/api/v1/crates/${crate}/${version}" \
               >/dev/null 2>&1
           }
