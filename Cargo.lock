@@ -3719,6 +3719,7 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
  "tracing",
+ "xet-core-structures",
 ]
 
 [[package]]
