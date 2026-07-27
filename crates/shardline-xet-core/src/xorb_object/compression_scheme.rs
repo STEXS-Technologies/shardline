@@ -4,7 +4,7 @@ use std::io::{Cursor, Read, Write, copy};
 use std::str::FromStr;
 
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
-use xet_core_structures::xorb_object::byte_grouping::bg4::{bg4_split, bg4_regroup};
+use xet_core_structures::xorb_object::byte_grouping::bg4::{bg4_regroup, bg4_split};
 
 use crate::error::CoreError;
 
@@ -89,7 +89,9 @@ impl CompressionScheme {
             }
             CompressionScheme::None => data.into(),
             CompressionScheme::LZ4 => lz4_compress_from_slice(data).map(Cow::from)?,
-            CompressionScheme::ByteGrouping4LZ4 => bg4_lz4_compress_from_slice(data).map(Cow::from)?,
+            CompressionScheme::ByteGrouping4LZ4 => {
+                bg4_lz4_compress_from_slice(data).map(Cow::from)?
+            }
         })
     }
 
@@ -402,7 +404,9 @@ mod tests {
     #[test]
     fn bg4_roundtrip_small_payload() {
         let data = b"Hello, this tests BG4 byte-interleaving compression!";
-        let compressed = CompressionScheme::ByteGrouping4LZ4.compress_from_slice(data).unwrap();
+        let compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(data)
+            .unwrap();
         let decompressed = CompressionScheme::ByteGrouping4LZ4
             .decompress_from_slice(&compressed)
             .unwrap();
@@ -412,7 +416,9 @@ mod tests {
     #[test]
     fn bg4_roundtrip_empty() {
         let data: &[u8] = b"";
-        let compressed = CompressionScheme::ByteGrouping4LZ4.compress_from_slice(data).unwrap();
+        let compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(data)
+            .unwrap();
         let decompressed = CompressionScheme::ByteGrouping4LZ4
             .decompress_from_slice(&compressed)
             .unwrap();
@@ -422,7 +428,9 @@ mod tests {
     #[test]
     fn bg4_roundtrip_single_byte() {
         let data = &[42u8];
-        let compressed = CompressionScheme::ByteGrouping4LZ4.compress_from_slice(data).unwrap();
+        let compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(data)
+            .unwrap();
         let decompressed = CompressionScheme::ByteGrouping4LZ4
             .decompress_from_slice(&compressed)
             .unwrap();
@@ -440,10 +448,7 @@ mod tests {
             let decompressed = CompressionScheme::ByteGrouping4LZ4
                 .decompress_from_slice(&compressed)
                 .unwrap();
-            assert_eq!(
-                *decompressed, data,
-                "BG4 roundtrip failed for size {n}"
-            );
+            assert_eq!(*decompressed, data, "BG4 roundtrip failed for size {n}");
         }
     }
 
@@ -481,7 +486,9 @@ mod tests {
     #[test]
     fn bg4_roundtrip_random_data() {
         // 256 KiB of pseudo-random data
-        let data: Vec<u8> = (0u32..262144).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect();
+        let data: Vec<u8> = (0u32..262144)
+            .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
+            .collect();
         let compressed = CompressionScheme::ByteGrouping4LZ4
             .compress_from_slice(&data)
             .unwrap();
@@ -524,7 +531,9 @@ mod tests {
             *CompressionScheme::ByteGrouping4LZ4
                 .decompress_from_slice(&bg4_compressed)
                 .unwrap(),
-            *CompressionScheme::LZ4.decompress_from_slice(&lz4_compressed).unwrap()
+            *CompressionScheme::LZ4
+                .decompress_from_slice(&lz4_compressed)
+                .unwrap()
         );
     }
 
@@ -534,7 +543,10 @@ mod tests {
         let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
         let grouped = bg4_split(&data);
         let regrouped = bg4_regroup(&grouped);
-        assert_eq!(regrouped, data, "bg4_split→bg4_regroup roundtrip must match upstream");
+        assert_eq!(
+            regrouped, data,
+            "bg4_split→bg4_regroup roundtrip must match upstream"
+        );
     }
 
     // --- Fuzz-target-style proptest tests for BG4 decompression safety ---
@@ -663,7 +675,7 @@ mod tests {
             let _result = upstream_bg4_regroup(input);
         }
         // If we reach here, no panic occurred
-        assert!(true, "bg4_regroup did not panic on any input");
+        // If we reach here, bg4_regroup did not panic on any input
     }
 
     #[test]
@@ -696,10 +708,10 @@ mod tests {
         let len = compressed.len();
 
         for &cut in &[
-            len / 2,       // 50 %
-            len / 10,      // 10 %
-            1usize,        // 1 byte
-            0usize,        // 0 bytes (empty)
+            len / 2,  // 50 %
+            len / 10, // 10 %
+            1usize,   // 1 byte
+            0usize,   // 0 bytes (empty)
         ] {
             let cut = cut.min(len);
             let truncated = &compressed[..cut];
