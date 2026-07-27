@@ -115,6 +115,13 @@ fn xorb_roundtrip_bg4_lz4_compression() {
     let deserialized = XorbObject::deserialize(&mut cursor).unwrap();
     assert_eq!(deserialized.info.xorb_hash, obj.info.xorb_hash);
 
+    // Validate
+    let mut cursor2 = Cursor::new(&buf);
+    let validated = XorbObject::validate_xorb_object(&mut cursor2, &obj.info.xorb_hash)
+        .unwrap()
+        .expect("bg4 validation should succeed");
+    assert_eq!(validated.info.num_chunks, 2);
+
     // Decode and verify decompressed data
     let mut cursor3 = Cursor::new(&chunk_data);
     let mut decoded = Vec::new();
