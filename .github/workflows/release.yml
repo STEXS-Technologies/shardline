@@ -138,7 +138,7 @@ jobs:
           fi
 
           crate_version() {
-            cargo pkgid -p "$1" | sed -E 's/.*#([^#]+)$/\1/'
+            cargo pkgid -p "$1" | sed -E 's/.*#//; s/.*@//'
           }
 
           crate_version_published() {
@@ -177,7 +177,7 @@ jobs:
         run: |
           set -euo pipefail
           crate_version() {
-            cargo pkgid -p "$1" | sed -E 's/.*#([^#]+)$/\1/'
+            cargo pkgid -p "$1" | sed -E 's/.*#//; s/.*@//'
           }
           for crate in ${CRATE_PACKAGES}; do
             version="$(crate_version "${crate}")"
