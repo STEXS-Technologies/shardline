@@ -179,6 +179,8 @@ mod tests {
     use std::borrow::Cow;
     use std::io::Cursor;
 
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -533,5 +535,222 @@ mod tests {
         let grouped = bg4_split(&data);
         let regrouped = bg4_regroup(&grouped);
         assert_eq!(regrouped, data, "bg4_split→bg4_regroup roundtrip must match upstream");
+    }
+
+    // --- Fuzz-target-style proptest tests for BG4 decompression safety ---
+
+    proptest! {
+        /// Feed arbitrary byte slices to bg4_regroup and verify it never panics.
+        /// bg4_regroup is a pure byte-interleaving function — it should handle any input gracefully.
+        #[test]
+        fn bg4_regroup_arbitrary_bytes_never_panics(data in proptest::collection::vec(any::<u8>(), 0..8192)) {
+            let _result = bg4_regroup(&data);
+            // Any output (correct or garbage) is acceptable; we only care about no panic.
+        }
+    }
+
+    proptest! {
+        /// Feed arbitrary byte slices to bg4_lz4_decompress_from_slice and verify it never panics.
+        /// The decompressor should return Err on invalid data rather than crashing.
+        #[test]
+        fn bg4_lz4_decompress_arbitrary_bytes_never_panics(data in proptest::collection::vec(any::<u8>(), 0..8192)) {
+            let _result = bg4_lz4_decompress_from_slice(&data);
+            // Both Ok and Err are acceptable; we only care about no panic.
+        }
+    }
+
+    proptest! {
+        /// Compress then decompress arbitrary data and verify a perfect roundtrip.
+        /// This is a stronger correctness check: any data that survives compress+decompress
+        /// must come back byte-for-byte identical.
+        #[test]
+        fn bg4_compress_roundtrip_arbitrary_data(data in proptest::collection::vec(any::<u8>(), 0..16384)) {
+            let compressed = bg4_lz4_compress_from_slice(&data)
+                .expect("compression of arbitrary data should not fail");
+            let decompressed = bg4_lz4_decompress_from_slice(&compressed)
+                .expect("decompression of our own compressed data should not fail");
+            assert_eq!(decompressed, data, "BG4 compress→decompress roundtrip must preserve data");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // BG4 regression tests — safety/corner-case coverage
+    // -------------------------------------------------------------------------
+
+    use xet_core_structures::xorb_object::byte_grouping::bg4::bg4_regroup as upstream_bg4_regroup;
+
+    #[test]
+    fn bg4_decompress_corrupted_lz4_frame() {
+        // Compress valid data with BG4, then truncate the LZ4 frame so it's
+        // malformed.  Decompression must not panic.  It may return an error
+        // (preferred) or decompress to wrong data — either is acceptable as
+        // long as it doesn't crash.
+        let data = b"Hello, this is a test of BG4 compression with valid data!";
+        let compressed = bg4_lz4_compress_from_slice(data).unwrap();
+
+        // Truncate at several positions inside the LZ4 frame header / body
+        for &cut in &[1usize, 4, 8, 16, 32, compressed.len() / 2] {
+            let truncated = &compressed[..cut.min(compressed.len())];
+            let result = bg4_lz4_decompress_from_slice(truncated);
+            match result {
+                Err(_) => {} // expected — truncated data should error
+                Ok(decompressed) => {
+                    // If the truncated frame happens to decompress (e.g. just
+                    // the magic header), the output must NOT match the original.
+                    assert_ne!(
+                        &*decompressed, data,
+                        "truncated BG4 data must not roundtrip correctly (cut={cut})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bg4_decompress_plain_lz4_as_bg4() {
+        // Compress with plain LZ4, then try to decompress using the BG4 path.
+        // Must not panic. May return error or wrong data.
+        let data = b"Data compressed with plain LZ4, NOT BG4.";
+        let lz4_compressed = lz4_compress_from_slice(data).unwrap();
+
+        let result = bg4_lz4_decompress_from_slice(&lz4_compressed);
+        match result {
+            Err(_) => {} // expected
+            Ok(decompressed) => {
+                // Plain LZ4 data decompresses fine via LZ4, but bg4_regroup
+                // on non-interleaved data produces garbage.
+                assert_ne!(
+                    decompressed, data,
+                    "plain LZ4 data decompressed via BG4 path must not match original"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bg4_decompress_none_data_as_bg4() {
+        // Feed raw uncompressed bytes to the BG4 decompressor.  Must not panic.
+        let raw = b"These bytes have never been compressed.";
+        let result = bg4_lz4_decompress_from_slice(raw);
+        match result {
+            Err(_) => {} // expected
+            Ok(decompressed) => {
+                assert_ne!(
+                    decompressed, raw,
+                    "uncompressed data decompressed via BG4 path must not match original"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bg4_regroup_panic_safety() {
+        // Call upstream bg4_regroup with truly arbitrary byte sequences (not the
+        // output of bg4_split).  The function must never panic.
+        let inputs: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"ab",
+            b"abc",
+            b"abcd",
+            b"abcde",
+            &[0u8; 7],
+            &[0xFFu8; 100],
+            &(0..200).map(|i| i as u8).collect::<Vec<_>>(),
+        ];
+        for input in inputs {
+            // Should never panic regardless of input
+            let _result = upstream_bg4_regroup(input);
+        }
+        // If we reach here, no panic occurred
+        assert!(true, "bg4_regroup did not panic on any input");
+    }
+
+    #[test]
+    fn lz4_decompress_bg4_data_as_lz4() {
+        // Compress with BG4, then try to decompress via the plain LZ4 path.
+        // Must not panic. May return error or wrong data.
+        let data = b"BG4 compressed payload fed to plain LZ4 decompressor.";
+        let bg4_compressed = bg4_lz4_compress_from_slice(data).unwrap();
+
+        let result = lz4_decompress_from_slice(&bg4_compressed);
+        match result {
+            Err(_) => {} // expected — LZ4 frame decoder rejects the data
+            Ok(decompressed) => {
+                // If the LZ4 frame happens to be valid, the content will be
+                // the interleaved bytes (not the original message).
+                assert_ne!(
+                    decompressed, data,
+                    "plain LZ4 decompressor must not roundtrip BG4 data"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bg4_decompress_truncated_compressed() {
+        // Compress with BG4, then truncate the output at various lengths.
+        // Must not panic. May return error or wrong data.
+        let data: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
+        let compressed = bg4_lz4_compress_from_slice(&data).unwrap();
+        let len = compressed.len();
+
+        for &cut in &[
+            len / 2,       // 50 %
+            len / 10,      // 10 %
+            1usize,        // 1 byte
+            0usize,        // 0 bytes (empty)
+        ] {
+            let cut = cut.min(len);
+            let truncated = &compressed[..cut];
+            let result = bg4_lz4_decompress_from_slice(truncated);
+            match result {
+                Err(_) => {} // expected
+                Ok(decompressed) => {
+                    assert_ne!(
+                        decompressed, data,
+                        "truncated BG4 data must not roundtrip correctly (cut={cut}/{len})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bg4_compress_and_decompress_max_chunk_size() {
+        // 16 MiB — the maximum chunk size in the shardline chunking layer.
+        const SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+        let data: Vec<u8> = (0..SIZE).map(|i| (i % 256) as u8).collect();
+        let compressed = bg4_lz4_compress_from_slice(&data).unwrap();
+        let decompressed = bg4_lz4_decompress_from_slice(&compressed).unwrap();
+        assert_eq!(
+            decompressed.len(),
+            data.len(),
+            "BG4 roundtrip at max chunk size: length mismatch"
+        );
+        // Compare in chunks to keep peak memory reasonable
+        for chunk in decompressed.chunks(1024 * 1024) {
+            let offset = chunk.as_ptr() as usize - decompressed.as_ptr() as usize;
+            assert_eq!(
+                chunk,
+                &data[offset..offset + chunk.len()],
+                "BG4 roundtrip mismatch at offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn bg4_compress_tiny_data_expands() {
+        // Very small inputs (1, 2, 3 bytes) must not panic and must
+        // roundtrip correctly.
+        for &n in &[1usize, 2, 3] {
+            let data: Vec<u8> = (0..n).map(|i| (i % 256) as u8).collect();
+            let compressed = bg4_lz4_compress_from_slice(&data).unwrap();
+            let decompressed = bg4_lz4_decompress_from_slice(&compressed).unwrap();
+            assert_eq!(
+                decompressed, data,
+                "BG4 roundtrip failed for {n}-byte input"
+            );
+        }
     }
 }

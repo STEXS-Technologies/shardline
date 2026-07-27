@@ -1420,6 +1420,27 @@ mod tests {
         assert_eq!(decoded[0].data(), data.as_slice());
     }
 
+    #[test]
+    fn validate_serialized_xorb_bg4_round_trip() {
+        let data = b"bg4 compressed data".to_vec();
+        let chunk_hash = compute_data_hash(&data);
+        let xorb_hash = xorb_hash(&[(chunk_hash, u64::try_from(data.len()).unwrap())]);
+        let serialized = serialized_xorb_object_from_components(
+            &xorb_hash,
+            data.clone(),
+            vec![(chunk_hash, u64::try_from(data.len()).unwrap())],
+            CompressionScheme::ByteGrouping4LZ4,
+        )
+        .unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let mut reader = Cursor::new(serialized.serialized_data);
+        let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
+        assert_eq!(validated.chunks().len(), 1);
+        assert_eq!(validated.unpacked_length(), data.len() as u64);
+        let decoded = decode_serialized_xorb_chunks(&mut reader, &validated).unwrap();
+        assert_eq!(decoded[0].data(), data.as_slice());
+    }
+
     // ── DecodedXorbChunk / ValidatedXorbChunk edge cases ────────────────
 
     #[test]
