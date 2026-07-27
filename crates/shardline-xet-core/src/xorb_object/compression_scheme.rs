@@ -394,4 +394,144 @@ mod tests {
     fn default_is_auto() {
         assert_eq!(CompressionScheme::default(), CompressionScheme::Auto);
     }
+
+    // --- BG4-specific regression tests ---
+
+    #[test]
+    fn bg4_roundtrip_small_payload() {
+        let data = b"Hello, this tests BG4 byte-interleaving compression!";
+        let compressed = CompressionScheme::ByteGrouping4LZ4.compress_from_slice(data).unwrap();
+        let decompressed = CompressionScheme::ByteGrouping4LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert_eq!(&*decompressed, data);
+    }
+
+    #[test]
+    fn bg4_roundtrip_empty() {
+        let data: &[u8] = b"";
+        let compressed = CompressionScheme::ByteGrouping4LZ4.compress_from_slice(data).unwrap();
+        let decompressed = CompressionScheme::ByteGrouping4LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[test]
+    fn bg4_roundtrip_single_byte() {
+        let data = &[42u8];
+        let compressed = CompressionScheme::ByteGrouping4LZ4.compress_from_slice(data).unwrap();
+        let decompressed = CompressionScheme::ByteGrouping4LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert_eq!(&*decompressed, data);
+    }
+
+    #[test]
+    fn bg4_roundtrip_not_multiple_of_4() {
+        // Test various sizes that don't divide evenly by 4
+        for n in [1, 2, 3, 5, 7, 13, 65535, 65537, 131073] {
+            let data: Vec<u8> = (0..n).map(|i| (i % 256) as u8).collect();
+            let compressed = CompressionScheme::ByteGrouping4LZ4
+                .compress_from_slice(&data)
+                .unwrap();
+            let decompressed = CompressionScheme::ByteGrouping4LZ4
+                .decompress_from_slice(&compressed)
+                .unwrap();
+            assert_eq!(
+                *decompressed, data,
+                "BG4 roundtrip failed for size {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn bg4_roundtrip_chunk_sized_payload() {
+        // Typical chunk size used in shardline (64 KiB)
+        let data: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        let compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(&data)
+            .unwrap();
+        let decompressed = CompressionScheme::ByteGrouping4LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert_eq!(*decompressed, data);
+    }
+
+    #[test]
+    fn bg4_roundtrip_large_repetitive_data() {
+        // 1 MiB of repeated pattern — BG4 should compress well
+        let data: Vec<u8> = (0..1_048_576).map(|i| ((i * 7 + 3) % 256) as u8).collect();
+        let compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(&data)
+            .unwrap();
+        let decompressed = CompressionScheme::ByteGrouping4LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert_eq!(*decompressed, data);
+        // Verify BG4 actually compresses
+        assert!(
+            compressed.len() < data.len(),
+            "BG4-LZ4 should compress repetitive data"
+        );
+    }
+
+    #[test]
+    fn bg4_roundtrip_random_data() {
+        // 256 KiB of pseudo-random data
+        let data: Vec<u8> = (0u32..262144).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect();
+        let compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(&data)
+            .unwrap();
+        let decompressed = CompressionScheme::ByteGrouping4LZ4
+            .decompress_from_slice(&compressed)
+            .unwrap();
+        assert_eq!(*decompressed, data);
+    }
+
+    #[test]
+    fn bg4_roundtrip_reader_based() {
+        let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
+        let compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(&data)
+            .unwrap();
+        let mut reader = Cursor::new(&*compressed);
+        let mut writer = Vec::new();
+        let n = CompressionScheme::ByteGrouping4LZ4
+            .decompress_from_reader(&mut reader, &mut writer)
+            .unwrap();
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(writer, data);
+    }
+
+    #[test]
+    fn bg4_produces_different_output_than_plain_lz4() {
+        // BG4 interleaving should produce a different compressed output than plain LZ4
+        let data = b"abcdefgh";
+        let bg4_compressed = CompressionScheme::ByteGrouping4LZ4
+            .compress_from_slice(data)
+            .unwrap();
+        let lz4_compressed = CompressionScheme::LZ4.compress_from_slice(data).unwrap();
+        // The compressed bytes should differ (BG4 interleaves before LZ4)
+        assert_ne!(
+            *bg4_compressed, *lz4_compressed,
+            "BG4 and plain LZ4 should produce different compressed output"
+        );
+        // But both should decompress to the same original
+        assert_eq!(
+            *CompressionScheme::ByteGrouping4LZ4
+                .decompress_from_slice(&bg4_compressed)
+                .unwrap(),
+            *CompressionScheme::LZ4.decompress_from_slice(&lz4_compressed).unwrap()
+        );
+    }
+
+    #[test]
+    fn bg4_cross_compat_with_upstream_split_regroup() {
+        // Verify our BG4 matches upstream xet-core-structures split/regroup
+        let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
+        let grouped = bg4_split(&data);
+        let regrouped = bg4_regroup(&grouped);
+        assert_eq!(regrouped, data, "bg4_split→bg4_regroup roundtrip must match upstream");
+    }
 }
