@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-07-28
+
+Patch release fixing Xet protocol uploads broken by stubbed BG4 compression.
+
+### Fixed
+
+- **Xet BG4 compression**: shardline-xet-core stubbed ByteGrouping4LZ4 as plain LZ4,
+  causing all xet-data client uploads to fail with HTTP 400. Delegates to upstream
+  xet-core-structures for correct BG4 interleaving/deinterleaving.
+- **CI license check**: MPL-2.0 added to deny.toml allow list for xet-core-structures
+  transitive dependencies.
+
+### Testing
+
+- Added 23 BG4 compression unit tests (roundtrips, panic safety, cross-scheme, proptest).
+- Added adapter integration test for BG4 xorb validate/decode roundtrip.
+- Added missing validate_xorb_object call to existing BG4 integration test.
+
 ## [1.2.1] - 2026-07-27
 
 Patch release establishing recoverable upload lifecycles, shared chunk-backed storage,
