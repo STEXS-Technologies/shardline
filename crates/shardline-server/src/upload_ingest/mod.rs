@@ -1,3 +1,4 @@
+pub(crate) mod cdc;
 mod body_reader;
 mod chunk_store;
 mod ingestor;
