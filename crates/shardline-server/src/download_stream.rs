@@ -1,7 +1,8 @@
-use std::{io::SeekFrom, pin::Pin};
+use std::{io::{Error as IoError, ErrorKind, SeekFrom}, pin::Pin};
 
 use axum::body::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
+use lz4_flex;
 use shardline_index::FileRecord;
 use shardline_protocol::ByteRange;
 use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore};
@@ -20,6 +21,11 @@ pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
 
 /// Streams a chunk-backed file record without materializing the complete object.
+///
+/// Chunks are stored compressed. Each chunk is read as a whole compressed blob,
+/// decompressed, and then the requested byte range is sliced from the decompressed
+/// data. The `packed_end` field on the chunk record indicates the compressed storage
+/// length; `length` is the raw (uncompressed) length used for offset math.
 pub(crate) async fn file_record_byte_stream(
     object_store: ServerObjectStore,
     record: FileRecord,
@@ -60,18 +66,50 @@ pub(crate) async fn file_record_byte_stream(
             .checked_sub(chunk.offset)
             .ok_or(ServerError::Overflow)?;
         let relative_end = end.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?;
+        // Use packed_end as storage length (compressed), fall back to length for backward compat
+        let storage_length = if chunk.packed_end > 0 {
+            chunk.packed_end
+        } else {
+            chunk.length
+        };
         terms.push((
             chunk_object_key(&chunk.hash)?,
-            chunk.length,
+            storage_length, // compressed length for storage read
+            chunk.length,   // raw length for offset math
             ByteRange::new(relative_start, relative_end)
                 .map_err(|_error| ServerError::RangeNotSatisfiable)?,
         ));
     }
 
-    let streams = stream::iter(terms).then(move |(key, length, term_range)| {
-        let object_store = object_store.clone();
-        async move { object_byte_range_stream(object_store, key, length, term_range).await }
-    });
+    // For each term: read the entire compressed chunk, decompress, then apply byte range
+    let streams = stream::iter(terms).then(
+        move |(key, storage_length, _raw_length, range)| {
+            let object_store = object_store.clone();
+            async move {
+                // Read the entire compressed chunk
+                let compressed_stream =
+                    object_byte_stream(object_store, key, storage_length).await?;
+                // Collect all compressed bytes
+                let compressed = compressed_stream
+                    .try_fold(Vec::new(), |mut acc, chunk| async move {
+                        acc.extend_from_slice(&chunk);
+                        Ok(acc)
+                    })
+                    .await?;
+                // Decompress
+                let decompressed = lz4_flex::decompress_size_prepended(&compressed).map_err(
+                    |e| ServerError::Io(IoError::new(ErrorKind::InvalidData, e)),
+                )?;
+                // Apply byte range on decompressed data
+                let range_start = usize::try_from(range.start())?;
+                let range_end = usize::try_from(range.end_inclusive())?;
+                let sliced = decompressed[range_start..=range_end].to_vec();
+                let byte_stream: ServerByteStream =
+                    Box::pin(stream::once(async move { Ok(Bytes::from(sliced)) }));
+                Ok::<ServerByteStream, ServerError>(byte_stream)
+            }
+        },
+    );
     Ok(Box::pin(streams.try_flatten()))
 }
 

@@ -357,6 +357,7 @@ impl FileUploadIngestor {
         let super::chunk_store::StoredChunkOutcome {
             hash_hex,
             chunk_length,
+            compressed_length,
             inserted,
         } = outcome.stored;
         if inserted {
@@ -379,7 +380,7 @@ impl FileUploadIngestor {
             range_start: 0,
             range_end: 1,
             packed_start: 0,
-            packed_end: chunk_length,
+            packed_end: compressed_length,
         });
         Ok(())
     }
