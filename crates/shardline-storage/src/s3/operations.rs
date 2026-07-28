@@ -654,17 +654,15 @@ impl ObjectStore for S3ObjectStore {
 
     /// Stores an object if no identical object exists yet.
     ///
-    /// # TOCTOU Race Window
+    /// This method skips the HEAD existence check and relies entirely on
+    /// `PutMode::Create` (which sends `If-None-Match: *`) for conflict
+    /// detection.  For first-time uploads this saves one round-trip.  If the
+    /// object already exists, S3 returns `412 Precondition Failed` and the
+    /// method returns [`PutOutcome::AlreadyExists`].
     ///
-    /// The `metadata()` existence probe and `PutMode::Create` write
-    /// are not atomic.  Two concurrent callers that both see the key
-    /// as absent will both attempt a `PutMode::Create` write.  The second write
-    /// will fail with `AlreadyExists`, and the conflict-resolution path compares
-    /// the existing bytes against the caller's body.  For content-addressed keys
-    /// this is safe because both callers write identical bytes.  The
-    /// conflict-resolution path validates the match and returns
-    /// [`PutOutcome::AlreadyExists`] on success or
-    /// [`S3ObjectStoreError::ExistingObjectConflict`] on mismatch.
+    /// This is safe for content-addressed keys because the same digest always
+    /// maps to the same bytes — a race between two concurrent writers both
+    /// putting identical content is harmless.
     fn put_if_absent(
         &self,
         key: &ObjectKey,
@@ -673,20 +671,10 @@ impl ObjectStore for S3ObjectStore {
     ) -> Result<PutOutcome, Self::Error> {
         verify_integrity(body.as_slice(), integrity)?;
         let location = self.location_for_key(key)?;
-        if let Some(existing) = ObjectStore::metadata(self, key)? {
-            return existing_object_outcome(
-                self,
-                key,
-                existing.length(),
-                body.as_slice(),
-                integrity,
-            );
-        }
-
         let bytes = body.into_bytes();
         let write = self.block_on(self.inner.put_opts(
             &location,
-            bytes.clone().into(),
+            bytes.into(),
             PutMode::Create.into(),
         ));
         match write {
@@ -696,12 +684,7 @@ impl ObjectStore for S3ObjectStore {
             }))
             | Err(S3ObjectStoreError::External(ExternalObjectStoreError::Precondition {
                 ..
-            })) => {
-                let existing_length = ObjectStore::metadata(self, key)?
-                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
-                    .length();
-                existing_object_outcome(self, key, existing_length, bytes.as_ref(), integrity)
-            }
+            })) => Ok(PutOutcome::AlreadyExists),
             Err(error) => Err(error),
         }
     }
@@ -807,30 +790,16 @@ impl AsyncObjectStore for S3ObjectStore {
     ) -> Result<PutOutcome, Self::Error> {
         verify_integrity(body.as_slice(), integrity)?;
         let location = self.location_for_key(key)?;
-        if let Some(existing) = AsyncObjectStore::metadata(self, key).await? {
-            return existing_object_outcome(
-                self,
-                key,
-                existing.length(),
-                body.as_slice(),
-                integrity,
-            );
-        }
-
         let bytes = body.into_bytes();
         match self
             .inner
-            .put_opts(&location, bytes.clone().into(), PutMode::Create.into())
+            .put_opts(&location, bytes.into(), PutMode::Create.into())
             .await
         {
             Ok(_result) => Ok(PutOutcome::Inserted),
             Err(ExternalObjectStoreError::AlreadyExists { .. })
             | Err(ExternalObjectStoreError::Precondition { .. }) => {
-                let existing_length = AsyncObjectStore::metadata(self, key)
-                    .await?
-                    .ok_or(S3ObjectStoreError::ExistingObjectConflict)?
-                    .length();
-                existing_object_outcome(self, key, existing_length, bytes.as_ref(), integrity)
+                Ok(PutOutcome::AlreadyExists)
             }
             Err(error) => Err(S3ObjectStoreError::External(error)),
         }
