@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use shardline_index::{FileChunkRecord, FileRecord};
 use shardline_protocol::RepositoryScope;
 use tokio::task::JoinSet;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use super::cdc::CdcChunker;
 use super::body_reader::ChunkBuffer;
@@ -297,7 +297,10 @@ impl FileUploadIngestor {
         let Some(joined) = self.in_flight_chunks.join_next().await else {
             return Ok(());
         };
-        let outcome = joined.map_err(ServerError::BlockingTask)??;
+        let outcome = joined.map_err(|e| {
+            warn!(error = %e, "chunk storage task panicked");
+            ServerError::BlockingTask(e)
+        })??;
         if let Some(buffer) = outcome.reusable_buffer {
             self.recycle_pending_buffer(buffer);
         }

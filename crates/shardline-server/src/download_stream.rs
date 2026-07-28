@@ -10,7 +10,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
 };
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::{
     ServerError, chunk_store::chunk_object_key, error::ObjectStoreError,
@@ -106,10 +106,17 @@ pub(crate) async fn file_record_byte_stream(
                         Ok(acc)
                     })
                     .await?;
-                // Decompress
-                let decompressed = lz4_flex::decompress_size_prepended(&compressed).map_err(
-                    |e| ServerError::Io(IoError::new(ErrorKind::InvalidData, e)),
-                )?;
+                // Safety: validate decompressed size before allocation
+                let decompressed_size =
+                    u64::from_be_bytes(compressed[0..8].try_into().unwrap_or([0; 8]));
+                const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024; // 2MB safety ceiling
+                if decompressed_size > MAX_DECOMPRESSED_CHUNK {
+                    return Err(ServerError::Overflow);
+                }
+                let decompressed = lz4_flex::decompress_size_prepended(&compressed).map_err(|e| {
+                    warn!(compressed_len = compressed.len(), error = %e, "failed to decompress chunk");
+                    ServerError::Io(IoError::new(ErrorKind::InvalidData, e))
+                })?;
                 trace!(
                     chunk_hash = ?chunk_key,
                     compressed_len = compressed.len(),
