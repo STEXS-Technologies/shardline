@@ -451,29 +451,22 @@ mod tests {
     async fn dedup_records_savings_metric_on_already_exists() {
         // Verify that storing a duplicate chunk triggers the dedup_saves_bytes_total
         // metric, which is wired through record_dedup_on_already_exists.
+        // NOTE: We use only relative assertions because the global metric counter
+        // is shared across all tests in the process.
         let tmp = shardline_test_support::TempStorage::new();
         let store = ServerObjectStore::local(tmp.path()).unwrap();
         let data = b"dedup-metric-test-content!";
-
-        let before = shardline_metrics::metrics()
-            .storage
-            .dedup_saves_bytes_total
-            .get();
 
         // First insert — should be stored as new
         let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(data));
         let outcome1 = put_if_absent_chunk_buffer(&store, chunk1).await.unwrap();
         assert!(outcome1.inserted);
-        let after_first = shardline_metrics::metrics()
+
+        // Second insert with same content — should trigger dedup and record savings
+        let before_dedup = shardline_metrics::metrics()
             .storage
             .dedup_saves_bytes_total
             .get();
-        assert_eq!(
-            after_first, before,
-            "dedup_saves should not increase on first insert"
-        );
-
-        // Second insert with same content — should trigger dedup and record savings
         let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(data));
         let outcome2 = put_if_absent_chunk_buffer(&store, chunk2).await.unwrap();
         assert!(!outcome2.inserted);
@@ -482,8 +475,9 @@ mod tests {
             .dedup_saves_bytes_total
             .get();
         assert!(
-            after_dedup > after_first,
-            "dedup_saves_bytes_total should increase on dedup (before: {after_first}, after: {after_dedup})"
+            after_dedup > before_dedup,
+            "dedup_saves_bytes_total should increase by chunk_length ({}) on dedup (before: {before_dedup}, after: {after_dedup})",
+            outcome2.chunk_length
         );
     }
 
