@@ -11,6 +11,7 @@ pub struct StorageMetrics {
     pub xorbs_bytes_total: IntCounter,
     pub shards_total: IntGauge,
     pub dedup_saves_bytes_total: IntCounter,
+    pub compression_saved_bytes_total: IntCounter,
 }
 
 impl StorageMetrics {
@@ -32,6 +33,10 @@ impl StorageMetrics {
             "shardline_dedup_saves_bytes_total",
             "Bytes saved by deduplication",
         );
+        let compression_saved_bytes_total = must_counter(
+            "shardline_compression_saved_bytes_total",
+            "Bytes saved by LZ4 compression",
+        );
 
         registry.register(Box::new(objects_total.clone())).ok();
         registry
@@ -45,6 +50,9 @@ impl StorageMetrics {
         registry
             .register(Box::new(dedup_saves_bytes_total.clone()))
             .ok();
+        registry
+            .register(Box::new(compression_saved_bytes_total.clone()))
+            .ok();
 
         Self {
             objects_total,
@@ -55,6 +63,7 @@ impl StorageMetrics {
             xorbs_bytes_total,
             shards_total,
             dedup_saves_bytes_total,
+            compression_saved_bytes_total,
         }
     }
 
@@ -79,6 +88,10 @@ impl StorageMetrics {
 
     pub fn record_dedup_saves(&self, bytes: u64) {
         self.dedup_saves_bytes_total.inc_by(bytes);
+    }
+
+    pub fn record_compression_saved(&self, bytes: u64) {
+        self.compression_saved_bytes_total.inc_by(bytes);
     }
 }
 
@@ -157,5 +170,19 @@ mod tests {
 
         metrics.record_dedup_saves(300);
         assert_eq!(metrics.dedup_saves_bytes_total.get(), 800);
+    }
+
+    #[test]
+    fn storage_metrics_record_compression_saved() {
+        let registry = Registry::new();
+        let metrics = StorageMetrics::new(&registry);
+
+        assert_eq!(metrics.compression_saved_bytes_total.get(), 0);
+
+        metrics.record_compression_saved(1000);
+        assert_eq!(metrics.compression_saved_bytes_total.get(), 1000);
+
+        metrics.record_compression_saved(500);
+        assert_eq!(metrics.compression_saved_bytes_total.get(), 1500);
     }
 }

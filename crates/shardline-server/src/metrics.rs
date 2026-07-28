@@ -84,6 +84,14 @@ pub fn record_dedup_saves(bytes: u64) {
         .record_dedup_saves(bytes);
 }
 
+pub fn record_compression_saved(raw_bytes: u64, compressed_bytes: u64) {
+    if raw_bytes > compressed_bytes {
+        shardline_metrics::metrics()
+            .storage
+            .record_compression_saved(raw_bytes - compressed_bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

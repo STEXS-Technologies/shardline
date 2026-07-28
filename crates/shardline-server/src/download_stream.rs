@@ -1021,6 +1021,63 @@ mod tests {
         assert!(matches!(result, Err(ServerError::NotFound)));
     }
 
+    // ── file_record_byte_stream decompression round-trip ─────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_record_byte_stream_decompresses_lz4_chunks() {
+        use shardline_index::{FileRecord, FileChunkRecord};
+        use shardline_storage::ObjectStore;
+
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store =
+            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+
+        // Create a compressible payload
+        let payload = vec![0xABu8; 4096];
+        let compressed = lz4_flex::compress_prepend_size(&payload);
+
+        // Store the compressed chunk with its hash
+        let hash = crate::local_backend::chunk_hash(&compressed);
+        let hash_hex = shardline_index::xet_hash_hex_string(hash);
+        let object_key = crate::chunk_store::chunk_object_key(&hash_hex).unwrap();
+        let integrity = shardline_storage::ObjectIntegrity::new(hash, compressed.len() as u64);
+        object_store
+            .put_if_absent(
+                &object_key,
+                shardline_storage::ObjectBody::from_vec(compressed.clone()),
+                &integrity,
+            )
+            .unwrap();
+
+        // Build a FileRecord pointing to this chunk
+        let record = FileRecord {
+            file_id: "test-lz4".to_string(),
+            content_hash: hash_hex.clone(),
+            total_bytes: payload.len() as u64,
+            chunk_size: 65536,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash_hex,
+                offset: 0,
+                length: payload.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: compressed.len() as u64,
+            }],
+        };
+
+        let mut stream =
+            super::file_record_byte_stream(object_store, record, None)
+                .await
+                .unwrap();
+        let mut result = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            result.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(result, payload);
+    }
+
     // ── object_byte_range_stream via Local store with mid-range ──────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
