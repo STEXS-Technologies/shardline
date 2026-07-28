@@ -58,8 +58,7 @@ shardline manpage --output ./shardline.1
 
 ## Global Flags
 
-These flags are available on every command and must be placed before the
-subcommand:
+These flags are available on every command and must be placed before the subcommand:
 
 ```text
 --env-file <PATH>   Load a .env file into the process environment before

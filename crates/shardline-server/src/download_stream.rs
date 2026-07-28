@@ -10,6 +10,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
 };
+use tracing::{debug, trace};
 
 use crate::{
     ServerError, chunk_store::chunk_object_key, error::ObjectStoreError,
@@ -35,6 +36,14 @@ pub(crate) async fn file_record_byte_stream(
     if record.total_bytes == 0 {
         return Ok(Box::pin(stream::empty()));
     }
+
+    debug!(
+        file_id = %record.file_id,
+        total_bytes = record.total_bytes,
+        chunk_count = record.chunks.len(),
+        range = ?range,
+        "reconstructing file from chunks"
+    );
 
     let requested_start = range.map_or(0, |value| value.start());
     let requested_end = range.map_or_else(
@@ -87,6 +96,7 @@ pub(crate) async fn file_record_byte_stream(
             let object_store = object_store.clone();
             async move {
                 // Read the entire compressed chunk
+                let chunk_key = key.clone();
                 let compressed_stream =
                     object_byte_stream(object_store, key, storage_length).await?;
                 // Collect all compressed bytes
@@ -100,6 +110,12 @@ pub(crate) async fn file_record_byte_stream(
                 let decompressed = lz4_flex::decompress_size_prepended(&compressed).map_err(
                     |e| ServerError::Io(IoError::new(ErrorKind::InvalidData, e)),
                 )?;
+                trace!(
+                    chunk_hash = ?chunk_key,
+                    compressed_len = compressed.len(),
+                    decompressed_len = decompressed.len(),
+                    "decompressed chunk"
+                );
                 // Apply byte range on decompressed data
                 let range_start = usize::try_from(range.start())?;
                 let range_end = usize::try_from(range.end_inclusive())?;

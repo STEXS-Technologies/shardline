@@ -78,8 +78,9 @@ SHARDLINE_RECONSTRUCTION_CACHE_TTL_SECONDS=30
 
 #### TLS and mTLS
 
-Use `rediss://` for a TLS-protected Redis endpoint. The normal platform trust store is
-used when the server certificate chains to a public CA:
+Use `rediss://` for a TLS-protected Redis endpoint.
+The normal platform trust store is used when the server certificate chains to a public
+CA:
 
 ```text
 SHARDLINE_RECONSTRUCTION_CACHE_ADAPTER=redis
@@ -87,8 +88,8 @@ SHARDLINE_RECONSTRUCTION_CACHE_REDIS_URL=rediss://cache.example.com:6379
 ```
 
 For a private CA, mount its PEM file and set
-`SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CA_FILE`. For Redis mTLS, mount the
-client certificate and private key as separate files and set both variables below.
+`SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CA_FILE`. For Redis mTLS, mount the client
+certificate and private key as separate files and set both variables below.
 They are read as bounded secret files; the certificate and key are never emitted in
 configuration debug output.
 
@@ -99,8 +100,9 @@ SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_CERT_FILE=/run/secrets/redis-cli
 SHARDLINE_RECONSTRUCTION_CACHE_REDIS_TLS_CLIENT_KEY_FILE=/run/secrets/redis-client-key.pem
 ```
 
-Set the client certificate and key together. Shardline rejects a partial mTLS
-identity during startup. TLS material requires a `rediss://` URL.
+Set the client certificate and key together.
+Shardline rejects a partial mTLS identity during startup.
+TLS material requires a `rediss://` URL.
 
 Redis-compatible caches improve cache reuse across horizontally scaled API nodes while
 keeping the cache separate from durable metadata.

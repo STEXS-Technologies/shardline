@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use shardline_index::{FileChunkRecord, FileRecord};
 use shardline_protocol::RepositoryScope;
 use tokio::task::JoinSet;
+use tracing::{debug, instrument};
 
 use super::cdc::CdcChunker;
 use super::body_reader::ChunkBuffer;
@@ -81,6 +82,7 @@ impl FileUploadIngestor {
     }
 
     /// Ingests one body chunk and persists complete content chunks.
+    #[instrument(skip(self, object_store, bytes), fields(bytes_len = bytes.len()))]
     pub(crate) async fn ingest_body_chunk(
         &mut self,
         object_store: &ServerObjectStore,
@@ -114,6 +116,7 @@ impl FileUploadIngestor {
     }
 
     /// Finalizes the upload after the stream reaches EOF.
+    #[instrument(skip(self, object_store), fields(file_id = %file_id))]
     pub(crate) async fn finish(
         mut self,
         object_store: &ServerObjectStore,
@@ -158,6 +161,14 @@ impl FileUploadIngestor {
             stored_bytes: self.stored_bytes,
             chunks: self.chunks,
         };
+
+        debug!(
+            file_id,
+            total_bytes = self.next_offset,
+            inserted_chunks = self.inserted_chunks,
+            reused_chunks = self.reused_chunks,
+            "upload complete"
+        );
 
         Ok((record, response))
     }

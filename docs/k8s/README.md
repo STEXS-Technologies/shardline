@@ -41,10 +41,10 @@ docs/k8s/production-scaled/
 
 ## Configuration
 
-Server settings are defined in `configmap.yaml` as a `shardline.toml` file
-mounted at `/etc/shardline/shardline.toml`. Shardline automatically detects
-this path, so no `--config` flag is needed. Credentials and
-secrets remain in the runtime secret as env vars or mounted files.
+Server settings are defined in `configmap.yaml` as a `shardline.toml` file mounted at
+`/etc/shardline/shardline.toml`. Shardline automatically detects this path, so no
+`--config` flag is needed.
+Credentials and secrets remain in the runtime secret as env vars or mounted files.
 
 ```bash
 kubectl apply -f docs/k8s/production-scaled/configmap.yaml
@@ -192,36 +192,38 @@ For the broader production operating model, see [Operations](../OPERATIONS.md).
 
 ## Disposable `kind` Smoke Test
 
-The repository ships a CI-grade smoke test for the scaled deployment profile. It builds the
-current Docker image, creates a temporary `kind` cluster, starts Postgres, Redis, and MinIO
-inside the cluster, creates the S3 bucket and metadata schema, and deploys the production
-manifests through a small test overlay.
+The repository ships a CI-grade smoke test for the scaled deployment profile.
+It builds the current Docker image, creates a temporary `kind` cluster, starts Postgres,
+Redis, and MinIO inside the cluster, creates the S3 bucket and metadata schema, and
+deploys the production manifests through a small test overlay.
 
-Run it from the repository root when `docker`, `kind`, `kubectl`, `cargo`, and `python3` are
-available:
+Run it from the repository root when `docker`, `kind`, `kubectl`, `cargo`, and `python3`
+are available:
 
 ```bash
 scripts/k8s/kind-smoke.sh
 ```
 
 The test validates both role-specific readiness responses, provider-token issuance, an
-authenticated xorb upload through the transfer Service, shard registration through the API
-Service, a ranged transfer download, API statistics, metrics authentication, and that API and
-transfer routes remain separated. It uses one low-resource replica of each Shardline role and
-does not require an ingress controller; the script port-forwards each Service directly.
+authenticated xorb upload through the transfer Service, shard registration through the
+API Service, a ranged transfer download, API statistics, metrics authentication, and
+that API and transfer routes remain separated.
+It uses one low-resource replica of each Shardline role and does not require an ingress
+controller; the script port-forwards each Service directly.
 
-The cluster name is unique by default and is deleted on success, failure, or interruption.
-The locally built smoke image and port-forward processes are also removed. On failure, the
-script preserves Kubernetes diagnostics in a temporary directory (or in
-`SHARDLINE_KIND_LOG_DIR` when set) before deleting the cluster. Set
-`SHARDLINE_KIND_CLUSTER_NAME` only when a predictable, still-disposable name is required; the
-script refuses to reuse an existing cluster.
+The cluster name is unique by default and is deleted on success, failure, or
+interruption. The locally built smoke image and port-forward processes are also removed.
+On failure, the script preserves Kubernetes diagnostics in a temporary directory (or in
+`SHARDLINE_KIND_LOG_DIR` when set) before deleting the cluster.
+Set `SHARDLINE_KIND_CLUSTER_NAME` only when a predictable, still-disposable name is
+required; the script refuses to reuse an existing cluster.
 
 ## Runtime hardening
 
-The production-scaled manifests are designed for the Kubernetes `restricted`
-Pod Security Standard: containers run as non-root, drop every Linux capability,
-disallow privilege escalation, use a read-only root filesystem, and select the
-node's `RuntimeDefault` seccomp profile. Keep an equivalent AppArmor profile
-enabled where the cluster supports it; clusters without AppArmor support must
-enforce an equivalent runtime policy through their admission controller.
+The production-scaled manifests are designed for the Kubernetes `restricted` Pod
+Security Standard: containers run as non-root, drop every Linux capability, disallow
+privilege escalation, use a read-only root filesystem, and select the node's
+`RuntimeDefault` seccomp profile.
+Keep an equivalent AppArmor profile enabled where the cluster supports it; clusters
+without AppArmor support must enforce an equivalent runtime policy through their
+admission controller.

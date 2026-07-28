@@ -3,6 +3,7 @@ use bytes::BytesMut;
 use lz4_flex;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 use tokio::task;
+use tracing::{debug, trace};
 
 use super::body_reader::ChunkBuffer;
 use crate::{
@@ -45,6 +46,12 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
     let (hash_hex, object_key) = chunk_object_key_for_computed_hash(hash)?;
     let chunk_length = u64::try_from(raw.len())?;
     let compressed_length = u64::try_from(compressed.len())?;
+    trace!(
+        raw_len = raw.len(),
+        compressed_len = compressed.len(),
+        ratio = format!("{:.2}", compressed.len() as f64 / raw.len().max(1) as f64),
+        "LZ4 compressed chunk"
+    );
     let integrity = ObjectIntegrity::new(hash, compressed_length);
     Ok(ChunkStorageRequest {
         key: object_key,
@@ -58,6 +65,7 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
 /// Records dedup savings when a chunk already exists in the store.
 fn record_dedup_on_already_exists(outcome: PutOutcome, chunk_length: u64) {
     if matches!(outcome, PutOutcome::AlreadyExists) {
+        debug!(chunk_length, "dedup hit — chunk already stored");
         record_dedup_saves(chunk_length);
     }
 }
