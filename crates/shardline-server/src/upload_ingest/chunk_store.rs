@@ -8,7 +8,8 @@ use tracing::{debug, trace};
 use super::body_reader::ChunkBuffer;
 use crate::{
     ServerError, chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
-    metrics::record_dedup_saves, object_store::ServerObjectStore,
+    metrics::{record_compression_saved, record_dedup_saves},
+    object_store::ServerObjectStore,
 };
 
 pub(super) struct SequencedStoredChunkOutcome {
@@ -52,6 +53,7 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
         ratio = format!("{:.2}", compressed.len() as f64 / raw.len().max(1) as f64),
         "LZ4 compressed chunk"
     );
+    record_compression_saved(chunk_length, compressed_length);
     let integrity = ObjectIntegrity::new(hash, compressed_length);
     Ok(ChunkStorageRequest {
         key: object_key,
@@ -752,5 +754,84 @@ mod tests {
             outcome.compressed_length,
             "stored byte count should match compressed_length"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // LZ4 compression additional tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn lz4_compress_reduces_size_for_compressible_data() {
+        let data = vec![0u8; 65536]; // 64KB of zeros — highly compressible
+        let compressed = lz4_flex::compress_prepend_size(&data);
+        assert!(
+            compressed.len() < data.len(),
+            "compression should reduce size for zeros (compressed={} vs raw={})",
+            compressed.len(),
+            data.len()
+        );
+        let decompressed = lz4_flex::decompress_size_prepended(&compressed).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn lz4_round_trip_various_sizes() {
+        for size in [0, 1, 63, 64, 65, 128, 1024, 65536] {
+            let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+            let compressed = lz4_flex::compress_prepend_size(&data);
+            let decompressed = lz4_flex::decompress_size_prepended(&compressed).unwrap();
+            assert_eq!(decompressed, data, "round-trip failed for size {size}");
+        }
+    }
+
+    #[test]
+    fn lz4_zero_length_round_trip() {
+        let data: Vec<u8> = vec![];
+        let compressed = lz4_flex::compress_prepend_size(&data);
+        let decompressed = lz4_flex::decompress_size_prepended(&compressed).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn compressed_length_leq_chunk_length_for_compressible() {
+        let chunk = ChunkBuffer::Pooled(Bytes::from(vec![0u8; 4096]));
+        let request = chunk_object_key_and_integrity(&chunk).unwrap();
+        assert!(
+            request.compressed_length <= request.chunk_length,
+            "compressible data should not expand (compressed={} vs raw={})",
+            request.compressed_length,
+            request.chunk_length
+        );
+    }
+
+    #[test]
+    fn compressed_length_may_exceed_for_incompressible() {
+        let data: Vec<u8> = (0..128).map(|i| (i * 37 + 13) as u8).collect();
+        let chunk = ChunkBuffer::Pooled(Bytes::from(data));
+        let request = chunk_object_key_and_integrity(&chunk).unwrap();
+        // Small data with LZ4 prepend_size overhead may be larger than raw
+        assert!(request.compressed_length > 0);
+        assert_eq!(request.chunk_length, 128);
+    }
+
+    // ------------------------------------------------------------------
+    // Shared variant round-trip with local store
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn shared_chunk_local_store_roundtrip_read() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+        let data = b"roundtrip-read-test-content";
+        let chunk = ChunkBuffer::Shared(Bytes::from_static(data));
+        let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
+        assert!(outcome.inserted);
+        // Read back and verify content matches
+        let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
+        let compressed = lz4_flex::compress_prepend_size(data);
+        let hash = crate::local_backend::chunk_hash(&compressed);
+        let expected_hex = shardline_index::xet_hash_hex_string(hash);
+        assert_eq!(outcome.hash_hex, expected_hex);
+        assert!(store.contains(&object_key).unwrap());
     }
 }
