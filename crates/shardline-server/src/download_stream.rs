@@ -3,7 +3,7 @@ use std::{io::{Error as IoError, ErrorKind, SeekFrom}, pin::Pin};
 use axum::body::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use lz4_flex;
-use shardline_index::FileRecord;
+use shardline_index::{FileRecord, xet_hash_hex_string};
 use shardline_protocol::ByteRange;
 use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore};
 use tokio::{
@@ -14,7 +14,8 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     ServerError, chunk_store::chunk_object_key, error::ObjectStoreError,
-    object_store::ServerObjectStore, object_store::run_before_local_object_read_hook,
+    local_backend::chunk_hash, object_store::ServerObjectStore,
+    object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
@@ -81,18 +82,20 @@ pub(crate) async fn file_record_byte_stream(
         } else {
             chunk.length
         };
+        let hash_hex = chunk.hash.clone();
         terms.push((
-            chunk_object_key(&chunk.hash)?,
+            chunk_object_key(&hash_hex)?,
             storage_length, // compressed length for storage read
             chunk.length,   // raw length for offset math
+            hash_hex,       // expected hash for integrity verification
             ByteRange::new(relative_start, relative_end)
                 .map_err(|_error| ServerError::RangeNotSatisfiable)?,
         ));
     }
 
-    // For each term: read the entire compressed chunk, decompress, then apply byte range
+    // For each term: read the entire compressed chunk, decompress, verify integrity, then apply byte range
     let streams = stream::iter(terms).then(
-        move |(key, storage_length, _raw_length, range)| {
+        move |(key, storage_length, _raw_length, expected_hash_hex, range)| {
             let object_store = object_store.clone();
             async move {
                 // Read the entire compressed chunk
@@ -117,6 +120,23 @@ pub(crate) async fn file_record_byte_stream(
                     warn!(compressed_len = compressed.len(), error = %e, "failed to decompress chunk");
                     ServerError::Io(IoError::new(ErrorKind::InvalidData, e))
                 })?;
+
+                // Verify decompressed content matches expected chunk hash
+                // (hash is of raw content, not compressed)
+                let actual_hash = chunk_hash(&decompressed);
+                let actual_hex = xet_hash_hex_string(actual_hash);
+                if actual_hex != expected_hash_hex {
+                    warn!(
+                        expected = %expected_hash_hex,
+                        actual = %actual_hex,
+                        decompressed_len = decompressed.len(),
+                        "chunk integrity mismatch after decompression"
+                    );
+                    return Err(ServerError::ObjectStore(
+                        ObjectStoreError::StoredLengthMismatch,
+                    ));
+                }
+
                 trace!(
                     chunk_hash = ?chunk_key,
                     compressed_len = compressed.len(),
@@ -1043,11 +1063,13 @@ mod tests {
         let payload = vec![0xABu8; 4096];
         let compressed = lz4_flex::compress_prepend_size(&payload);
 
-        // Store the compressed chunk with its hash
-        let hash = crate::local_backend::chunk_hash(&compressed);
-        let hash_hex = shardline_index::xet_hash_hex_string(hash);
+        // Store the compressed chunk keyed by its raw-content hash
+        let raw_hash = crate::local_backend::chunk_hash(&payload);
+        let hash_hex = shardline_index::xet_hash_hex_string(raw_hash);
         let object_key = crate::chunk_store::chunk_object_key(&hash_hex).unwrap();
-        let integrity = shardline_storage::ObjectIntegrity::new(hash, compressed.len() as u64);
+        // Integrity verifies stored bytes (compressed), not raw content
+        let compressed_hash = crate::local_backend::chunk_hash(&compressed);
+        let integrity = shardline_storage::ObjectIntegrity::new(compressed_hash, compressed.len() as u64);
         object_store
             .put_if_absent(
                 &object_key,

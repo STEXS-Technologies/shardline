@@ -43,8 +43,9 @@ struct ChunkStorageRequest {
 fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageRequest, ServerError> {
     let raw = chunk.as_slice();
     let compressed = lz4_flex::compress_prepend_size(raw);
-    let hash = chunk_hash(&compressed);
-    let (hash_hex, object_key) = chunk_object_key_for_computed_hash(hash)?;
+    let raw_hash = chunk_hash(raw); // content identity: hash of raw bytes
+    let compressed_hash = chunk_hash(&compressed); // storage integrity: hash of stored bytes
+    let (hash_hex, object_key) = chunk_object_key_for_computed_hash(raw_hash)?;
     let chunk_length = u64::try_from(raw.len())?;
     let compressed_length = u64::try_from(compressed.len())?;
     trace!(
@@ -54,7 +55,7 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
         "LZ4 compressed chunk"
     );
     record_compression_saved(chunk_length, compressed_length);
-    let integrity = ObjectIntegrity::new(hash, compressed_length);
+    let integrity = ObjectIntegrity::new(compressed_hash, compressed_length);
     Ok(ChunkStorageRequest {
         key: object_key,
         integrity,
@@ -252,17 +253,32 @@ mod tests {
     }
 
     #[test]
-    fn integrity_hash_matches_blake3_of_compressed_bytes() {
+    fn integrity_hash_matches_blake3_of_raw_bytes() {
         let data = b"test data for blake3 verification";
         let chunk = ChunkBuffer::Pooled(Bytes::from_static(data));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
-        let compressed = lz4_flex::compress_prepend_size(data);
-        let expected_hash = chunk_hash(&compressed);
+        let expected_hash = chunk_hash(data); // CHANGED: hash raw bytes, not compressed
         let expected_hex = xet_hash_hex_string(expected_hash);
         assert_eq!(request.hash_hex, expected_hex);
         // Small data may not compress below raw length (LZ4 adds size prefix overhead),
         // but the compressed length must be consistent
         assert!(request.compressed_length > 0);
+    }
+
+    #[test]
+    fn hash_is_of_raw_bytes_not_compressed() {
+        // Two different raw chunks must produce different hashes
+        // even if they compress to the same output (unlikely but proves the model)
+        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(b"hello world"));
+        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(b"hello worle"));
+        let req1 = chunk_object_key_and_integrity(&chunk1).unwrap();
+        let req2 = chunk_object_key_and_integrity(&chunk2).unwrap();
+        assert_ne!(req1.hash_hex, req2.hash_hex);
+
+        // Verify hash is computed on raw data, not compressed
+        let raw_hash = chunk_hash(b"hello world");
+        let raw_hex = xet_hash_hex_string(raw_hash);
+        assert_eq!(req1.hash_hex, raw_hex);
     }
 
     #[test]
@@ -364,10 +380,9 @@ mod tests {
         let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
 
-        // The hash is computed on compressed bytes (content-addressed on compressed form)
+        // The hash is computed on raw bytes (content-addressed on raw content)
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
-        let compressed = lz4_flex::compress_prepend_size(data);
-        let hash = chunk_hash(&compressed);
+        let hash = chunk_hash(data);
         let expected_hex = xet_hash_hex_string(hash);
         assert_eq!(outcome.hash_hex, expected_hex);
 
@@ -828,8 +843,7 @@ mod tests {
         assert!(outcome.inserted);
         // Read back and verify content matches
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
-        let compressed = lz4_flex::compress_prepend_size(data);
-        let hash = crate::local_backend::chunk_hash(&compressed);
+        let hash = crate::local_backend::chunk_hash(data);
         let expected_hex = shardline_index::xet_hash_hex_string(hash);
         assert_eq!(outcome.hash_hex, expected_hex);
         assert!(store.contains(&object_key).unwrap());
