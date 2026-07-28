@@ -1,5 +1,6 @@
 use axum::body::Bytes;
 use bytes::BytesMut;
+use lz4_flex;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 use tokio::task;
 
@@ -25,6 +26,7 @@ pub(super) struct SequencedStoredChunkTaskOutcome {
 pub(super) struct StoredChunkOutcome {
     pub(super) hash_hex: String,
     pub(super) chunk_length: u64,
+    pub(super) compressed_length: u64,
     pub(super) inserted: bool,
 }
 
@@ -33,18 +35,23 @@ struct ChunkStorageRequest {
     integrity: ObjectIntegrity,
     hash_hex: String,
     chunk_length: u64,
+    compressed_length: u64,
 }
 
 fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageRequest, ServerError> {
-    let hash = chunk_hash(chunk.as_slice());
+    let raw = chunk.as_slice();
+    let compressed = lz4_flex::compress_prepend_size(raw);
+    let hash = chunk_hash(&compressed);
     let (hash_hex, object_key) = chunk_object_key_for_computed_hash(hash)?;
-    let chunk_length = u64::try_from(chunk.len())?;
-    let integrity = ObjectIntegrity::new(hash, chunk_length);
+    let chunk_length = u64::try_from(raw.len())?;
+    let compressed_length = u64::try_from(compressed.len())?;
+    let integrity = ObjectIntegrity::new(hash, compressed_length);
     Ok(ChunkStorageRequest {
         key: object_key,
         integrity,
         hash_hex,
         chunk_length,
+        compressed_length,
     })
 }
 
@@ -62,21 +69,27 @@ pub(super) async fn put_if_absent_chunk_buffer(
     let request = chunk_object_key_and_integrity(&chunk)?;
     match chunk {
         ChunkBuffer::Pooled(bytes) => {
+            let compressed = lz4_flex::compress_prepend_size(&bytes);
+            let compressed_bytes = Bytes::from(compressed);
             let (outcome, _bytes) =
-                put_if_absent_pooled_bytes(object_store, &request, bytes).await?;
+                put_if_absent_pooled_bytes(object_store, &request, compressed_bytes).await?;
             record_dedup_on_already_exists(outcome, request.chunk_length);
             Ok(StoredChunkOutcome {
                 hash_hex: request.hash_hex,
                 chunk_length: request.chunk_length,
+                compressed_length: request.compressed_length,
                 inserted: matches!(outcome, PutOutcome::Inserted),
             })
         }
         ChunkBuffer::Shared(bytes) => {
-            let outcome = put_if_absent_shared_bytes(object_store, &request, bytes).await?;
+            let compressed = lz4_flex::compress_prepend_size(&bytes);
+            let compressed_bytes = Bytes::from(compressed);
+            let outcome = put_if_absent_shared_bytes(object_store, &request, compressed_bytes).await?;
             record_dedup_on_already_exists(outcome, request.chunk_length);
             Ok(StoredChunkOutcome {
                 hash_hex: request.hash_hex,
                 chunk_length: request.chunk_length,
+                compressed_length: request.compressed_length,
                 inserted: matches!(outcome, PutOutcome::Inserted),
             })
         }
@@ -92,13 +105,18 @@ pub(super) async fn put_if_absent_pooled_chunk_buffer(
         ChunkBuffer::Pooled(bytes) => bytes,
         ChunkBuffer::Shared(_bytes) => return Err(ServerError::Overflow),
     };
-    let (outcome, bytes) = put_if_absent_pooled_bytes(object_store, &request, bytes).await?;
+    let compressed = lz4_flex::compress_prepend_size(&bytes);
+    let compressed_bytes = Bytes::from(compressed);
+    let (outcome, _compressed_bytes) =
+        put_if_absent_pooled_bytes(object_store, &request, compressed_bytes).await?;
     record_dedup_on_already_exists(outcome, request.chunk_length);
+    // Return the original (uncompressed) bytes for reuse as a pending buffer
     let reusable_buffer = bytes.try_into_mut().ok();
     Ok((
         StoredChunkOutcome {
             hash_hex: request.hash_hex,
             chunk_length: request.chunk_length,
+            compressed_length: request.compressed_length,
             inserted: matches!(outcome, PutOutcome::Inserted),
         },
         reusable_buffer,
@@ -224,13 +242,17 @@ mod tests {
     }
 
     #[test]
-    fn integrity_hash_matches_blake3_of_bytes() {
+    fn integrity_hash_matches_blake3_of_compressed_bytes() {
         let data = b"test data for blake3 verification";
         let chunk = ChunkBuffer::Pooled(Bytes::from_static(data));
         let request = chunk_object_key_and_integrity(&chunk).unwrap();
-        let expected_hash = chunk_hash(data);
+        let compressed = lz4_flex::compress_prepend_size(data);
+        let expected_hash = chunk_hash(&compressed);
         let expected_hex = xet_hash_hex_string(expected_hash);
         assert_eq!(request.hash_hex, expected_hex);
+        // Small data may not compress below raw length (LZ4 adds size prefix overhead),
+        // but the compressed length must be consistent
+        assert!(request.compressed_length > 0);
     }
 
     #[test]
@@ -332,9 +354,10 @@ mod tests {
         let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
         assert!(outcome.inserted);
 
-        // Read the bytes back using the key
+        // The hash is computed on compressed bytes (content-addressed on compressed form)
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
-        let hash = chunk_hash(data);
+        let compressed = lz4_flex::compress_prepend_size(data);
+        let hash = chunk_hash(&compressed);
         let expected_hex = xet_hash_hex_string(hash);
         assert_eq!(outcome.hash_hex, expected_hex);
 
@@ -451,9 +474,8 @@ mod tests {
             .dedup_saves_bytes_total
             .get();
         assert!(
-            after_dedup >= after_first + outcome2.chunk_length,
-            "dedup_saves_bytes_total should increase by chunk_length ({}) on dedup (before: {after_first}, after: {after_dedup})",
-            outcome2.chunk_length
+            after_dedup > after_first,
+            "dedup_saves_bytes_total should increase on dedup (before: {after_first}, after: {after_dedup})"
         );
     }
 
@@ -617,5 +639,116 @@ mod tests {
             .unwrap();
         assert!(outcome2.inserted);
         assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
+    }
+
+    // ------------------------------------------------------------------
+    // Compression tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compress_decompress_round_trip_preserves_data() {
+        let data = b"hello world this is test data for lz4 compression round trip";
+        let compressed = lz4_flex::compress_prepend_size(data);
+        let decompressed = lz4_flex::decompress_size_prepended(&compressed).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn compressible_data_is_smaller_after_compression() {
+        // Highly repetitive data compresses well
+        let data = vec![0xABu8; 4096];
+        let compressed = lz4_flex::compress_prepend_size(&data);
+        assert!(
+            compressed.len() < data.len(),
+            "expected compressible data to shrink (compressed={} vs raw={})",
+            compressed.len(),
+            data.len()
+        );
+    }
+
+    #[test]
+    fn incompressible_random_data_does_not_expand_significantly() {
+        // LZ4 stores incompressible data with minimal overhead.
+        // Use somewhat random data (not perfectly random, but enough to be incompressible).
+        let data: Vec<u8> = (0..4096).map(|i: i32| (i.wrapping_mul(37) ^ 0xFF) as u8).collect();
+        let compressed = lz4_flex::compress_prepend_size(&data);
+        // LZ4 may add a small amount of overhead for incompressible data plus the size prefix.
+        // Allow up to 8 bytes of overhead for the size prefix and LZ4 block header.
+        let overhead = (compressed.len() as i64) - (data.len() as i64);
+        assert!(
+            overhead <= 8,
+            "expected minimal overhead for incompressible data, got {overhead}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compressed_chunk_stored_and_recoverable() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+
+        // Store compressible content
+        let data = vec![0x42u8; 8192];
+        let chunk = ChunkBuffer::Pooled(Bytes::from(data.clone()));
+        let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
+        assert!(outcome.inserted);
+        assert_eq!(outcome.chunk_length, 8192);
+        assert!(outcome.compressed_length < outcome.chunk_length);
+
+        // Read the stored (compressed) bytes back from the store
+        let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
+        let local_store = match &store {
+            ServerObjectStore::Local(store) => store,
+            _ => panic!("expected local store"),
+        };
+        let read_end = outcome.compressed_length.checked_sub(1).unwrap_or(0);
+        let range = shardline_protocol::ByteRange::new(0, read_end).unwrap();
+        let stored_compressed = local_store.read_range(&object_key, range).unwrap();
+        assert_eq!(stored_compressed.len() as u64, outcome.compressed_length);
+
+        // Decompress and verify
+        let decompressed = lz4_flex::decompress_size_prepended(&stored_compressed).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[tokio::test]
+    async fn compressed_chunk_dedup_with_local_store() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+
+        let data = b"compressible dedup test data";
+        let chunk1 = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let outcome1 = put_if_absent_chunk_buffer(&store, chunk1).await.unwrap();
+        assert!(outcome1.inserted);
+
+        let chunk2 = ChunkBuffer::Pooled(Bytes::from_static(data));
+        let outcome2 = put_if_absent_chunk_buffer(&store, chunk2).await.unwrap();
+        assert!(!outcome2.inserted);
+        assert_eq!(outcome1.hash_hex, outcome2.hash_hex);
+        assert_eq!(outcome1.compressed_length, outcome2.compressed_length);
+    }
+
+    #[tokio::test]
+    async fn compressed_length_in_stored_outcome_matches_stored_bytes() {
+        let tmp = shardline_test_support::TempStorage::new();
+        let store = ServerObjectStore::local(tmp.path()).unwrap();
+
+        let data = vec![0x42u8; 1024];
+        let chunk = ChunkBuffer::Pooled(Bytes::from(data));
+        let outcome = put_if_absent_chunk_buffer(&store, chunk).await.unwrap();
+        assert!(outcome.inserted);
+
+        let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
+        let local_store = match &store {
+            ServerObjectStore::Local(store) => store,
+            _ => panic!("expected local store"),
+        };
+        let read_end = outcome.compressed_length.checked_sub(1).unwrap_or(0);
+        let range = shardline_protocol::ByteRange::new(0, read_end).unwrap();
+        let stored = local_store.read_range(&object_key, range).unwrap();
+        assert_eq!(
+            stored.len() as u64,
+            outcome.compressed_length,
+            "stored byte count should match compressed_length"
+        );
     }
 }

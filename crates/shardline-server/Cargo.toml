@@ -59,6 +59,7 @@ shardline-xet-core.workspace = true
 prometheus.workspace = true
 tower.workspace = true
 tower-http = { workspace = true, features = ["util", "cors"] }
+lz4_flex = "0.11"
 zeroize.workspace = true
 
 [dev-dependencies]
