@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use tracing::trace;
+
 /// Gear hash (FastCDC) content-defined chunking implementation.
 ///
 /// Uses the exact same algorithm and gear table as
@@ -376,6 +378,12 @@ impl CdcChunker {
         if create_chunk {
             self.hash = 0; // Reset for next chunk (matches xet-data behavior)
             self.pending_len = 0;
+            trace!(
+                boundary = cur_index,
+                chunk_size = if create_chunk { cur_index } else { 0 },
+                forced = cur_index >= self.max_chunk,
+                "CDC boundary found"
+            );
             Some(cur_index)
         } else {
             // Mark all bytes up to read_end as scanned

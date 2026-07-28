@@ -1969,6 +1969,15 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
+name = "lz4_flex"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db9a0d582c2874f68138a16ce1867e0ffde6c0bb0a0df85e1f36d04146db488a"
@@ -3574,6 +3583,7 @@ dependencies = [
  "hmac",
  "jsonwebtoken",
  "libc",
+ "lz4_flex 0.11.6",
  "prometheus",
  "redis",
  "reqwest 0.12.28",
@@ -3713,7 +3723,8 @@ dependencies = [
  "blake3",
  "bytes",
  "countio",
- "lz4_flex",
+ "gearhash",
+ "lz4_flex 0.13.0",
  "proptest",
  "serde",
  "static_assertions",
@@ -5532,7 +5543,7 @@ dependencies = [
  "heapify",
  "itertools 0.14.0",
  "lazy_static",
- "lz4_flex",
+ "lz4_flex 0.13.0",
  "more-asserts",
  "rand 0.10.1",
  "regex",
