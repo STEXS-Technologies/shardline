@@ -17,7 +17,7 @@ use super::{
     DEFAULT_MAX_SHARD_RECONSTRUCTION_TERMS, DEFAULT_MAX_SHARD_XORB_CHUNKS, DEFAULT_MAX_SHARD_XORBS,
     DeploymentMode, MAX_ED25519_KEY_BYTES, MAX_METRICS_TOKEN_BYTES, MAX_TOKEN_SIGNING_KEY_BYTES,
     ObjectStorageAdapter, ServerConfig, ServerConfigError, ShardMetadataLimits,
-    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks,
+    default_transfer_max_in_flight_chunks, default_upload_max_in_flight_chunks, parse_byte_size,
 };
 use crate::{
     reconstruction_cache::ReconstructionCacheAdapter, server_frontend::ServerFrontend,
@@ -84,9 +84,10 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             || ServerConfigError::ZeroMaxShardXorbChunks,
         )?,
     );
-    let raw_chunk_size = var("SHARDLINE_CHUNK_SIZE_BYTES")
-        .unwrap_or_else(|_error| "65536".to_owned())
-        .parse::<usize>()?;
+    let raw_chunk_size_str = var("SHARDLINE_CHUNK_SIZE")
+        .or_else(|_| var("SHARDLINE_CHUNK_SIZE_BYTES"))
+        .unwrap_or_else(|_error| "64KB".to_owned());
+    let raw_chunk_size = parse_byte_size(&raw_chunk_size_str)?;
     let Some(chunk_size) = NonZeroUsize::new(raw_chunk_size) else {
         return Err(ServerConfigError::ZeroChunkSize);
     };
@@ -539,6 +540,7 @@ pub fn load_server_config_from_env_with_toml(
             "SHARDLINE_MAX_REQUEST_BODY_BYTES",
             srv.max_request_body_bytes.map(|v| v.to_string()),
         );
+        set_if_unset("SHARDLINE_CHUNK_SIZE", srv.chunk_size.clone());
         set_if_unset(
             "SHARDLINE_CHUNK_SIZE_BYTES",
             srv.chunk_size_bytes.map(|v| v.to_string()),

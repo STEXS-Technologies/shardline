@@ -863,6 +863,89 @@ impl ServerConfig {
     }
 }
 
+/// Parse a human-readable byte size string like `"64KB"`, `"1GB"`, `"512b"`,
+/// `"57mb"`, or a plain number interpreted as bytes.
+///
+/// Accepts:
+/// - Decimal (SI): `b`/`B`, `kb`/`KB`, `mb`/`MB`, `gb`/`GB`, `tb`/`TB`
+///   (powers of 1000)
+/// - Binary (IEC): `kib`/`KiB`, `mib`/`MiB`, `gib`/`GiB`, `tib`/`TiB`
+///   (powers of 1024)
+///
+/// Case-insensitive. Plain numbers are parsed as raw bytes.
+///
+/// # Errors
+///
+/// Returns [`ServerConfigError::ChunkSizeParse`] when the string is empty, the
+/// number portion cannot be parsed, the unit is unknown, or the value is
+/// negative. Returns [`ServerConfigError::ZeroChunkSize`] when the result is
+/// zero.
+pub fn parse_byte_size(s: &str) -> Result<usize, ServerConfigError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(ServerConfigError::ChunkSizeParse(
+            "empty chunk size".to_owned(),
+        ));
+    }
+
+    // Try plain number first (e.g. "65536")
+    if let Ok(n) = s.parse::<usize>() {
+        if n == 0 {
+            return Err(ServerConfigError::ZeroChunkSize);
+        }
+        return Ok(n);
+    }
+
+    // Split between trailing digits and the unit suffix.
+    let split_pos = s
+        .rfind(|c: char| c.is_ascii_digit())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if split_pos == 0 || split_pos >= s.len() {
+        return Err(ServerConfigError::ChunkSizeParse(
+            "invalid chunk size format".to_owned(),
+        ));
+    }
+    let num_str = &s[..split_pos];
+    let unit = &s[split_pos..];
+
+    let num: f64 = num_str.parse().map_err(|_| {
+        ServerConfigError::ChunkSizeParse("invalid chunk size number".to_owned())
+    })?;
+
+    if num < 0.0 {
+        return Err(ServerConfigError::ChunkSizeParse(
+            "negative chunk size".to_owned(),
+        ));
+    }
+
+    // Decimal (SI) units use powers of 1000; binary (IEC) use powers of 1024.
+    let multiplier = match unit.to_lowercase().as_str() {
+        "b" | "" => 1.0,
+        // Binary (IEC) — powers of 1024
+        "kib" => 1024.0,
+        "mib" => 1024.0 * 1024.0,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        // Decimal (SI) — powers of 1000
+        "kb" => 1000.0,
+        "mb" => 1000.0 * 1000.0,
+        "gb" => 1000.0 * 1000.0 * 1000.0,
+        "tb" => 1000.0 * 1000.0 * 1000.0 * 1000.0,
+        _ => {
+            return Err(ServerConfigError::ChunkSizeParse(
+                "unknown size unit".to_owned(),
+            ))
+        }
+    };
+
+    let bytes = (num * multiplier) as usize;
+    if bytes == 0 {
+        return Err(ServerConfigError::ZeroChunkSize);
+    }
+    Ok(bytes)
+}
+
 /// Returns the adaptive default upload chunk parallelism for the current host.
 #[must_use]
 pub fn default_upload_max_in_flight_chunks() -> NonZeroUsize {

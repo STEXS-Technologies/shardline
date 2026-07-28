@@ -1949,3 +1949,61 @@ fn route_policy_registry_has_all_expected_policies() {
         Some(RouteAuthPolicy::Authenticated)
     );
 }
+
+// ── parse_byte_size tests ───────────────────────────────────────────────
+
+#[test]
+fn parse_byte_size_si_units() {
+    // SI (decimal) — powers of 1000
+    assert_eq!(parse_byte_size("1KB").unwrap(), 1000);
+    assert_eq!(parse_byte_size("64KB").unwrap(), 64_000);
+    assert_eq!(parse_byte_size("1MB").unwrap(), 1_000_000);
+    assert_eq!(parse_byte_size("57mb").unwrap(), 57_000_000);
+    assert_eq!(parse_byte_size("1GB").unwrap(), 1_000_000_000);
+    assert_eq!(parse_byte_size("2TB").unwrap(), 2_000_000_000_000);
+}
+
+#[test]
+fn parse_byte_size_iec_units() {
+    // IEC (binary) — powers of 1024
+    assert_eq!(parse_byte_size("1KiB").unwrap(), 1024);
+    assert_eq!(parse_byte_size("64KiB").unwrap(), 65536);
+    assert_eq!(parse_byte_size("1MiB").unwrap(), 1_048_576);
+    assert_eq!(parse_byte_size("2MiB").unwrap(), 2_097_152);
+    assert_eq!(parse_byte_size("1GiB").unwrap(), 1_073_741_824);
+    assert_eq!(parse_byte_size("1TiB").unwrap(), 1_099_511_627_776);
+}
+
+#[test]
+fn parse_byte_size_plain_number() {
+    assert_eq!(parse_byte_size("65536").unwrap(), 65536);
+    assert_eq!(parse_byte_size("512b").unwrap(), 512);
+    assert_eq!(parse_byte_size("0").is_err(), true);
+}
+
+#[test]
+fn parse_byte_size_case_insensitive() {
+    assert_eq!(parse_byte_size("64kb").unwrap(), 64_000);  // SI
+    assert_eq!(parse_byte_size("64kib").unwrap(), 65536);   // IEC
+    assert_eq!(parse_byte_size("1Gb").unwrap(), 1_000_000_000);  // SI
+    assert_eq!(parse_byte_size("1gib").unwrap(), 1_073_741_824);  // IEC
+}
+
+#[test]
+fn parse_byte_size_whitespace() {
+    assert_eq!(parse_byte_size("  64KiB  ").unwrap(), 65536);
+}
+
+#[test]
+fn parse_byte_size_invalid() {
+    assert!(parse_byte_size("").is_err());
+    assert!(parse_byte_size("abc").is_err());
+    assert!(parse_byte_size("0KB").is_err());
+    assert!(parse_byte_size("-1KB").is_err());
+}
+
+#[test]
+fn parse_byte_size_unknown_unit() {
+    assert!(parse_byte_size("64xyz").is_err());
+    assert!(parse_byte_size("1PB").is_err());
+}

@@ -85,6 +85,9 @@ pub enum ServerConfigError {
     /// The chunk size could not be parsed.
     #[error("invalid chunk size")]
     ChunkSize(#[from] ParseIntError),
+    /// The chunk size string could not be parsed.
+    #[error("invalid chunk size: {0}")]
+    ChunkSizeParse(String),
     /// The maximum request body size could not be parsed.
     #[error("invalid max request body size")]
     MaxRequestBodyBytes(ParseIntError),
