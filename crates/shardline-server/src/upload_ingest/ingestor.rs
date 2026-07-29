@@ -13,6 +13,7 @@ use super::cdc::CdcChunker;
 use super::chunk_store::{
     SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
 };
+use super::xorb_packer::{pack_chunks_into_xorb, store_xorb};
 
 #[cfg(test)]
 use crate::config::default_upload_max_in_flight_chunks;
@@ -42,6 +43,9 @@ pub(crate) struct FileUploadIngestor {
     pub(super) records: Vec<FileChunkRecord>,
     pub(super) sha256: Option<Sha256>,
     pub(super) cdc_chunker: Box<CdcChunker>,
+    /// Raw (uncompressed) chunk data collected during streaming for
+    /// optional xorb packing at finish time.
+    pub(super) raw_chunk_data: Vec<Vec<u8>>,
 }
 
 impl FileUploadIngestor {
@@ -78,6 +82,7 @@ impl FileUploadIngestor {
             records: Vec::new(),
             sha256: compute_sha256.then(Sha256::new),
             cdc_chunker: Box::new(CdcChunker::new(chunk_size)),
+            raw_chunk_data: Vec::new(),
         }
     }
 
@@ -142,6 +147,71 @@ impl FileUploadIngestor {
 
         let total_bytes = self.next_offset;
         let chunk_size = u64::try_from(self.chunk_size)?;
+
+        // Pack CDC chunks into a xorb container and store it alongside
+        // individual chunks. The xorb provides efficient single-GET download
+        // for future optimization; individual chunks remain for dedup and
+        // backward compat.
+        if !self.raw_chunk_data.is_empty() {
+            let raw_offsets: Vec<u64> = self.records.iter().map(|r| r.offset).collect();
+            let chunks_with_offsets: Vec<(Vec<u8>, u64)> = self
+                .raw_chunk_data
+                .drain(..)
+                .zip(raw_offsets)
+                .collect();
+            match pack_chunks_into_xorb(&chunks_with_offsets) {
+                Ok(packed) => {
+                    match store_xorb(object_store, &packed.xorb_hash_hex, &packed.serialized).await
+                    {
+                        Ok(_inserted) => {
+                            debug!(
+                                file_id,
+                                xorb_hash = %packed.xorb_hash_hex,
+                                num_chunks = packed.chunk_entries.len(),
+                                packed_len = packed.serialized.len(),
+                                "stored xorb container for file upload"
+                            );
+                            // Update all FileChunkRecord entries to reference the xorb
+                            // so the download path can read a single xorb object instead
+                            // of fetching each chunk individually.
+                            for (i, record) in self.records.iter_mut().enumerate() {
+                                if let Some(entry) = packed.chunk_entries.get(i) {
+                                    record.hash = packed.xorb_hash_hex.clone();
+                                    record.range_start = u64::from(entry.chunk_index);
+                                    let next_index = entry
+                                        .chunk_index
+                                        .checked_add(1)
+                                        .ok_or(ServerError::Overflow)?;
+                                    record.range_end = u64::from(next_index);
+                                    record.packed_start = u64::from(entry.packed_offset);
+                                    let packed_end = entry
+                                        .packed_offset
+                                        .checked_add(entry.packed_length)
+                                        .ok_or(ServerError::Overflow)?;
+                                    record.packed_end = u64::from(packed_end);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                file_id,
+                                xorb_hash = %packed.xorb_hash_hex,
+                                error = %error,
+                                "failed to store xorb container, continuing with individual chunks"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        file_id,
+                        error = %error,
+                        "failed to pack chunks into xorb, continuing with individual chunks"
+                    );
+                }
+            }
+        }
+
         let content_hash = content_hash(total_bytes, chunk_size, &self.records);
         let record = FileRecord {
             file_id: file_id.to_owned(),
@@ -189,6 +259,8 @@ impl FileUploadIngestor {
         boundary: usize,
     ) -> Result<(), ServerError> {
         let chunk = self.pending.split_to(boundary);
+        // Buffer raw data for optional xorb packing in finish().
+        self.raw_chunk_data.push(chunk.to_vec());
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -237,6 +309,8 @@ impl FileUploadIngestor {
     ) -> Result<(), ServerError> {
         let replacement = self.take_pending_buffer();
         let chunk = mem::replace(&mut self.pending, replacement);
+        // Buffer raw data for optional xorb packing in finish().
+        self.raw_chunk_data.push(chunk.to_vec());
         let sequence = self.next_sequence;
         self.next_sequence = checked_increment(self.next_sequence)?;
         let offset = self.next_offset;
@@ -405,13 +479,10 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use axum::body::Bytes;
-    use shardline_index::xet_hash_hex_string;
-    use shardline_storage::ObjectStore;
 
-    use super::super::cdc::CdcChunker;
     use super::FileUploadIngestor;
     use crate::{
-        ServerError, chunk_store::chunk_object_key, local_backend::chunk_hash,
+        ServerError,
         object_store::ServerObjectStore,
     };
 
