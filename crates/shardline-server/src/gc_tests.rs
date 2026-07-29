@@ -226,7 +226,7 @@ async fn exercise_gc_dry_run_reports_orphan_chunks_without_mutating_quarantine()
     // container stored alongside individual chunks.
     ensure(
         report.orphan_chunks >= 1,
-        "expected at least 1 orphan chunk (manual orphan + optional xorb)",
+        "expected at least 1 orphan chunk (manual orphan + xorb)",
     )?;
     ensure(
         report.orphan_chunk_bytes >= 6,
@@ -289,16 +289,16 @@ async fn exercise_gc_mark_only_creates_quarantine_candidates() -> Result<(), Box
     // Note: the xorb container appears as an additional orphan.
     ensure(
         report.orphan_chunks >= 1,
-        "expected at least 1 orphan chunk (manual orphan + optional xorb)",
+        "expected at least 1 orphan chunk (manual orphan + xorb)",
     )?;
     // Note: the xorb container is also quarantined alongside the manual orphan.
     ensure(
         report.active_quarantine_candidates >= 1,
-        "expected at least 1 active quarantine candidate (manual orphan + optional xorb)",
+        "expected at least 1 active quarantine candidate (manual orphan + xorb)",
     )?;
     ensure(
         report.new_quarantine_candidates >= 1,
-        "expected at least 1 new quarantine candidate (manual orphan + optional xorb)",
+        "expected at least 1 new quarantine candidate (manual orphan + xorb)",
     )?;
     ensure_eq(
         &report.retained_quarantine_candidates,
