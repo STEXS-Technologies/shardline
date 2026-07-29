@@ -65,8 +65,6 @@ pub struct ServerConfig {
     pub(crate) provider: ProviderConfig,
     pub(crate) shutdown_timeout: Option<Duration>,
     pub(crate) admission_max_weight: NonZeroUsize,
-    pub(crate) xorb_target_size: usize,
-    pub(crate) xorb_max_chunks_per_container: usize,
 }
 
 impl ServerConfig {
@@ -125,8 +123,6 @@ impl ServerConfig {
             },
             shutdown_timeout: None,
             admission_max_weight: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
-            xorb_target_size: 64 * 1024 * 1024, // 64 MiB
-            xorb_max_chunks_per_container: 8192,
         }
     }
 
@@ -593,24 +589,6 @@ impl ServerConfig {
     ///
     /// Once accumulated chunk data reaches this threshold, the upload
     /// ingestor may pack chunks into a xorb container.
-    #[must_use]
-    pub const fn with_xorb_target_size(mut self, size: usize) -> Self {
-        self.xorb_target_size = size;
-        self
-    }
-
-    /// Returns the target xorb container size in bytes.
-    #[must_use]
-    pub const fn xorb_target_size(&self) -> usize {
-        self.xorb_target_size
-    }
-
-    /// Returns the maximum number of chunks per xorb container.
-    #[must_use]
-    pub const fn xorb_max_chunks_per_container(&self) -> usize {
-        self.xorb_max_chunks_per_container
-    }
-
     /// Sets the PostgreSQL connection URL for the index store.
     ///
     /// # Errors

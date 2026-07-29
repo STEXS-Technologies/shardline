@@ -264,8 +264,7 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             reconstruction_cache_ttl_seconds,
             reconstruction_cache_memory_max_entries,
         )
-        .with_admission_max_weight(admission_max_weight_from_env())
-        .with_xorb_target_size(xorb_target_size_from_env());
+        .with_admission_max_weight(admission_max_weight_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
     config.cache.redis_tls = reconstruction_cache_redis_tls;
@@ -385,18 +384,7 @@ pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroU
     )
     }
 
-    /// Parses the `SHARDLINE_XORB_TARGET_SIZE` environment variable.
-///
-/// Accepts human-readable byte sizes (e.g. "64MB", "128MiB") or a plain
-/// number of bytes. Falls back to 64 MiB on failure.
-pub(crate) fn xorb_target_size_from_env() -> usize {
-    var("SHARDLINE_XORB_TARGET_SIZE")
-        .ok()
-        .and_then(|v| parse_byte_size(&v).ok())
-        .unwrap_or(64 * 1024 * 1024)
-}
-
-/// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
+    /// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
 pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
     let fallback = NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
     var("SHARDLINE_ADMISSION_MAX_WEIGHT").map_or_else(
@@ -564,10 +552,6 @@ pub fn load_server_config_from_env_with_toml(
         set_if_unset(
             "SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS",
             srv.transfer_max_in_flight_chunks.map(|v| v.to_string()),
-        );
-        set_if_unset(
-            "SHARDLINE_XORB_TARGET_SIZE",
-            srv.xorb_target_size.clone(),
         );
     }
 
