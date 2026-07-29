@@ -519,4 +519,81 @@ mod tests {
         };
         assert_eq!(parsed.as_bytes(), &expected);
     }
+
+    #[test]
+    fn pack_max_chunks_succeeds() {
+        // Create exactly 8192 chunks of varying unique content.
+        let chunks: Vec<(Vec<u8>, u64)> = (0..8192)
+            .map(|i| (vec![(i & 0xFF) as u8; 64], i as u64 * 64))
+            .collect();
+        let packed = pack_chunks_into_xorb(&chunks).unwrap();
+        assert_eq!(packed.chunk_entries.len(), 8192);
+        verify_xorb_roundtrip(&packed, &chunks);
+    }
+
+    #[test]
+    fn pack_single_very_large_chunk() {
+        let data = b"A".repeat(2_000_000);
+        let chunks = vec![(data.clone(), 0u64)];
+        let packed = pack_chunks_into_xorb(&chunks).unwrap();
+        assert_eq!(packed.chunk_entries.len(), 1);
+        verify_xorb_roundtrip(&packed, &chunks);
+    }
+
+    #[test]
+    fn pack_chunks_with_binary_data() {
+        // Chunks with binary data including null bytes and high bytes 0x00-0xFF.
+        let chunks: Vec<(Vec<u8>, u64)> = (0..256)
+            .map(|i| {
+                let data: Vec<u8> = (0..64).map(|j| ((i + j) & 0xFF) as u8).collect();
+                (data, i as u64 * 64)
+            })
+            .collect();
+        let packed = pack_chunks_into_xorb(&chunks).unwrap();
+        assert_eq!(packed.chunk_entries.len(), 256);
+        verify_xorb_roundtrip(&packed, &chunks);
+    }
+
+    #[test]
+    fn store_xorb_idempotent_already_exists() {
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore, PutOutcome};
+        use crate::object_store::ServerObjectStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
+
+        let chunks = vec![(b"idempotent already exists test".to_vec(), 0u64)];
+        let packed = pack_chunks_into_xorb(&chunks).unwrap();
+
+        let object_key =
+            crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
+        let integrity = ObjectIntegrity::new(
+            crate::local_backend::chunk_hash(&packed.serialized),
+            packed.serialized.len() as u64,
+        );
+
+        let outcome1 = store.put_if_absent(
+            &object_key,
+            ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
+            &integrity,
+        ).unwrap();
+        match outcome1 {
+            PutOutcome::Inserted => { /* expected */ }
+            PutOutcome::AlreadyExists => {
+                panic!("first store should return Inserted, not AlreadyExists")
+            }
+        }
+
+        let outcome2 = store.put_if_absent(
+            &object_key,
+            ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
+            &integrity,
+        ).unwrap();
+        match outcome2 {
+            PutOutcome::Inserted => {
+                panic!("second store should return AlreadyExists, not Inserted")
+            }
+            PutOutcome::AlreadyExists => { /* expected */ }
+        }
+    }
 }
