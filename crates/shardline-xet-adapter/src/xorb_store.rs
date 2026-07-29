@@ -168,6 +168,39 @@ fn xorb_chunks_cache_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
     ObjectKey::parse(&format!("_xorb_chunks/{prefix}/{hash_hex}")).map_err(map_object_key_error)
 }
 
+/// Extracts a xorb hash from a cache sidecar key (`_xorb_chunks/{prefix}/{hash}`).
+/// Returns `None` when the key does not match the cache-namespace pattern.
+pub fn xorb_chunks_cache_hash_from_key_if_present(
+    key: &ObjectKey,
+) -> Result<Option<&str>, XetAdapterError> {
+    let mut segments = key.as_str().split('/');
+    let Some(namespace) = segments.next() else {
+        return Ok(None);
+    };
+    let Some(prefix) = segments.next() else {
+        return Ok(None);
+    };
+    let Some(hash) = segments.next() else {
+        return Ok(None);
+    };
+    if segments.next().is_some() {
+        return Ok(None);
+    }
+    if namespace != "_xorb_chunks" {
+        return Ok(None);
+    }
+    if prefix.len() != 2 {
+        return Ok(None);
+    }
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    if &hash[..2] != prefix {
+        return Ok(None);
+    }
+    Ok(Some(hash))
+}
+
 /// # Errors
 ///
 /// Returns an error when the upload fails validation or storage.

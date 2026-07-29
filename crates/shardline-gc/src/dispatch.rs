@@ -19,6 +19,17 @@ pub(super) fn optional_chunk_container_keys(
                 if !object_keys.contains(&object_key) {
                     object_keys.push(object_key);
                 }
+                // Also reference the xorb chunk-hash cache sidecar so the
+                // GC does not treat it as an orphan.  The sidecar shares
+                // the same xorb hash and is safe to reference alongside
+                // the xorb container itself.
+                let cache_prefix = chunk_hash.get(..2).ok_or(GcError::InvalidContentHash)?;
+                let cache_key_str = format!("_xorb_chunks/{cache_prefix}/{chunk_hash}");
+                if let Ok(cache_key) = ObjectKey::parse(&cache_key_str) {
+                    if !object_keys.contains(&cache_key) {
+                        object_keys.push(cache_key);
+                    }
+                }
             }
             ServerFrontend::Lfs
             | ServerFrontend::BazelHttp

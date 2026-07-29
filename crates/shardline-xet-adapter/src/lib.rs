@@ -55,6 +55,7 @@ pub use xorb::{
 };
 pub use xorb_store::{
     normalize_serialized_xorb, store_uploaded_xorb, store_uploaded_xorb_with_metrics,
-    visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
+    visit_stored_xorb_chunk_hashes, xorb_chunks_cache_hash_from_key_if_present,
+    xorb_hash_from_object_key_if_present, xorb_object_key,
 };
 pub use xorb_visit::map_xorb_visit_error;
