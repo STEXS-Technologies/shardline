@@ -90,7 +90,7 @@ async fn start_protocol_runtime_with_max_request_body(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_max_request_body_bytes(max_request_body_bytes)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
@@ -118,7 +118,7 @@ async fn start_protocol_runtime_with_oci_limits(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_oci_upload_session_ttl_seconds(oci_upload_session_ttl_seconds)
     .with_oci_upload_max_active_sessions(oci_upload_max_active_sessions)
@@ -147,7 +147,7 @@ async fn start_protocol_runtime_with_oci_token_limits(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_oci_registry_token_ttl_seconds(oci_registry_token_ttl_seconds)
     .with_oci_registry_token_max_in_flight_requests(oci_registry_token_max_in_flight_requests)
@@ -175,7 +175,7 @@ async fn start_protocol_runtime_on_shared_root(
         addr,
         base_url.clone(),
         root_dir.to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     ))
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
@@ -1237,7 +1237,7 @@ async fn oci_frontend_registry_token_exchange_uses_dedicated_ttl_and_reports_met
     let runtime = start_protocol_runtime_with_oci_token_limits(
         &[ServerFrontend::Oci],
         NonZeroU64::new(1).unwrap_or(NonZeroU64::MIN),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await?;
     let client = Client::new();

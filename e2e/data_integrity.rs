@@ -80,7 +80,7 @@ async fn try_start_server(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends(frontends.iter().copied())?;
@@ -5599,7 +5599,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -5644,7 +5644,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             "http://gc.local".to_owned(),
             storage.path().to_path_buf(),
-            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(128).unwrap(),
         )
         .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
         .unwrap()
@@ -5664,7 +5664,7 @@ async fn lfs_objects_survive_gc_when_referenced() {
         addr2,
         base_url2.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -5942,7 +5942,7 @@ async fn try_start_hub_server() -> Result<
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -7929,7 +7929,7 @@ async fn health_check_during_gc() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -7967,7 +7967,7 @@ async fn health_check_during_gc() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         "http://gc.local".to_owned(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -8155,7 +8155,7 @@ async fn gc_does_not_remove_referenced_chunks() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -8204,7 +8204,7 @@ async fn gc_does_not_remove_referenced_chunks() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         "http://gc.local".to_owned(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -8776,7 +8776,7 @@ async fn postgres_backend_lfs_round_trip() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -8936,7 +8936,7 @@ async fn config_validation_missing_signing_key() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         "http://test.local".to_owned(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_deployment_mode(DeploymentMode::Authenticated)
     .with_server_frontends([ServerFrontend::Lfs].iter().copied())
@@ -8962,7 +8962,7 @@ async fn config_validation_empty_frontends() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         "http://test.local".to_owned(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -9201,7 +9201,7 @@ async fn config_auth_provider_invalid_rejected() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         "http://test.local".to_owned(),
         tempfile::tempdir().unwrap().path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_auth_provider(AuthProviderKind::Local);
     assert_eq!(result.auth_provider(), AuthProviderKind::Local);
@@ -9297,7 +9297,7 @@ async fn s3_backend_lfs_round_trip() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -9418,7 +9418,7 @@ async fn s3_backend_dedup_cross_frontend() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -9508,7 +9508,7 @@ async fn postgres_backend_oci_manifest_push_pull() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -10232,7 +10232,7 @@ async fn upload_during_gc() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -10270,7 +10270,7 @@ async fn upload_during_gc() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         "http://gc.local".to_owned(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -12279,7 +12279,7 @@ async fn s3_backend_oci_session_upload() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()
@@ -12426,7 +12426,7 @@ async fn s3_backend_oci_session_abort() {
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(128).unwrap(),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())
     .unwrap()

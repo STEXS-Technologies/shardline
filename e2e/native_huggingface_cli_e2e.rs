@@ -283,7 +283,7 @@ async fn start_hub_runtime() -> Result<HubRuntime, TestError> {
         address,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).ok_or("test chunk size must be non-zero")?,
+        NonZeroUsize::new(128).ok_or("test chunk size must be non-zero")?,
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?
     .with_server_frontends([ServerFrontend::Hub])?

@@ -129,7 +129,7 @@ async fn exercise_role(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .with_server_role(role)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?;
@@ -204,7 +204,7 @@ async fn start_frontend_role_runtime(
         addr,
         base_url.clone(),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .with_server_role(role)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec())?

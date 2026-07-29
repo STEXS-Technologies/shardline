@@ -50,7 +50,7 @@ async fn protocol_xorb_and_shard_routes_register_reconstruction() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -192,7 +192,7 @@ async fn reconstruction_route_applies_requested_range_and_rejects_unsatisfiable_
         return;
     };
     let public_base_url = format!("http://{addr}");
-    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
     let config = ServerConfig::new(
         addr,
         public_base_url.clone(),
@@ -341,7 +341,7 @@ async fn native_hash_path_routes_reject_non_xet_hashes() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -444,7 +444,7 @@ async fn xorb_transfer_route_requires_range_and_serves_partial_content() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -752,7 +752,7 @@ async fn xorb_routes_reject_missing_hashes_before_repository_reference_scan() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -833,7 +833,7 @@ async fn chunk_routes_reject_missing_hashes_before_repository_reference_scan() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -900,7 +900,7 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
     let Ok(storage) = storage else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -973,7 +973,7 @@ async fn chunk_transfer_permit_uses_stored_chunk_length() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_streams_exact_expected_bytes() {
-    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let response = full_byte_stream_response(
         test_byte_stream(vec![
@@ -994,7 +994,7 @@ async fn full_transfer_response_streams_exact_expected_bytes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_rejects_short_stream() {
-    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let response = full_byte_stream_response(
         test_byte_stream(vec![Ok(Bytes::from_static(b"abc"))]),
@@ -1008,7 +1008,7 @@ async fn full_transfer_response_rejects_short_stream() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_rejects_oversized_frame() {
-    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let response = full_byte_stream_response(
         test_byte_stream(vec![Ok(Bytes::from_static(b"abcde"))]),
@@ -1022,7 +1022,7 @@ async fn full_transfer_response_rejects_oversized_frame() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_transfer_response_accepts_frame_larger_than_stream_buffer() {
-    let chunk_size = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
     let limiter = TransferLimiter::new(chunk_size, NonZeroUsize::MIN);
     let total_length_u64 = STREAM_READ_BUFFER_BYTES.saturating_add(1);
     let total_length = usize::try_from(total_length_u64).unwrap_or(0);
@@ -1067,7 +1067,7 @@ async fn health_route_boots_with_postgres_metadata_config() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_index_postgres_url(pg_url)
     .and_then(|config| config.with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec()));
@@ -1105,7 +1105,7 @@ async fn readiness_route_reports_local_backend_for_initialized_storage() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -1302,7 +1302,7 @@ async fn shard_route_rejects_missing_xorbs() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -1367,7 +1367,7 @@ async fn routes_require_bearer_token_when_auth_is_enabled() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -1415,7 +1415,7 @@ async fn write_routes_reject_read_only_tokens() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -1481,7 +1481,7 @@ async fn routes_accept_matching_scope_tokens() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -1576,12 +1576,12 @@ async fn router_rejects_bodies_over_configured_limit() {
     let Ok(addr) = addr else {
         return;
     };
-    let max_request_body_bytes = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
+    let max_request_body_bytes = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
     let config = ServerConfig::new(
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_max_request_body_bytes(max_request_body_bytes)
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
@@ -1644,7 +1644,7 @@ async fn stats_route_requires_auth_when_token_auth_is_configured() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -1691,7 +1691,7 @@ async fn authenticated_chunk_route_requires_file_version_context() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
@@ -1846,7 +1846,7 @@ async fn reconstruction_transfer_urls_work_and_stay_repository_scoped() {
         addr,
         format!("http://{addr}"),
         storage.path().to_path_buf(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .with_token_signing_key(b"test-signing-key-32-bytes-long!!".to_vec());
     assert!(config.is_ok());
