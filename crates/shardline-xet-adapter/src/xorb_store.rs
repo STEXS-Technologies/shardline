@@ -103,20 +103,69 @@ pub fn visit_stored_xorb_chunk_hashes<Visitor>(
 where
     Visitor: FnMut(String) -> Result<(), XetAdapterError>,
 {
-    let Some(metadata) = ObjectStore::metadata(object_store, object_key)? else {
+    let Some(xorb_hash_hex) = xorb_hash_from_object_key_if_present(object_key)? else {
         return Ok(());
     };
-    let Some(xorb_hash_hex) = xorb_hash_from_object_key_if_present(object_key)? else {
+
+    // Try a cached listing of chunk hashes first.  Xorbs are immutable
+    // (content-addressed), so the cache never needs invalidation.
+    let cache_key = xorb_chunks_cache_key(xorb_hash_hex)?;
+    if let Ok(Some(cache_meta)) = ObjectStore::metadata(object_store, &cache_key) {
+        if let Ok(cache_bytes) = read_full_object(object_store, &cache_key, cache_meta.length()) {
+            let body = String::from_utf8_lossy(&cache_bytes);
+            for line in body.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    visitor(trimmed.to_owned())?;
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    let Some(metadata) = ObjectStore::metadata(object_store, object_key)? else {
         return Ok(());
     };
     let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
     let xorb_bytes = read_full_object(object_store, object_key, metadata.length())?;
     let mut cursor = Cursor::new(xorb_bytes);
     let validated = validate_serialized_xorb(&mut cursor, expected_hash)?;
+
+    // Collect chunk hashes, call the visitor, and write the cache sidecar.
+    let mut chunk_hashes = Vec::new();
     try_for_each_serialized_xorb_chunk(&mut cursor, &validated, |decoded_chunk| {
-        visitor(xet_hash_hex_string(decoded_chunk.descriptor().hash()))
+        let hash_hex = xet_hash_hex_string(decoded_chunk.descriptor().hash());
+        visitor(hash_hex.clone())?;
+        chunk_hashes.push(hash_hex);
+        Ok(())
     })
-    .map_err(map_xorb_visit_error)
+    .map_err(map_xorb_visit_error)?;
+
+    // Persist the cache sidecar for future GC runs.
+    let cache_body = chunk_hashes.join("\n");
+    let integrity = ObjectIntegrity::new(
+        chunk_hash(cache_body.as_bytes()),
+        cache_body.len() as u64,
+    );
+    let _ = ObjectStore::put_if_absent(
+        object_store,
+        &cache_key,
+        ObjectBody::from_bytes(cache_body.into_bytes().into()),
+        &integrity,
+    );
+
+    Ok(())
+}
+
+/// Cache key for a xorb's chunk-hash listing.
+/// Stored alongside the xorb as a lightweight sidecar so the GC can
+/// discover chunk references without re-parsing the xorb container.
+fn xorb_chunks_cache_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
+    shardline_server_core::validate_content_hash_with(hash_hex, || {
+        XetAdapterError::InvalidContentHash
+    })?;
+    let prefix = hash_hex.get(..2).ok_or(XetAdapterError::InvalidContentHash)?;
+    ObjectKey::parse(&format!("_xorb_chunks/{prefix}/{hash_hex}")).map_err(map_object_key_error)
 }
 
 /// # Errors
