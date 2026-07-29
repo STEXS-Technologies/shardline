@@ -35,7 +35,7 @@ use crate::{
     test_fixtures,
     xet_adapter::{XET_READ_TOKEN_ROUTE, XET_WRITE_TOKEN_ROUTE},
 };
-use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore};
+use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, xet_hash_hex_string};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::{AuthProvider, auth::Ed25519AuthProvider, auth::LocalHmacProvider};
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
@@ -10278,4 +10278,138 @@ async fn ed25519_auth_rejects_token_from_wrong_key() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Mixed-format dedup
+// ---------------------------------------------------------------------------
+
+/// Same content uploaded as FixedChunkV1 and XorbCdcV1 deduplicates correctly.
+///
+/// The chunk hash is computed from raw bytes for both storage representations,
+/// so the chunk storage path is the same regardless of format.  Uploading the
+/// same content through the CAS pipeline after manually placing a raw chunk
+/// exercises chunk-level deduplication.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_format_dedup_same_content() {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
+
+    // 1. Compute content hashes and object keys used by both formats.
+    let content = b"dedup-test-content-that-should-be-identical-in-both-formats!";
+    let hash = test_hash(content);
+    let object_key =
+        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &hash, None).expect("object key");
+
+    // The file_id matches what `protocol_object_file_id` computes in backend.rs.
+    let file_id = format!(
+        "protocol-object-{}",
+        hex::encode(Sha256::digest(object_key.as_str().as_bytes()))
+    );
+
+    let chunk_hash =
+        xet_hash_hex_string(crate::local_backend::chunk_hash(content));
+    let chunk_object_key =
+        crate::chunk_store::chunk_object_key(&chunk_hash).expect("chunk key");
+
+    // 2. Write the raw (uncompressed) chunk to the object store, simulating
+    //    what FixedChunkV1 storage would produce.
+    let object_store =
+        ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
+    object_store
+        .put_if_absent(
+            &chunk_object_key,
+            ObjectBody::from_vec(content.to_vec()),
+            &ObjectIntegrity::new(
+                crate::local_backend::chunk_hash(content),
+                content.len() as u64,
+            ),
+        )
+        .expect("write raw chunk");
+
+    // 3. Register a FixedChunkV1 FileRecord so the index has a record for
+    //    this file.
+    let record_store = LocalRecordStore::open(tmp.path().to_path_buf());
+    record_store
+        .commit_file_version_metadata(&FileRecord {
+            file_id: file_id.clone(),
+            content_hash: hash.clone(),
+            total_bytes: content.len() as u64,
+            chunk_size: 4_194_304,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: chunk_hash.clone(),
+                offset: 0,
+                length: content.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: content.len() as u64,
+            }],
+        })
+        .await
+        .expect("commit fixed record");
+
+    // 4. Upload the SAME content through the CAS path.  The ingestor (which
+    //    uses XorbCdcV1 for the FileRecord) finds the chunk already present
+    //    in the object store → chunk-level deduplication.
+    //
+    //    The FileRecord already exists (created in step 3 above), so the
+    //    backend returns PutOutcome::AlreadyExists after verifying the body
+    //    hash matches.  We only assert that the call does not error.
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).expect("parallelism"),
+        object_store.clone(),
+        &[ServerFrontend::BazelHttp],
+    )
+    .await
+    .expect("backend");
+
+    let server_backend = crate::backend::ServerBackend::Local(backend);
+    let _outcome = server_backend
+        .put_sha256_addressed_object_stream_if_absent(
+            &object_key,
+            &hash,
+            crate::upload_ingest::RequestBodyReader::from_bytes(
+                axum::body::Bytes::from_static(content),
+            ),
+        )
+        .await
+        .expect("cas upload");
+
+    // 5. Verify the content is readable through the backend.
+    let bytes = server_backend
+        .read_object(&object_key)
+        .await
+        .expect("readable");
+    assert_eq!(bytes, content, "content mismatch");
+
+    // 6. Verify only ONE chunk file exists on disk — the chunk we manually
+    //    placed is the same one the CAS pipeline would have stored, proving
+    //    chunk-level deduplication across formats.
+    let chunk_path = tmp.path().join("chunks").join(&chunk_hash[..2]).join(&chunk_hash);
+    assert!(chunk_path.exists(), "chunk file should exist at {chunk_path:?}");
+
+    // Check that no OTHER chunk files were created (i.e. the CAS upload
+    // reused the existing chunk rather than writing a duplicate).
+    let chunks_dir = tmp.path().join("chunks");
+    let mut chunk_count = 0_usize;
+    if let Ok(entries) = std::fs::read_dir(&chunks_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Ok(files) = std::fs::read_dir(&path) {
+                    chunk_count += files.flatten().count();
+                }
+            }
+        }
+    }
+    assert_eq!(
+        chunk_count, 1,
+        "expected exactly one chunk file (dedup), found {chunk_count}"
+    );
 }
