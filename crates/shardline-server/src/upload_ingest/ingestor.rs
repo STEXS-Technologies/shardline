@@ -46,6 +46,8 @@ pub(crate) struct FileUploadIngestor {
     /// Raw (uncompressed) chunk data collected during streaming for
     /// optional xorb packing at finish time.
     pub(super) raw_chunk_data: Vec<Vec<u8>>,
+    /// Whether xorb packing is enabled (from ServerConfig).
+    pub(super) xorb_packing_enabled: bool,
 }
 
 impl FileUploadIngestor {
@@ -65,6 +67,17 @@ impl FileUploadIngestor {
         compute_sha256: bool,
         max_in_flight_chunks: NonZeroUsize,
     ) -> Self {
+        Self::new_with_xorb_packing(chunk_size, compute_sha256, max_in_flight_chunks, true)
+    }
+
+    /// Creates a new file upload ingestor with bounded chunk-level parallelism
+    /// and explicit control over xorb packing.
+    pub(crate) fn new_with_xorb_packing(
+        chunk_size: NonZeroUsize,
+        compute_sha256: bool,
+        max_in_flight_chunks: NonZeroUsize,
+        xorb_packing_enabled: bool,
+    ) -> Self {
         let chunk_size = chunk_size.get();
         Self {
             chunk_size,
@@ -83,6 +96,7 @@ impl FileUploadIngestor {
             sha256: compute_sha256.then(Sha256::new),
             cdc_chunker: Box::new(CdcChunker::new(chunk_size)),
             raw_chunk_data: Vec::new(),
+            xorb_packing_enabled,
         }
     }
 
@@ -152,7 +166,7 @@ impl FileUploadIngestor {
         // individual chunks. The xorb provides efficient single-GET download
         // for future optimization; individual chunks remain for dedup and
         // backward compat.
-        if !self.raw_chunk_data.is_empty() {
+        if self.xorb_packing_enabled && !self.raw_chunk_data.is_empty() {
             let raw_offsets: Vec<u64> = self.records.iter().map(|r| r.offset).collect();
             let chunks_with_offsets: Vec<(Vec<u8>, u64)> = self
                 .raw_chunk_data
@@ -505,6 +519,28 @@ mod tests {
         assert_eq!(ingestor.reused_chunks, 0);
         assert_eq!(ingestor.stored_bytes, 0);
         assert!(ingestor.sha256.is_some());
+    }
+
+    #[test]
+    fn ingestor_new_with_xorb_packing_disabled() {
+        let ingestor = FileUploadIngestor::new_with_xorb_packing(
+            NonZeroUsize::new(128).unwrap(),
+            false,
+            NonZeroUsize::new(8).unwrap(),
+            false,
+        );
+        assert!(!ingestor.xorb_packing_enabled);
+    }
+
+    #[test]
+    fn ingestor_new_with_xorb_packing_enabled() {
+        let ingestor = FileUploadIngestor::new_with_xorb_packing(
+            NonZeroUsize::new(128).unwrap(),
+            true,
+            NonZeroUsize::new(8).unwrap(),
+            true,
+        );
+        assert!(ingestor.xorb_packing_enabled);
     }
 
     #[test]
