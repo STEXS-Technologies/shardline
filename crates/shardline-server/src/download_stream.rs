@@ -180,20 +180,26 @@ pub(crate) async fn file_record_byte_stream(
         } else {
             chunk.length
         };
+        // packed_end == chunk.length  → old FixedChunkV1 (no compression)
+        // packed_end != chunk.length  → new XorbCdcV1 (LZ4-compressed;
+        //   may be smaller or larger than raw for tiny payloads)
+        let is_compressed = chunk.packed_end != chunk.length;
         let hash_hex = chunk.hash.clone();
+        let chunk_range = ByteRange::new(relative_start, relative_end)
+            .map_err(|_error| ServerError::RangeNotSatisfiable)?;
         terms.push((
             chunk_object_key(&hash_hex)?,
             storage_length, // compressed length for storage read
             chunk.length,   // raw length for offset math
             hash_hex,       // expected hash for integrity verification
-            ByteRange::new(relative_start, relative_end)
-                .map_err(|_error| ServerError::RangeNotSatisfiable)?,
+            chunk_range,
+            is_compressed,  // packed_end > 0 → LZ4-compressed; 0 → old uncompressed
         ));
     }
 
-    // For each term: read the entire compressed chunk, decompress, verify integrity, then apply byte range
+    // For each term: read chunk data, optionally decompress, verify integrity, then apply byte range
     let streams = stream::iter(terms).then(
-        move |(key, storage_length, _raw_length, expected_hash_hex, chunk_range)| {
+        move |(key, storage_length, _raw_length, expected_hash_hex, chunk_range, is_compressed)| {
             let object_store = object_store.clone();
             async move {
                 // Read the entire compressed chunk
@@ -207,47 +213,54 @@ pub(crate) async fn file_record_byte_stream(
                         Ok(acc)
                     })
                     .await?;
-                // Safety: validate decompressed size before allocation.
-                // lz4_flex prepends the uncompressed size as a 4-byte little-endian u32.
-                const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024; // 2MB safety ceiling
-                let decompressed_size = compressed
-                    .first_chunk::<4>()
-                    .map(|header| u32::from_le_bytes(*header) as u64)
-                    .unwrap_or(u64::MAX);
-                if decompressed_size > MAX_DECOMPRESSED_CHUNK {
-                    return Err(ServerError::Overflow);
-                }
-                let decompressed = lz4_flex::decompress_size_prepended(&compressed).map_err(|e| {
-                    warn!(compressed_len = compressed.len(), error = %e, "failed to decompress chunk");
-                    ServerError::Io(IoError::new(ErrorKind::InvalidData, e))
-                })?;
+                let data: Vec<u8> = if is_compressed {
+                    // New format (XorbCdcV1): LZ4-compressed. Decompress and verify hash.
+                    const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024;
+                    let decompressed_size = compressed
+                        .first_chunk::<4>()
+                        .map(|header| u32::from_le_bytes(*header) as u64)
+                        .unwrap_or(u64::MAX);
+                    if decompressed_size > MAX_DECOMPRESSED_CHUNK {
+                        return Err(ServerError::Overflow);
+                    }
+                    let decompressed =
+                        lz4_flex::decompress_size_prepended(&compressed).map_err(|e| {
+                            warn!(compressed_len = compressed.len(), error = %e, "failed to decompress chunk");
+                            ServerError::Io(IoError::new(ErrorKind::InvalidData, e))
+                        })?;
 
-                // Verify decompressed content matches expected chunk hash
-                // (hash is of raw content, not compressed)
-                let actual_hash = chunk_hash(&decompressed);
-                let actual_hex = xet_hash_hex_string(actual_hash);
-                if actual_hex != expected_hash_hex {
-                    warn!(
-                        expected = %expected_hash_hex,
-                        actual = %actual_hex,
+                    let actual_hash = chunk_hash(&decompressed);
+                    let actual_hex = xet_hash_hex_string(actual_hash);
+                    if actual_hex != expected_hash_hex {
+                        warn!(
+                            expected = %expected_hash_hex,
+                            actual = %actual_hex,
+                            decompressed_len = decompressed.len(),
+                            "chunk integrity mismatch after decompression"
+                        );
+                        return Err(ServerError::ObjectStore(
+                            ObjectStoreError::StoredLengthMismatch,
+                        ));
+                    }
+
+                    trace!(
+                        chunk_hash = ?chunk_key,
+                        compressed_len = compressed.len(),
                         decompressed_len = decompressed.len(),
-                        "chunk integrity mismatch after decompression"
+                        "decompressed chunk"
                     );
-                    return Err(ServerError::ObjectStore(
-                        ObjectStoreError::StoredLengthMismatch,
-                    ));
-                }
-
-                trace!(
-                    chunk_hash = ?chunk_key,
-                    compressed_len = compressed.len(),
-                    decompressed_len = decompressed.len(),
-                    "decompressed chunk"
-                );
-                // Apply byte range on decompressed data
+                    decompressed
+                } else {
+                    // Old format (FixedChunkV1 / pre-CDC): raw (uncompressed) data.
+                    // The stored bytes are the raw chunk data; the hash in the
+                    // file record is computed from raw bytes, so the hash stored
+                    // in the record matches the data on disk directly.
+                    compressed
+                };
+                // Apply byte range on the data
                 let range_start = usize::try_from(chunk_range.start())?;
                 let range_end = usize::try_from(chunk_range.end_inclusive())?;
-                let sliced = decompressed
+                let sliced = data
                     .get(range_start..=range_end)
                     .ok_or(ServerError::Overflow)?
                     .to_vec();

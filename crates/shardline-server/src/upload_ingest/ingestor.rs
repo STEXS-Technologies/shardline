@@ -188,21 +188,30 @@ impl FileUploadIngestor {
                             // Update all FileChunkRecord entries to reference the xorb
                             // so the download path can read a single xorb object instead
                             // of fetching each chunk individually.
-                            for (i, record) in self.records.iter_mut().enumerate() {
-                                if let Some(entry) = packed.chunk_entries.get(i) {
-                                    record.hash = packed.xorb_hash_hex.clone();
-                                    record.range_start = u64::from(entry.chunk_index);
-                                    let next_index = entry
-                                        .chunk_index
-                                        .checked_add(1)
-                                        .ok_or(ServerError::Overflow)?;
-                                    record.range_end = u64::from(next_index);
-                                    record.packed_start = u64::from(entry.packed_offset);
-                                    let packed_end = entry
-                                        .packed_offset
-                                        .checked_add(entry.packed_length)
-                                        .ok_or(ServerError::Overflow)?;
-                                    record.packed_end = u64::from(packed_end);
+                            //
+                            // Single-chunk files are excluded: the download stream's
+                            // is_xorb_backed fast-path guard requires chunks.len() > 1
+                            // (otherwise a lone hash trivially matches itself and we'd
+                            // look for the xorb-hash path instead of the individual
+                            // chunk path).  The xorb is still stored for future dedup
+                            // benefit, but reads use the individual chunk record.
+                            if packed.chunk_entries.len() > 1 {
+                                for (i, record) in self.records.iter_mut().enumerate() {
+                                    if let Some(entry) = packed.chunk_entries.get(i) {
+                                        record.hash = packed.xorb_hash_hex.clone();
+                                        record.range_start = u64::from(entry.chunk_index);
+                                        let next_index = entry
+                                            .chunk_index
+                                            .checked_add(1)
+                                            .ok_or(ServerError::Overflow)?;
+                                        record.range_end = u64::from(next_index);
+                                        record.packed_start = u64::from(entry.packed_offset);
+                                        let packed_end = entry
+                                            .packed_offset
+                                            .checked_add(entry.packed_length)
+                                            .ok_or(ServerError::Overflow)?;
+                                        record.packed_end = u64::from(packed_end);
+                                    }
                                 }
                             }
                         }

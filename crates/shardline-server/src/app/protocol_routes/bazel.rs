@@ -328,7 +328,7 @@ mod tests {
     /// Builds a minimal [`AppState`] backed by a fresh temp directory.
     async fn build_test_state() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(4096).unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:0".to_owned(),

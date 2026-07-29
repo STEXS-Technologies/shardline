@@ -403,7 +403,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_stream_ends_early_returns_length_mismatch() {
         let limiter = TransferLimiter::new(
-            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
         // Stream has 5 bytes but we claim 10 → stream ends early → StoredLengthMismatch
@@ -415,7 +415,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_stream_has_extra_data_returns_length_mismatch() {
         let limiter = TransferLimiter::new(
-            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
         // Claim 5 bytes but stream has 11 → extra data after remaining_bytes hits 0
@@ -427,7 +427,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_accepts_exact_stream() {
         let limiter = TransferLimiter::new(
-            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
         let body = metered_transfer_body(stream_from_bytes(b"exact-data"), limiter, 10);
@@ -439,7 +439,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_empty_stream_returns_length_mismatch() {
         let limiter = TransferLimiter::new(
-            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
         // Claim 5 bytes but stream is empty → stream ends early
@@ -451,7 +451,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metered_transfer_body_detects_too_large_chunk() {
         let limiter = TransferLimiter::new(
-            std::num::NonZeroUsize::new(1024).unwrap(),
+            std::num::NonZeroUsize::new(65536).unwrap(),
             std::num::NonZeroUsize::new(4096).unwrap(),
         );
         // Create a stream whose first chunk is larger than remaining_bytes

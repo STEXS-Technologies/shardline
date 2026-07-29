@@ -741,7 +741,7 @@ mod tests {
     /// which keeps each test self-contained without token minting.
     async fn build_test_state() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(128).unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:0".to_owned(),
@@ -779,7 +779,7 @@ mod tests {
     /// Builds a minimal [`AppState`] with an auth provider for xet transfer tests.
     async fn build_test_state_with_auth() -> (Arc<AppState>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let chunk_size = NonZeroUsize::new(4).unwrap();
+        let chunk_size = NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:8080".to_owned(),

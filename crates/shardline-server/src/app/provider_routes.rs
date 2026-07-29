@@ -218,7 +218,7 @@ mod tests {
     async fn handle_webhook_provider_tokens_disabled() {
         // Build a minimal AppState with provider_tokens = None
         let temp = tempfile::tempdir().unwrap();
-        let chunk_size = std::num::NonZeroUsize::new(4096).unwrap();
+        let chunk_size = std::num::NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:8080".to_owned(),
@@ -234,7 +234,7 @@ mod tests {
             provider_tokens: None,
             reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(
-                std::num::NonZeroUsize::new(4096).unwrap(),
+                std::num::NonZeroUsize::new(65536).unwrap(),
                 std::num::NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
@@ -267,7 +267,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn handle_webhook_unknown_provider_returns_error() {
         let temp = tempfile::tempdir().unwrap();
-        let chunk_size = std::num::NonZeroUsize::new(4096).unwrap();
+        let chunk_size = std::num::NonZeroUsize::new(65536).unwrap();
         let config = ServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
             "http://127.0.0.1:8080".to_owned(),
@@ -298,7 +298,7 @@ mod tests {
             provider_tokens: Some(service),
             reconstruction_cache: ReconstructionCacheService::disabled(),
             transfer_limiter: TransferLimiter::new(
-                std::num::NonZeroUsize::new(4096).unwrap(),
+                std::num::NonZeroUsize::new(65536).unwrap(),
                 std::num::NonZeroUsize::new(16).unwrap(),
             ),
             oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(64)),
