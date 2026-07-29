@@ -312,8 +312,9 @@ mod tests {
     };
 
     use super::{
-        canonicalize_uploaded_xorb, normalize_serialized_xorb, validate_serialized_xorb,
-        visit_stored_xorb_chunk_hashes, xorb_hash_from_object_key_if_present, xorb_object_key,
+        canonicalize_uploaded_xorb, normalize_serialized_xorb, read_full_object,
+        validate_serialized_xorb, visit_stored_xorb_chunk_hashes, xorb_chunks_cache_key,
+        xorb_hash_from_object_key_if_present, xorb_object_key,
     };
     use crate::error::XetAdapterError;
     use shardline_server_core::ServerObjectStore;
@@ -1826,6 +1827,56 @@ mod tests {
         })
         .unwrap();
         assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn visit_stored_xorb_chunk_hashes_cache_written_and_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_store = ServerObjectStore::local(temp.path().join("objects")).unwrap();
+        let raw = build_raw_xorb(3, ChunkSize::Fixed(128));
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, true)
+                .unwrap();
+        let hash = serialized.hash.hex();
+        async_store_xorb(&object_store, &hash, &serialized.serialized_data).unwrap();
+
+        let xorb_key = xorb_object_key(&hash).unwrap();
+        let cache_key = xorb_chunks_cache_key(&hash).unwrap();
+
+        // First visit: parses the xorb and writes the cache sidecar.
+        let mut first_hashes = Vec::new();
+        visit_stored_xorb_chunk_hashes(&object_store, &xorb_key, |h| {
+            first_hashes.push(h);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(first_hashes.len(), 3, "xorb has 3 chunks");
+
+        // Verify the cache sidecar was written.
+        let cache_meta = ObjectStore::metadata(&object_store, &cache_key)
+            .unwrap()
+            .expect("cache sidecar must exist");
+        assert!(cache_meta.length() > 0, "cache file non-empty");
+
+        // Second visit: reads from cache instead of re-parsing the xorb.
+        let mut second_hashes = Vec::new();
+        visit_stored_xorb_chunk_hashes(&object_store, &xorb_key, |h| {
+            second_hashes.push(h);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(second_hashes.len(), 3, "cached visit returns 3 hashes");
+        assert_eq!(first_hashes, second_hashes, "cached hashes match xorb hashes");
+
+        // Verify the cache file contains the expected hash strings.
+        let cache_bytes = read_full_object(&object_store, &cache_key, cache_meta.length()).unwrap();
+        let cache_text = String::from_utf8(cache_bytes).unwrap();
+        for hash in &first_hashes {
+            assert!(
+                cache_text.contains(hash.as_str()),
+                "cache must contain chunk hash {hash}"
+            );
+        }
     }
 
     // ── store_uploaded_xorb with LZ4 and footer ─────────────────────────
