@@ -111,13 +111,13 @@ pub(crate) async fn file_record_byte_stream(
                         Ok(acc)
                     })
                     .await?;
-                // Safety: validate decompressed size before allocation
-                let header: [u8; 8] = compressed
-                    .get(0..8)
-                    .and_then(|slice| slice.try_into().ok())
-                    .unwrap_or([0u8; 8]);
-                let decompressed_size = u64::from_be_bytes(header);
+                // Safety: validate decompressed size before allocation.
+                // lz4_flex prepends the uncompressed size as a 4-byte little-endian u32.
                 const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024; // 2MB safety ceiling
+                let decompressed_size = compressed
+                    .first_chunk::<4>()
+                    .map(|header| u32::from_le_bytes(*header) as u64)
+                    .unwrap_or(u64::MAX);
                 if decompressed_size > MAX_DECOMPRESSED_CHUNK {
                     return Err(ServerError::Overflow);
                 }
