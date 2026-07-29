@@ -26,6 +26,7 @@ pub(super) async fn read_record(
             content_hash: hash.to_owned(),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
@@ -37,6 +38,7 @@ pub(super) async fn read_record(
             content_hash: String::new(),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
@@ -124,6 +126,7 @@ mod tests {
             content_hash: "deadbeef".to_owned(),
             total_bytes: 100,
             chunk_size: 64,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope.clone()),
             chunks: vec![FileChunkRecord {
                 hash: chunk_hash.to_owned(),

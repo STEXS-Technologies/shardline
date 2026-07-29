@@ -200,6 +200,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope),
             chunks: vec![
                 FileChunkRecord {
@@ -263,6 +264,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 12,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![
                 FileChunkRecord {
@@ -317,6 +319,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -349,6 +352,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: Vec::new(),
         };
@@ -373,6 +377,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![
                 FileChunkRecord {
@@ -427,6 +432,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: Vec::new(),
         };
@@ -449,6 +455,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -481,6 +488,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -508,6 +516,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![
                 FileChunkRecord {
@@ -553,6 +562,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: "a".repeat(64),
@@ -588,6 +598,7 @@ mod tests {
             content_hash: "deadbeef".repeat(8),
             total_bytes: 12,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![
                 FileChunkRecord {
@@ -651,6 +662,7 @@ mod tests {
                         content_hash: "a".repeat(64),
                         total_bytes: 4,
                         chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                         repository_scope: None,
                         chunks: vec![FileChunkRecord {
                             hash: "c".repeat(64),
@@ -678,6 +690,7 @@ mod tests {
                         content_hash: "b".repeat(64),
                         total_bytes: 4,
                         chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                         repository_scope: None,
                         chunks: vec![FileChunkRecord {
                             hash: "c".repeat(64),

@@ -419,6 +419,7 @@ fn make_stored_chunks_record(chunks: Vec<FileChunkRecord>) -> Vec<u8> {
         content_hash: valid_hash(),
         total_bytes: 1024,
         chunk_size: 65536,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -518,6 +519,7 @@ fn collect_references_empty_chunks_does_not_increment_records() {
         content_hash: valid_hash(),
         total_bytes: 0,
         chunk_size: 65536,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![],
     };
@@ -639,6 +641,7 @@ fn make_referenced_terms_record(chunks: Vec<FileChunkRecord>) -> Vec<u8> {
         content_hash: valid_hash(),
         total_bytes: 1024,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -779,6 +782,7 @@ fn single_chunk_record(file_id: &str, hash: &str, chunk_size: u64) -> FileRecord
         content_hash: valid_hash(),
         total_bytes: 256,
         chunk_size,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: hash.to_owned(),

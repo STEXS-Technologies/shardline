@@ -241,6 +241,7 @@ impl FileUploadIngestor {
             content_hash: content_hash.clone(),
             total_bytes,
             chunk_size,
+            storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
             repository_scope: repository_scope.cloned(),
             chunks: self.records,
         };

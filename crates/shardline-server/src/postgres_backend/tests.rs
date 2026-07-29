@@ -303,6 +303,7 @@ fn file_record(scope: &RepositoryScope, chunk_hash: &str) -> FileRecord {
         content_hash: "c".repeat(64),
         total_bytes: 4,
         chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope.clone()),
         chunks: vec![FileChunkRecord {
             hash: chunk_hash.to_owned(),

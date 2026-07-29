@@ -118,6 +118,7 @@ async fn scan_record_tree_latest_reports_orphan_missing_version() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -177,6 +178,7 @@ async fn scan_record_tree_latest_with_matching_version_is_clean() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -231,6 +233,7 @@ async fn scan_record_tree_version_with_valid_record_is_clean() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -284,6 +287,7 @@ async fn scan_record_tree_mismatched_version_record_reported() {
         content_hash: shared_hash.clone(),
         total_bytes: 100,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![shardline_index::FileChunkRecord {
             hash: "cd".repeat(32),
@@ -304,6 +308,7 @@ async fn scan_record_tree_mismatched_version_record_reported() {
         content_hash: shared_hash,
         total_bytes: 200,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: Vec::new(),
     };
@@ -371,6 +376,7 @@ async fn scan_record_tree_latest_invalid_file_id_reported() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -437,6 +443,7 @@ async fn scan_record_tree_latest_invalid_content_hash_reported() {
         content_hash: "invalid-hash".to_owned(),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -495,6 +502,7 @@ async fn scan_record_tree_version_invalid_content_hash_reported() {
         content_hash: "too-short".to_owned(),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -554,6 +562,7 @@ async fn scan_record_tree_version_unparseable_in_matching_check() {
         content_hash: content_hash.clone(),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: chunks.clone(),
     };
@@ -804,6 +813,7 @@ async fn scan_record_tree_latest_non_contiguous_chunks_reported() {
         content_hash: "bb".repeat(32),
         total_bytes: 100,
         chunk_size: 4096,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -1242,6 +1252,7 @@ async fn scan_record_tree_version_matching_check_unparseable_json_skipped() {
         content_hash: content_hash.clone(),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -1324,6 +1335,7 @@ async fn scan_record_tree_version_invalid_json_bytes_reported() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -1393,6 +1405,7 @@ async fn scan_record_tree_latest_invalid_json_bytes_reported() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -1463,6 +1476,7 @@ async fn scan_record_tree_latest_record_path_mismatch_reported() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -1920,6 +1934,7 @@ async fn scan_record_tree_version_content_hash_path_mismatch_reported() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };

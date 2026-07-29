@@ -109,9 +109,9 @@ pub enum StorageRepresentation {
     /// Fixed-size chunking, no compression.
     #[serde(rename = "fixed_chunk_v1")]
     FixedChunkV1,
-    /// CDC chunking + LZ4 compression + optional xorb container packing.
-    #[serde(rename = "xorb_cdc_v2")]
-    XorbCdcV2,
+    /// CDC chunking + LZ4 compression + xorb container packing.
+    #[serde(rename = "xorb_cdc_v1")]
+    XorbCdcV1,
 }
 
 impl Default for StorageRepresentation {
@@ -132,6 +132,10 @@ pub struct FileRecord {
     pub total_bytes: u64,
     /// Chunk size used for this upload. Protocol-object term records may use zero.
     pub chunk_size: u64,
+    /// Physical storage representation — controls the decoder path.
+    /// Defaults to [`FixedChunkV1`] for records that predate this field.
+    #[serde(default)]
+    pub storage_repr: StorageRepresentation,
     /// Optional repository namespace for provider-backed storage.
     pub repository_scope: Option<RepositoryScope>,
     /// Ordered chunks needed to reconstruct the file.

@@ -1211,6 +1211,7 @@ mod tests {
             content_hash: hash_hex.clone(),
             total_bytes: payload.len() as u64,
             chunk_size: 65536,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: hash_hex,
@@ -1429,6 +1430,7 @@ mod tests {
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes,
             chunk_size: 65536,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: file_chunks,
         };
@@ -1498,6 +1500,7 @@ mod tests {
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes,
             chunk_size: 65536,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: file_chunks,
         };
@@ -1568,6 +1571,7 @@ mod tests {
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes: raw_len,
             chunk_size: 65536,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: packed.xorb_hash_hex.clone(),
