@@ -119,12 +119,22 @@ pub(crate) async fn file_record_byte_stream(
     }
 
     // Fast path: if all chunks are in the same xorb, read it once.
+    // For a single chunk we also check packed_start > 0 — regular chunks
+    // always have packed_start == 0 (the serde default), while xorb-backed
+    // chunks have a non-zero offset into the xorb serialized data.
     let first_hash = record.chunks.first().map(|c| &c.hash);
-    let is_xorb_backed = record.chunks.len() > 1
-        && first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
+    let all_same_hash =
+        first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
+    let is_xorb_backed = if record.chunks.len() > 1 {
+        all_same_hash
+    } else {
+        // Single chunk: only route through the xorb path when the
+        // chunk has a non-zero packed_start (indicating it is a slice
+        // within a xorb, not a standalone chunk).
+        all_same_hash && record.chunks.first().is_some_and(|c| c.packed_start > 0)
+    };
 
     if is_xorb_backed {
-        // SAFETY: is_xorb_backed requires chunks.len() > 1, so first() is Some.
         #[allow(clippy::indexing_slicing)]
         let xorb_hash = &record.chunks[0].hash;
         debug!(
@@ -1516,6 +1526,80 @@ mod tests {
             result.len(),
             20,
             "byte range 5-24 inclusive should be 20 bytes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xorb_backed_byte_range_single_chunk() {
+        use shardline_index::{FileChunkRecord, FileRecord};
+
+        // 1. Pack a single chunk into a xorb.
+        let content = b"single-chunk-xorb-range-test!".to_vec();
+        let chunks = vec![(content.clone(), 0u64)];
+        let packed =
+            crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+
+        // 2. Store xorb.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store =
+            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        let _ = crate::upload_ingest::xorb_packer::store_xorb(
+            &object_store,
+            &packed.xorb_hash_hex,
+            &packed.serialized,
+        )
+        .await
+        .unwrap();
+
+        // 3. Create FileRecord with one xorb-backed entry.
+        //    Use the xorb hash as the chunk hash, and a non-zero packed_start
+        //    so the is_xorb_backed guard detects it as xorb-backed. The xorb
+        //    fast path reads the entire xorb and indexes decoded chunks by
+        //    range_start — it does not use packed_start for data access.
+        let entry = &packed.chunk_entries[0];
+        let raw_len = content.len() as u64;
+        let next_index = entry.chunk_index.checked_add(1).unwrap();
+        let packed_end = entry
+            .packed_offset
+            .checked_add(entry.packed_length)
+            .unwrap();
+        let record = FileRecord {
+            file_id: "single-chunk-xorb-range-test.bin".to_owned(),
+            content_hash: packed.xorb_hash_hex.clone(),
+            total_bytes: raw_len,
+            chunk_size: 65536,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: packed.xorb_hash_hex.clone(),
+                offset: 0,
+                length: raw_len,
+                range_start: u64::from(entry.chunk_index),
+                range_end: u64::from(next_index),
+                packed_start: 1, // non-zero to signal xorb-backed to the guard
+                packed_end: u64::from(packed_end),
+            }],
+        };
+
+        // 4. Request a range within the single chunk (bytes 5-15).
+        let range = ByteRange::new(5, 15).unwrap();
+        let mut stream =
+            super::file_record_byte_stream(object_store, record, Some(range))
+                .await
+                .unwrap();
+
+        let mut result = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            result.extend_from_slice(&chunk.unwrap());
+        }
+        let expected: Vec<u8> = content[5..=15].to_vec();
+        assert_eq!(
+            result, expected,
+            "xorb-backed byte range should handle single chunk correctly"
+        );
+        assert_eq!(
+            result.len(),
+            11,
+            "byte range 5-15 inclusive should be 11 bytes"
         );
     }
 }
