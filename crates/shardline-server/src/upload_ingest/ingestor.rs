@@ -264,6 +264,8 @@ impl FileUploadIngestor {
             "upload complete"
         );
 
+        crate::metrics::record_object_stored_by_repr(record.storage_repr.as_str(), record.total_bytes);
+
         Ok((record, response))
     }
 

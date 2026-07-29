@@ -593,6 +593,7 @@ impl ServerBackend {
                 ObjectStoreError::StoredLengthMismatch,
             ));
         }
+        crate::metrics::record_object_read_by_repr("file_read", total_length);
         Ok(stream)
     }
 

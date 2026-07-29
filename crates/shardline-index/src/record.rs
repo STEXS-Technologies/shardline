@@ -121,6 +121,18 @@ impl Default for StorageRepresentation {
     }
 }
 
+impl StorageRepresentation {
+    /// Returns the metric label for this representation (matches serde rename).
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WholeFileV1 => "whole_file_v1",
+            Self::FixedChunkV1 => "fixed_chunk_v1",
+            Self::XorbCdcV1 => "xorb_cdc_v1",
+        }
+    }
+}
+
 /// Durable file-version or latest-file metadata record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileRecord {

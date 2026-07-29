@@ -118,6 +118,23 @@ pub(crate) async fn file_record_byte_stream(
         return Ok(Box::pin(stream::empty()));
     }
 
+    // Explicit routing based on storage representation.
+    // WholeFileV1 records should use reconstruct_file_record_bytes, not this path.
+    match record.storage_repr {
+        shardline_index::StorageRepresentation::WholeFileV1 => {
+            return Err(ServerError::ObjectStore(
+                crate::error::ObjectStoreError::StoredLengthMismatch,
+            ));
+        }
+        shardline_index::StorageRepresentation::FixedChunkV1 => {
+            // Old format: uncompressed chunks.  The is_xorb_backed check below
+            // handles single-chunk records correctly (packed_start == 0).
+        }
+        shardline_index::StorageRepresentation::XorbCdcV1 => {
+            // New format: compressed + optionally xorb-packed.  Proceed.
+        }
+    }
+
     // Fast path: if all chunks are in the same xorb, read it once.
     // For a single chunk we also check packed_start > 0 — regular chunks
     // always have packed_start == 0 (the serde default), while xorb-backed
