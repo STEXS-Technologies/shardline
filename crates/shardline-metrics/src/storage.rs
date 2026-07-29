@@ -1,4 +1,4 @@
-use prometheus::{IntCounter, IntGauge, Registry};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, Registry};
 
 use crate::{must_counter, must_gauge};
 
@@ -12,6 +12,7 @@ pub struct StorageMetrics {
     pub shards_total: IntGauge,
     pub dedup_saves_bytes_total: IntCounter,
     pub compression_saved_bytes_total: IntCounter,
+    pub objects_by_repr: IntCounterVec,
 }
 
 impl StorageMetrics {
@@ -37,6 +38,11 @@ impl StorageMetrics {
             "shardline_compression_saved_bytes_total",
             "Bytes saved by LZ4 compression",
         );
+        let objects_by_repr = IntCounterVec::new(
+            prometheus::opts!("shardline_objects_by_repr_total", "Objects stored by representation"),
+            &["representation"],
+        )
+        .expect("objects_by_repr counter");
 
         registry.register(Box::new(objects_total.clone())).ok();
         registry
@@ -53,6 +59,9 @@ impl StorageMetrics {
         registry
             .register(Box::new(compression_saved_bytes_total.clone()))
             .ok();
+        registry
+            .register(Box::new(objects_by_repr.clone()))
+            .ok();
 
         Self {
             objects_total,
@@ -64,7 +73,16 @@ impl StorageMetrics {
             shards_total,
             dedup_saves_bytes_total,
             compression_saved_bytes_total,
+            objects_by_repr,
         }
+    }
+
+    pub fn record_object_stored_by_repr(&self, representation: &str, bytes: u64) {
+        self.objects_total.inc();
+        self.objects_bytes_total.inc_by(bytes);
+        self.objects_by_repr
+            .with_label_values(&[representation])
+            .inc();
     }
 
     pub fn record_object_stored(&self, bytes: u64) {

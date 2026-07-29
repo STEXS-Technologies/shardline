@@ -66,6 +66,12 @@ pub fn record_shard_stored() {
     shardline_metrics::metrics().storage.record_shard_stored();
 }
 
+pub fn record_object_stored_by_repr(representation: &str, bytes: u64) {
+    shardline_metrics::metrics()
+        .storage
+        .record_object_stored_by_repr(representation, bytes);
+}
+
 pub fn record_lfs_upload() {
     shardline_metrics::metrics().protocol.record_lfs_upload();
 }
