@@ -60,7 +60,6 @@ shardline_objects_by_repr_total
 - `SHARDLINE_CHUNK_SIZE` now defaults to `64KB` (was `4194304` / 4MB, but in practice
   was always sized per-deployment). The CDC target chunk size is 64KB; minimum chunk is 8KB;
   maximum is 128KB.
-- `SHARDLINE_XORB_PACKING` removed — xorb packing is always enabled.
 
 ## [1.2.2] - 2026-07-28
 
