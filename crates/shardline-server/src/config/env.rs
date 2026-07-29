@@ -265,7 +265,6 @@ pub(super) fn load_server_config_from_env() -> Result<ServerConfig, ServerConfig
             reconstruction_cache_memory_max_entries,
         )
         .with_admission_max_weight(admission_max_weight_from_env())
-        .with_xorb_packing(xorb_packing_enabled_from_env())
         .with_xorb_target_size(xorb_target_size_from_env());
     config.cache.adapter = reconstruction_cache_adapter;
     config.cache.redis_url = reconstruction_cache_redis_url.map(SecretString::new);
@@ -384,17 +383,9 @@ pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroU
             })
         },
     )
-}
+    }
 
-/// Parses the `SHARDLINE_XORB_PACKING` environment variable.
-pub(crate) fn xorb_packing_enabled_from_env() -> bool {
-    var("SHARDLINE_XORB_PACKING")
-        .unwrap_or_else(|_| "true".to_owned())
-        .parse::<bool>()
-        .unwrap_or(true)
-}
-
-/// Parses the `SHARDLINE_XORB_TARGET_SIZE` environment variable.
+    /// Parses the `SHARDLINE_XORB_TARGET_SIZE` environment variable.
 ///
 /// Accepts human-readable byte sizes (e.g. "64MB", "128MiB") or a plain
 /// number of bytes. Falls back to 64 MiB on failure.
@@ -573,10 +564,6 @@ pub fn load_server_config_from_env_with_toml(
         set_if_unset(
             "SHARDLINE_TRANSFER_MAX_IN_FLIGHT_CHUNKS",
             srv.transfer_max_in_flight_chunks.map(|v| v.to_string()),
-        );
-        set_if_unset(
-            "SHARDLINE_XORB_PACKING",
-            srv.xorb_packing.map(|v| v.to_string()),
         );
         set_if_unset(
             "SHARDLINE_XORB_TARGET_SIZE",

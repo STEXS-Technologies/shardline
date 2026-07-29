@@ -34,7 +34,6 @@ pub struct ServerSection {
     pub chunk_size_bytes: Option<u64>,
     pub upload_max_in_flight_chunks: Option<u64>,
     pub transfer_max_in_flight_chunks: Option<u64>,
-    pub xorb_packing: Option<bool>,
     pub xorb_target_size: Option<String>,
 }
 
