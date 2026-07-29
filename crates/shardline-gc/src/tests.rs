@@ -1583,6 +1583,7 @@ async fn run_local_gc_with_prepopulated_store() {
         content_hash: hash.to_owned(),
         total_bytes: 25,
         chunk_size: 100,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: hash.to_owned(),
@@ -1645,6 +1646,7 @@ fn run_gc_with_stores_record_referencing_existing_chunk_no_orphan() {
             content_hash: hash.to_owned(),
             total_bytes: 21,
             chunk_size: 100,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: hash.to_owned(),
@@ -1704,6 +1706,7 @@ fn run_gc_with_stores_dangling_record_reference_handled_gracefully() {
             content_hash: hash.to_owned(),
             total_bytes: 100,
             chunk_size: 100,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: hash.to_owned(),
@@ -1767,6 +1770,7 @@ fn run_gc_with_stores_multiple_records_sharing_a_chunk_no_orphan() {
                 content_hash: hash.to_owned(),
                 total_bytes: 12,
                 chunk_size: 100,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.to_owned(),

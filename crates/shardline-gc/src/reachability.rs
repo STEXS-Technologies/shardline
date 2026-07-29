@@ -534,6 +534,7 @@ mod tests {
                 content_hash: hash.to_owned(),
                 total_bytes: 100,
                 chunk_size: 100,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.to_owned(),
@@ -616,6 +617,7 @@ mod tests {
                 content_hash: hash.to_owned(),
                 total_bytes: 200,
                 chunk_size: 200,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.to_owned(),
@@ -672,6 +674,7 @@ mod tests {
                 content_hash: chunk_hash_hex.to_owned(),
                 total_bytes: 100,
                 chunk_size: 100,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: chunk_hash_hex.to_owned(),
@@ -741,6 +744,7 @@ mod tests {
                 content_hash: hash.to_owned(),
                 total_bytes: 100,
                 chunk_size: 0,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.to_owned(),
@@ -796,6 +800,7 @@ mod tests {
                 content_hash: hash1.to_owned(),
                 total_bytes: 50,
                 chunk_size: 50,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash1.to_owned(),
@@ -815,6 +820,7 @@ mod tests {
                 content_hash: hash2.to_owned(),
                 total_bytes: 75,
                 chunk_size: 75,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash2.to_owned(),

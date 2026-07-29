@@ -23,6 +23,7 @@ mod tests {
             content_hash: "a".repeat(64),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: Some(scope),
             chunks: Vec::new(),
         };

@@ -369,6 +369,7 @@ impl super::PostgresBackend {
             content_hash: content_hash.unwrap_or_default().to_owned(),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: repository_scope.cloned(),
             chunks: Vec::new(),
         };
@@ -505,6 +506,7 @@ mod tests {
             content_hash: make_hash('f'),
             total_bytes: 1024,
             chunk_size: 256,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope.clone()),
             chunks: vec![FileChunkRecord {
                 hash: chunk_hash.to_owned(),
@@ -621,6 +623,7 @@ mod tests {
                 content_hash: make_hash('f'),
                 total_bytes: 1024,
                 chunk_size: 256,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: None,
                 chunks: vec![FileChunkRecord {
                     hash: hash.clone(),
@@ -647,6 +650,7 @@ mod tests {
                 content_hash: make_hash('f'),
                 total_bytes: 0,
                 chunk_size: 0,
+                storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                 repository_scope: Some(scope.clone()),
                 chunks: Vec::new(),
             };
@@ -1098,6 +1102,7 @@ mod tests {
             content_hash: content_hash.to_owned(),
             total_bytes: 1024,
             chunk_size: 256,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(scope.clone()),
             chunks: Vec::new(),
         }
@@ -1443,6 +1448,7 @@ mod tests {
             content_hash: make_hash('e'),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: Some(scope),
             chunks: Vec::new(),
         };

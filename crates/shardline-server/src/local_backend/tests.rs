@@ -571,6 +571,7 @@ async fn repository_references_xorb_ignores_non_authoritative_legacy_scope_metad
         content_hash: "b".repeat(64),
         total_bytes: 4,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(right_scope),
         chunks: vec![FileChunkRecord {
             hash: xorb_hash.clone(),

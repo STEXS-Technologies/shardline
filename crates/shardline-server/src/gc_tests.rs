@@ -517,6 +517,7 @@ async fn exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable
         content_hash: hash.clone(),
         total_bytes: orphan_payload.len() as u64,
         chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![shardline_index::FileChunkRecord {
             hash: hash.clone(),

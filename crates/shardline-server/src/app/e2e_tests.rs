@@ -1609,6 +1609,7 @@ async fn backward_compatibility_all_formats_readable() {
             content_hash: fixed_hash.clone(),
             total_bytes: fixed_content.len() as u64,
             chunk_size: 4_194_304,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: fixed_chunk_hash,
@@ -1631,6 +1632,7 @@ async fn backward_compatibility_all_formats_readable() {
             content_hash: whole_hash.clone(),
             total_bytes: whole_content.len() as u64,
             chunk_size: 0, // ReferencedObjectTerms
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: whole_chunk_hash,
@@ -1838,6 +1840,7 @@ async fn gc_preserves_old_and_new_formats() {
             content_hash: fixed_hash.clone(),
             total_bytes: fixed_content.len() as u64,
             chunk_size: 4_194_304,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: fixed_chunk_hash,
@@ -1859,6 +1862,7 @@ async fn gc_preserves_old_and_new_formats() {
             content_hash: whole_hash.clone(),
             total_bytes: whole_content.len() as u64,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: whole_chunk_hash,

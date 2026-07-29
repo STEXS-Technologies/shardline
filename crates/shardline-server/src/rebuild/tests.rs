@@ -48,6 +48,7 @@ fn synthetic_large_inventory_record(index: usize) -> Result<FileRecord, Box<dyn 
         content_hash,
         total_bytes: 16,
         chunk_size: 16,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: chunk_hash,
@@ -131,6 +132,7 @@ async fn index_rebuild_reaches_a_fixed_point_on_second_run() {
         content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([71; 32])),
         total_bytes: 4,
         chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: xet_hash_hex_string(ShardlineHash::from_bytes([72; 32])),
@@ -266,6 +268,7 @@ async fn index_rebuild_preserves_reconstruction_rows_backed_by_version_records()
         content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([34; 32])),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: Vec::new(),
     };
@@ -447,6 +450,7 @@ async fn index_rebuild_reports_invalid_version_record_json() {
         content_hash: "a".repeat(64),
         total_bytes: 12,
         chunk_size: 128,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
