@@ -933,50 +933,6 @@ pub(crate) fn verify_integrity(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn existing_object_outcome(
-    store: &S3ObjectStore,
-    key: &ObjectKey,
-    existing_length: u64,
-    expected_bytes: &[u8],
-    integrity: &ObjectIntegrity,
-) -> Result<PutOutcome, S3ObjectStoreError> {
-    if existing_length != integrity.length() {
-        return Err(S3ObjectStoreError::ExistingObjectConflict);
-    }
-    if existing_length == 0 {
-        verify_integrity(expected_bytes, integrity)?;
-        return Ok(PutOutcome::AlreadyExists);
-    }
-
-    // Stream-compare in chunks to avoid loading the full object into memory.
-    // Content-addressed keys always produce matching bytes for identical hashes,
-    // so a full in-memory comparison is unnecessary and causes OOM at 5GiB+.
-    let mut offset = 0_u64;
-    while offset < existing_length {
-        let remaining = existing_length
-            .checked_sub(offset)
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let to_read = remaining.min(super::STREAM_COMPARE_CHUNK_BYTES as u64);
-        let end = offset
-            .checked_add(to_read)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        let range = ByteRange::new(offset, end)
-            .map_err(|_error| S3ObjectStoreError::ExistingObjectConflict)?;
-        let existing_chunk = ObjectStore::read_range(store, key, range)?;
-        let expected_chunk = expected_bytes
-            .get(offset as usize..)
-            .and_then(|slice| slice.get(..to_read as usize))
-            .ok_or(S3ObjectStoreError::ExistingObjectConflict)?;
-        if existing_chunk.as_slice() != expected_chunk {
-            return Err(S3ObjectStoreError::ExistingObjectConflict);
-        }
-        offset = end.saturating_add(1);
-    }
-    Ok(PutOutcome::AlreadyExists)
-}
-
 pub(crate) fn existing_object_outcome_from_file(
     store: &S3ObjectStore,
     key: &ObjectKey,
