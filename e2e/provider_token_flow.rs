@@ -280,7 +280,7 @@ fn issue_token(
 }
 
 fn non_zero_chunk_size() -> Result<NonZeroUsize, ServerE2eInvariantError> {
-    NonZeroUsize::new(4).ok_or_else(|| ServerE2eInvariantError::new("chunk size must be non-zero"))
+    NonZeroUsize::new(128).ok_or_else(|| ServerE2eInvariantError::new("chunk size must be non-zero"))
 }
 
 fn non_zero_ttl() -> Result<NonZeroU64, ServerE2eInvariantError> {
