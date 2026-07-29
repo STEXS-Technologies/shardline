@@ -1351,4 +1351,158 @@ mod tests {
             .collect();
         assert_eq!(observed, b"x");
     }
+
+    // ── xorb-backed file record tests ────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xorb_backed_file_record_reads_correctly() {
+        use shardline_index::{FileChunkRecord, FileRecord};
+
+        // 1. Pack 3 chunks into a xorb.
+        let chunks = vec![
+            (b"Hello, ".to_vec(), 0u64),
+            (b"xorb world".to_vec(), 7u64),
+            (b"!".to_vec(), 17u64),
+        ];
+        let packed =
+            crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+
+        // 2. Store xorb in a local object store.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store =
+            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        let was_inserted = crate::upload_ingest::xorb_packer::store_xorb(
+            &object_store,
+            &packed.xorb_hash_hex,
+            &packed.serialized,
+        )
+        .await
+        .unwrap();
+        assert!(was_inserted, "xorb should be stored");
+
+        // 3. Create a FileRecord with xorb-backed entries.
+        let mut file_chunks = Vec::new();
+        for (i, entry) in packed.chunk_entries.iter().enumerate() {
+            let raw_len = chunks[i].0.len() as u64;
+            let next_index = entry.chunk_index.checked_add(1).unwrap();
+            let packed_end = entry
+                .packed_offset
+                .checked_add(entry.packed_length)
+                .unwrap();
+            file_chunks.push(FileChunkRecord {
+                hash: packed.xorb_hash_hex.clone(),
+                offset: entry.raw_offset,
+                length: raw_len,
+                range_start: u64::from(entry.chunk_index),
+                range_end: u64::from(next_index),
+                packed_start: u64::from(entry.packed_offset),
+                packed_end: u64::from(packed_end),
+            });
+        }
+
+        let total_bytes: u64 = chunks.iter().map(|(d, _)| d.len() as u64).sum();
+        let record = FileRecord {
+            file_id: "xorb-test-file.bin".to_string(),
+            content_hash: packed.xorb_hash_hex.clone(),
+            total_bytes,
+            chunk_size: 65536,
+            repository_scope: None,
+            chunks: file_chunks,
+        };
+
+        // 4. Call file_record_byte_stream (no range = full file).
+        let mut stream = super::file_record_byte_stream(object_store, record, None)
+            .await
+            .unwrap();
+
+        // 5. Collect and verify all decompressed content matches.
+        let mut result = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            result.extend_from_slice(&chunk.unwrap());
+        }
+        let expected: Vec<u8> = chunks.iter().flat_map(|(d, _)| d.clone()).collect();
+        assert_eq!(result, expected, "xorb-backed file record content should match");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xorb_backed_download_with_byte_range() {
+        use shardline_index::{FileChunkRecord, FileRecord};
+
+        // 1. Pack 3 chunks into a xorb with known sizes.
+        let chunks = vec![
+            (b"0123456789".to_vec(), 0u64),     // 10 bytes
+            (b"ABCDEFGHIJ".to_vec(), 10u64),    // 10 bytes
+            (b"abcdefghij".to_vec(), 20u64),    // 10 bytes
+        ];
+        let packed =
+            crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+
+        // 2. Store xorb.
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store =
+            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        let _ = crate::upload_ingest::xorb_packer::store_xorb(
+            &object_store,
+            &packed.xorb_hash_hex,
+            &packed.serialized,
+        )
+        .await
+        .unwrap();
+
+        // 3. Create FileRecord with xorb-backed entries.
+        let mut file_chunks = Vec::new();
+        for (i, entry) in packed.chunk_entries.iter().enumerate() {
+            let raw_len = chunks[i].0.len() as u64;
+            let next_index = entry.chunk_index.checked_add(1).unwrap();
+            let packed_end = entry
+                .packed_offset
+                .checked_add(entry.packed_length)
+                .unwrap();
+            file_chunks.push(FileChunkRecord {
+                hash: packed.xorb_hash_hex.clone(),
+                offset: entry.raw_offset,
+                length: raw_len,
+                range_start: u64::from(entry.chunk_index),
+                range_end: u64::from(next_index),
+                packed_start: u64::from(entry.packed_offset),
+                packed_end: u64::from(packed_end),
+            });
+        }
+
+        let total_bytes: u64 = chunks.iter().map(|(d, _)| d.len() as u64).sum();
+        let record = FileRecord {
+            file_id: "xorb-range-test.bin".to_string(),
+            content_hash: packed.xorb_hash_hex.clone(),
+            total_bytes,
+            chunk_size: 65536,
+            repository_scope: None,
+            chunks: file_chunks,
+        };
+
+        // 4. Request a range that spans bytes 5-24.
+        //    Chunk 0: bytes 0-9, we want 5-9 (5 bytes: "56789")
+        //    Chunk 1: bytes 10-19, we want 10-19 (10 bytes: "ABCDEFGHIJ")
+        //    Chunk 2: bytes 20-29, we want 20-24 (5 bytes: "abcde")
+        //    Expected: "56789ABCDEFGHIJabcde"
+        let range = ByteRange::new(5, 24).unwrap();
+        let mut stream =
+            super::file_record_byte_stream(object_store, record, Some(range))
+                .await
+                .unwrap();
+
+        let mut result = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            result.extend_from_slice(&chunk.unwrap());
+        }
+        let expected: Vec<u8> = b"56789ABCDEFGHIJabcde".to_vec();
+        assert_eq!(
+            result, expected,
+            "xorb-backed byte range should span multiple chunks correctly"
+        );
+        assert_eq!(
+            result.len(),
+            20,
+            "byte range 5-24 inclusive should be 20 bytes"
+        );
+    }
 }
