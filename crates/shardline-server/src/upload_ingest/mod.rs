@@ -2,6 +2,7 @@ mod body_reader;
 pub(crate) mod cdc;
 mod chunk_store;
 mod ingestor;
+pub(crate) mod xorb_packer;
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},

@@ -6,7 +6,7 @@ use std::{
 use axum::body::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use lz4_flex;
-use shardline_index::{FileRecord, xet_hash_hex_string};
+use shardline_index::{FileRecord, parse_xet_hash_hex, xet_hash_hex_string};
 use shardline_protocol::ByteRange;
 use shardline_storage::{LocalObjectStore, ObjectKey, ObjectStore, S3ObjectStore};
 use tokio::{
@@ -17,12 +17,87 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     ServerError, chunk_store::chunk_object_key, error::ObjectStoreError, local_backend::chunk_hash,
-    object_store::ServerObjectStore, object_store::run_before_local_object_read_hook,
+    object_store::read_full_object, object_store::ServerObjectStore,
+    object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
 
 pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>> + Send>>;
+
+/// Reads a xorb-backed file record by fetching the single xorb object, parsing
+/// all chunks, and extracting the requested byte range.
+///
+/// When all chunks in a [`FileRecord`] share the same hash (meaning they were
+/// packed into a single xorb container during upload), this path reads the xorb
+/// once and extracts decompressed chunk data without per-chunk storage round-trips.
+async fn read_xorb_backed_chunks(
+    object_store: ServerObjectStore,
+    record: &FileRecord,
+    range: Option<ByteRange>,
+) -> Result<ServerByteStream, ServerError> {
+    // 1. Read the entire xorb from storage.
+    let chunk_zero = record.chunks.first().ok_or(ServerError::Overflow)?;
+    let xorb_hash_hex = &chunk_zero.hash;
+    let xorb_key = crate::xet_adapter::xorb_object_key(xorb_hash_hex)?;
+    let metadata = object_store.metadata(&xorb_key)?.ok_or(ServerError::NotFound)?;
+    let xorb_length = metadata.length();
+    let xorb_data = read_full_object(&object_store, &xorb_key, xorb_length)?;
+
+    // 2. Parse and validate the xorb (verifies xorb hash against expected hash).
+    let expected_hash = parse_xet_hash_hex(xorb_hash_hex)?;
+    let mut cursor = std::io::Cursor::new(xorb_data.as_slice());
+    let validated = crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)?;
+
+    // 3. Decode all chunks (decompresses and verifies per-chunk content hashes).
+    std::io::Seek::seek(&mut cursor, SeekFrom::Start(0))?;
+    let decoded_chunks =
+        crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)?;
+
+    // 4. Filter and slice by the requested byte range.
+    let requested_start = range.map_or(0, |value| value.start());
+    let requested_end = range.map_or_else(
+        || {
+            record
+                .total_bytes
+                .checked_sub(1)
+                .ok_or(ServerError::Overflow)
+        },
+        |value| Ok(value.end_inclusive()),
+    )?;
+
+    let mut terms = Vec::new();
+    for chunk in &record.chunks {
+        let chunk_end = chunk
+            .offset
+            .checked_add(chunk.length)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(ServerError::Overflow)?;
+        let start = requested_start.max(chunk.offset);
+        let end = requested_end.min(chunk_end);
+        if start > end {
+            continue;
+        }
+        let relative_start = start.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?;
+        let relative_end = end.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?;
+
+        // Look up the decoded chunk by its index within the xorb.
+        let chunk_index = chunk.range_start as usize;
+        let decoded = decoded_chunks.get(chunk_index).ok_or(ServerError::Overflow)?;
+        let decoded_data = decoded.data();
+
+        let range_start = usize::try_from(relative_start)?;
+        let range_end = usize::try_from(relative_end)?;
+        let sliced = decoded_data
+            .get(range_start..=range_end)
+            .ok_or(ServerError::Overflow)?
+            .to_vec();
+        terms.push(Bytes::from(sliced));
+    }
+
+    let stream = stream::iter(terms).map(Ok::<Bytes, ServerError>);
+    Ok(Box::pin(stream))
+}
 
 /// Streams a chunk-backed file record without materializing the complete object.
 ///
@@ -30,6 +105,9 @@ pub type ServerByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ServerError>
 /// decompressed, and then the requested byte range is sliced from the decompressed
 /// data. The `packed_end` field on the chunk record indicates the compressed storage
 /// length; `length` is the raw (uncompressed) length used for offset math.
+///
+/// When all chunks in the record share the same hash (xorb-backed), this function
+/// delegates to [`read_xorb_backed_chunks`] for a single-GET read path.
 pub(crate) async fn file_record_byte_stream(
     object_store: ServerObjectStore,
     record: FileRecord,
@@ -38,6 +116,24 @@ pub(crate) async fn file_record_byte_stream(
     record.validate_reconstruction_plan()?;
     if record.total_bytes == 0 {
         return Ok(Box::pin(stream::empty()));
+    }
+
+    // Fast path: if all chunks are in the same xorb, read it once.
+    let first_hash = record.chunks.first().map(|c| &c.hash);
+    let is_xorb_backed = record.chunks.len() > 1
+        && first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
+
+    if is_xorb_backed {
+        // SAFETY: is_xorb_backed requires chunks.len() > 1, so first() is Some.
+        #[allow(clippy::indexing_slicing)]
+        let xorb_hash = &record.chunks[0].hash;
+        debug!(
+            file_id = %record.file_id,
+            total_bytes = record.total_bytes,
+            xorb_hash = %xorb_hash,
+            "reading xorb-backed file"
+        );
+        return read_xorb_backed_chunks(object_store, &record, range).await;
     }
 
     debug!(
