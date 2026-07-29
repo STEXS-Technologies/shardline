@@ -1772,6 +1772,163 @@ async fn backward_compatibility_all_formats_readable() {
     assert_eq!(body_bytes(resp).await, new_content, "XorbCdcV1 content");
 }
 
+// ============================================================================
+// GC + xorb mixed-format test — validates that GC correctly handles all three
+// storage formats (WholeFileV1, FixedChunkV1, XorbCdcV1) in the same repo.
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_preserves_old_and_new_formats() {
+    let tmp = TempDir::new().expect("tempdir");
+    let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
+    let object_store =
+        ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
+
+    // 1. Create FixedChunkV1 record (old format, uncompressed chunk)
+    let fixed_content = b"fixed-chunk-gc-test-data-0123456789";
+    let fixed_hash = test_hash(fixed_content);
+    let fixed_key =
+        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
+            .expect("fixed key");
+    let fixed_file_id = format!(
+        "protocol-object-{}",
+        hex::encode(Sha256::digest(fixed_key.as_str().as_bytes()))
+    );
+    let fixed_chunk_hash =
+        shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(fixed_content));
+    let fixed_chunk_key =
+        crate::chunk_store::chunk_object_key(&fixed_chunk_hash).expect("fixed chunk key");
+    object_store
+        .put_if_absent(
+            &fixed_chunk_key,
+            ObjectBody::from_vec(fixed_content.to_vec()),
+            &ObjectIntegrity::new(
+                crate::local_backend::chunk_hash(fixed_content),
+                fixed_content.len() as u64,
+            ),
+        )
+        .expect("write fixed chunk");
+
+    // 2. Create WholeFileV1 record (single object at object key)
+    let whole_content = b"whole-file-gc-test-data-0123456789";
+    let whole_hash = test_hash(whole_content);
+    let whole_key =
+        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
+            .expect("whole key");
+    let whole_file_id = format!(
+        "protocol-object-{}",
+        hex::encode(Sha256::digest(whole_key.as_str().as_bytes()))
+    );
+    object_store
+        .put_if_absent(
+            &whole_key,
+            ObjectBody::from_vec(whole_content.to_vec()),
+            &ObjectIntegrity::new(
+                crate::local_backend::chunk_hash(whole_content),
+                whole_content.len() as u64,
+            ),
+        )
+        .expect("write whole object");
+
+    // 3. Register both old-format FileRecords
+    let record_store = LocalRecordStore::open(tmp.path().to_path_buf());
+    record_store
+        .commit_file_version_metadata(&FileRecord {
+            file_id: fixed_file_id,
+            content_hash: fixed_hash.clone(),
+            total_bytes: fixed_content.len() as u64,
+            chunk_size: 4_194_304,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: fixed_chunk_hash,
+                offset: 0,
+                length: fixed_content.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: fixed_content.len() as u64,
+            }],
+        })
+        .await
+        .expect("commit fixed record");
+    let whole_chunk_hash =
+        shardline_index::xet_hash_hex_string(crate::local_backend::chunk_hash(whole_content));
+    record_store
+        .commit_file_version_metadata(&FileRecord {
+            file_id: whole_file_id,
+            content_hash: whole_hash.clone(),
+            total_bytes: whole_content.len() as u64,
+            chunk_size: 0,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: whole_chunk_hash,
+                offset: 0,
+                length: whole_content.len() as u64,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: whole_content.len() as u64,
+            }],
+        })
+        .await
+        .expect("commit whole record");
+
+    // 4. Create a new-format XorbCdcV1 upload via ServerBackend wrapping LocalBackend
+    let backend = LocalBackend::new_with_object_store_and_upload_parallelism_with_frontends(
+        tmp.path().to_path_buf(),
+        "http://127.0.0.1:8080".to_owned(),
+        chunk_size,
+        NonZeroUsize::new(64).expect("upload parallelism"),
+        object_store.clone(),
+        &[ServerFrontend::BazelHttp],
+    )
+    .await
+    .expect("backend");
+    let server_backend = crate::ServerBackend::Local(backend);
+    let new_content = b"new-xorb-gc-test-data-0123456789";
+    let new_hash = test_hash(new_content);
+    server_backend
+        .put_sha256_addressed_object_stream_if_absent(
+            &crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &new_hash, None)
+                .expect("new key"),
+            &new_hash,
+            crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
+                new_content,
+            )),
+        )
+        .await
+        .expect("new upload");
+
+    // 5. Run GC dry run — verify all three formats' chunks are referenced
+    let report = crate::gc::run_local_gc(
+        tmp.path().to_path_buf(),
+        crate::gc::LocalGcOptions::dry_run(),
+    )
+    .await
+    .expect("gc dry run");
+    assert!(
+        report.referenced_chunks >= 3,
+        "expected at least 3 referenced chunks, got {}",
+        report.referenced_chunks
+    );
+    assert_eq!(report.deleted_chunks, 0, "dry run must not delete chunks");
+
+    // 6. Verify all three formats still readable via the backend
+    for (label, hash) in [
+        ("FixedChunkV1", &fixed_hash),
+        ("WholeFileV1", &whole_hash),
+        ("XorbCdcV1", &new_hash),
+    ] {
+        let key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, hash, None)
+            .expect("key");
+        let bytes = server_backend
+            .read_object(&key)
+            .await
+            .unwrap_or_else(|e| panic!("{label} readable: {e}"));
+        assert!(!bytes.is_empty(), "{label} must have content");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconstruction_not_found_v2() {
     let (app, _tmp) = test_app(&[ServerFrontend::Xet]).await;
