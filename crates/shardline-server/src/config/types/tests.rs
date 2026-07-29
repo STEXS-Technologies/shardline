@@ -1983,10 +1983,10 @@ fn parse_byte_size_plain_number() {
 
 #[test]
 fn parse_byte_size_case_insensitive() {
-    assert_eq!(parse_byte_size("64kb").unwrap(), 64_000);  // SI
-    assert_eq!(parse_byte_size("64kib").unwrap(), 65536);   // IEC
-    assert_eq!(parse_byte_size("1Gb").unwrap(), 1_000_000_000);  // SI
-    assert_eq!(parse_byte_size("1gib").unwrap(), 1_073_741_824);  // IEC
+    assert_eq!(parse_byte_size("64kb").unwrap(), 64_000); // SI
+    assert_eq!(parse_byte_size("64kib").unwrap(), 65536); // IEC
+    assert_eq!(parse_byte_size("1Gb").unwrap(), 1_000_000_000); // SI
+    assert_eq!(parse_byte_size("1gib").unwrap(), 1_073_741_824); // IEC
 }
 
 #[test]

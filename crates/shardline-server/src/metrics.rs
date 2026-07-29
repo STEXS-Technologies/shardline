@@ -88,7 +88,7 @@ pub fn record_compression_saved(raw_bytes: u64, compressed_bytes: u64) {
     if raw_bytes > compressed_bytes {
         shardline_metrics::metrics()
             .storage
-            .record_compression_saved(raw_bytes - compressed_bytes);
+            .record_compression_saved(raw_bytes.wrapping_sub(compressed_bytes));
     }
 }
 

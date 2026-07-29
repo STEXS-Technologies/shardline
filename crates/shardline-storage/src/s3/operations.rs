@@ -798,9 +798,7 @@ impl AsyncObjectStore for S3ObjectStore {
         {
             Ok(_result) => Ok(PutOutcome::Inserted),
             Err(ExternalObjectStoreError::AlreadyExists { .. })
-            | Err(ExternalObjectStoreError::Precondition { .. }) => {
-                Ok(PutOutcome::AlreadyExists)
-            }
+            | Err(ExternalObjectStoreError::Precondition { .. }) => Ok(PutOutcome::AlreadyExists),
             Err(error) => Err(S3ObjectStoreError::External(error)),
         }
     }
@@ -935,6 +933,7 @@ pub(crate) fn verify_integrity(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn existing_object_outcome(
     store: &S3ObjectStore,
     key: &ObjectKey,
