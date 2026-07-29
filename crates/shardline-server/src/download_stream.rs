@@ -1,4 +1,7 @@
-use std::{io::{Error as IoError, ErrorKind, SeekFrom}, pin::Pin};
+use std::{
+    io::{Error as IoError, ErrorKind, SeekFrom},
+    pin::Pin,
+};
 
 use axum::body::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt, stream};
@@ -13,9 +16,8 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
-    ServerError, chunk_store::chunk_object_key, error::ObjectStoreError,
-    local_backend::chunk_hash, object_store::ServerObjectStore,
-    object_store::run_before_local_object_read_hook,
+    ServerError, chunk_store::chunk_object_key, error::ObjectStoreError, local_backend::chunk_hash,
+    object_store::ServerObjectStore, object_store::run_before_local_object_read_hook,
 };
 
 pub const STREAM_READ_BUFFER_BYTES: u64 = 1024 * 1024;
@@ -95,7 +97,7 @@ pub(crate) async fn file_record_byte_stream(
 
     // For each term: read the entire compressed chunk, decompress, verify integrity, then apply byte range
     let streams = stream::iter(terms).then(
-        move |(key, storage_length, _raw_length, expected_hash_hex, range)| {
+        move |(key, storage_length, _raw_length, expected_hash_hex, chunk_range)| {
             let object_store = object_store.clone();
             async move {
                 // Read the entire compressed chunk
@@ -110,8 +112,11 @@ pub(crate) async fn file_record_byte_stream(
                     })
                     .await?;
                 // Safety: validate decompressed size before allocation
-                let decompressed_size =
-                    u64::from_be_bytes(compressed[0..8].try_into().unwrap_or([0; 8]));
+                let header: [u8; 8] = compressed
+                    .get(0..8)
+                    .and_then(|slice| slice.try_into().ok())
+                    .unwrap_or([0u8; 8]);
+                let decompressed_size = u64::from_be_bytes(header);
                 const MAX_DECOMPRESSED_CHUNK: u64 = 2 * 1024 * 1024; // 2MB safety ceiling
                 if decompressed_size > MAX_DECOMPRESSED_CHUNK {
                     return Err(ServerError::Overflow);
@@ -144,9 +149,12 @@ pub(crate) async fn file_record_byte_stream(
                     "decompressed chunk"
                 );
                 // Apply byte range on decompressed data
-                let range_start = usize::try_from(range.start())?;
-                let range_end = usize::try_from(range.end_inclusive())?;
-                let sliced = decompressed[range_start..=range_end].to_vec();
+                let range_start = usize::try_from(chunk_range.start())?;
+                let range_end = usize::try_from(chunk_range.end_inclusive())?;
+                let sliced = decompressed
+                    .get(range_start..=range_end)
+                    .ok_or(ServerError::Overflow)?
+                    .to_vec();
                 let byte_stream: ServerByteStream =
                     Box::pin(stream::once(async move { Ok(Bytes::from(sliced)) }));
                 Ok::<ServerByteStream, ServerError>(byte_stream)
@@ -1052,12 +1060,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn file_record_byte_stream_decompresses_lz4_chunks() {
-        use shardline_index::{FileRecord, FileChunkRecord};
+        use shardline_index::{FileChunkRecord, FileRecord};
         use shardline_storage::ObjectStore;
 
         let storage = shardline_test_support::TempStorage::new();
-        let object_store =
-            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        let object_store = crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
 
         // Create a compressible payload
         let payload = vec![0xABu8; 4096];
@@ -1069,7 +1076,8 @@ mod tests {
         let object_key = crate::chunk_store::chunk_object_key(&hash_hex).unwrap();
         // Integrity verifies stored bytes (compressed), not raw content
         let compressed_hash = crate::local_backend::chunk_hash(&compressed);
-        let integrity = shardline_storage::ObjectIntegrity::new(compressed_hash, compressed.len() as u64);
+        let integrity =
+            shardline_storage::ObjectIntegrity::new(compressed_hash, compressed.len() as u64);
         object_store
             .put_if_absent(
                 &object_key,
@@ -1096,10 +1104,9 @@ mod tests {
             }],
         };
 
-        let mut stream =
-            super::file_record_byte_stream(object_store, record, None)
-                .await
-                .unwrap();
+        let mut stream = super::file_record_byte_stream(object_store, record, None)
+            .await
+            .unwrap();
         let mut result = Vec::new();
         while let Some(chunk) = stream.next().await {
             result.extend_from_slice(&chunk.unwrap());

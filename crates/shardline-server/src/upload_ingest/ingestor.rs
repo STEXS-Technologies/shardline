@@ -8,8 +8,8 @@ use shardline_protocol::RepositoryScope;
 use tokio::task::JoinSet;
 use tracing::{debug, instrument, warn};
 
-use super::cdc::CdcChunker;
 use super::body_reader::ChunkBuffer;
+use super::cdc::CdcChunker;
 use super::chunk_store::{
     SequencedStoredChunkOutcome, SequencedStoredChunkTaskOutcome, put_if_absent_pooled_chunk_buffer,
 };
@@ -464,7 +464,7 @@ mod tests {
         let mut buffer = bytes::BytesMut::with_capacity(2048);
         buffer.extend_from_slice(b"some data");
         ingestor.recycle_pending_buffer(buffer);
-        assert!(ingestor.reusable_pending_buffers.len() >= 0) ;
+        assert!(ingestor.reusable_pending_buffers.len() >= 0);
         // Buffer should be cleared after recycling
         assert!(ingestor.reusable_pending_buffers[0].is_empty());
     }
@@ -510,7 +510,10 @@ mod tests {
         let mut ingestor = FileUploadIngestor::new(chunk_size, false);
 
         let ingested = ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGH"))
+            .ingest_body_chunk(
+                &object_store,
+                &Bytes::from_static(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGH"),
+            )
             .await;
         assert!(ingested.is_ok());
 
@@ -545,7 +548,10 @@ mod tests {
         assert_eq!(ingestor.in_flight_chunks.len(), 0);
 
         let second = ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"UVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+            .ingest_body_chunk(
+                &object_store,
+                &Bytes::from_static(b"UVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+            )
             .await;
         assert!(second.is_ok());
         assert_eq!(ingestor.in_flight_chunks.len(), 0);
@@ -558,7 +564,7 @@ mod tests {
             return;
         };
 
-        assert_eq!(record.total_bytes, 72) ;
+        assert_eq!(record.total_bytes, 72);
         assert!(response.inserted_chunks > 0);
         assert_eq!(response.chunks.len(), response.inserted_chunks as usize);
     }
@@ -575,7 +581,10 @@ mod tests {
 
         // Send data; with CDC, small data may stay pending until finish()
         let ingested = ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMN"))
+            .ingest_body_chunk(
+                &object_store,
+                &Bytes::from_static(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMN"),
+            )
             .await;
         assert!(ingested.is_ok());
 
@@ -608,7 +617,12 @@ mod tests {
         assert!(pooled_capacity >= 4);
 
         let second = ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"DEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+            .ingest_body_chunk(
+                &object_store,
+                &Bytes::from_static(
+                    b"DEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                ),
+            )
             .await;
         assert!(second.is_ok());
         // With CDC, pending buffer is reused after chunks are flushed
@@ -636,23 +650,22 @@ mod tests {
         };
 
         // Use data large enough for CDC to find boundaries
-        let test_data: Vec<u8> = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            .iter().copied().collect();
-        
+        let test_data: Vec<u8> =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                .iter()
+                .copied()
+                .collect();
+
         let mut first = FileUploadIngestor::new(chunk_size, false);
         let first_data = Bytes::from(test_data.clone());
-        let first_ingested = first
-            .ingest_body_chunk(&object_store, &first_data)
-            .await;
+        let first_ingested = first.ingest_body_chunk(&object_store, &first_data).await;
         assert!(first_ingested.is_ok());
         let first_finished = first.finish(&object_store, "first.bin", None, None).await;
         assert!(first_finished.is_ok());
 
         let mut second = FileUploadIngestor::new(chunk_size, false);
         let second_data = Bytes::from(test_data.clone());
-        let second_ingested = second
-            .ingest_body_chunk(&object_store, &second_data)
-            .await;
+        let second_ingested = second.ingest_body_chunk(&object_store, &second_data).await;
         assert!(second_ingested.is_ok());
         let second_finished = second.finish(&object_store, "second.bin", None, None).await;
         assert!(second_finished.is_ok());
@@ -690,7 +703,10 @@ mod tests {
             .ingest_body_chunk(&object_store, &Bytes::from_static(b"abcde"))
             .await;
         let second = ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"fghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+            .ingest_body_chunk(
+                &object_store,
+                &Bytes::from_static(b"fghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+            )
             .await;
         assert!(first.is_ok());
         assert!(second.is_ok());
@@ -706,7 +722,7 @@ mod tests {
         };
 
         assert!(response.inserted_chunks > 0);
-        assert_eq!(record.total_bytes, 62) ;
+        assert_eq!(record.total_bytes, 62);
         assert_eq!(record.chunks.len(), response.inserted_chunks as usize);
     }
 
@@ -841,7 +857,11 @@ mod tests {
         // With CDC (target=128, min=16, max=256), send enough data to produce
         // multiple chunks. The data below is 320 bytes — enough for 2+ chunks.
         let data: Vec<u8> = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            .iter().copied().cycle().take(320).collect();
+            .iter()
+            .copied()
+            .cycle()
+            .take(320)
+            .collect();
         ingestor
             .ingest_body_chunk(&object_store, &Bytes::from(data))
             .await
@@ -903,7 +923,7 @@ mod tests {
             .await
             .unwrap();
         // After flush, the buffer should be recycled
-        assert!(ingestor.reusable_pending_buffers.len() >= 0) ;
+        assert!(ingestor.reusable_pending_buffers.len() >= 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -915,7 +935,12 @@ mod tests {
 
         // Send data that reaches CDC boundaries
         ingestor
-            .ingest_body_chunk(&object_store, &Bytes::from_static(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+            .ingest_body_chunk(
+                &object_store,
+                &Bytes::from_static(
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                ),
+            )
             .await
             .unwrap();
 
@@ -927,7 +952,7 @@ mod tests {
         let Ok((record, _response)) = finished else {
             return;
         };
-        assert!(record.chunks.len() >= 1) ;
+        assert!(record.chunks.len() >= 1);
         assert_eq!(record.total_bytes, 72);
     }
 
@@ -953,7 +978,7 @@ mod tests {
         let Ok((_record, first_response)) = first_finished else {
             return;
         };
-        assert!(first_response.inserted_chunks >= 1) ;
+        assert!(first_response.inserted_chunks >= 1);
         assert_eq!(first_response.reused_chunks, 0);
 
         // Second upload with same content
@@ -992,9 +1017,7 @@ mod tests {
             .take(5760)
             .collect();
         let body = Bytes::from(data);
-        let ingested = ingestor
-            .ingest_body_chunk(&object_store, &body)
-            .await;
+        let ingested = ingestor.ingest_body_chunk(&object_store, &body).await;
         assert!(ingested.is_ok());
 
         let finished = ingestor

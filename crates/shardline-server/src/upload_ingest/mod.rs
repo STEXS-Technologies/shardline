@@ -1,5 +1,5 @@
-pub(crate) mod cdc;
 mod body_reader;
+pub(crate) mod cdc;
 mod chunk_store;
 mod ingestor;
 

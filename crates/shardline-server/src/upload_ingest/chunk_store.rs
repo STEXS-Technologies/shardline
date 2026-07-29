@@ -1,13 +1,14 @@
 use axum::body::Bytes;
 use bytes::BytesMut;
-use lz4_flex;
 use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore, PutOutcome};
 use tokio::task;
 use tracing::{debug, trace};
 
 use super::body_reader::ChunkBuffer;
 use crate::{
-    ServerError, chunk_store::chunk_object_key_for_computed_hash, local_backend::chunk_hash,
+    ServerError,
+    chunk_store::chunk_object_key_for_computed_hash,
+    local_backend::chunk_hash,
     metrics::{record_compression_saved, record_dedup_saves},
     object_store::ServerObjectStore,
 };
@@ -48,10 +49,12 @@ fn chunk_object_key_and_integrity(chunk: &ChunkBuffer) -> Result<ChunkStorageReq
     let (hash_hex, object_key) = chunk_object_key_for_computed_hash(raw_hash)?;
     let chunk_length = u64::try_from(raw.len())?;
     let compressed_length = u64::try_from(compressed.len())?;
+    #[allow(clippy::float_arithmetic)]
+    let ratio = format!("{:.2}", compressed.len() as f64 / raw.len().max(1) as f64);
     trace!(
         raw_len = raw.len(),
         compressed_len = compressed.len(),
-        ratio = format!("{:.2}", compressed.len() as f64 / raw.len().max(1) as f64),
+        ratio = ratio,
         "LZ4 compressed chunk"
     );
     record_compression_saved(chunk_length, compressed_length);
@@ -73,6 +76,7 @@ fn record_dedup_on_already_exists(outcome: PutOutcome, chunk_length: u64) {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn put_if_absent_chunk_buffer(
     object_store: &ServerObjectStore,
     chunk: ChunkBuffer,
@@ -95,7 +99,8 @@ pub(super) async fn put_if_absent_chunk_buffer(
         ChunkBuffer::Shared(bytes) => {
             let compressed = lz4_flex::compress_prepend_size(&bytes);
             let compressed_bytes = Bytes::from(compressed);
-            let outcome = put_if_absent_shared_bytes(object_store, &request, compressed_bytes).await?;
+            let outcome =
+                put_if_absent_shared_bytes(object_store, &request, compressed_bytes).await?;
             record_dedup_on_already_exists(outcome, request.chunk_length);
             Ok(StoredChunkOutcome {
                 hash_hex: request.hash_hex,
@@ -134,6 +139,7 @@ pub(super) async fn put_if_absent_pooled_chunk_buffer(
     ))
 }
 
+#[cfg(test)]
 async fn put_if_absent_shared_bytes(
     object_store: &ServerObjectStore,
     request: &ChunkStorageRequest,
@@ -689,7 +695,9 @@ mod tests {
     fn incompressible_random_data_does_not_expand_significantly() {
         // LZ4 stores incompressible data with minimal overhead.
         // Use somewhat random data (not perfectly random, but enough to be incompressible).
-        let data: Vec<u8> = (0..4096).map(|i: i32| (i.wrapping_mul(37) ^ 0xFF) as u8).collect();
+        let data: Vec<u8> = (0..4096)
+            .map(|i: i32| (i.wrapping_mul(37) ^ 0xFF) as u8)
+            .collect();
         let compressed = lz4_flex::compress_prepend_size(&data);
         // LZ4 may add a small amount of overhead for incompressible data plus the size prefix.
         // Allow up to 8 bytes of overhead for the size prefix and LZ4 block header.

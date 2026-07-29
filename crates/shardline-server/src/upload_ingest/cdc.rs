@@ -11,7 +11,7 @@ use tracing::trace;
 /// a rolling Gear hash, producing chunks of roughly uniform size
 /// while ensuring identical byte sequences produce identical
 /// boundaries regardless of position.
-
+///
 /// Gear hash table from gearhash-0.1.3/src/table.rs.
 const GEAR_TABLE: [u64; 256] = [
     0xb088d3a9e840f559,
@@ -292,24 +292,24 @@ impl CdcChunker {
     ///
     /// `target_chunk_size` must be a power of two and greater than 64.
     pub fn new(target_chunk_size: usize) -> Self {
-        assert!(target_chunk_size.is_power_of_two());
-        assert!(target_chunk_size > 64);
+        debug_assert!(target_chunk_size.is_power_of_two());
+        debug_assert!(target_chunk_size > 64);
 
-        let raw_mask = (target_chunk_size - 1) as u64;
+        let raw_mask = target_chunk_size.wrapping_sub(1) as u64;
         let mask = raw_mask << raw_mask.leading_zeros();
 
         Self {
             hash: 0,
             target_chunk_size,
             min_chunk: target_chunk_size / 8,
-            max_chunk: target_chunk_size * 2,
+            max_chunk: target_chunk_size.wrapping_mul(2),
             mask,
             pending_len: 0,
         }
     }
 
     /// Returns the minimum chunk size enforced by this chunker.
-    pub fn min_chunk(&self) -> usize {
+    pub const fn min_chunk(&self) -> usize {
         self.min_chunk
     }
 
@@ -341,26 +341,39 @@ impl CdcChunker {
 
         // Skip the minimum chunk zone. The hash has a window size of 64,
         // so skip only min_chunk - 64 - 1 bytes without hashing.
-        if previous_len + 64 < self.min_chunk {
-            let skip = (self.min_chunk - previous_len - 64 - 1).min(n_bytes - previous_len);
-            cur_index += skip;
+        if previous_len.wrapping_add(64) < self.min_chunk {
+            let skip = self
+                .min_chunk
+                .saturating_sub(previous_len)
+                .saturating_sub(64)
+                .saturating_sub(1)
+                .min(n_bytes.saturating_sub(previous_len));
+            cur_index = cur_index.wrapping_add(skip);
         }
 
         // Don't scan past the maximum chunk boundary
         let read_end = n_bytes.min(self.max_chunk);
 
         // Scan for boundary using Gear hash
+        let mut boundary_index = None;
         for i in cur_index..read_end {
-            self.hash = (self.hash << 1).wrapping_add(GEAR_TABLE[data[i] as usize]);
+            self.hash = (self.hash << 1).wrapping_add({
+                let byte = *data.get(i).unwrap_or(&0);
+                *GEAR_TABLE.get(byte as usize).unwrap_or(&0)
+            });
 
             // Enforce minimum chunk size — i is an absolute position in the
             // pending buffer, which equals the position from the current
             // chunk start (pending is always fresh after a boundary flush).
             if i >= self.min_chunk && (self.hash & self.mask) == 0 {
-                cur_index = i + 1;
-                create_chunk = true;
+                boundary_index = Some(i);
                 break;
             }
+        }
+
+        if let Some(i) = boundary_index {
+            cur_index = i.wrapping_add(1);
+            create_chunk = true;
         }
 
         // If no boundary found, advance cur_index to read_end so the
@@ -393,7 +406,7 @@ impl CdcChunker {
     }
 
     /// Resets the internal hash state for scanning a new chunk.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.hash = 0;
         self.pending_len = 0;
     }
@@ -537,7 +550,8 @@ mod tests {
 
         // --- Compare ---
         assert_eq!(
-            batch_boundaries, stream_boundaries,
+            batch_boundaries,
+            stream_boundaries,
             "Streaming CDC boundaries differ from batch!\n  batch:   {:?}\n  stream:  {:?}",
             batch_boundaries.iter().take(20).collect::<Vec<_>>(),
             stream_boundaries.iter().take(20).collect::<Vec<_>>(),

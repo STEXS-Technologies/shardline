@@ -10,6 +10,7 @@ type BoxedBodyStream = Pin<Box<dyn Stream<Item = BodyChunkResult> + Send>>;
 
 pub(super) enum ChunkBuffer {
     Pooled(Bytes),
+    #[allow(dead_code)]
     Shared(Bytes),
 }
 
@@ -21,6 +22,7 @@ impl ChunkBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) const fn len(&self) -> usize {
         match self {
             Self::Pooled(bytes) => bytes.len(),

@@ -899,7 +899,7 @@ pub fn parse_byte_size(s: &str) -> Result<usize, ServerConfigError> {
     // Split between trailing digits and the unit suffix.
     let split_pos = s
         .rfind(|c: char| c.is_ascii_digit())
-        .map(|i| i + 1)
+        .map(|i| i.wrapping_add(1))
         .unwrap_or(0);
     if split_pos == 0 || split_pos >= s.len() {
         return Err(ServerConfigError::ChunkSizeParse(
@@ -909,9 +909,9 @@ pub fn parse_byte_size(s: &str) -> Result<usize, ServerConfigError> {
     let num_str = &s[..split_pos];
     let unit = &s[split_pos..];
 
-    let num: f64 = num_str.parse().map_err(|_| {
-        ServerConfigError::ChunkSizeParse("invalid chunk size number".to_owned())
-    })?;
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_e| ServerConfigError::ChunkSizeParse("invalid chunk size number".to_owned()))?;
 
     if num < 0.0 {
         return Err(ServerConfigError::ChunkSizeParse(
@@ -920,25 +920,26 @@ pub fn parse_byte_size(s: &str) -> Result<usize, ServerConfigError> {
     }
 
     // Decimal (SI) units use powers of 1000; binary (IEC) use powers of 1024.
-    let multiplier = match unit.to_lowercase().as_str() {
+    let multiplier: f64 = match unit.to_lowercase().as_str() {
         "b" | "" => 1.0,
         // Binary (IEC) — powers of 1024
         "kib" => 1024.0,
-        "mib" => 1024.0 * 1024.0,
-        "gib" => 1024.0 * 1024.0 * 1024.0,
-        "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "mib" => 1_048_576.0_f64,      // 1024^2
+        "gib" => 1_073_741_824.0_f64,  // 1024^3
+        "tib" => 1_099_511_627_776.0_f64, // 1024^4
         // Decimal (SI) — powers of 1000
-        "kb" => 1000.0,
-        "mb" => 1000.0 * 1000.0,
-        "gb" => 1000.0 * 1000.0 * 1000.0,
-        "tb" => 1000.0 * 1000.0 * 1000.0 * 1000.0,
+        "kb" => 1_000.0,
+        "mb" => 1_000_000.0_f64,           // 1000^2
+        "gb" => 1_000_000_000.0_f64,       // 1000^3
+        "tb" => 1_000_000_000_000.0_f64,   // 1000^4
         _ => {
             return Err(ServerConfigError::ChunkSizeParse(
                 "unknown size unit".to_owned(),
-            ))
+            ));
         }
     };
 
+    #[allow(clippy::float_arithmetic)]
     let bytes = (num * multiplier) as usize;
     if bytes == 0 {
         return Err(ServerConfigError::ZeroChunkSize);
