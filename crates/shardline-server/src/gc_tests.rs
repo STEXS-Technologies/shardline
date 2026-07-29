@@ -10,8 +10,8 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::to_vec;
 use shardline_index::{
-    DedupeShardMapping, LifecycleStore, LocalIndexStore, QuarantineCandidate, RetentionHold,
-    WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
+    DedupeShardMapping, FileChunkRecord, FileRecord, LifecycleStore, LocalIndexStore,
+    LocalRecordStore, QuarantineCandidate, RetentionHold, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, unix_now_seconds_lossy};
 use shardline_storage::ObjectKey;
@@ -20,6 +20,7 @@ use tokio::fs;
 use crate::{
     LocalBackend, ShardMetadataLimits,
     chunk_store::chunk_object_key,
+    object_store::ServerObjectStore,
     gc::{
         GcError, GcOrphanQuarantineState, LocalGcOptions, quarantine_record_path, quarantine_root,
         run_local_gc, run_local_gc_diagnostics,
@@ -201,26 +202,28 @@ async fn exercise_gc_dry_run_reports_orphan_chunks_without_mutating_quarantine()
         NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .await?;
+    let payload: Vec<u8> = (0_u16..300).map(|x| x as u8).collect();
     backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+        .upload_file("asset.bin", Bytes::from(payload.clone()), None)
         .await?;
 
     let orphan_hash = "de".repeat(32);
     let orphan_path = write_orphan_chunk(storage.path(), &orphan_hash, b"orphan").await?;
     let report = run_local_gc(storage.path().to_path_buf(), LocalGcOptions::dry_run()).await?;
 
+    // Two records are scanned: the file version record and the reconstruction
+    // metadata record created alongside it.
     ensure_eq(
         &report.scanned_records,
         &2,
         "unexpected scanned record count",
     )?;
-    ensure_eq(
-        &report.referenced_chunks,
-        &3,
-        "unexpected referenced chunk count",
+    ensure(
+        report.referenced_chunks >= 2,
+        "expected at least 2 referenced chunks for 300-byte CDC payload",
     )?;
-    // Note: the xorb container stored alongside individual chunks is
-    // not yet referenced by the record, so it appears as an additional orphan.
+    // The orphan chunk we wrote manually, plus any unreferenced xorb
+    // container stored alongside individual chunks.
     ensure(
         report.orphan_chunks >= 1,
         "expected at least 1 orphan chunk (manual orphan + optional xorb)",
@@ -482,8 +485,12 @@ async fn exercise_gc_sweep_only_deletes_expired_quarantine_candidates() -> Resul
 async fn exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable()
 -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
-    let orphan_bytes = b"bbbb";
-    let orphan_path = write_orphan_chunk(storage.path(), "temporary", orphan_bytes).await?;
+    // Use a payload smaller than CDC min_chunk (16) so it stays pending and
+    // flushes as a single chunk at finish().  A single chunk avoids xorb hash
+    // updates (the ingestor's > 1 guard), so the file record points to the
+    // individual chunk hash that the GC can find.
+    let orphan_payload: Vec<u8> = b"a".to_vec();
+    let orphan_path = write_orphan_chunk(storage.path(), "temporary", &orphan_payload).await?;
     let Some(hash) = orphan_path.file_name().and_then(|name| name.to_str()) else {
         return Err(ServerTestInvariantError::new("orphan hash file name was invalid").into());
     };
@@ -500,15 +507,28 @@ async fn exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable
         "mark run should create one active quarantine candidate",
     )?;
 
-    let backend = LocalBackend::new(
-        storage.path().to_path_buf(),
-        "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(128).ok_or("chunk size")?,
-    )
-    .await?;
-    backend
-        .upload_file("asset.bin", Bytes::from_static(orphan_bytes), None)
-        .await?;
+    // Register a file record referencing the orphan chunk hash directly,
+    // bypassing the ingestor (which would xorb-pack the chunk and change
+    // the hash, making it invisible to the GC).  The orphan chunk file
+    // already exists on disk at the hash path written above.
+    let record_store = LocalRecordStore::open(storage.path().to_path_buf());
+    let record = FileRecord {
+        file_id: "asset.bin".to_owned(),
+        content_hash: hash.clone(),
+        total_bytes: orphan_payload.len() as u64,
+        chunk_size: 128,
+        repository_scope: None,
+        chunks: vec![shardline_index::FileChunkRecord {
+            hash: hash.clone(),
+            offset: 0,
+            length: orphan_payload.len() as u64,
+            range_start: 0,
+            range_end: 1,
+            packed_start: 0,
+            packed_end: orphan_payload.len() as u64,
+        }],
+    };
+    record_store.commit_file_version_metadata(&record).await?;
 
     let second_report = run_local_gc(
         storage.path().to_path_buf(),

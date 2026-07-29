@@ -31,7 +31,7 @@ pub(crate) async fn build_oci_test_state() -> OciTestContext {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let root = temp.path().to_path_buf();
     let bind_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let chunk_size = NonZeroUsize::new(4096).unwrap();
+    let chunk_size = NonZeroUsize::new(65536).unwrap();
 
     let config = ServerConfig::new(
         bind_addr,

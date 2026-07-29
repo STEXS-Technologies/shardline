@@ -97,6 +97,30 @@ const fn default_packed_end() -> u64 {
     0
 }
 
+/// Storage representation used for a file's physical data.
+///
+/// Each variant maps to a unique decoder path.  The field is persisted in
+/// the `FileRecord` and defaulted for older records that predate the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageRepresentation {
+    /// Single-object whole-file storage (pre-chunking, term-referenced).
+    #[serde(rename = "whole_file_v1")]
+    WholeFileV1,
+    /// Fixed-size chunking, no compression.
+    #[serde(rename = "fixed_chunk_v1")]
+    FixedChunkV1,
+    /// CDC chunking + LZ4 compression + optional xorb container packing.
+    #[serde(rename = "xorb_cdc_v2")]
+    XorbCdcV2,
+}
+
+impl Default for StorageRepresentation {
+    fn default() -> Self {
+        // Records created before this field existed were fixed-chunk, uncompressed.
+        Self::FixedChunkV1
+    }
+}
+
 /// Durable file-version or latest-file metadata record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileRecord {
