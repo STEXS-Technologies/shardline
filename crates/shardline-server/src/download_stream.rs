@@ -1184,7 +1184,7 @@ mod tests {
 
         // Build a FileRecord pointing to this chunk
         let record = FileRecord {
-            file_id: "test-lz4".to_string(),
+            file_id: "test-lz4".to_owned(),
             content_hash: hash_hex.clone(),
             total_bytes: payload.len() as u64,
             chunk_size: 65536,
@@ -1402,7 +1402,7 @@ mod tests {
 
         let total_bytes: u64 = chunks.iter().map(|(d, _)| d.len() as u64).sum();
         let record = FileRecord {
-            file_id: "xorb-test-file.bin".to_string(),
+            file_id: "xorb-test-file.bin".to_owned(),
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes,
             chunk_size: 65536,
@@ -1471,7 +1471,7 @@ mod tests {
 
         let total_bytes: u64 = chunks.iter().map(|(d, _)| d.len() as u64).sum();
         let record = FileRecord {
-            file_id: "xorb-range-test.bin".to_string(),
+            file_id: "xorb-range-test.bin".to_owned(),
             content_hash: packed.xorb_hash_hex.clone(),
             total_bytes,
             chunk_size: 65536,

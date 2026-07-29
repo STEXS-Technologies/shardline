@@ -1112,7 +1112,7 @@ async fn authorize_with_no_auth_returns_ok_none() {
         reconstruction_cache: crate::ReconstructionCacheService::disabled(),
         transfer_limiter: crate::TransferLimiter::new(
             NonZeroUsize::new(65536).unwrap(),
-            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(128).unwrap(),
         ),
         oci_registry_token_limiter: Arc::new(tokio::sync::Semaphore::new(8)),
         admission: crate::admission::WeightedAdmission::new(

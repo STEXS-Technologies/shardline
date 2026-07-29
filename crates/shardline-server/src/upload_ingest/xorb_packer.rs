@@ -507,7 +507,7 @@ mod tests {
         // Verify that the xorb hash hex produced by our packer can be
         // parsed back by the Xet adapter's parse_xet_hash_hex function.
         let data = b"hash format test".to_vec();
-        let chunks = vec![(data.clone(), 0u64)];
+        let chunks = vec![(data, 0u64)];
         let packed = pack_chunks_into_xorb(&chunks).unwrap();
 
         let parsed =

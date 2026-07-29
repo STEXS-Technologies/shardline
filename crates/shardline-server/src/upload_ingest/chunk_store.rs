@@ -568,6 +568,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::panic)]
     #[tokio::test]
     async fn compressed_chunk_stored_and_recoverable() {
         let tmp = shardline_test_support::TempStorage::new();
@@ -587,9 +588,9 @@ mod tests {
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
         let local_store = match &store {
             ServerObjectStore::Local(store) => store,
-            _ => panic!("expected local store"),
+            ServerObjectStore::S3(_) | ServerObjectStore::Blackhole => panic!("expected local store"),
         };
-        let read_end = outcome.compressed_length.checked_sub(1).unwrap_or(0);
+        let read_end = outcome.compressed_length.saturating_sub(1);
         let range = shardline_protocol::ByteRange::new(0, read_end).unwrap();
         let stored_compressed = local_store.read_range(&object_key, range).unwrap();
         assert_eq!(stored_compressed.len() as u64, outcome.compressed_length);
@@ -620,6 +621,7 @@ mod tests {
         assert_eq!(outcome1.compressed_length, outcome2.compressed_length);
     }
 
+    #[allow(clippy::panic)]
     #[tokio::test]
     async fn compressed_length_in_stored_outcome_matches_stored_bytes() {
         let tmp = shardline_test_support::TempStorage::new();
@@ -635,9 +637,9 @@ mod tests {
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
         let local_store = match &store {
             ServerObjectStore::Local(store) => store,
-            _ => panic!("expected local store"),
+            ServerObjectStore::S3(_) | ServerObjectStore::Blackhole => panic!("expected local store"),
         };
-        let read_end = outcome.compressed_length.checked_sub(1).unwrap_or(0);
+        let read_end = outcome.compressed_length.saturating_sub(1);
         let range = shardline_protocol::ByteRange::new(0, read_end).unwrap();
         let stored = local_store.read_range(&object_key, range).unwrap();
         assert_eq!(
