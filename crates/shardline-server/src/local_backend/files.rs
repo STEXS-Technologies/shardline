@@ -437,7 +437,7 @@ mod tests {
         let backend = LocalBackend::new(
             tmp.path().to_path_buf(),
             "http://127.0.0.1:8080".to_owned(),
-            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(128).unwrap(),
         )
         .await
         .unwrap();

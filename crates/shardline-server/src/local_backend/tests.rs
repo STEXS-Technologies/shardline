@@ -24,7 +24,7 @@ async fn local_backend_reuses_unchanged_chunks() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -81,7 +81,7 @@ async fn local_backend_stats_ignore_non_authoritative_legacy_file_inventory() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -124,7 +124,7 @@ async fn local_backend_ready_rejects_symlinked_metadata_database_path() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -166,7 +166,7 @@ async fn local_backend_new_rejects_symlinked_root_ancestor() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -201,7 +201,7 @@ async fn local_backend_file_record_rejects_oversized_metadata_before_reading() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -242,7 +242,7 @@ async fn xorb_upload_is_idempotent_and_keeps_serialized_body_readable() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -282,7 +282,7 @@ async fn shard_registration_rejects_missing_xorb_without_creating_file() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -320,7 +320,7 @@ async fn shard_registration_creates_reconstruction_after_xorbs_exist() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -380,7 +380,7 @@ async fn successful_xorb_upload_does_not_create_incoming_body_file() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -411,7 +411,7 @@ async fn successful_shard_upload_does_not_create_staging_directories() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -453,7 +453,7 @@ async fn repository_scope_namespaces_records_for_same_file_id() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -518,7 +518,7 @@ async fn repository_references_xorb_ignores_non_authoritative_legacy_scope_metad
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -589,7 +589,7 @@ async fn read_chunk_for_file_version_rejects_unreferenced_chunk() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -639,7 +639,7 @@ async fn local_backend_ready_succeeds_for_initialized_storage() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -667,7 +667,7 @@ async fn local_backend_ready_fails_when_local_chunk_root_is_missing() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -699,7 +699,7 @@ async fn local_backend_ready_fails_when_metadata_database_path_is_directory() {
     let Ok(temp) = temp else {
         return;
     };
-    let chunk_size = NonZeroUsize::new(4);
+    let chunk_size = NonZeroUsize::new(128);
     assert!(chunk_size.is_some());
     let Some(chunk_size) = chunk_size else {
         return;
@@ -731,7 +731,7 @@ async fn local_backend_ready_fails_when_metadata_database_path_is_directory() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_backend_new_creates_root_and_chunks_directories() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
 
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
@@ -764,7 +764,7 @@ async fn local_backend_new_creates_root_and_chunks_directories() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_file_returns_non_empty_content_hash() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -792,7 +792,7 @@ async fn upload_file_returns_non_empty_content_hash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_same_file_twice_produces_identical_content_hash() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -825,7 +825,7 @@ async fn upload_same_file_twice_produces_identical_content_hash() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn download_file_returns_correct_bytes() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -858,7 +858,7 @@ async fn download_file_returns_correct_bytes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_record_returns_correct_metadata_after_upload() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -897,7 +897,7 @@ async fn file_record_returns_correct_metadata_after_upload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_record_nonexistent_file_returns_not_found() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -917,7 +917,7 @@ async fn file_record_nonexistent_file_returns_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_record_with_content_hash_nonexistent_returns_not_found() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -945,7 +945,7 @@ async fn file_record_with_content_hash_nonexistent_returns_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xorb_upload_stored_and_length_matches() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -977,7 +977,7 @@ async fn xorb_upload_stored_and_length_matches() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xorb_read_returns_correct_bytes() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -1009,7 +1009,7 @@ async fn xorb_read_returns_correct_bytes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_file_with_repository_scope_round_trip() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -1046,7 +1046,7 @@ async fn upload_file_with_repository_scope_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn download_file_nonexistent_returns_not_found() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
@@ -1066,7 +1066,7 @@ async fn download_file_nonexistent_returns_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_chunk_metadata_matches_chunk_size() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let chunk_size = NonZeroUsize::new(4).expect("chunk_size");
+    let chunk_size = NonZeroUsize::new(128).expect("chunk_size");
     let backend = LocalBackend::new(
         temp.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),

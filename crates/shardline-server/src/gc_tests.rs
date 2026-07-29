@@ -198,7 +198,7 @@ async fn exercise_gc_dry_run_reports_orphan_chunks_without_mutating_quarantine()
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .await?;
     backend
@@ -268,7 +268,7 @@ async fn exercise_gc_mark_only_creates_quarantine_candidates() -> Result<(), Box
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .await?;
     backend
@@ -503,7 +503,7 @@ async fn exercise_gc_releases_quarantine_candidates_when_chunk_becomes_reachable
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .await?;
     backend
@@ -824,7 +824,7 @@ async fn exercise_gc_live_native_xet_record_keeps_retained_shard_reachable()
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .await?;
     let (xorb_body, xorb_hash_hex) = single_chunk_xorb(b"aaaa");
@@ -1129,7 +1129,7 @@ async fn exercise_gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Erro
         LocalBackend::new(
             storage.path().to_path_buf(),
             "http://127.0.0.1:8080".to_owned(),
-            NonZeroUsize::new(4).ok_or("chunk size")?,
+            NonZeroUsize::new(128).ok_or("chunk size")?,
         )
         .await?,
     );
@@ -1191,7 +1191,7 @@ async fn exercise_gc_concurrent_upload_interleaving() -> Result<(), Box<dyn Erro
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(128).ok_or("chunk size")?,
     )
     .await?;
     let record = backend

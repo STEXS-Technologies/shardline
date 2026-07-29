@@ -71,7 +71,7 @@ async fn index_rebuild_restores_missing_latest_record() {
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
     assert!(backend.is_ok());
@@ -130,7 +130,7 @@ async fn index_rebuild_reaches_a_fixed_point_on_second_run() {
         file_id: "asset.bin".to_owned(),
         content_hash: xet_hash_hex_string(ShardlineHash::from_bytes([71; 32])),
         total_bytes: 4,
-        chunk_size: 4,
+        chunk_size: 128,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: xet_hash_hex_string(ShardlineHash::from_bytes([72; 32])),
@@ -173,7 +173,7 @@ async fn index_rebuild_prunes_stale_latest_record_without_versions() {
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
     assert!(backend.is_ok());
@@ -306,7 +306,7 @@ async fn index_rebuild_restores_repository_scoped_latest_records() {
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
     assert!(backend.is_ok());
@@ -446,7 +446,7 @@ async fn index_rebuild_reports_invalid_version_record_json() {
         file_id: "asset.bin".to_owned(),
         content_hash: "a".repeat(64),
         total_bytes: 12,
-        chunk_size: 4,
+        chunk_size: 128,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),
@@ -503,7 +503,7 @@ async fn index_rebuild_skips_invalid_version_reconstruction_plan() {
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
     assert!(backend.is_ok());
@@ -584,7 +584,7 @@ async fn index_rebuild_restores_dedupe_shard_mapping_from_retained_shard_objects
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
     assert!(backend.is_ok());
@@ -642,7 +642,7 @@ async fn index_rebuild_does_not_mutate_dedupe_mappings_when_retained_shard_is_co
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+        NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN),
     )
     .await;
     assert!(backend.is_ok());

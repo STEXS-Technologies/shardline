@@ -571,7 +571,6 @@ mod tests {
         let mut buffer = bytes::BytesMut::with_capacity(2048);
         buffer.extend_from_slice(b"some data");
         ingestor.recycle_pending_buffer(buffer);
-        assert!(ingestor.reusable_pending_buffers.len() >= 0);
         // Buffer should be cleared after recycling
         assert!(ingestor.reusable_pending_buffers[0].is_empty());
     }
@@ -759,9 +758,7 @@ mod tests {
         // Use data large enough for CDC to find boundaries
         let test_data: Vec<u8> =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-                .iter()
-                .copied()
-                .collect();
+                .to_vec();
 
         let mut first = FileUploadIngestor::new(chunk_size, false);
         let first_data = Bytes::from(test_data.clone());
@@ -943,7 +940,7 @@ mod tests {
         };
         assert_eq!(record.total_bytes, 4);
         assert!(response.inserted_chunks >= 1);
-        assert!(response.chunks.len() >= 1);
+        assert!(!response.chunks.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -974,7 +971,7 @@ mod tests {
             .await
             .unwrap();
         // CDC may or may not have flushed all chunks depending on boundaries
-        assert!(ingestor.completed_chunks.len() >= 1);
+        assert!(!ingestor.completed_chunks.is_empty());
 
         let finished = ingestor
             .finish(&object_store, "multi-chunk.bin", None, None)
@@ -984,7 +981,7 @@ mod tests {
             return;
         };
         assert_eq!(record.total_bytes, 320);
-        assert!(record.chunks.len() >= 1);
+        assert!(!record.chunks.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1030,7 +1027,6 @@ mod tests {
             .await
             .unwrap();
         // After flush, the buffer should be recycled
-        assert!(ingestor.reusable_pending_buffers.len() >= 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1059,7 +1055,7 @@ mod tests {
         let Ok((record, _response)) = finished else {
             return;
         };
-        assert!(record.chunks.len() >= 1);
+        assert!(!record.chunks.is_empty());
         assert_eq!(record.total_bytes, 72);
     }
 

@@ -1978,7 +1978,7 @@ fn parse_byte_size_iec_units() {
 fn parse_byte_size_plain_number() {
     assert_eq!(parse_byte_size("65536").unwrap(), 65536);
     assert_eq!(parse_byte_size("512b").unwrap(), 512);
-    assert_eq!(parse_byte_size("0").is_err(), true);
+    assert!(parse_byte_size("0").is_err());
 }
 
 #[test]
