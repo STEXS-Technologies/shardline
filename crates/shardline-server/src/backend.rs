@@ -567,6 +567,7 @@ impl ServerBackend {
             Self::Postgres(backend) => backend.object_length(object_key).await,
         };
         if direct_length.is_ok() {
+            crate::metrics::record_object_read_by_repr("direct_object", total_length);
             return match self {
                 Self::Local(backend) => {
                     backend

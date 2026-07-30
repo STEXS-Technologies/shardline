@@ -136,6 +136,14 @@ pub fn record_gc_run(duration: std::time::Duration, objects_collected: u64, byte
         .record_run(duration, objects_collected, bytes_collected);
 }
 
+pub fn record_gc_mark_duration(duration: std::time::Duration) {
+    metrics().gc.record_mark_duration(duration);
+}
+
+pub fn record_gc_sweep_duration(duration: std::time::Duration) {
+    metrics().gc.record_sweep_duration(duration);
+}
+
 pub fn record_fsck_run(duration: std::time::Duration, errors_found: u64) {
     metrics().fsck.record_run(duration, errors_found);
 }
