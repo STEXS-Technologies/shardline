@@ -164,6 +164,7 @@ fn make_candidate_with_file_id(file_id: &str) -> VersionCandidate<&'static str> 
             content_hash: "a".repeat(64),
             total_bytes: 0,
             chunk_size: 0,
+            storage_repr: shardline_index::StorageRepresentation::WholeFileV1,
             repository_scope: None,
             chunks: Vec::new(),
         },
@@ -402,6 +403,7 @@ async fn run_index_rebuild_with_single_version_record_produces_latest() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -440,6 +442,7 @@ async fn run_index_rebuild_with_existing_latest_unchanged() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -854,6 +857,7 @@ async fn run_index_rebuild_removes_stale_latest_records() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };
@@ -865,6 +869,7 @@ async fn run_index_rebuild_removes_stale_latest_records() {
         content_hash: "b".repeat(64),
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: Vec::new(),
     };
@@ -1799,6 +1804,7 @@ async fn run_index_rebuild_reconstruction_preserved_when_file_id_is_hash() {
         content_hash,
         total_bytes: 0,
         chunk_size: 0,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks,
     };

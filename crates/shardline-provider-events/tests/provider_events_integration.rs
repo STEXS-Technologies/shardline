@@ -33,6 +33,7 @@ fn test_record(scope: RepositoryScope) -> FileRecord {
         content_hash: "a".repeat(64),
         total_bytes: 8,
         chunk_size: 4,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: Some(scope),
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),

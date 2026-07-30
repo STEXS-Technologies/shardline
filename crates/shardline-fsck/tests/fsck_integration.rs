@@ -143,6 +143,7 @@ fn make_record(
     let ch = content_hash(total_bytes, chunk_size, &chunks);
 
     FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: file_id.to_owned(),
         content_hash: ch,
         total_bytes,

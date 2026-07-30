@@ -661,6 +661,7 @@ async fn scan_record_tree_latest_with_missing_chunk_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes,
@@ -741,6 +742,7 @@ async fn scan_record_tree_latest_record_hash_mismatch_reported() {
     let wrong_content_hash = "dd".repeat(32);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash: wrong_content_hash,
         total_bytes,
@@ -883,6 +885,7 @@ async fn scan_record_tree_latest_native_xet_missing_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes,
@@ -979,6 +982,7 @@ async fn scan_record_tree_latest_chunk_hash_mismatch_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes,
@@ -1065,6 +1069,7 @@ async fn scan_record_tree_latest_chunk_length_mismatch_reported() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes,
@@ -1162,6 +1167,7 @@ async fn scan_record_tree_latest_xorb_key_added_to_reachability() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes,
@@ -1645,6 +1651,7 @@ async fn scan_record_tree_latest_native_xet_valid_xorb_clean() {
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes,
@@ -1765,6 +1772,7 @@ async fn scan_record_tree_latest_native_xet_range_exceeds_chunks() {
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: chunk_len,
@@ -1870,6 +1878,7 @@ async fn scan_record_tree_latest_native_xet_missing_inner_chunk() {
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
 
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-file-id".to_owned(),
         content_hash,
         total_bytes: chunk_len,
@@ -2019,6 +2028,7 @@ async fn scan_record_tree_latest_native_xet_invalid_hash_rejected_by_validation(
     let chunk_size = 0_u64;
     let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-bad-hash".to_owned(),
         content_hash,
         total_bytes,
@@ -2135,6 +2145,7 @@ async fn scan_record_tree_latest_native_xet_with_inner_chunks_tracks_reachabilit
     let chunk_size = 0_u64;
     let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
     let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "test-native-xet-reach".to_owned(),
         content_hash,
         total_bytes: chunk_len,

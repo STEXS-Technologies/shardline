@@ -605,6 +605,7 @@ fn sample_file_record() -> shardline_index::FileRecord {
         content_hash: "aabbccdd".repeat(8),
         total_bytes: 100,
         chunk_size: 10,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: Vec::new(),
     }
