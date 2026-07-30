@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use shardline_index::{AsyncIndexStore, QuarantineCandidate};
-use shardline_storage::ObjectStore;
+use shardline_storage::{ObjectKey, ObjectStore};
+use shardline_xet_adapter::xorb_hash_from_object_key_if_present;
 
 use crate::{GcError, reachability::OrphanObject, types::LocalGcReport};
 use shardline_server_core::{checked_add, checked_increment};
@@ -176,6 +177,20 @@ where
         let _outcome = object_store
             .delete_if_present(&orphan.object_key)
             .map_err(Into::into)?;
+
+        // When a xorb container is swept, also remove its chunk-hash cache
+        // sidecar (_xorb_chunks/{prefix}/{hash}) so orphaned cache entries
+        // do not accumulate in the store.
+        if let Some(hash) = xorb_hash_from_object_key_if_present(&orphan.object_key)? {
+            if let Ok(cache_key) = ObjectKey::parse(&format!(
+                "_xorb_chunks/{}/{}",
+                &hash[..2],
+                hash
+            )) {
+                let _ = object_store.delete_if_present(&cache_key).map_err(Into::into);
+            }
+        }
+
         report.deleted_chunks = checked_increment(report.deleted_chunks)?;
         report.deleted_bytes = checked_add(report.deleted_bytes, orphan.bytes)?;
         report.released_quarantine_candidates =
