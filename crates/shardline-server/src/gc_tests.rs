@@ -772,6 +772,61 @@ async fn exercise_gc_mark_and_sweep_deletes_orphan_native_xorb_object() -> Resul
     Ok(())
 }
 
+/// An orphan xorb with a chunk-hash cache sidecar is swept with both
+/// files deleted together.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent() {
+    let result =
+        exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent().await;
+    let error = result.as_ref().err().map(ToString::to_string);
+    assert!(
+        result.is_ok(),
+        "gc mark and sweep must delete xorb cache sidecar with parent: {error:?}"
+    );
+}
+
+async fn exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent()
+-> Result<(), Box<dyn Error>>
+{
+    let storage = tempfile::tempdir()?;
+    let hash = "ab".repeat(32);
+    let xorb_key = xorb_object_key(&hash)?;
+    let cache_key = ObjectKey::parse(&format!("_xorb_chunks/ab/{hash}"))?;
+
+    // Write the orphan xorb container.
+    let xorb_path = write_orphan_object(storage.path(), &xorb_key, b"fake xorb data").await?;
+
+    // Write the cache sidecar (_xorb_chunks/{prefix}/{hash}).
+    let cache_dir = storage.path().join("chunks").join(cache_key.as_str());
+    let cache_parent = cache_dir.parent().ok_or(ServerTestInvariantError::new("cache parent"))?;
+    fs::create_dir_all(cache_parent).await?;
+    let cache_path = write_orphan_object(storage.path(), &cache_key, b"hash1\nhash2\n").await?;
+
+    let diagnostics = run_local_gc_diagnostics(
+        storage.path().to_path_buf(),
+        LocalGcOptions::mark_and_sweep(0),
+    )
+    .await?;
+
+    // The GC should have deleted the xorb (counted as 1 deleted chunk).
+    ensure_eq(
+        &diagnostics.report.deleted_chunks,
+        &1,
+        "orphan xorb should be deleted",
+    )?;
+    ensure(
+        !fs::try_exists(xorb_path).await?,
+        "xorb file must be removed after sweep",
+    )?;
+    // The cache sidecar must also be removed.
+    ensure(
+        !fs::try_exists(cache_path).await?,
+        "xorb cache sidecar must be removed with parent xorb",
+    )?;
+
+    Ok(())
+}
+
 async fn exercise_gc_mark_and_sweep_deletes_orphan_retained_shard_object()
 -> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
