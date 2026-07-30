@@ -34,6 +34,7 @@ fn test_record() -> FileRecord {
         content_hash: valid_hash(),
         total_bytes: 8,
         chunk_size: 8,
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         repository_scope: None,
         chunks: vec![FileChunkRecord {
             hash: "b".repeat(64),

@@ -122,10 +122,11 @@ mod tests {
     #[test]
     fn optional_chunk_container_keys_with_xet_returns_xorb_key() {
         let keys = optional_chunk_container_keys(&[ServerFrontend::Xet], VALID_HASH).unwrap();
-        assert_eq!(keys.len(), 1);
-        // xorb_object_key produces xorbs/default/{prefix}/{hash}.xorb
+        assert_eq!(keys.len(), 2, "xorb_key + cache sidecar");
+        // Keys[0] is the xorb container, keys[1] is the cache sidecar.
         assert!(keys[0].as_str().starts_with("xorbs/default/"));
         assert!(keys[0].as_str().ends_with(".xorb"));
+        assert!(keys[1].as_str().starts_with("_xorb_chunks/"));
     }
 
     #[test]
@@ -142,8 +143,9 @@ mod tests {
             ServerFrontend::Hub,
         ];
         let keys = optional_chunk_container_keys(&frontends, VALID_HASH).unwrap();
-        assert_eq!(keys.len(), 1);
+        assert_eq!(keys.len(), 2, "xorb key + cache sidecar");
         assert!(keys[0].as_str().starts_with("xorbs/default/"));
+        assert!(keys[1].as_str().starts_with("_xorb_chunks/"));
     }
 
     #[test]
@@ -189,12 +191,12 @@ mod tests {
     #[test]
     fn optional_chunk_container_keys_xet_and_lfs_no_duplicates() {
         // When both Xet and Lfs are present, only the Xet xorb key should be
-        // returned — no duplicate entries.
+        // returned — no duplicate entries.  The cache sidecar is also returned.
         let frontends = [ServerFrontend::Xet, ServerFrontend::Lfs];
         let keys = optional_chunk_container_keys(&frontends, VALID_HASH).unwrap();
-        assert_eq!(keys.len(), 1, "should return exactly one xorb key");
+        assert_eq!(keys.len(), 2, "xorb key + cache sidecar");
         assert!(keys[0].as_str().starts_with("xorbs/default/"));
-        assert!(keys[0].as_str().ends_with(".xorb"));
+        assert!(keys[1].as_str().starts_with("_xorb_chunks/"));
     }
 
     #[test]
@@ -332,14 +334,17 @@ mod tests {
     #[test]
     fn optional_chunk_container_keys_with_duplicate_xet_key_dedup() {
         // When Xet appears twice in the frontend list, the result should
-        // still contain only one xorb key (deduplication via contains check).
+        // contain one xorb key + one cache sidecar key (deduplication via
+        // contains check prevents 2 xorb keys and 2 cache keys).
         let frontends = [ServerFrontend::Xet, ServerFrontend::Xet];
         let keys = optional_chunk_container_keys(&frontends, VALID_HASH).unwrap();
         assert_eq!(
             keys.len(),
-            1,
-            "duplicate Xet frontends must not produce duplicates"
+            2,
+            "duplicate Xet frontends must not produce duplicate xorb or cache keys"
         );
+        assert!(keys[0].as_str().starts_with("xorbs/default/"));
+        assert!(keys[1].as_str().starts_with("_xorb_chunks/"));
     }
 
     // ── Timeout / cancellation tests ─────────────────────────────────────

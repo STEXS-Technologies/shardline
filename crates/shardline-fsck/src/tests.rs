@@ -1471,6 +1471,7 @@ async fn run_fsck_with_dedupe_shard_added_to_reachability() {
     let chunk_size = 4096_u64;
     let content_hash_val = content_hash(total_bytes, chunk_size, &chunks);
     let record = FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
         file_id: "reachable-file".to_owned(),
         content_hash: content_hash_val,
         total_bytes,

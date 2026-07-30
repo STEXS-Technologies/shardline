@@ -309,6 +309,7 @@ mod tests {
             content_hash: "b".repeat(64),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(matching_scope),
             chunks: vec![test_record()],
         };
@@ -317,6 +318,7 @@ mod tests {
             content_hash: "c".repeat(64),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(non_matching_scope),
             chunks: vec![test_record()],
         };
@@ -356,6 +358,7 @@ mod tests {
             content_hash: "d".repeat(64),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(
                 RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
                     .unwrap(),
@@ -404,6 +407,7 @@ mod tests {
             content_hash: "e".repeat(64),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(
                 RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
                     .unwrap(),
@@ -429,6 +433,7 @@ mod tests {
             content_hash: "f".repeat(64),
             total_bytes: 4,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(
                 RepositoryScope::new(RepositoryProvider::GitHub, "org", "repo", Some("main"))
                     .unwrap(),

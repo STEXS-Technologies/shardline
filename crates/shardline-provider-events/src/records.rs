@@ -167,6 +167,7 @@ mod tests {
             content_hash: "a".repeat(64),
             total_bytes: 8,
             chunk_size: 4,
+            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
             repository_scope: Some(
                 RepositoryScope::new(RepositoryProvider::GitHub, "owner", "repo", Some("main"))
                     .unwrap(),
