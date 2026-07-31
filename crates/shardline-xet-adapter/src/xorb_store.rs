@@ -143,10 +143,8 @@ where
 
     // Persist the cache sidecar for future GC runs.
     let cache_body = chunk_hashes.join("\n");
-    let integrity = ObjectIntegrity::new(
-        chunk_hash(cache_body.as_bytes()),
-        cache_body.len() as u64,
-    );
+    let integrity =
+        ObjectIntegrity::new(chunk_hash(cache_body.as_bytes()), cache_body.len() as u64);
     ObjectStore::put_if_absent(
         object_store,
         &cache_key,
@@ -165,7 +163,9 @@ fn xorb_chunks_cache_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
     shardline_server_core::validate_content_hash_with(hash_hex, || {
         XetAdapterError::InvalidContentHash
     })?;
-    let prefix = hash_hex.get(..2).ok_or(XetAdapterError::InvalidContentHash)?;
+    let prefix = hash_hex
+        .get(..2)
+        .ok_or(XetAdapterError::InvalidContentHash)?;
     ObjectKey::parse(&format!("_xorb_chunks/{prefix}/{hash_hex}")).map_err(map_object_key_error)
 }
 
@@ -1905,7 +1905,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(second_hashes.len(), 3, "cached visit returns 3 hashes");
-        assert_eq!(first_hashes, second_hashes, "cached hashes match xorb hashes");
+        assert_eq!(
+            first_hashes, second_hashes,
+            "cached hashes match xorb hashes"
+        );
 
         // Verify the cache file contains the expected hash strings.
         let cache_bytes = read_full_object(&object_store, &cache_key, cache_meta.length()).unwrap();

@@ -6,7 +6,7 @@ use shardline_xet_core::{
     merklehash::MerkleHash,
     xorb_object::{
         Chunk, CompressionScheme, RawXorbData, SerializedXorbObject,
-        xorb_chunk_format::{XorbChunkHeader, XORB_CHUNK_HEADER_LENGTH, deserialize_chunk_header},
+        xorb_chunk_format::{XORB_CHUNK_HEADER_LENGTH, XorbChunkHeader, deserialize_chunk_header},
     },
 };
 
@@ -103,12 +103,13 @@ pub fn pack_chunks_into_xorb(
         })?;
 
         let compressed_len = usize::try_from(header.get_compressed_length())
-            .map_err(|e| {
-                ServerError::NumericConversion(e)
-            })?;
-        let chunk_total_len =
-            u32::try_from(XORB_CHUNK_HEADER_LENGTH.checked_add(compressed_len).ok_or(ServerError::Overflow)?)
-                .map_err(ServerError::NumericConversion)?;
+            .map_err(ServerError::NumericConversion)?;
+        let chunk_total_len = u32::try_from(
+            XORB_CHUNK_HEADER_LENGTH
+                .checked_add(compressed_len)
+                .ok_or(ServerError::Overflow)?,
+        )
+        .map_err(ServerError::NumericConversion)?;
 
         // Skip the compressed payload bytes.
         let mut skip_buf = vec![0u8; compressed_len];
@@ -200,9 +201,19 @@ mod tests {
 
             let entry = &packed.chunk_entries[i];
             assert_eq!(entry.chunk_index, i as u32, "chunk {i} index mismatch");
-            assert_eq!(entry.raw_offset, *expected_offset, "chunk {i} offset mismatch");
-            assert_eq!(entry.raw_length, expected_data.len() as u64, "chunk {i} raw length mismatch");
-            assert_eq!(entry.packed_length as usize, compressed_size, "chunk {i} packed length mismatch");
+            assert_eq!(
+                entry.raw_offset, *expected_offset,
+                "chunk {i} offset mismatch"
+            );
+            assert_eq!(
+                entry.raw_length,
+                expected_data.len() as u64,
+                "chunk {i} raw length mismatch"
+            );
+            assert_eq!(
+                entry.packed_length as usize, compressed_size,
+                "chunk {i} packed length mismatch"
+            );
         }
 
         // Verify xorb hash is deterministic.
@@ -298,8 +309,8 @@ mod tests {
 
     #[test]
     fn store_and_read_xorb() {
-        use shardline_storage::ObjectStore;
         use crate::object_store::ServerObjectStore;
+        use shardline_storage::ObjectStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
@@ -309,18 +320,23 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let was_inserted = rt
-            .block_on(store_xorb(&store, &packed.xorb_hash_hex, &packed.serialized))
+            .block_on(store_xorb(
+                &store,
+                &packed.xorb_hash_hex,
+                &packed.serialized,
+            ))
             .unwrap();
         assert!(was_inserted, "first store should insert");
 
         // Verify the xorb exists in the store.
-        let object_key =
-            crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
+        let object_key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
         assert!(store.contains(&object_key).unwrap());
 
         // Read back and verify using metadata length.
         let metadata = store.metadata(&object_key).unwrap().unwrap();
-        let stored_bytes = store.read_full_object(&object_key, metadata.length()).unwrap();
+        let stored_bytes = store
+            .read_full_object(&object_key, metadata.length())
+            .unwrap();
         assert_eq!(stored_bytes, packed.serialized);
     }
 
@@ -336,12 +352,20 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let first = rt
-            .block_on(store_xorb(&store, &packed.xorb_hash_hex, &packed.serialized))
+            .block_on(store_xorb(
+                &store,
+                &packed.xorb_hash_hex,
+                &packed.serialized,
+            ))
             .unwrap();
         assert!(first);
 
         let second = rt
-            .block_on(store_xorb(&store, &packed.xorb_hash_hex, &packed.serialized))
+            .block_on(store_xorb(
+                &store,
+                &packed.xorb_hash_hex,
+                &packed.serialized,
+            ))
             .unwrap();
         assert!(!second, "second store should report not inserted");
     }
@@ -359,16 +383,14 @@ mod tests {
         let packed = pack_chunks_into_xorb(&chunks).unwrap();
         assert_eq!(packed.chunk_entries.len(), 3);
 
-        let expected_hash =
-            shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
+        let expected_hash = shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
         let mut cursor = std::io::Cursor::new(packed.serialized.as_slice());
         let validated = crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)
             .expect("xorb validation should succeed");
 
         std::io::Seek::seek(&mut cursor, std::io::SeekFrom::Start(0)).unwrap();
-        let decoded =
-            crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)
-                .expect("xorb decode should succeed");
+        let decoded = crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)
+            .expect("xorb decode should succeed");
 
         assert_eq!(decoded.len(), chunks.len());
         for (i, (expected_data, _offset)) in chunks.iter().enumerate() {
@@ -379,8 +401,7 @@ mod tests {
                 "chunk {i} data mismatch after full round trip"
             );
             // Verify per-chunk content hash matches original raw data.
-            let expected_hash: [u8; 32] =
-                compute_data_hash(expected_data).into();
+            let expected_hash: [u8; 32] = compute_data_hash(expected_data).into();
             let actual_hash = *decoded_chunk.descriptor().hash().as_bytes();
             assert_eq!(
                 expected_hash, actual_hash,
@@ -437,16 +458,14 @@ mod tests {
         assert_eq!(packed.chunk_entries.len(), 1);
 
         // Unpack and verify.
-        let expected_hash =
-            shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
+        let expected_hash = shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
         let mut cursor = std::io::Cursor::new(packed.serialized.as_slice());
         let validated = crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)
             .expect("single-chunk xorb validation should succeed");
 
         std::io::Seek::seek(&mut cursor, std::io::SeekFrom::Start(0)).unwrap();
-        let decoded =
-            crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)
-                .expect("single-chunk xorb decode should succeed");
+        let decoded = crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)
+            .expect("single-chunk xorb decode should succeed");
 
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].data(), data.as_slice());
@@ -461,16 +480,14 @@ mod tests {
         assert_eq!(packed.chunk_entries.len(), 1);
 
         // Unpack via validate + decode.
-        let expected_hash =
-            shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
+        let expected_hash = shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
         let mut cursor = std::io::Cursor::new(packed.serialized.as_slice());
         let validated = crate::xet_adapter::validate_serialized_xorb(&mut cursor, expected_hash)
             .expect("large-chunk xorb validation should succeed");
 
         std::io::Seek::seek(&mut cursor, std::io::SeekFrom::Start(0)).unwrap();
-        let decoded =
-            crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)
-                .expect("large-chunk xorb decode should succeed");
+        let decoded = crate::xet_adapter::decode_serialized_xorb_chunks(&mut cursor, &validated)
+            .expect("large-chunk xorb decode should succeed");
 
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].data(), data.as_slice());
@@ -482,23 +499,28 @@ mod tests {
         use shardline_storage::ObjectStore;
 
         let tmp = tempfile::tempdir().unwrap();
-        let store = crate::object_store::ServerObjectStore::local(tmp.path().join("objects"))
-            .unwrap();
+        let store =
+            crate::object_store::ServerObjectStore::local(tmp.path().join("objects")).unwrap();
 
         let chunks = vec![(b"stored xorb test data".to_vec(), 0u64)];
         let packed = pack_chunks_into_xorb(&chunks).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let was_inserted = rt
-            .block_on(store_xorb(&store, &packed.xorb_hash_hex, &packed.serialized))
+            .block_on(store_xorb(
+                &store,
+                &packed.xorb_hash_hex,
+                &packed.serialized,
+            ))
             .unwrap();
         assert!(was_inserted, "first store should insert");
 
         // Read back and verify bytes match.
-        let object_key =
-            crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
+        let object_key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
         let metadata = store.metadata(&object_key).unwrap().unwrap();
-        let stored_bytes = store.read_full_object(&object_key, metadata.length()).unwrap();
+        let stored_bytes = store
+            .read_full_object(&object_key, metadata.length())
+            .unwrap();
         assert_eq!(stored_bytes, packed.serialized);
     }
 
@@ -510,8 +532,7 @@ mod tests {
         let chunks = vec![(data, 0u64)];
         let packed = pack_chunks_into_xorb(&chunks).unwrap();
 
-        let parsed =
-            shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
+        let parsed = shardline_index::parse_xet_hash_hex(&packed.xorb_hash_hex).unwrap();
         let expected: [u8; 32] = {
             let hash = compute_data_hash(b"hash format test");
             let xorb_h = xorb_hash(&[(hash, 16u64)]);
@@ -556,8 +577,8 @@ mod tests {
 
     #[test]
     fn store_xorb_idempotent_already_exists() {
-        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore, PutOutcome};
         use crate::object_store::ServerObjectStore;
+        use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore, PutOutcome};
 
         let tmp = tempfile::tempdir().unwrap();
         let store = ServerObjectStore::local(tmp.path().join("objects")).unwrap();
@@ -565,28 +586,31 @@ mod tests {
         let chunks = vec![(b"idempotent already exists test".to_vec(), 0u64)];
         let packed = pack_chunks_into_xorb(&chunks).unwrap();
 
-        let object_key =
-            crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
+        let object_key = crate::xet_adapter::xorb_object_key(&packed.xorb_hash_hex).unwrap();
         let integrity = ObjectIntegrity::new(
             crate::local_backend::chunk_hash(&packed.serialized),
             packed.serialized.len() as u64,
         );
 
-        let outcome1 = store.put_if_absent(
-            &object_key,
-            ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
-            &integrity,
-        ).unwrap();
+        let outcome1 = store
+            .put_if_absent(
+                &object_key,
+                ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
+                &integrity,
+            )
+            .unwrap();
         assert!(
             matches!(outcome1, PutOutcome::Inserted),
             "first store should return Inserted, not AlreadyExists"
         );
 
-        let outcome2 = store.put_if_absent(
-            &object_key,
-            ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
-            &integrity,
-        ).unwrap();
+        let outcome2 = store
+            .put_if_absent(
+                &object_key,
+                ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
+                &integrity,
+            )
+            .unwrap();
         assert!(
             matches!(outcome2, PutOutcome::AlreadyExists),
             "second store should return AlreadyExists, not Inserted"

@@ -154,11 +154,8 @@ impl FileUploadIngestor {
         // backward compat.
         if !self.raw_chunk_data.is_empty() {
             let raw_offsets: Vec<u64> = self.records.iter().map(|r| r.offset).collect();
-            let chunks_with_offsets: Vec<(Vec<u8>, u64)> = self
-                .raw_chunk_data
-                .drain(..)
-                .zip(raw_offsets)
-                .collect();
+            let chunks_with_offsets: Vec<(Vec<u8>, u64)> =
+                self.raw_chunk_data.drain(..).zip(raw_offsets).collect();
             match pack_chunks_into_xorb(&chunks_with_offsets) {
                 Ok(packed) => {
                     match store_xorb(object_store, &packed.xorb_hash_hex, &packed.serialized).await
@@ -250,7 +247,10 @@ impl FileUploadIngestor {
             "upload complete"
         );
 
-        crate::metrics::record_object_stored_by_repr(record.storage_repr.as_str(), record.total_bytes);
+        crate::metrics::record_object_stored_by_repr(
+            record.storage_repr.as_str(),
+            record.total_bytes,
+        );
 
         Ok((record, response))
     }
@@ -493,10 +493,7 @@ mod tests {
     use axum::body::Bytes;
 
     use super::FileUploadIngestor;
-    use crate::{
-        ServerError,
-        object_store::ServerObjectStore,
-    };
+    use crate::{ServerError, object_store::ServerObjectStore};
 
     #[test]
     fn ingestor_new_with_parallelism_creates_empty_state() {
@@ -733,8 +730,7 @@ mod tests {
 
         // Use data large enough for CDC to find boundaries
         let test_data: Vec<u8> =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-                .to_vec();
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_vec();
 
         let mut first = FileUploadIngestor::new(chunk_size, false);
         let first_data = Bytes::from(test_data.clone());

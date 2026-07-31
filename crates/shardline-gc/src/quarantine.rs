@@ -182,11 +182,8 @@ where
         // sidecar (_xorb_chunks/{prefix}/{hash}) so orphaned cache entries
         // do not accumulate in the store.
         if let Some(hash) = xorb_hash_from_object_key_if_present(&orphan.object_key)?
-            && let Ok(cache_key) = ObjectKey::parse(&format!(
-                "_xorb_chunks/{}/{}",
-                &hash[..2],
-                hash
-            ))
+            && let Ok(cache_key) =
+                ObjectKey::parse(&format!("_xorb_chunks/{}/{}", &hash[..2], hash))
         {
             let _cache_outcome = object_store
                 .delete_if_present(&cache_key)

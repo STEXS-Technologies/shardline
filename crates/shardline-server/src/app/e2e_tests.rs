@@ -1552,15 +1552,13 @@ async fn backward_compatibility_all_formats_readable() {
     let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
 
     // ── 1. Pre-populate storage with old-format data ────────────────────────
-    let object_store =
-        ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
 
     // FixedChunkV1: raw uncompressed chunk + old-style record
     let fixed_content = b"fixed-chunk-old-format-data-0123456789";
     let fixed_hash = test_hash(fixed_content);
-    let fixed_key =
-        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
-            .expect("fixed key");
+    let fixed_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
+        .expect("fixed key");
     let fixed_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(fixed_key.as_str().as_bytes()))
@@ -1583,9 +1581,8 @@ async fn backward_compatibility_all_formats_readable() {
     // WholeFileV1: single object at the object key path
     let whole_content = b"whole-file-old-format-data-0123456789";
     let whole_hash = test_hash(whole_content);
-    let whole_key =
-        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
-            .expect("whole key");
+    let whole_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
+        .expect("whole key");
     let whole_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(whole_key.as_str().as_bytes()))
@@ -1669,7 +1666,9 @@ async fn backward_compatibility_all_formats_readable() {
     .expect("server frontends")
     .with_token_signing_key(b"0123456789abcdef0123456789abcdef".to_vec())
     .expect("token signing key");
-    config.validate_runtime_requirements().expect("runtime requirements");
+    config
+        .validate_runtime_requirements()
+        .expect("runtime requirements");
 
     let state = Arc::new(AppState {
         config,
@@ -1727,8 +1726,16 @@ async fn backward_compatibility_all_formats_readable() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "FixedChunkV1 should be readable");
-    assert_eq!(body_bytes(resp).await, fixed_content, "FixedChunkV1 content");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "FixedChunkV1 should be readable"
+    );
+    assert_eq!(
+        body_bytes(resp).await,
+        fixed_content,
+        "FixedChunkV1 content"
+    );
 
     // ── 4. Verify WholeFileV1 readable ───────────────────────────────────────
     let resp = app
@@ -1742,7 +1749,11 @@ async fn backward_compatibility_all_formats_readable() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "WholeFileV1 should be readable");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "WholeFileV1 should be readable"
+    );
     assert_eq!(body_bytes(resp).await, whole_content, "WholeFileV1 content");
 
     // ── 5. Upload + verify XorbCdcV1 ─────────────────────────────────────────
@@ -1770,7 +1781,11 @@ async fn backward_compatibility_all_formats_readable() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "XorbCdcV1 should be readable");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "XorbCdcV1 should be readable"
+    );
     assert_eq!(body_bytes(resp).await, new_content, "XorbCdcV1 content");
 }
 
@@ -1783,15 +1798,13 @@ async fn backward_compatibility_all_formats_readable() {
 async fn gc_preserves_old_and_new_formats() {
     let tmp = TempDir::new().expect("tempdir");
     let chunk_size = NonZeroUsize::new(65536).expect("chunk size");
-    let object_store =
-        ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
 
     // 1. Create FixedChunkV1 record (old format, uncompressed chunk)
     let fixed_content = b"fixed-chunk-gc-test-data-0123456789";
     let fixed_hash = test_hash(fixed_content);
-    let fixed_key =
-        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
-            .expect("fixed key");
+    let fixed_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &fixed_hash, None)
+        .expect("fixed key");
     let fixed_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(fixed_key.as_str().as_bytes()))
@@ -1814,9 +1827,8 @@ async fn gc_preserves_old_and_new_formats() {
     // 2. Create WholeFileV1 record (single object at object key)
     let whole_content = b"whole-file-gc-test-data-0123456789";
     let whole_hash = test_hash(whole_content);
-    let whole_key =
-        crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
-            .expect("whole key");
+    let whole_key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, &whole_hash, None)
+        .expect("whole key");
     let whole_file_id = format!(
         "protocol-object-{}",
         hex::encode(Sha256::digest(whole_key.as_str().as_bytes()))
@@ -1923,8 +1935,8 @@ async fn gc_preserves_old_and_new_formats() {
         ("WholeFileV1", &whole_hash),
         ("XorbCdcV1", &new_hash),
     ] {
-        let key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, hash, None)
-            .expect("key");
+        let key =
+            crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, hash, None).expect("key");
         let read = server_backend.read_object(&key).await;
         assert!(read.is_ok(), "{label} readable: {read:?}");
         let bytes = read.expect("read_object");
@@ -10306,15 +10318,12 @@ async fn mixed_format_dedup_same_content() {
         hex::encode(Sha256::digest(object_key.as_str().as_bytes()))
     );
 
-    let chunk_hash =
-        xet_hash_hex_string(crate::local_backend::chunk_hash(content));
-    let chunk_object_key =
-        crate::chunk_store::chunk_object_key(&chunk_hash).expect("chunk key");
+    let chunk_hash = xet_hash_hex_string(crate::local_backend::chunk_hash(content));
+    let chunk_object_key = crate::chunk_store::chunk_object_key(&chunk_hash).expect("chunk key");
 
     // 2. Write the raw (uncompressed) chunk to the object store, simulating
     //    what FixedChunkV1 storage would produce.
-    let object_store =
-        ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
+    let object_store = ServerObjectStore::local(tmp.path().join("chunks")).expect("object store");
     object_store
         .put_if_absent(
             &chunk_object_key,
@@ -10373,9 +10382,9 @@ async fn mixed_format_dedup_same_content() {
         .put_sha256_addressed_object_stream_if_absent(
             &object_key,
             &hash,
-            crate::upload_ingest::RequestBodyReader::from_bytes(
-                axum::body::Bytes::from_static(content),
-            ),
+            crate::upload_ingest::RequestBodyReader::from_bytes(axum::body::Bytes::from_static(
+                content,
+            )),
         )
         .await
         .expect("cas upload");
@@ -10390,8 +10399,15 @@ async fn mixed_format_dedup_same_content() {
     // 6. Verify only ONE chunk file exists on disk — the chunk we manually
     //    placed is the same one the CAS pipeline would have stored, proving
     //    chunk-level deduplication across formats.
-    let chunk_path = tmp.path().join("chunks").join(&chunk_hash[..2]).join(&chunk_hash);
-    assert!(chunk_path.exists(), "chunk file should exist at {chunk_path:?}");
+    let chunk_path = tmp
+        .path()
+        .join("chunks")
+        .join(&chunk_hash[..2])
+        .join(&chunk_hash);
+    assert!(
+        chunk_path.exists(),
+        "chunk file should exist at {chunk_path:?}"
+    );
 
     // Check that no OTHER chunk files were created (i.e. the CAS upload
     // reused the existing chunk rather than writing a duplicate).

@@ -2116,5 +2116,3 @@ fn s3_list_flat_namespace_validates_start_after() {
     // internally in its own way for S3)
     assert!(result.is_err(), "expected connection error");
 }
-
-

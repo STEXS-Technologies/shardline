@@ -261,10 +261,7 @@ fn find_xorb_container(storage_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     match found.len() {
         1 => Ok(found.remove(0)),
         0 => Err(CliE2eInvariantError::new("no xorb container found after upload").into()),
-        n => Err(CliE2eInvariantError::new(format!(
-            "expected 1 xorb container, found {n}"
-        ))
-        .into()),
+        n => Err(CliE2eInvariantError::new(format!("expected 1 xorb container, found {n}")).into()),
     }
 }
 
