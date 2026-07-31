@@ -727,19 +727,20 @@ async fn all_frontends_share_digest_addressed_storage_and_keep_xet_and_hub_worki
         !oci_path.exists(),
         "OCI should not retain a legacy whole object"
     );
-    for chunk in shared_bytes.chunks(4) {
-        let hash = shardline_index::xet_hash_hex_string(chunk_hash(chunk));
-        let chunk_path = runtime
-            .storage_path()
-            .join("chunks")
-            .join(&hash[..2])
-            .join(&hash);
-        assert!(
-            chunk_path.exists(),
-            "shared frontend chunk should exist at {}",
-            chunk_path.display()
-        );
-    }
+    // The upload is ingested via CDC with target chunk size 128, so the
+    // 24-byte payload is stored as a single chunk keyed by its raw-content
+    // hash (not as 4-byte fixed-size slices from the pre-CDC era).
+    let chunk_hash_hex = shardline_index::xet_hash_hex_string(chunk_hash(shared_bytes));
+    let chunk_path = runtime
+        .storage_path()
+        .join("chunks")
+        .join(&chunk_hash_hex[..2])
+        .join(&chunk_hash_hex);
+    assert!(
+        chunk_path.exists(),
+        "shared frontend chunk should exist at {}",
+        chunk_path.display()
+    );
 
     let hub_repo = client
         .post(format!("{}/api/repos/create", runtime.base_url()))
@@ -1266,7 +1267,7 @@ async fn oci_frontend_registry_token_exchange_uses_dedicated_ttl_and_reports_met
     assert_eq!(metrics.status(), StatusCode::OK);
     let metrics = metrics.text().await?;
     assert!(metrics.contains("shardline_oci_registry_token_ttl_seconds 1"));
-    assert!(metrics.contains("shardline_oci_registry_token_max_in_flight_requests 4"));
+    assert!(metrics.contains("shardline_oci_registry_token_max_in_flight_requests 128"));
     assert!(
         metrics.contains("shardline_oci_registry_token_requests_total"),
         "expected shardline_oci_registry_token_requests_total metric to be present"
