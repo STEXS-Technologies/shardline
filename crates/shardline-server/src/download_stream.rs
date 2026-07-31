@@ -212,10 +212,16 @@ pub(crate) async fn file_record_byte_stream(
         } else {
             chunk.length
         };
-        // packed_end == chunk.length  → old FixedChunkV1 (no compression)
-        // packed_end != chunk.length  → new XorbCdcV1 (LZ4-compressed;
-        //   may be smaller or larger than raw for tiny payloads)
-        let is_compressed = chunk.packed_end != chunk.length;
+        // Compression is a property of the storage representation, not of size
+        // equality: LZ4-compressed data may be exactly the same size as (or even
+        // larger than) the raw chunk for small or incompressible payloads. Using
+        // `packed_end != chunk.length` as the discriminator caused compressed
+        // bytes to be served as raw whenever the compressed size coincided with
+        // the raw size (XorbCdcV1 single-chunk records).
+        let is_compressed = matches!(
+            record.storage_repr,
+            shardline_index::StorageRepresentation::XorbCdcV1
+        );
         let hash_hex = chunk.hash.clone();
         let chunk_range = ByteRange::new(relative_start, relative_end)
             .map_err(|_error| ServerError::RangeNotSatisfiable)?;
@@ -225,7 +231,7 @@ pub(crate) async fn file_record_byte_stream(
             chunk.length,   // raw length for offset math
             hash_hex,       // expected hash for integrity verification
             chunk_range,
-            is_compressed, // packed_end > 0 → LZ4-compressed; 0 → old uncompressed
+            is_compressed, // XorbCdcV1 → LZ4-compressed; FixedChunkV1 → old uncompressed
         ));
     }
 
@@ -1227,13 +1233,13 @@ mod tests {
             )
             .unwrap();
 
-        // Build a FileRecord pointing to this chunk
+        // Build a FileRecord pointing to this chunk (compressed storage)
         let record = FileRecord {
             file_id: "test-lz4".to_owned(),
             content_hash: hash_hex.clone(),
             total_bytes: payload.len() as u64,
             chunk_size: 65536,
-            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+            storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
             repository_scope: None,
             chunks: vec![FileChunkRecord {
                 hash: hash_hex,
@@ -1256,7 +1262,99 @@ mod tests {
         assert_eq!(result, payload);
     }
 
-    // ── object_byte_range_stream via Local store with mid-range ──────────
+    // ── regression: compressed size coinciding with raw size ─────────────
+    // XorbCdcV1 single-chunk records where the LZ4-compressed object is
+    // exactly as large as the raw chunk used to be served as raw compressed
+    // bytes, because compression was detected via size inequality
+    // (`packed_end != chunk.length`). Compression is a property of the
+    // storage representation and must not be inferred from sizes.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_record_byte_stream_decompresses_when_compressed_size_equals_raw_size() {
+        use shardline_index::{FileChunkRecord, FileRecord};
+        use shardline_storage::ObjectStore;
+
+        // Stored chunk captured from a real CI failure post-mortem (OCI
+        // digest mismatch, e2e skopeo flow): a skopeo-pushed gzip layer
+        // blob whose LZ4-compressed form is exactly as large as its raw
+        // content. LZ4 header u32 LE = 183; decompressed size = 183;
+        // sha256(decompressed) = 70d1c71d22c6e42eacf51571769b7a7fc73e4a3f4a7236ea05219d0bdc2cbb58
+        // (the expected blob digest the server failed to serve).
+        let stored: Vec<u8> = vec![
+            0xb7, 0x00, 0x00, 0x00, 0xf6, 0x8c, 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x09, 0x6e, 0x88,
+            0x00, 0xff, 0xec, 0xd1, 0x41, 0x6a, 0xc3, 0x30, 0x10, 0x40, 0x51, 0xad, 0x7b, 0x0a,
+            0x9d, 0xc0, 0x9e, 0xa9, 0x2c, 0xf9, 0x3c, 0xc2, 0x76, 0xb1, 0x41, 0xad, 0x8a, 0xed,
+            0x42, 0x7b, 0xfb, 0xe2, 0x45, 0xb0, 0x42, 0x08, 0xd9, 0xc4, 0x90, 0x90, 0xff, 0x36,
+            0x03, 0x23, 0x31, 0x9b, 0x5f, 0xd5, 0xe6, 0x70, 0x22, 0x22, 0xad, 0xf7, 0xdb, 0xd4,
+            0xd6, 0x4b, 0x39, 0x4f, 0x8c, 0xfa, 0x77, 0xe7, 0xd4, 0x85, 0xc6, 0x05, 0x23, 0x12,
+            0x5a, 0xaf, 0xc6, 0xfa, 0xe2, 0xc6, 0x61, 0x7e, 0x96, 0x35, 0xce, 0xd6, 0x9a, 0xd8,
+            0x95, 0xdb, 0x4b, 0xb7, 0xde, 0x9f, 0x54, 0x55, 0x7f, 0xc7, 0xbf, 0x94, 0x63, 0x5f,
+            0xad, 0xbf, 0xeb, 0xbe, 0xbe, 0xab, 0xad, 0x70, 0x68, 0x9a, 0xeb, 0xfd, 0x9d, 0x9e,
+            0xf7, 0x57, 0x55, 0xe7, 0x8d, 0x95, 0xf2, 0xc8, 0x51, 0x5e, 0xbc, 0xff, 0x38, 0xa4,
+            0x94, 0xed, 0xc7, 0x9c, 0x3f, 0xed, 0x32, 0xc6, 0xb9, 0x4f, 0xd3, 0xd7, 0x60, 0x73,
+            0x37, 0xbd, 0xed, 0x5f, 0x00, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x03, 0x3c, 0xa8, 0x7f,
+            0x00, 0x00, 0x00, 0xff, 0xff, 0x03, 0x00, 0x0f, 0x4c, 0x70, 0x4d, 0x00, 0x28, 0x00,
+            0x00,
+        ];
+        let payload = lz4_flex::decompress_size_prepended(&stored)
+            .expect("captured bytes decompress to the raw gzip blob");
+        assert_eq!(
+            stored.len(),
+            payload.len(),
+            "the coincidence at the heart of the bug: compressed size == raw size"
+        );
+
+        let storage = shardline_test_support::TempStorage::new();
+        let object_store = crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+
+        // Store the compressed chunk keyed by its raw-content hash
+        let raw_hash = crate::local_backend::chunk_hash(&payload);
+        let hash_hex = shardline_index::xet_hash_hex_string(raw_hash);
+        let object_key = crate::chunk_store::chunk_object_key(&hash_hex).unwrap();
+        let stored_hash = crate::local_backend::chunk_hash(&stored);
+        let integrity =
+            shardline_storage::ObjectIntegrity::new(stored_hash, stored.len() as u64);
+        object_store
+            .put_if_absent(
+                &object_key,
+                shardline_storage::ObjectBody::from_vec(stored.clone()),
+                &integrity,
+            )
+            .unwrap();
+
+        // Forge the record shape observed in the wild: chunk.length and
+        // total_bytes equal the STORED (compressed) size, with packed_end
+        // matching as well — so a size-based discriminator sees
+        // `packed_end == chunk.length` and serves the raw object. A
+        // storage-repr-based discriminator must still decompress.
+        let stored_len = stored.len() as u64;
+        let record = FileRecord {
+            file_id: "test-eq-size".to_owned(),
+            content_hash: hash_hex.clone(),
+            total_bytes: stored_len,
+            chunk_size: 65536,
+            storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+            repository_scope: None,
+            chunks: vec![FileChunkRecord {
+                hash: hash_hex,
+                offset: 0,
+                length: stored_len,
+                range_start: 0,
+                range_end: 1,
+                packed_start: 0,
+                packed_end: stored_len,
+            }],
+        };
+
+        let mut stream = super::file_record_byte_stream(object_store, record, None)
+            .await
+            .unwrap();
+        let mut result = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            result.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(result, payload);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn object_byte_range_stream_local_store_mid_range() {
