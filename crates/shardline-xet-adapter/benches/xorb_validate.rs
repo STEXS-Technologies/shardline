@@ -57,8 +57,7 @@ fn build_xorb(num_chunks: usize, chunk_size: usize) -> (Vec<u8>, ShardlineHash) 
     .expect("benchmark xorb fixture should build");
 
     // Convert merkle hash to ShardlineHash.
-    let expected_hash =
-        ShardlineHash::from_bytes(xorb_hash.as_bytes().try_into().expect("hash is 32 bytes"));
+    let expected_hash = ShardlineHash::from_bytes(xorb_hash.to_bytes());
 
     (serialized_data, expected_hash)
 }

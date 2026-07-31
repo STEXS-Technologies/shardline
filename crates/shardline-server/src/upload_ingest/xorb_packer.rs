@@ -15,7 +15,7 @@ use crate::{ServerError, object_store::ServerObjectStore};
 /// Metadata for one chunk packed inside a xorb.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields read in tests
-pub(crate) struct XorbChunkEntry {
+pub struct XorbChunkEntry {
     /// Index of this chunk within the xorb (0-based).
     pub chunk_index: u32,
     /// Byte offset in the original file (uncompressed).
@@ -30,7 +30,7 @@ pub(crate) struct XorbChunkEntry {
 
 /// A fully packed xorb container with metadata.
 #[derive(Debug, Clone)]
-pub(crate) struct PackedXorb {
+pub struct PackedXorb {
     /// Complete serialized xorb bytes (chunks + footer).
     pub serialized: Vec<u8>,
     /// Xorb content hash in Xet hexadecimal format.
@@ -50,7 +50,7 @@ pub(crate) struct PackedXorb {
 ///
 /// Returns [`ServerError::Overflow`] when chunk offsets or buffer
 /// lengths overflow, or [`ServerError::Io`] when serialization fails.
-pub(crate) fn pack_chunks_into_xorb(
+pub fn pack_chunks_into_xorb(
     chunks: &[(Vec<u8>, u64)], // (raw_data, file_offset)
 ) -> Result<PackedXorb, ServerError> {
     if chunks.is_empty() {
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn pack_single_very_large_chunk() {
         let data = b"A".repeat(2_000_000);
-        let chunks = vec![(data.clone(), 0u64)];
+        let chunks = vec![(data, 0u64)];
         let packed = pack_chunks_into_xorb(&chunks).unwrap();
         assert_eq!(packed.chunk_entries.len(), 1);
         verify_xorb_roundtrip(&packed, &chunks);
@@ -577,23 +577,19 @@ mod tests {
             ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
             &integrity,
         ).unwrap();
-        match outcome1 {
-            PutOutcome::Inserted => { /* expected */ }
-            PutOutcome::AlreadyExists => {
-                panic!("first store should return Inserted, not AlreadyExists")
-            }
-        }
+        assert!(
+            matches!(outcome1, PutOutcome::Inserted),
+            "first store should return Inserted, not AlreadyExists"
+        );
 
         let outcome2 = store.put_if_absent(
             &object_key,
             ObjectBody::from_bytes(axum::body::Bytes::copy_from_slice(&packed.serialized)),
             &integrity,
         ).unwrap();
-        match outcome2 {
-            PutOutcome::Inserted => {
-                panic!("second store should return AlreadyExists, not Inserted")
-            }
-            PutOutcome::AlreadyExists => { /* expected */ }
-        }
+        assert!(
+            matches!(outcome2, PutOutcome::AlreadyExists),
+            "second store should return AlreadyExists, not Inserted"
+        );
     }
 }

@@ -12,7 +12,7 @@
 )]
 
 use criterion::{BenchmarkId, Criterion, black_box};
-use shardline_index::{FileChunkRecord, FileRecord};
+use shardline_index::{FileChunkRecord, FileRecord, StorageRepresentation};
 use shardline_server_core::{chunk_hash, parse_stored_file_record_bytes, validate_content_hash};
 
 fn make_record(chunk_count: usize) -> FileRecord {
@@ -39,6 +39,7 @@ fn make_record(chunk_count: usize) -> FileRecord {
         total_bytes: offset,
         chunk_size: 4096,
         repository_scope: None,
+        storage_repr: StorageRepresentation::FixedChunkV1,
         chunks,
     }
 }

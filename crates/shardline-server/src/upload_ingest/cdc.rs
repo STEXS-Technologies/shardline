@@ -278,7 +278,7 @@ const GEAR_TABLE: [u64; 256] = [
 /// Scans for chunk boundaries using a rolling Gear hash, producing chunks
 /// that are roughly `target_chunk_size` bytes on average, with
 /// `min_chunk = target_chunk_size / 8` and `max_chunk = target_chunk_size * 2`.
-pub(crate) struct CdcChunker {
+pub struct CdcChunker {
     hash: u64,
     target_chunk_size: usize,
     min_chunk: usize,
@@ -291,6 +291,7 @@ impl CdcChunker {
     /// Creates a new chunker with the given target chunk size.
     ///
     /// `target_chunk_size` must be a power of two and greater than 64.
+    #[must_use]
     pub fn new(target_chunk_size: usize) -> Self {
         debug_assert!(target_chunk_size.is_power_of_two());
         debug_assert!(target_chunk_size > 64);
@@ -309,6 +310,7 @@ impl CdcChunker {
     }
 
     /// Returns the minimum chunk size enforced by this chunker.
+    #[must_use]
     pub const fn min_chunk(&self) -> usize {
         self.min_chunk
     }

@@ -1,48 +1,75 @@
 #![no_main]
-
-use std::io::Cursor;
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::assertions_on_constants
+)]
 
 use libfuzzer_sys::fuzz_target;
-use shardline_xet_core::xorb_object::{
-    reconstruct_xorb_with_footer, validate_serialized_xorb,
-};
-use shardline_xet_core::xorb_object::xorb_object_format::XorbObject;
+use shardline_server::upload_ingest::xorb_packer::pack_chunks_into_xorb;
+use shardline_xet_core::xorb_object::reconstruct_xorb_with_footer;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 32 {
-        return; // Need at least a small payload
+        return;
     }
-    // Split input into up to 8 variable-size "chunks".
-    let chunk_count = ((data[0] as usize) % 8).max(1);
-    let mut chunks = Vec::new();
-    let mut offset = 1;
-    for _ in 0..chunk_count {
-        if offset >= data.len() {
+    // Derive chunk boundaries from the fuzz input so we exercise many
+    // chunk-size distributions. First byte picks the number of chunks
+    // (1..=16), remaining bytes are split evenly among them.
+    let num_chunks = (data[0] as usize % 16) + 1;
+    let payload = &data[1..];
+    if payload.is_empty() {
+        return;
+    }
+    let base = payload.len() / num_chunks;
+    let mut chunks: Vec<(Vec<u8>, u64)> = Vec::with_capacity(num_chunks);
+    let mut offset: u64 = 0;
+    let mut cursor = 0usize;
+    for i in 0..num_chunks {
+        let end = if i + 1 == num_chunks {
+            payload.len()
+        } else {
+            cursor + base
+        };
+        if end <= cursor {
             break;
         }
-        // Vary chunk size by skipping bytes proportional to position.
-        let chunk_len = ((data[offset >> 1] as usize) % 256 + 1)
-            .min(data.len() - offset);
-        chunks.push((data[offset..offset + chunk_len].to_vec(), 0u64));
-        offset += chunk_len;
-        if offset >= data.len() {
-            break;
-        }
+        let slice = payload[cursor..end].to_vec();
+        chunks.push((slice, offset));
+        offset += (end - cursor) as u64;
+        cursor = end;
     }
     if chunks.is_empty() {
         return;
     }
-    // Pack into xorb via the same path the ingestor uses.
-    // (pack_chunks_into_xorb lives in shardline-server, so we use the
-    // lower-level reconstruct path for the fuzz harness.)
-    //
-    // Round-trip: serialize → validate → decode → verify chunk content.
-    let mut serialized = Vec::new();
-    if reconstruct_xorb_with_footer(&mut serialized, data).is_ok() {
-        let mut cursor = Cursor::new(serialized.as_slice());
-        if let Ok(validated) = validate_serialized_xorb(&mut cursor, data) {
-            // At minimum the validation parsed correctly.
-            let _ = validated;
+
+    // Pack: chunks -> serialized xorb.
+    let packed = match pack_chunks_into_xorb(&chunks) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    // Re-parse + re-serialize: for a well-formed xorb this must be
+    // byte-identical (headers, payloads, and footer are written back
+    // verbatim), and must never fail.
+    let mut reserialized = Vec::new();
+    match reconstruct_xorb_with_footer(&mut reserialized, &packed.serialized) {
+        Ok(_) => {
+            assert_eq!(
+                reserialized, packed.serialized,
+                "re-serialization mismatch ({} chunks, {} bytes)",
+                chunks.len(),
+                packed.serialized.len()
+            );
+        }
+        Err(_) => {
+            // A well-formed pack must always re-serialize. Fail loudly.
+            assert!(
+                false,
+                "pack produced xorb that failed to re-serialize ({} chunks, {} bytes)",
+                chunks.len(),
+                packed.serialized.len()
+            );
         }
     }
 });

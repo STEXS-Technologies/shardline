@@ -355,7 +355,7 @@ where
                 XorbParseError::from(XorbInvalidFormatError::ChunkPayloadMetadataMismatch).into(),
             );
         }
-        let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data))?;
+        let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data));
         if descriptor.hash() != actual_hash {
             return Err(
                 XorbParseError::from(XorbInvalidFormatError::ChunkPayloadHashMismatch).into(),
@@ -413,7 +413,7 @@ where
                 XorbParseError::from(XorbInvalidFormatError::ChunkPayloadMetadataMismatch).into(),
             );
         }
-        let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data))?;
+        let actual_hash = merkle_hash_to_shardline_hash(compute_data_hash(&data));
         if descriptor.hash() != actual_hash {
             return Err(
                 XorbParseError::from(XorbInvalidFormatError::ChunkPayloadHashMismatch).into(),
@@ -450,7 +450,7 @@ fn validated_chunk_footer_at(
         .ok_or(XorbInvalidFormatError::MetadataSectionLengthMismatch)?;
     let hash = merkle_hash_to_shardline_hash(*validated.info.chunk_hashes.get(index).ok_or_else(
         || XorbParseError::from(XorbInvalidFormatError::MetadataSectionLengthMismatch),
-    )?)?;
+    )?);
 
     Ok((packed_end, unpacked_end, hash))
 }
@@ -478,12 +478,9 @@ fn shardline_hash_to_merkle_hash(hash: ShardlineHash) -> Result<MerkleHash, Xorb
         .map_err(|_error| XorbInvalidFormatError::XorbHashConversionFailed.into())
 }
 
-fn merkle_hash_to_shardline_hash(hash: MerkleHash) -> Result<ShardlineHash, XorbParseError> {
-    let bytes: [u8; 32] = hash
-        .as_bytes()
-        .try_into()
-        .map_err(|_error| XorbInvalidFormatError::ChunkHashConversionFailed)?;
-    Ok(ShardlineHash::from_bytes(bytes))
+fn merkle_hash_to_shardline_hash(hash: MerkleHash) -> ShardlineHash {
+    let bytes: [u8; 32] = hash.into();
+    ShardlineHash::from_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -631,10 +628,6 @@ mod tests {
             return;
         };
         let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
 
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash);
@@ -702,10 +695,6 @@ mod tests {
             return;
         };
         let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
         let removed = serialized.serialized_data.pop();
         assert!(removed.is_some());
 
@@ -731,10 +720,6 @@ mod tests {
             return;
         };
         let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
         let mut reader = Cursor::new(serialized.serialized_data.as_slice());
         let validated = validate_serialized_xorb(&mut reader, expected_hash);
         assert!(validated.is_ok());
@@ -795,10 +780,6 @@ mod tests {
             return;
         };
         let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash);
         assert!(validated.is_ok());
@@ -820,7 +801,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_accessors() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"test")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"test"));
         let chunk = ValidatedXorbChunk::new(hash, 10, 100, 50, 80);
         assert_eq!(chunk.hash(), hash);
         assert_eq!(chunk.packed_start(), 10);
@@ -832,14 +813,14 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_unpacked_len_zero() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"t")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"t"));
         let chunk = ValidatedXorbChunk::new(hash, 0, 0, 5, 5);
         assert_eq!(chunk.unpacked_len(), 0);
     }
 
     #[test]
     fn validated_xorb_chunk_unpacked_len_saturating() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"t")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"t"));
         let chunk = ValidatedXorbChunk::new(hash, 0, 0, 100, 50);
         // saturating_sub: 50 - 100 = 0
         assert_eq!(chunk.unpacked_len(), 0);
@@ -849,7 +830,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_accessors() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"test")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"test"));
         let chunk = ValidatedXorbChunk::new(hash, 0, 100, 0, 50);
         let validated = ValidatedXorb::new(hash, 1000, 900, 500, vec![chunk.clone()]);
         assert_eq!(validated.hash(), hash);
@@ -861,7 +842,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_empty_chunks() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"empty")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"empty"));
         let validated = ValidatedXorb::new(hash, 0, 0, 0, vec![]);
         assert!(validated.chunks().is_empty());
     }
@@ -870,7 +851,7 @@ mod tests {
 
     #[test]
     fn decoded_xorb_chunk_accessors() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"data")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"data"));
         let descriptor = ValidatedXorbChunk::new(hash, 0, 4, 0, 4);
         let data = b"hello".to_vec();
         let decoded = DecodedXorbChunk::new(descriptor.clone(), data.clone());
@@ -883,8 +864,8 @@ mod tests {
     #[test]
     fn merkle_hash_to_shardline_hash_round_trip() {
         let merkle = compute_data_hash(b"roundtrip");
-        let shardline = merkle_hash_to_shardline_hash(merkle).unwrap();
-        let bytes: [u8; 32] = merkle.as_bytes().try_into().unwrap();
+        let shardline = merkle_hash_to_shardline_hash(merkle);
+        let bytes: [u8; 32] = merkle.into();
         assert_eq!(shardline.as_bytes(), &bytes);
     }
 
@@ -938,10 +919,6 @@ mod tests {
             return;
         };
         let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
 
         // Corrupt the serialized data to cause non-monotonic boundaries
         // by swapping footer metadata offsets (induce inconsistent boundaries)
@@ -966,7 +943,7 @@ mod tests {
 
     #[test]
     fn decoded_xorb_chunk_data_mutability() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"d")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"d"));
         let descriptor = ValidatedXorbChunk::new(hash, 0, 1, 0, 1);
         let data = vec![1u8, 2, 3];
         let decoded = DecodedXorbChunk::new(descriptor, data);
@@ -978,7 +955,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_new_and_const_values() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"const")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"const"));
         let chunk = ValidatedXorbChunk::new(hash, 5, 10, 3, 8);
         assert_eq!(chunk.hash(), hash);
         assert_eq!(chunk.packed_start(), 5);
@@ -991,7 +968,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_new_zero_lengths() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"zero")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"zero"));
         let validated = ValidatedXorb::new(hash, 0, 0, 0, vec![]);
         assert_eq!(validated.total_length(), 0);
         assert_eq!(validated.packed_content_length(), 0);
@@ -1031,10 +1008,6 @@ mod tests {
             return;
         };
         let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash);
         assert!(validated.is_ok());
@@ -1081,10 +1054,6 @@ mod tests {
             return;
         };
         let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
-        assert!(expected_hash.is_ok());
-        let Ok(expected_hash) = expected_hash else {
-            return;
-        };
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash);
         assert!(validated.is_ok());
@@ -1151,7 +1120,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_non_zero_offsets() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"offset")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"offset"));
         let chunk = ValidatedXorbChunk::new(hash, 50, 150, 200, 350);
         assert_eq!(chunk.packed_start(), 50);
         assert_eq!(chunk.packed_end(), 150);
@@ -1164,7 +1133,7 @@ mod tests {
 
     #[test]
     fn decoded_xorb_chunk_empty_data() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"empty_data")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"empty_data"));
         let descriptor = ValidatedXorbChunk::new(hash, 0, 0, 0, 0);
         let decoded = DecodedXorbChunk::new(descriptor, Vec::new());
         assert!(decoded.data().is_empty());
@@ -1197,7 +1166,7 @@ mod tests {
             CompressionScheme::None,
         )
         .unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data.as_slice());
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
 
@@ -1252,7 +1221,7 @@ mod tests {
         );
         assert!(serialized.is_ok());
         let serialized = serialized.unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data.as_slice());
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
 
@@ -1297,7 +1266,7 @@ mod tests {
         );
         assert!(serialized.is_ok());
         let serialized = serialized.unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data.as_slice());
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
 
@@ -1349,7 +1318,7 @@ mod tests {
         );
         assert!(serialized.is_ok());
         let serialized = serialized.unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data.as_slice());
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
 
@@ -1392,7 +1361,7 @@ mod tests {
             CompressionScheme::LZ4,
         )
         .unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
         assert_eq!(validated.chunks().len(), 1);
@@ -1413,7 +1382,7 @@ mod tests {
             CompressionScheme::None,
         )
         .unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
         let decoded = decode_serialized_xorb_chunks(&mut reader, &validated).unwrap();
@@ -1432,7 +1401,7 @@ mod tests {
             CompressionScheme::ByteGrouping4LZ4,
         )
         .unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
         assert_eq!(validated.chunks().len(), 1);
@@ -1445,7 +1414,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_max_offsets() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"max")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"max"));
         let chunk = ValidatedXorbChunk::new(hash, 0, u64::MAX, 0, u64::MAX);
         assert_eq!(chunk.packed_start(), 0);
         assert_eq!(chunk.packed_end(), u64::MAX);
@@ -1454,14 +1423,14 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_large_offsets() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"large")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"large"));
         let chunk = ValidatedXorbChunk::new(hash, 1_000_000, 2_000_000, 5_000_000, 10_000_000);
         assert_eq!(chunk.unpacked_len(), 5_000_000);
     }
 
     #[test]
     fn validated_xorb_large_values() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"big")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"big"));
         let chunk = ValidatedXorbChunk::new(hash, 0, 100, 0, 100);
         let validated = ValidatedXorb::new(hash, u64::MAX, u64::MAX, u64::MAX, vec![chunk]);
         assert_eq!(validated.total_length(), u64::MAX);
@@ -1471,7 +1440,7 @@ mod tests {
 
     #[test]
     fn decoded_xorb_chunk_accessors_consistency() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"cons")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"cons"));
         let descriptor = ValidatedXorbChunk::new(hash, 10, 20, 5, 15);
         let data = vec![1, 2, 3, 4, 5];
         let chunk = DecodedXorbChunk::new(descriptor.clone(), data);
@@ -1514,7 +1483,7 @@ mod tests {
         );
         assert!(serialized.is_ok());
         let serialized = serialized.unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
 
@@ -1540,7 +1509,7 @@ mod tests {
         );
         assert!(serialized.is_ok());
         let serialized = serialized.unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
 
@@ -1582,7 +1551,7 @@ mod tests {
         // and uses the hash list for footer metadata.
         assert!(serialized.is_ok());
         let serialized = serialized.unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
 
         let mut reader = Cursor::new(serialized.serialized_data);
         let result = validate_serialized_xorb(&mut reader, expected_hash);
@@ -1796,7 +1765,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_zero_length_chunk() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"zero")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"zero"));
         let chunk = ValidatedXorbChunk::new(hash, 10, 10, 20, 20);
         assert_eq!(chunk.unpacked_len(), 0);
     }
@@ -1835,7 +1804,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_zero_length_saturating_arithmetic() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"sat")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"sat"));
         // unpacked_start > unpacked_end -> saturating_sub returns 0
         let chunk = ValidatedXorbChunk::new(hash, 0, 10, 100, 50);
         assert_eq!(chunk.unpacked_len(), 0);
@@ -1845,8 +1814,8 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_full_range_use() {
-        let h1 = merkle_hash_to_shardline_hash(compute_data_hash(b"a")).unwrap();
-        let h2 = merkle_hash_to_shardline_hash(compute_data_hash(b"b")).unwrap();
+        let h1 = merkle_hash_to_shardline_hash(compute_data_hash(b"a"));
+        let h2 = merkle_hash_to_shardline_hash(compute_data_hash(b"b"));
         let c1 = ValidatedXorbChunk::new(h1, 0, 50, 0, 100);
         let c2 = ValidatedXorbChunk::new(h2, 50, 100, 100, 200);
         let xorb = ValidatedXorb::new(h1, 200, 100, 200, vec![c1, c2]);
@@ -1891,7 +1860,7 @@ mod tests {
             CompressionScheme::None,
         )
         .unwrap();
-        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected_hash = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data.as_slice());
         let validated = validate_serialized_xorb(&mut reader, expected_hash).unwrap();
 
@@ -1928,7 +1897,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_offsets_respect_ordering_invariants() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"ordering")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"ordering"));
         let chunks = vec![
             ValidatedXorbChunk::new(hash, 0, 50, 0, 100),
             ValidatedXorbChunk::new(hash, 50, 120, 100, 250),
@@ -1948,7 +1917,7 @@ mod tests {
 
     #[test]
     fn decoded_xorb_chunk_binary_data_roundtrip() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"binary")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"binary"));
         let binary_data: Vec<u8> = (0..255).collect();
         let descriptor = ValidatedXorbChunk::new(hash, 0, 255, 0, 255);
         let chunk = DecodedXorbChunk::new(descriptor, binary_data.clone());
@@ -1985,7 +1954,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_chunk_equality_and_clone() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"eq")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"eq"));
         let a = ValidatedXorbChunk::new(hash, 0, 10, 0, 10);
         let b = ValidatedXorbChunk::new(hash, 0, 10, 0, 10);
         let c = ValidatedXorbChunk::new(hash, 0, 10, 0, 20);
@@ -1996,7 +1965,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_equality() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"eq2")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"eq2"));
         let chunk = ValidatedXorbChunk::new(hash, 0, 10, 0, 10);
         let a = ValidatedXorb::new(hash, 10, 10, 10, vec![chunk.clone()]);
         let b = ValidatedXorb::new(hash, 10, 10, 10, vec![chunk]);
@@ -2005,7 +1974,7 @@ mod tests {
 
     #[test]
     fn decoded_xorb_chunk_equality() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"eq3")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"eq3"));
         let d1 = ValidatedXorbChunk::new(hash, 0, 5, 0, 5);
         let a = DecodedXorbChunk::new(d1.clone(), vec![1, 2, 3]);
         let b = DecodedXorbChunk::new(d1, vec![1, 2, 3]);
@@ -2014,7 +1983,7 @@ mod tests {
 
     #[test]
     fn decoded_xorb_chunk_inequality() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"ineq")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"ineq"));
         let d1 = ValidatedXorbChunk::new(hash, 0, 5, 0, 5);
         let d2 = ValidatedXorbChunk::new(hash, 0, 10, 0, 10);
         let a = DecodedXorbChunk::new(d1, vec![1, 2, 3]);
@@ -2026,16 +1995,16 @@ mod tests {
 
     #[test]
     fn shardline_merkle_hash_round_trip_deterministic() {
-        let original = merkle_hash_to_shardline_hash(compute_data_hash(b"deterministic")).unwrap();
+        let original = merkle_hash_to_shardline_hash(compute_data_hash(b"deterministic"));
         let merkle = super::shardline_hash_to_merkle_hash(original).unwrap();
-        let recovered = merkle_hash_to_shardline_hash(merkle).unwrap();
+        let recovered = merkle_hash_to_shardline_hash(merkle);
         assert_eq!(original, recovered);
     }
 
     #[test]
     fn merkle_hash_to_shardline_non_zero() {
         let merkle = compute_data_hash(b"non-zero");
-        let shardline = merkle_hash_to_shardline_hash(merkle).unwrap();
+        let shardline = merkle_hash_to_shardline_hash(merkle);
         assert_ne!(
             shardline,
             ShardlineHash::from_bytes([0; 32]),
@@ -2071,7 +2040,7 @@ mod tests {
             CompressionScheme::None,
         )
         .unwrap();
-        let expected = merkle_hash_to_shardline_hash(xorb_hash).unwrap();
+        let expected = merkle_hash_to_shardline_hash(xorb_hash);
         let mut reader = Cursor::new(serialized.serialized_data);
         let validated = validate_serialized_xorb(&mut reader, expected).unwrap();
         assert_eq!(validated.chunks().len(), 3);
@@ -2099,7 +2068,7 @@ mod tests {
 
     #[test]
     fn validated_xorb_non_zero_packed_start() {
-        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"nz")).unwrap();
+        let hash = merkle_hash_to_shardline_hash(compute_data_hash(b"nz"));
         let chunk = ValidatedXorbChunk::new(hash, 500, 1000, 0, 200);
         let xorb = ValidatedXorb::new(hash, 1500, 500, 200, vec![chunk]);
         assert_eq!(xorb.packed_content_length(), 500);

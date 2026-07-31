@@ -114,6 +114,7 @@ pub enum StorageRepresentation {
     XorbCdcV1,
 }
 
+#[allow(clippy::derivable_impls)] // derive would pick WholeFileV1; legacy records default to FixedChunkV1
 impl Default for StorageRepresentation {
     fn default() -> Self {
         // Records created before this field existed were fixed-chunk, uncompressed.
@@ -124,7 +125,7 @@ impl Default for StorageRepresentation {
 impl StorageRepresentation {
     /// Returns the metric label for this representation (matches serde rename).
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::WholeFileV1 => "whole_file_v1",
             Self::FixedChunkV1 => "fixed_chunk_v1",
@@ -1390,7 +1391,7 @@ mod tests {
             (StorageRepresentation::XorbCdcV1, "xorb_cdc_v1"),
         ] {
             assert_eq!(repr.as_str(), expected, "as_str() for {repr:?}");
-            let serialized = serde_json::to_value(&repr).unwrap();
+            let serialized = serde_json::to_value(repr).unwrap();
             assert_eq!(
                 serialized.as_str().unwrap(),
                 expected,

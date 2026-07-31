@@ -379,8 +379,7 @@ fn xorb_decode_reports_correct_chunk_metadata() {
         // Hash in descriptor must match actual data hash.
         let actual_hash = compute_data_hash(chunk.data());
         let expected_hash_from_desc = desc.hash();
-        let actual_shardline =
-            ShardlineHash::from_bytes(actual_hash.as_bytes().try_into().expect("32 bytes"));
+        let actual_shardline = ShardlineHash::from_bytes(actual_hash.into());
         assert_eq!(
             expected_hash_from_desc, actual_shardline,
             "chunk {i} descriptor hash must match computed data hash"

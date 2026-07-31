@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::to_vec;
 use shardline_index::{
-    DedupeShardMapping, FileChunkRecord, FileRecord, LifecycleStore, LocalIndexStore,
+    DedupeShardMapping, FileRecord, LifecycleStore, LocalIndexStore,
     LocalRecordStore, QuarantineCandidate, RetentionHold, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, unix_now_seconds_lossy};
@@ -20,7 +20,6 @@ use tokio::fs;
 use crate::{
     LocalBackend, ShardMetadataLimits,
     chunk_store::chunk_object_key,
-    object_store::ServerObjectStore,
     gc::{
         GcError, GcOrphanQuarantineState, LocalGcOptions, quarantine_record_path, quarantine_root,
         run_local_gc, run_local_gc_diagnostics,
@@ -798,7 +797,9 @@ async fn exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent()
 
     // Write the cache sidecar (_xorb_chunks/{prefix}/{hash}).
     let cache_dir = storage.path().join("chunks").join(cache_key.as_str());
-    let cache_parent = cache_dir.parent().ok_or(ServerTestInvariantError::new("cache parent"))?;
+    let cache_parent = cache_dir
+        .parent()
+        .ok_or_else(|| ServerTestInvariantError::new("cache parent"))?;
     fs::create_dir_all(cache_parent).await?;
     let cache_path = write_orphan_object(storage.path(), &cache_key, b"hash1\nhash2\n").await?;
 
