@@ -141,7 +141,10 @@ async fn bench_reports_sparse_update_and_concurrent_metrics() {
     assert_eq!(report.totals.total_concurrent_newly_stored_bytes, 4096);
     assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
     assert_eq!(report.totals.total_cross_repository_reused_chunks, 1);
-    assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 2048);
+    assert_eq!(
+        report.totals.total_cross_repository_newly_stored_bytes,
+        2048
+    );
     assert!(
         iteration.timing.process_cpu_cores_per_mille
             >= iteration.timing.process_host_utilization_per_mille
@@ -332,7 +335,10 @@ async fn bench_can_focus_on_cross_repository_upload() {
     assert_eq!(report.totals.total_uploaded_bytes, 3072);
     assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
     assert_eq!(report.totals.total_cross_repository_reused_chunks, 1);
-    assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 2048);
+    assert_eq!(
+        report.totals.total_cross_repository_newly_stored_bytes,
+        2048
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

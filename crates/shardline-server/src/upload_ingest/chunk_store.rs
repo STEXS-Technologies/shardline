@@ -147,9 +147,7 @@ async fn put_if_absent_pooled_bytes(
 mod tests {
     use axum::body::Bytes;
 
-    use super::{
-        ChunkBuffer, chunk_object_key_and_integrity, put_if_absent_pooled_chunk_buffer,
-    };
+    use super::{ChunkBuffer, chunk_object_key_and_integrity, put_if_absent_pooled_chunk_buffer};
     use crate::local_backend::chunk_hash;
     use crate::object_store::ServerObjectStore;
     use shardline_index::xet_hash_hex_string;
@@ -588,7 +586,9 @@ mod tests {
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
         let local_store = match &store {
             ServerObjectStore::Local(store) => store,
-            ServerObjectStore::S3(_) | ServerObjectStore::Blackhole => panic!("expected local store"),
+            ServerObjectStore::S3(_) | ServerObjectStore::Blackhole => {
+                panic!("expected local store")
+            }
         };
         let read_end = outcome.compressed_length.saturating_sub(1);
         let range = shardline_protocol::ByteRange::new(0, read_end).unwrap();
@@ -637,7 +637,9 @@ mod tests {
         let object_key = crate::chunk_store::chunk_object_key(&outcome.hash_hex).unwrap();
         let local_store = match &store {
             ServerObjectStore::Local(store) => store,
-            ServerObjectStore::S3(_) | ServerObjectStore::Blackhole => panic!("expected local store"),
+            ServerObjectStore::S3(_) | ServerObjectStore::Blackhole => {
+                panic!("expected local store")
+            }
         };
         let read_end = outcome.compressed_length.saturating_sub(1);
         let range = shardline_protocol::ByteRange::new(0, read_end).unwrap();

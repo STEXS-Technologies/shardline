@@ -549,7 +549,10 @@ mod tests {
     )]
     use shardline_protocol::{RepositoryProvider, RepositoryScope};
 
-    use super::{FileChunkRecord, FileRecord, FileRecordInvariantError, RepositoryRecordScope, StorageRepresentation};
+    use super::{
+        FileChunkRecord, FileRecord, FileRecordInvariantError, RepositoryRecordScope,
+        StorageRepresentation,
+    };
 
     #[test]
     fn file_record_storage_layout_referenced_terms_when_chunk_size_is_zero() {

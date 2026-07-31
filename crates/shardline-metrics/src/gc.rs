@@ -20,12 +20,18 @@ impl GcMetrics {
                 .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
         );
         let mark_duration = must_histogram(
-            HistogramOpts::new("shardline_gc_mark_duration_seconds", "GC mark phase duration")
-                .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
+            HistogramOpts::new(
+                "shardline_gc_mark_duration_seconds",
+                "GC mark phase duration",
+            )
+            .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
         );
         let sweep_duration = must_histogram(
-            HistogramOpts::new("shardline_gc_sweep_duration_seconds", "GC sweep phase duration")
-                .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
+            HistogramOpts::new(
+                "shardline_gc_sweep_duration_seconds",
+                "GC sweep phase duration",
+            )
+            .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]),
         );
         let objects_collected = must_counter(
             "shardline_gc_objects_collected_total",

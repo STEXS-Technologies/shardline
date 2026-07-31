@@ -61,9 +61,7 @@ impl StorageMetrics {
         registry
             .register(Box::new(compression_saved_bytes_total.clone()))
             .ok();
-        registry
-            .register(Box::new(objects_by_repr.clone()))
-            .ok();
+        registry.register(Box::new(objects_by_repr.clone())).ok();
 
         Self {
             objects_total,

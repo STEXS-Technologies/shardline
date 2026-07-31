@@ -382,9 +382,9 @@ pub(crate) fn bounded_pool_size_from_env(name: &str, default: usize) -> NonZeroU
             })
         },
     )
-    }
+}
 
-    /// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
+/// Parses the `SHARDLINE_ADMISSION_MAX_WEIGHT` environment variable.
 pub(crate) fn admission_max_weight_from_env() -> NonZeroUsize {
     let fallback = NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
     var("SHARDLINE_ADMISSION_MAX_WEIGHT").map_or_else(

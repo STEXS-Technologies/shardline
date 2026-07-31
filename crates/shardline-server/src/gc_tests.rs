@@ -10,8 +10,8 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::to_vec;
 use shardline_index::{
-    DedupeShardMapping, FileRecord, LifecycleStore, LocalIndexStore,
-    LocalRecordStore, QuarantineCandidate, RetentionHold, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
+    DedupeShardMapping, FileRecord, LifecycleStore, LocalIndexStore, LocalRecordStore,
+    QuarantineCandidate, RetentionHold, WebhookDelivery, parse_xet_hash_hex, xet_hash_hex_string,
 };
 use shardline_protocol::{RepositoryProvider, unix_now_seconds_lossy};
 use shardline_storage::ObjectKey;
@@ -775,8 +775,7 @@ async fn exercise_gc_mark_and_sweep_deletes_orphan_native_xorb_object() -> Resul
 /// files deleted together.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent() {
-    let result =
-        exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent().await;
+    let result = exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent().await;
     let error = result.as_ref().err().map(ToString::to_string);
     assert!(
         result.is_ok(),
@@ -785,8 +784,7 @@ async fn gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent() {
 }
 
 async fn exercise_gc_mark_and_sweep_deletes_xorb_cache_sidecar_with_parent()
--> Result<(), Box<dyn Error>>
-{
+-> Result<(), Box<dyn Error>> {
     let storage = tempfile::tempdir()?;
     let hash = "ab".repeat(32);
     let xorb_key = xorb_object_key(&hash)?;

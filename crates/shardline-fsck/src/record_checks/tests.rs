@@ -2227,10 +2227,17 @@ async fn scan_record_tree_latest_xorb_cdc_v1_clean_with_container_only() {
         b"xorb-cdc-v1-container-a".to_vec(),
         b"xorb-cdc-v1-container-b".to_vec(),
     ];
-    let chunk_hashes: Vec<_> = chunk_data.iter().map(|data| compute_data_hash(data)).collect();
+    let chunk_hashes: Vec<_> = chunk_data
+        .iter()
+        .map(|data| compute_data_hash(data))
+        .collect();
     let chunk_lens: Vec<u64> = chunk_data.iter().map(|data| data.len() as u64).collect();
 
-    let xorb_pairs: Vec<_> = chunk_hashes.iter().copied().zip(chunk_lens.iter().copied()).collect();
+    let xorb_pairs: Vec<_> = chunk_hashes
+        .iter()
+        .copied()
+        .zip(chunk_lens.iter().copied())
+        .collect();
     let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
 
     let mut all_data = Vec::new();
@@ -2363,10 +2370,17 @@ async fn scan_record_tree_latest_xorb_cdc_v1_corrupted_container_reported() {
         b"xorb-cdc-v1-corrupt-container-a".to_vec(),
         b"xorb-cdc-v1-corrupt-container-b".to_vec(),
     ];
-    let chunk_hashes: Vec<_> = chunk_data.iter().map(|data| compute_data_hash(data)).collect();
+    let chunk_hashes: Vec<_> = chunk_data
+        .iter()
+        .map(|data| compute_data_hash(data))
+        .collect();
     let chunk_lens: Vec<u64> = chunk_data.iter().map(|data| data.len() as u64).collect();
 
-    let xorb_pairs: Vec<_> = chunk_hashes.iter().copied().zip(chunk_lens.iter().copied()).collect();
+    let xorb_pairs: Vec<_> = chunk_hashes
+        .iter()
+        .copied()
+        .zip(chunk_lens.iter().copied())
+        .collect();
     let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
 
     let mut all_data = Vec::new();
@@ -2494,10 +2508,17 @@ async fn scan_record_tree_latest_xorb_cdc_v1_missing_container_reported() {
         b"xorb-cdc-v1-missing-container-a".to_vec(),
         b"xorb-cdc-v1-missing-container-b".to_vec(),
     ];
-    let chunk_hashes: Vec<_> = chunk_data.iter().map(|data| compute_data_hash(data)).collect();
+    let chunk_hashes: Vec<_> = chunk_data
+        .iter()
+        .map(|data| compute_data_hash(data))
+        .collect();
     let chunk_lens: Vec<u64> = chunk_data.iter().map(|data| data.len() as u64).collect();
 
-    let xorb_pairs: Vec<_> = chunk_hashes.iter().copied().zip(chunk_lens.iter().copied()).collect();
+    let xorb_pairs: Vec<_> = chunk_hashes
+        .iter()
+        .copied()
+        .zip(chunk_lens.iter().copied())
+        .collect();
     let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
 
     let shardline_hash = {
@@ -2696,7 +2717,9 @@ async fn scan_record_tree_latest_xorb_cdc_v1_single_chunk_corrupt_blob_reported(
     // followed by garbage that is not LZ4 data.
     std::fs::write(
         &chunk_path,
-        [0xff, 0xff, 0xff, 0x7f, b'g', b'a', b'r', b'b', b'a', b'g', b'e'],
+        [
+            0xff, 0xff, 0xff, 0x7f, b'g', b'a', b'r', b'b', b'a', b'g', b'e',
+        ],
     )
     .unwrap();
 

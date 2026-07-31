@@ -17,7 +17,7 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     ServerError, chunk_store::chunk_object_key, error::ObjectStoreError, local_backend::chunk_hash,
-    object_store::read_full_object, object_store::ServerObjectStore,
+    object_store::ServerObjectStore, object_store::read_full_object,
     object_store::run_before_local_object_read_hook,
 };
 
@@ -40,7 +40,9 @@ async fn read_xorb_backed_chunks(
     let chunk_zero = record.chunks.first().ok_or(ServerError::Overflow)?;
     let xorb_hash_hex = &chunk_zero.hash;
     let xorb_key = crate::xet_adapter::xorb_object_key(xorb_hash_hex)?;
-    let metadata = object_store.metadata(&xorb_key)?.ok_or(ServerError::NotFound)?;
+    let metadata = object_store
+        .metadata(&xorb_key)?
+        .ok_or(ServerError::NotFound)?;
     let xorb_length = metadata.length();
     let xorb_data = read_full_object(&object_store, &xorb_key, xorb_length)?;
 
@@ -78,12 +80,16 @@ async fn read_xorb_backed_chunks(
         if start > end {
             continue;
         }
-        let relative_start = start.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?;
+        let relative_start = start
+            .checked_sub(chunk.offset)
+            .ok_or(ServerError::Overflow)?;
         let relative_end = end.checked_sub(chunk.offset).ok_or(ServerError::Overflow)?;
 
         // Look up the decoded chunk by its index within the xorb.
         let chunk_index = chunk.range_start as usize;
-        let decoded = decoded_chunks.get(chunk_index).ok_or(ServerError::Overflow)?;
+        let decoded = decoded_chunks
+            .get(chunk_index)
+            .ok_or(ServerError::Overflow)?;
         let decoded_data = decoded.data();
 
         let range_start = usize::try_from(relative_start)?;
@@ -140,8 +146,7 @@ pub(crate) async fn file_record_byte_stream(
     // always have packed_start == 0 (the serde default), while xorb-backed
     // chunks have a non-zero offset into the xorb serialized data.
     let first_hash = record.chunks.first().map(|c| &c.hash);
-    let all_same_hash =
-        first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
+    let all_same_hash = first_hash.is_some_and(|h| record.chunks.iter().all(|c| c.hash == *h));
     let is_xorb_backed = if record.chunks.len() > 1 {
         all_same_hash
     } else {
@@ -220,7 +225,7 @@ pub(crate) async fn file_record_byte_stream(
             chunk.length,   // raw length for offset math
             hash_hex,       // expected hash for integrity verification
             chunk_range,
-            is_compressed,  // packed_end > 0 → LZ4-compressed; 0 → old uncompressed
+            is_compressed, // packed_end > 0 → LZ4-compressed; 0 → old uncompressed
         ));
     }
 
@@ -1405,13 +1410,11 @@ mod tests {
             (b"xorb world".to_vec(), 7u64),
             (b"!".to_vec(), 17u64),
         ];
-        let packed =
-            crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+        let packed = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
 
         // 2. Store xorb in a local object store.
         let storage = shardline_test_support::TempStorage::new();
-        let object_store =
-            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        let object_store = crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
         let was_inserted = crate::upload_ingest::xorb_packer::store_xorb(
             &object_store,
             &packed.xorb_hash_hex,
@@ -1463,7 +1466,10 @@ mod tests {
             result.extend_from_slice(&chunk.unwrap());
         }
         let expected: Vec<u8> = chunks.iter().flat_map(|(d, _)| d.clone()).collect();
-        assert_eq!(result, expected, "xorb-backed file record content should match");
+        assert_eq!(
+            result, expected,
+            "xorb-backed file record content should match"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1472,17 +1478,15 @@ mod tests {
 
         // 1. Pack 3 chunks into a xorb with known sizes.
         let chunks = vec![
-            (b"0123456789".to_vec(), 0u64),     // 10 bytes
-            (b"ABCDEFGHIJ".to_vec(), 10u64),    // 10 bytes
-            (b"abcdefghij".to_vec(), 20u64),    // 10 bytes
+            (b"0123456789".to_vec(), 0u64),  // 10 bytes
+            (b"ABCDEFGHIJ".to_vec(), 10u64), // 10 bytes
+            (b"abcdefghij".to_vec(), 20u64), // 10 bytes
         ];
-        let packed =
-            crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+        let packed = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
 
         // 2. Store xorb.
         let storage = shardline_test_support::TempStorage::new();
-        let object_store =
-            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        let object_store = crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
         let _ = crate::upload_ingest::xorb_packer::store_xorb(
             &object_store,
             &packed.xorb_hash_hex,
@@ -1528,10 +1532,9 @@ mod tests {
         //    Chunk 2: bytes 20-29, we want 20-24 (5 bytes: "abcde")
         //    Expected: "56789ABCDEFGHIJabcde"
         let range = ByteRange::new(5, 24).unwrap();
-        let mut stream =
-            super::file_record_byte_stream(object_store, record, Some(range))
-                .await
-                .unwrap();
+        let mut stream = super::file_record_byte_stream(object_store, record, Some(range))
+            .await
+            .unwrap();
 
         let mut result = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -1556,13 +1559,11 @@ mod tests {
         // 1. Pack a single chunk into a xorb.
         let content = b"single-chunk-xorb-range-test!".to_vec();
         let chunks = vec![(content.clone(), 0u64)];
-        let packed =
-            crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
+        let packed = crate::upload_ingest::xorb_packer::pack_chunks_into_xorb(&chunks).unwrap();
 
         // 2. Store xorb.
         let storage = shardline_test_support::TempStorage::new();
-        let object_store =
-            crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
+        let object_store = crate::object_store::ServerObjectStore::local(storage.path()).unwrap();
         let _ = crate::upload_ingest::xorb_packer::store_xorb(
             &object_store,
             &packed.xorb_hash_hex,
@@ -1603,10 +1604,9 @@ mod tests {
 
         // 4. Request a range within the single chunk (bytes 5-15).
         let range = ByteRange::new(5, 15).unwrap();
-        let mut stream =
-            super::file_record_byte_stream(object_store, record, Some(range))
-                .await
-                .unwrap();
+        let mut stream = super::file_record_byte_stream(object_store, record, Some(range))
+            .await
+            .unwrap();
 
         let mut result = Vec::new();
         while let Some(chunk) = stream.next().await {

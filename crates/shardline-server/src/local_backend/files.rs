@@ -298,7 +298,10 @@ impl LocalBackend {
         // ReferencedObjectTerms layout (shard/xorb-referenced) is handled
         // by the raw reconstruct path; StoredChunks layout (ingestor/CDC)
         // uses the streaming path for LZ4 decompression and xorb packing.
-        if matches!(record.storage_layout(), FileRecordStorageLayout::ReferencedObjectTerms) {
+        if matches!(
+            record.storage_layout(),
+            FileRecordStorageLayout::ReferencedObjectTerms
+        ) {
             let server_frontends = self.server_frontends.clone();
             return task::spawn_blocking(move || {
                 reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
@@ -584,8 +587,8 @@ mod tests {
         // Decompress to verify the original content is recoverable.
         let chunk = uploaded.chunks.first().unwrap();
         let read_bytes = backend.read_chunk(&chunk.hash).await.unwrap();
-        let decompressed = lz4_flex::decompress_size_prepended(&read_bytes)
-            .expect("decompression should succeed");
+        let decompressed =
+            lz4_flex::decompress_size_prepended(&read_bytes).expect("decompression should succeed");
         assert_eq!(decompressed.as_slice(), content);
 
         // Also verify read_chunk_for_file_version succeeds when called with
@@ -596,20 +599,15 @@ mod tests {
             .unwrap();
         let chunk_hash = &record.chunks.first().unwrap().hash;
         let result = backend
-            .read_chunk_for_file_version(
-                chunk_hash,
-                "versioned.bin",
-                &uploaded.content_hash,
-                None,
-            )
+            .read_chunk_for_file_version(chunk_hash, "versioned.bin", &uploaded.content_hash, None)
             .await;
         // Note: read_chunk_for_file_version may return NotFound when the
         // record hash has been rewritten to a xorb hash (xorb packing).
         // This is expected — individual chunk lookups are not supported
         // for xorb-backed records.
         if let Ok(bytes) = result {
-            let decompressed = lz4_flex::decompress_size_prepended(&bytes)
-                .expect("decompression should succeed");
+            let decompressed =
+                lz4_flex::decompress_size_prepended(&bytes).expect("decompression should succeed");
             assert_eq!(decompressed.as_slice(), content);
         }
     }

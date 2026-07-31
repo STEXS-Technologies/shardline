@@ -56,7 +56,8 @@ fuzz_target!(|data: &[u8]| {
     match reconstruct_xorb_with_footer(&mut reserialized, &packed.serialized) {
         Ok(_) => {
             assert_eq!(
-                reserialized, packed.serialized,
+                reserialized,
+                packed.serialized,
                 "re-serialization mismatch ({} chunks, {} bytes)",
                 chunks.len(),
                 packed.serialized.len()

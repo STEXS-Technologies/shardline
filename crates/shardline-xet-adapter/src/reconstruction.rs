@@ -662,7 +662,7 @@ mod tests {
                         content_hash: "a".repeat(64),
                         total_bytes: 4,
                         chunk_size: 4,
-            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+                        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                         repository_scope: None,
                         chunks: vec![FileChunkRecord {
                             hash: "c".repeat(64),
@@ -690,7 +690,7 @@ mod tests {
                         content_hash: "b".repeat(64),
                         total_bytes: 4,
                         chunk_size: 4,
-            storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
+                        storage_repr: shardline_index::StorageRepresentation::FixedChunkV1,
                         repository_scope: None,
                         chunks: vec![FileChunkRecord {
                             hash: "c".repeat(64),
