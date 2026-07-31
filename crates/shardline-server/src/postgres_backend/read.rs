@@ -1,5 +1,6 @@
 use shardline_index::{
-    FileRecord, PostgresMetadataStoreError, RecordStore, RecordTraversal, RepositoryRecordScope,
+    FileRecord, FileRecordStorageLayout, PostgresMetadataStoreError, RecordStore, RecordTraversal,
+    RepositoryRecordScope,
 };
 use shardline_protocol::{ByteRange, RepositoryScope};
 #[cfg(test)]
@@ -169,13 +170,33 @@ impl super::PostgresBackend {
         let record = self
             .read_record(file_id, content_hash, repository_scope)
             .await?;
+        let total_bytes = record.total_bytes;
         let object_store = self.object_store();
         let server_frontends = self.server_frontends.clone();
-        task::spawn_blocking(move || {
-            reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
-        })
-        .await
-        .map_err(ServerError::BlockingTask)?
+
+        // ReferencedObjectTerms layout (shard/xorb-referenced) is handled
+        // by the raw reconstruct path; StoredChunks layout (ingestor/CDC)
+        // uses the streaming path for LZ4 decompression and xorb packing.
+        if matches!(
+            record.storage_layout(),
+            FileRecordStorageLayout::ReferencedObjectTerms
+        ) {
+            return task::spawn_blocking(move || {
+                reconstruct_file_record_bytes(&object_store, &server_frontends, &record)
+            })
+            .await
+            .map_err(ServerError::BlockingTask)?;
+        }
+
+        // StoredChunks path: stream with LZ4 decompression and xorb-fast-path.
+        let stream = file_record_byte_stream(object_store, record, None).await?;
+        let mut output = Vec::with_capacity(usize::try_from(total_bytes)?);
+        tokio::pin!(stream);
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk?);
+        }
+        Ok(output)
     }
 
     /// Reads a stored chunk by hash.
