@@ -1312,8 +1312,7 @@ mod tests {
         let hash_hex = shardline_index::xet_hash_hex_string(raw_hash);
         let object_key = crate::chunk_store::chunk_object_key(&hash_hex).unwrap();
         let stored_hash = crate::local_backend::chunk_hash(&stored);
-        let integrity =
-            shardline_storage::ObjectIntegrity::new(stored_hash, stored.len() as u64);
+        let integrity = shardline_storage::ObjectIntegrity::new(stored_hash, stored.len() as u64);
         object_store
             .put_if_absent(
                 &object_key,
