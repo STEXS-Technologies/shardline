@@ -1576,7 +1576,10 @@ async fn router_rejects_bodies_over_configured_limit() {
     let Ok(addr) = addr else {
         return;
     };
-    let max_request_body_bytes = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
+    // Body limit must sit BELOW the 5-byte request body to trigger 413;
+    // only the CDC chunk size needs to stay >= 128. (c164bd2's 4->128
+    // sweep over-applied to this limit and regressed the rejection.)
+    let max_request_body_bytes = NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN);
     let config = ServerConfig::new(
         addr,
         format!("http://{addr}"),
