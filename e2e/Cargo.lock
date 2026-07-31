@@ -2937,6 +2937,7 @@ dependencies = [
 name = "shardline-fsck"
 version = "1.2.2"
 dependencies = [
+ "lz4_flex 0.11.6",
  "serde_json",
  "shardline-cas",
  "shardline-index",

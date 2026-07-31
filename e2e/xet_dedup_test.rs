@@ -2,6 +2,7 @@
 //! Starts its own server (same as e2e tests), uploads original and modified file.
 #![allow(unused_imports)]
 
+use shardline_server::{ServerConfig, serve_with_listener};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
@@ -10,7 +11,6 @@ use std::{
     time::Duration,
 };
 use tokio::{net::TcpListener, spawn, time::sleep};
-use shardline_server::{ServerConfig, serve_with_listener};
 use xet_data::processing::{FileUploadSession, Sha256Policy, configurations::TranslatorConfig};
 
 const CHUNK_SIZE: usize = 65_536;
@@ -42,7 +42,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for server ready
     let client = reqwest::Client::new();
     for _ in 0..20 {
-        if client.get(format!("{base_url}/healthz")).send().await.is_ok() {
+        if client
+            .get(format!("{base_url}/healthz"))
+            .send()
+            .await
+            .is_ok()
+        {
             break;
         }
         sleep(Duration::from_millis(500)).await;
@@ -56,44 +61,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Upload original
     let orig_bytes = std::fs::read(orig_path)?;
     let file_name = std::path::Path::new(orig_path)
-        .file_name().unwrap_or_default().to_string_lossy().to_string();
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     eprintln!("Original: {} bytes ({})", orig_bytes.len(), file_name);
 
-    let (orig_info, orig_metrics) = upload(&translator, &file_name, &orig_bytes).await?;
-    eprintln!("  chunks: total={}, new={}, deduped={}", 
-        orig_metrics.total_chunks, orig_metrics.new_chunks, orig_metrics.deduped_chunks);
-    eprintln!("  bytes: total={}, new={}, deduped={}", 
-        orig_metrics.total_bytes, orig_metrics.new_bytes, orig_metrics.deduped_bytes);
+    let (_orig_info, orig_metrics) = upload(&translator, &file_name, &orig_bytes).await?;
+    eprintln!(
+        "  chunks: total={}, new={}, deduped={}",
+        orig_metrics.total_chunks, orig_metrics.new_chunks, orig_metrics.deduped_chunks
+    );
+    eprintln!(
+        "  bytes: total={}, new={}, deduped={}",
+        orig_metrics.total_bytes, orig_metrics.new_bytes, orig_metrics.deduped_bytes
+    );
 
     // Upload modified
     let mod_bytes = std::fs::read(mod_path)?;
     let mod_name = std::path::Path::new(mod_path)
-        .file_name().unwrap_or_default().to_string_lossy().to_string();
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     eprintln!("\nModified: {} bytes ({})", mod_bytes.len(), mod_name);
 
-    let (mod_info, mod_metrics) = upload(&translator, &mod_name, &mod_bytes).await?;
-    eprintln!("  chunks: total={}, new={}, deduped={}", 
-        mod_metrics.total_chunks, mod_metrics.new_chunks, mod_metrics.deduped_chunks);
-    eprintln!("  bytes: total={}, new={}, deduped={}", 
-        mod_metrics.total_bytes, mod_metrics.new_bytes, mod_metrics.deduped_bytes);
+    let (_mod_info, mod_metrics) = upload(&translator, &mod_name, &mod_bytes).await?;
+    eprintln!(
+        "  chunks: total={}, new={}, deduped={}",
+        mod_metrics.total_chunks, mod_metrics.new_chunks, mod_metrics.deduped_chunks
+    );
+    eprintln!(
+        "  bytes: total={}, new={}, deduped={}",
+        mod_metrics.total_bytes, mod_metrics.new_bytes, mod_metrics.deduped_bytes
+    );
 
     // Results
     println!("\n=== Xet CDC DEDUP RESULTS ===");
-    println!("Original upload:  {} chunks ({} bytes new of {} total)",
-        orig_metrics.total_chunks, orig_metrics.new_bytes, orig_metrics.total_bytes);
-    println!("Modified upload:  {} chunks total, {} new, {} deduped (saved)",
-        mod_metrics.total_chunks, mod_metrics.new_chunks, mod_metrics.deduped_chunks);
+    println!(
+        "Original upload:  {} chunks ({} bytes new of {} total)",
+        orig_metrics.total_chunks, orig_metrics.new_bytes, orig_metrics.total_bytes
+    );
+    println!(
+        "Modified upload:  {} chunks total, {} new, {} deduped (saved)",
+        mod_metrics.total_chunks, mod_metrics.new_chunks, mod_metrics.deduped_chunks
+    );
     let reuse_pct = if mod_metrics.total_chunks > 0 {
         (mod_metrics.deduped_chunks as f64 / mod_metrics.total_chunks as f64) * 100.0
     } else {
         0.0
     };
     println!("Chunk reuse rate: {:.1}%", reuse_pct);
-    println!("Bytes saved via dedup: {} of {} ({:.1}%)",
-        mod_metrics.deduped_bytes, mod_metrics.total_bytes,
+    println!(
+        "Bytes saved via dedup: {} of {} ({:.1}%)",
+        mod_metrics.deduped_bytes,
+        mod_metrics.total_bytes,
         if mod_metrics.total_bytes > 0 {
             (mod_metrics.deduped_bytes as f64 / mod_metrics.total_bytes as f64) * 100.0
-        } else { 0.0 }
+        } else {
+            0.0
+        }
     );
 
     server.abort();
@@ -104,9 +131,16 @@ async fn upload(
     translator: &Arc<TranslatorConfig>,
     name: &str,
     bytes: &[u8],
-) -> Result<(xet_data::processing::XetFileInfo, xet_data::deduplication::DeduplicationMetrics), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        xet_data::processing::XetFileInfo,
+        xet_data::deduplication::DeduplicationMetrics,
+    ),
+    Box<dyn std::error::Error>,
+> {
     // Set up a custom HTTP client that captures error bodies
-    let upload_session = FileUploadSession::new(translator.clone()).await
+    let upload_session = FileUploadSession::new(translator.clone())
+        .await
         .map_err(|e| {
             eprintln!("FileUploadSession::new error: {e:#}");
             e

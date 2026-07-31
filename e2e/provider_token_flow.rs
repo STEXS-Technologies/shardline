@@ -147,7 +147,7 @@ async fn exercise_provider_token_flow() -> Result<(), Box<dyn Error>> {
 }
 
 fn xet_hash_hex(hash: &MerkleHash) -> String {
-    let bytes: [u8; 32] = hash.as_bytes().try_into().unwrap_or([0; 32]);
+    let bytes: [u8; 32] = hash.to_bytes();
     xet_hash_hex_string(ShardlineHash::from_bytes(bytes))
 }
 
@@ -280,7 +280,8 @@ fn issue_token(
 }
 
 fn non_zero_chunk_size() -> Result<NonZeroUsize, ServerE2eInvariantError> {
-    NonZeroUsize::new(128).ok_or_else(|| ServerE2eInvariantError::new("chunk size must be non-zero"))
+    NonZeroUsize::new(128)
+        .ok_or_else(|| ServerE2eInvariantError::new("chunk size must be non-zero"))
 }
 
 fn non_zero_ttl() -> Result<NonZeroU64, ServerE2eInvariantError> {
