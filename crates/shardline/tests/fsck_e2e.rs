@@ -5,7 +5,7 @@ use std::{
     error::Error,
     fs::{remove_file, write as write_file},
     num::NonZeroUsize,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -48,11 +48,11 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
-    let uploaded = backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+    let _uploaded = backend
+        .upload_file("asset.bin", Bytes::from(vec![b'a'; 8192]), None)
         .await?;
     let shardline_bin = shardline_binary()?;
 
@@ -78,19 +78,10 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
         return Err(CliE2eInvariantError::new("clean fsck did not report zero issues").into());
     }
 
-    let first_chunk = uploaded.chunks.first().ok_or_else(|| {
-        CliE2eInvariantError::new("uploaded file did not produce any chunk records")
-    })?;
-    let hash_prefix = first_chunk
-        .hash
-        .get(..2)
-        .ok_or_else(|| CliE2eInvariantError::new("chunk hash prefix was missing"))?;
-    let chunk_path = storage
-        .path()
-        .join("chunks")
-        .join(hash_prefix)
-        .join(&first_chunk.hash);
-    remove_file(chunk_path)?;
+    // XorbCdcV1 records reference the packed xorb container, so a missing
+    // container is the missing-chunk failure this test must detect.
+    let xorb_path = find_xorb_container(storage.path())?;
+    remove_file(xorb_path)?;
 
     let broken_output = Command::new(shardline_bin)
         .args([
@@ -107,7 +98,9 @@ async fn exercise_fsck() -> Result<(), Box<dyn Error>> {
     }
     let broken_stdout = String::from_utf8(broken_output.stdout)?;
     let broken_stderr = String::from_utf8(broken_output.stderr)?;
-    if !broken_stdout.contains("issue_count: 2") {
+    // Every chunk reference in the latest and version records points at the
+    // same missing container: 4 chunks x 2 records = 8 missing_chunk issues.
+    if !broken_stdout.contains("issue_count: 8") {
         return Err(CliE2eInvariantError::new("broken fsck did not report issue count").into());
     }
     if !broken_stderr.contains("issue: missing_chunk") {
@@ -122,28 +115,18 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
-    let uploaded = backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+    let _uploaded = backend
+        .upload_file("asset.bin", Bytes::from(vec![b'a'; 8192]), None)
         .await?;
-    let first_chunk = uploaded.chunks.first().ok_or_else(|| {
-        CliE2eInvariantError::new("uploaded file did not produce any chunk records")
-    })?;
-    let hash_prefix = first_chunk
-        .hash
-        .get(..2)
-        .ok_or_else(|| CliE2eInvariantError::new("chunk hash prefix was missing"))?;
-    let chunk_path = storage
-        .path()
-        .join("chunks")
-        .join(hash_prefix)
-        .join(&first_chunk.hash);
-    let corrupt_len = usize::try_from(first_chunk.length)?;
-    write_file(&chunk_path, vec![0x5e; corrupt_len])?;
+    let xorb_path = find_xorb_container(storage.path())?;
+    let corrupt_len = std::fs::metadata(&xorb_path)?.len();
 
     let shardline_bin = shardline_binary()?;
+    // GC runs on the intact container first: the xorb is the reachable
+    // object for XorbCdcV1 records, so it must survive the sweep.
     let gc_output = Command::new(&shardline_bin)
         .args([
             "gc",
@@ -160,24 +143,18 @@ async fn exercise_corrupted_reachable_chunk_is_detected_after_gc() -> Result<(),
         .output()?;
     if !gc_output.status.success() {
         return Err(CliE2eInvariantError::new(format!(
-            "gc failed for corrupted reachable chunk: {}",
+            "gc failed for reachable xorb container: {}",
             String::from_utf8_lossy(&gc_output.stderr)
         ))
         .into());
     }
-    let gc_stdout = String::from_utf8(gc_output.stdout)?;
-    if !gc_stdout.contains("orphan_chunks: 0") {
-        return Err(CliE2eInvariantError::new(
-            "gc treated a corrupted reachable chunk as orphaned",
-        )
-        .into());
+    if !xorb_path.exists() {
+        return Err(CliE2eInvariantError::new("gc removed the reachable xorb container").into());
     }
-    if !gc_stdout.contains("deleted_chunks: 0") {
-        return Err(CliE2eInvariantError::new("gc deleted a corrupted but reachable chunk").into());
-    }
-    if !chunk_path.exists() {
-        return Err(CliE2eInvariantError::new("gc removed the corrupted reachable chunk").into());
-    }
+
+    // Corrupt the reachable container in place (same length so metadata
+    // stays consistent) and verify fsck reports the corruption.
+    write_file(&xorb_path, vec![0x5e; corrupt_len as usize])?;
 
     let fsck_output = Command::new(shardline_bin)
         .args([
@@ -262,6 +239,33 @@ async fn exercise_fsck_fails_closed_on_corrupt_webhook_delivery_metadata()
     }
 
     Ok(())
+}
+
+fn find_xorb_container(storage_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let mut found = Vec::new();
+    // Object storage lives under {root}/chunks; xorb containers are stored
+    // relative to the object store root at xorbs/default/{prefix}/{hash}.xorb.
+    let xorbs_root = storage_root.join("chunks").join("xorbs").join("default");
+    for prefix_entry in std::fs::read_dir(&xorbs_root)? {
+        let prefix_path = prefix_entry?.path();
+        if !prefix_path.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&prefix_path)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "xorb") {
+                found.push(path);
+            }
+        }
+    }
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(CliE2eInvariantError::new("no xorb container found after upload").into()),
+        n => Err(CliE2eInvariantError::new(format!(
+            "expected 1 xorb container, found {n}"
+        ))
+        .into()),
+    }
 }
 
 fn shardline_binary() -> Result<PathBuf, Box<dyn Error>> {

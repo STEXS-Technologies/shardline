@@ -1,6 +1,6 @@
 use prometheus::{IntCounter, IntCounterVec, IntGauge, Registry};
 
-use crate::{must_counter, must_gauge};
+use crate::{must_counter, must_counter_vec, must_gauge};
 
 pub struct StorageMetrics {
     pub objects_total: IntGauge,
@@ -38,11 +38,13 @@ impl StorageMetrics {
             "shardline_compression_saved_bytes_total",
             "Bytes saved by LZ4 compression",
         );
-        let objects_by_repr = IntCounterVec::new(
-            prometheus::opts!("shardline_objects_by_repr_total", "Objects stored by representation"),
+        let objects_by_repr = must_counter_vec(
+            prometheus::opts!(
+                "shardline_objects_by_repr_total",
+                "Objects stored by representation"
+            ),
             &["representation"],
-        )
-        .expect("objects_by_repr counter");
+        );
 
         registry.register(Box::new(objects_total.clone())).ok();
         registry

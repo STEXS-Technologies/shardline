@@ -90,9 +90,9 @@ async fn bench_reports_sparse_update_and_concurrent_metrics() {
             iterations: 1,
             concurrency: 2,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -120,25 +120,28 @@ async fn bench_reports_sparse_update_and_concurrent_metrics() {
     let Some(iteration) = iteration else {
         return;
     };
-    assert_eq!(iteration.chunks.initial_inserted_chunks, 3);
-    assert_eq!(iteration.chunks.sparse_update_inserted_chunks, 1);
+    // Chunk counts are derived from CDC boundaries over the deterministic
+    // bench payloads (chunk_size=1024, min=128, max=2048) and are not the
+    // fixed-size chunk arithmetic the assertions originally encoded.
+    assert_eq!(iteration.chunks.initial_inserted_chunks, 4);
+    assert_eq!(iteration.chunks.sparse_update_inserted_chunks, 2);
     assert_eq!(iteration.chunks.sparse_update_reused_chunks, 2);
     assert_eq!(iteration.chunks.concurrent_upload_inserted_chunks, 2);
-    assert_eq!(iteration.chunks.concurrent_upload_reused_chunks, 4);
-    assert_eq!(iteration.bytes.concurrent_newly_stored_bytes, 8);
-    assert_eq!(iteration.bytes.concurrent_uploaded_bytes, 24);
-    assert_eq!(iteration.bytes.concurrent_downloaded_bytes, 24);
+    assert_eq!(iteration.chunks.concurrent_upload_reused_chunks, 6);
+    assert_eq!(iteration.bytes.concurrent_newly_stored_bytes, 4096);
+    assert_eq!(iteration.bytes.concurrent_uploaded_bytes, 16384);
+    assert_eq!(iteration.bytes.concurrent_downloaded_bytes, 16384);
     assert_eq!(iteration.chunks.cross_repository_inserted_chunks, 1);
-    assert_eq!(iteration.chunks.cross_repository_reused_chunks, 2);
-    assert_eq!(iteration.bytes.cross_repository_newly_stored_bytes, 4);
-    assert_eq!(iteration.bytes.newly_stored_bytes, 40);
+    assert_eq!(iteration.chunks.cross_repository_reused_chunks, 1);
+    assert_eq!(iteration.bytes.cross_repository_newly_stored_bytes, 2048);
+    assert_eq!(iteration.bytes.newly_stored_bytes, 21504);
     assert_eq!(report.totals.total_sparse_update_reused_chunks, 2);
     assert_eq!(report.totals.total_concurrent_upload_inserted_chunks, 2);
-    assert_eq!(report.totals.total_concurrent_upload_reused_chunks, 4);
-    assert_eq!(report.totals.total_concurrent_newly_stored_bytes, 8);
+    assert_eq!(report.totals.total_concurrent_upload_reused_chunks, 6);
+    assert_eq!(report.totals.total_concurrent_newly_stored_bytes, 4096);
     assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
-    assert_eq!(report.totals.total_cross_repository_reused_chunks, 2);
-    assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 4);
+    assert_eq!(report.totals.total_cross_repository_reused_chunks, 1);
+    assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 2048);
     assert!(
         iteration.timing.process_cpu_cores_per_mille
             >= iteration.timing.process_host_utilization_per_mille
@@ -165,9 +168,9 @@ async fn bench_reuses_requested_storage_root_by_allocating_new_run_directories()
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -183,9 +186,9 @@ async fn bench_reuses_requested_storage_root_by_allocating_new_run_directories()
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -215,9 +218,9 @@ async fn bench_rejects_mutation_window_larger_than_asset() {
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 8,
-            mutated_bytes: 16,
+            chunk_size_bytes: 1024,
+            base_bytes: 4096,
+            mutated_bytes: 8192,
         },
     )
     .await;
@@ -243,9 +246,9 @@ async fn bench_rejects_zero_concurrency() {
             iterations: 1,
             concurrency: 0,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 8,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 4096,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -260,9 +263,9 @@ async fn ingest_bench_reports_upload_metrics() {
         iterations: 1,
         concurrency: 2,
         upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-        chunk_size_bytes: 4,
-        base_bytes: 12,
-        mutated_bytes: 4,
+        chunk_size_bytes: 1024,
+        base_bytes: 8192,
+        mutated_bytes: 1024,
     })
     .await;
     assert!(report.is_ok());
@@ -276,10 +279,12 @@ async fn ingest_bench_reports_upload_metrics() {
     assert_eq!(report.iterations, 1);
     assert_eq!(report.concurrency, 2);
     assert_eq!(report.available_parallelism, available_parallelism_u64());
-    assert_eq!(report.total_initial_inserted_chunks, 3);
-    assert_eq!(report.total_sparse_update_inserted_chunks, 3);
-    assert_eq!(report.total_concurrent_upload_inserted_chunks, 6);
-    assert_eq!(report.total_concurrent_uploaded_bytes, 24);
+    // Chunk counts derive from CDC boundaries over the deterministic bench
+    // payloads (chunk_size=1024, min=128, max=2048), not fixed-size arithmetic.
+    assert_eq!(report.total_initial_inserted_chunks, 4);
+    assert_eq!(report.total_sparse_update_inserted_chunks, 4);
+    assert_eq!(report.total_concurrent_upload_inserted_chunks, 8);
+    assert_eq!(report.total_concurrent_uploaded_bytes, 16384);
     assert!(
         report.average_process_cpu_cores_per_mille
             >= report.average_process_host_utilization_per_mille
@@ -302,9 +307,9 @@ async fn bench_can_focus_on_cross_repository_upload() {
             iterations: 1,
             concurrency: 2,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -322,10 +327,12 @@ async fn bench_can_focus_on_cross_repository_upload() {
     assert_eq!(report.latency.latest_download_micros, 0);
     assert_eq!(report.latency.previous_download_micros, 0);
     assert_eq!(report.latency.concurrent_upload_micros, 0);
-    assert_eq!(report.totals.total_uploaded_bytes, 12);
+    // Chunk counts derive from CDC boundaries over the deterministic
+    // cross-repository payloads (chunk_size=1024, min=128, max=2048).
+    assert_eq!(report.totals.total_uploaded_bytes, 3072);
     assert_eq!(report.totals.total_cross_repository_inserted_chunks, 1);
-    assert_eq!(report.totals.total_cross_repository_reused_chunks, 2);
-    assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 4);
+    assert_eq!(report.totals.total_cross_repository_reused_chunks, 1);
+    assert_eq!(report.totals.total_cross_repository_newly_stored_bytes, 2048);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -336,9 +343,9 @@ async fn ingest_bench_rejects_unsupported_download_focus() {
         iterations: 1,
         concurrency: 2,
         upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-        chunk_size_bytes: 4,
-        base_bytes: 12,
-        mutated_bytes: 4,
+        chunk_size_bytes: 1024,
+        base_bytes: 8192,
+        mutated_bytes: 1024,
     })
     .await;
     assert!(matches!(
@@ -627,9 +634,9 @@ async fn bench_focused_initial_upload_scenario() {
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -640,7 +647,7 @@ async fn bench_focused_initial_upload_scenario() {
     assert_eq!(report.latency.sparse_update_upload_micros, 0);
     assert_eq!(report.latency.latest_download_micros, 0);
     assert_eq!(report.latency.previous_download_micros, 0);
-    assert_eq!(report.totals.total_uploaded_bytes, 12);
+    assert_eq!(report.totals.total_uploaded_bytes, 8192);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -654,9 +661,9 @@ async fn bench_focused_sparse_update_upload_scenario() {
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -664,7 +671,7 @@ async fn bench_focused_sparse_update_upload_scenario() {
     let report = report.unwrap();
     assert!(report.latency.sparse_update_upload_micros > 0);
     assert_eq!(report.latency.initial_upload_micros, 0);
-    assert_eq!(report.totals.total_uploaded_bytes, 12);
+    assert_eq!(report.totals.total_uploaded_bytes, 8192);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -678,9 +685,9 @@ async fn bench_focused_latest_download_scenario() {
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -688,7 +695,7 @@ async fn bench_focused_latest_download_scenario() {
     let report = report.unwrap();
     assert!(report.latency.latest_download_micros > 0);
     assert_eq!(report.latency.initial_upload_micros, 0);
-    assert_eq!(report.totals.total_downloaded_bytes, 12);
+    assert_eq!(report.totals.total_downloaded_bytes, 8192);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -702,9 +709,9 @@ async fn bench_focused_ranged_reconstruction_scenario() {
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -724,9 +731,9 @@ async fn bench_focused_concurrent_upload_scenario() {
             iterations: 1,
             concurrency: 2,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -748,9 +755,9 @@ async fn bench_focused_concurrent_latest_download_scenario() {
             iterations: 1,
             concurrency: 2,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -770,9 +777,9 @@ async fn bench_focused_cached_latest_reconstruction_scenario() {
             iterations: 1,
             concurrency: 1,
             upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-            chunk_size_bytes: 4,
-            base_bytes: 12,
-            mutated_bytes: 4,
+            chunk_size_bytes: 1024,
+            base_bytes: 8192,
+            mutated_bytes: 1024,
         },
     )
     .await;
@@ -796,16 +803,16 @@ async fn ingest_bench_focused_initial_upload() {
         iterations: 1,
         concurrency: 2,
         upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-        chunk_size_bytes: 4,
-        base_bytes: 12,
-        mutated_bytes: 4,
+        chunk_size_bytes: 1024,
+        base_bytes: 8192,
+        mutated_bytes: 1024,
     })
     .await;
     assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.average_initial_upload_micros > 0);
     assert_eq!(report.average_sparse_update_upload_micros, 0);
-    assert_eq!(report.total_uploaded_bytes, 12);
+    assert_eq!(report.total_uploaded_bytes, 8192);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -816,16 +823,17 @@ async fn ingest_bench_focused_sparse_update() {
         iterations: 1,
         concurrency: 2,
         upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-        chunk_size_bytes: 4,
-        base_bytes: 12,
-        mutated_bytes: 4,
+        chunk_size_bytes: 1024,
+        base_bytes: 8192,
+        mutated_bytes: 1024,
     })
     .await;
     assert!(report.is_ok());
     let report = report.unwrap();
     assert!(report.average_sparse_update_upload_micros > 0);
-    // Total should still be base bytes
-    assert_eq!(report.total_uploaded_bytes, 12);
+    // Total should still be base bytes (reuse is bounded by CDC boundary
+    // alignment of the deterministic payloads, not fixed-size chunk math)
+    assert_eq!(report.total_uploaded_bytes, 8192);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -836,9 +844,9 @@ async fn ingest_bench_focused_concurrent_upload() {
         iterations: 1,
         concurrency: 2,
         upload_max_in_flight_chunks: DEFAULT_BENCH_UPLOAD_MAX_IN_FLIGHT_CHUNKS,
-        chunk_size_bytes: 4,
-        base_bytes: 12,
-        mutated_bytes: 4,
+        chunk_size_bytes: 1024,
+        base_bytes: 8192,
+        mutated_bytes: 1024,
     })
     .await;
     assert!(report.is_ok());
@@ -846,5 +854,5 @@ async fn ingest_bench_focused_concurrent_upload() {
     assert!(report.average_concurrent_upload_micros > 0);
     assert_eq!(report.average_initial_upload_micros, 0);
     assert_eq!(report.average_sparse_update_upload_micros, 0);
-    assert_eq!(report.total_concurrent_uploaded_bytes, 24);
+    assert_eq!(report.total_concurrent_uploaded_bytes, 16384);
 }

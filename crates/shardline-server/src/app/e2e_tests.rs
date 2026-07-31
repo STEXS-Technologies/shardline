@@ -38,7 +38,7 @@ use crate::{
 use shardline_index::{FileChunkRecord, FileRecord, LocalRecordStore, xet_hash_hex_string};
 use shardline_protocol::{RepositoryProvider, RepositoryScope, TokenClaims, TokenScope};
 use shardline_server_core::{AuthProvider, auth::Ed25519AuthProvider, auth::LocalHmacProvider};
-use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectKey, ObjectStore};
+use shardline_storage::{ObjectBody, ObjectIntegrity, ObjectStore};
 use shardline_xet_core::merklehash::compute_data_hash;
 
 // ---------------------------------------------------------------------------
@@ -1925,10 +1925,9 @@ async fn gc_preserves_old_and_new_formats() {
     ] {
         let key = crate::bazel_cache_object_key(crate::BazelCacheKind::Cas, hash, None)
             .expect("key");
-        let bytes = server_backend
-            .read_object(&key)
-            .await
-            .unwrap_or_else(|e| panic!("{label} readable: {e}"));
+        let read = server_backend.read_object(&key).await;
+        assert!(read.is_ok(), "{label} readable: {read:?}");
+        let bytes = read.expect("read_object");
         assert!(!bytes.is_empty(), "{label} must have content");
     }
 }
@@ -10401,10 +10400,10 @@ async fn mixed_format_dedup_same_content() {
     if let Ok(entries) = std::fs::read_dir(&chunks_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
-                if let Ok(files) = std::fs::read_dir(&path) {
-                    chunk_count += files.flatten().count();
-                }
+            if path.is_dir()
+                && let Ok(files) = std::fs::read_dir(&path)
+            {
+                chunk_count += files.flatten().count();
             }
         }
     }

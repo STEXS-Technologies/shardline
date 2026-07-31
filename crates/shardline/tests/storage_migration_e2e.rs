@@ -30,7 +30,7 @@ async fn exercise_storage_migrate_local_to_local() -> Result<(), Box<dyn Error>>
     let backend = LocalBackend::new(
         source.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     backend
@@ -125,7 +125,7 @@ async fn exercise_storage_migrate_rejects_symlinked_local_root() -> Result<(), B
     let backend = LocalBackend::new(
         redirected.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     backend

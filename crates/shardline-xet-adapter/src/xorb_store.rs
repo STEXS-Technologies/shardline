@@ -110,17 +110,17 @@ where
     // Try a cached listing of chunk hashes first.  Xorbs are immutable
     // (content-addressed), so the cache never needs invalidation.
     let cache_key = xorb_chunks_cache_key(xorb_hash_hex)?;
-    if let Ok(Some(cache_meta)) = ObjectStore::metadata(object_store, &cache_key) {
-        if let Ok(cache_bytes) = read_full_object(object_store, &cache_key, cache_meta.length()) {
-            let body = String::from_utf8_lossy(&cache_bytes);
-            for line in body.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    visitor(trimmed.to_owned())?;
-                }
+    if let Ok(Some(cache_meta)) = ObjectStore::metadata(object_store, &cache_key)
+        && let Ok(cache_bytes) = read_full_object(object_store, &cache_key, cache_meta.length())
+    {
+        let body = String::from_utf8_lossy(&cache_bytes);
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                visitor(trimmed.to_owned())?;
             }
-            return Ok(());
         }
+        return Ok(());
     }
 
     let Some(metadata) = ObjectStore::metadata(object_store, object_key)? else {
@@ -147,12 +147,13 @@ where
         chunk_hash(cache_body.as_bytes()),
         cache_body.len() as u64,
     );
-    let _ = ObjectStore::put_if_absent(
+    ObjectStore::put_if_absent(
         object_store,
         &cache_key,
         ObjectBody::from_bytes(cache_body.into_bytes().into()),
         &integrity,
-    );
+    )
+    .ok();
 
     Ok(())
 }
@@ -170,6 +171,11 @@ fn xorb_chunks_cache_key(hash_hex: &str) -> Result<ObjectKey, XetAdapterError> {
 
 /// Extracts a xorb hash from a cache sidecar key (`_xorb_chunks/{prefix}/{hash}`).
 /// Returns `None` when the key does not match the cache-namespace pattern.
+///
+/// # Errors
+///
+/// Never returns an error: keys that do not match the cache-namespace pattern
+/// yield `Ok(None)`.
 pub fn xorb_chunks_cache_hash_from_key_if_present(
     key: &ObjectKey,
 ) -> Result<Option<&str>, XetAdapterError> {

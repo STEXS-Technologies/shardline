@@ -181,14 +181,16 @@ where
         // When a xorb container is swept, also remove its chunk-hash cache
         // sidecar (_xorb_chunks/{prefix}/{hash}) so orphaned cache entries
         // do not accumulate in the store.
-        if let Some(hash) = xorb_hash_from_object_key_if_present(&orphan.object_key)? {
-            if let Ok(cache_key) = ObjectKey::parse(&format!(
+        if let Some(hash) = xorb_hash_from_object_key_if_present(&orphan.object_key)?
+            && let Ok(cache_key) = ObjectKey::parse(&format!(
                 "_xorb_chunks/{}/{}",
                 &hash[..2],
                 hash
-            )) {
-                let _ = object_store.delete_if_present(&cache_key).map_err(Into::into);
-            }
+            ))
+        {
+            let _cache_outcome = object_store
+                .delete_if_present(&cache_key)
+                .map_err(Into::into);
         }
 
         report.deleted_chunks = checked_increment(report.deleted_chunks)?;

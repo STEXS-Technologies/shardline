@@ -2202,3 +2202,567 @@ async fn scan_record_tree_latest_native_xet_with_inner_chunks_tracks_reachabilit
         "expected MissingVersionRecord"
     );
 }
+
+// ── XorbCdcV1: container-only records (ingestor path) ──────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_record_tree_latest_xorb_cdc_v1_clean_with_container_only() {
+    use shardline_index::RecordMutation;
+    use shardline_protocol::ShardlineHash;
+    use shardline_xet_adapter::xorb_object_key;
+    use shardline_xet_core::merklehash::compute_data_hash;
+    use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
+    use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
+
+    let storage = shardline_test_support::TempStorage::new();
+    let root = storage.path_buf();
+    let record_store = shardline_index::LocalRecordStore::open(root.clone());
+    let object_root = root.join("chunks");
+    let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+    // Two chunks: the ingestor rewrites record hashes to the xorb container
+    // hash only for multi-chunk files, and stores no descriptor-keyed member
+    // objects — the XorbCdcV1 layout this test exercises.
+    let chunk_data: [Vec<u8>; 2] = [
+        b"xorb-cdc-v1-container-a".to_vec(),
+        b"xorb-cdc-v1-container-b".to_vec(),
+    ];
+    let chunk_hashes: Vec<_> = chunk_data.iter().map(|data| compute_data_hash(data)).collect();
+    let chunk_lens: Vec<u64> = chunk_data.iter().map(|data| data.len() as u64).collect();
+
+    let xorb_pairs: Vec<_> = chunk_hashes.iter().copied().zip(chunk_lens.iter().copied()).collect();
+    let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
+
+    let mut all_data = Vec::new();
+    for data in &chunk_data {
+        all_data.extend_from_slice(data);
+    }
+    let boundaries: Vec<u64> = chunk_lens
+        .iter()
+        .scan(0_u64, |acc, &len| {
+            *acc += len;
+            Some(*acc)
+        })
+        .collect();
+    let chunk_and_boundaries: Vec<_> = chunk_hashes.iter().copied().zip(boundaries).collect();
+    let serialized = serialized_xorb_object_from_components(
+        &xorb_merkle_hash,
+        all_data,
+        chunk_and_boundaries,
+        CompressionScheme::None,
+    )
+    .unwrap();
+
+    let shardline_hash = {
+        let bytes: [u8; 32] = xorb_merkle_hash.into();
+        ShardlineHash::from_bytes(bytes)
+    };
+    let xorb_hash_hex = xet_hash_hex_string(shardline_hash);
+
+    let xorb_key = xorb_object_key(&xorb_hash_hex).unwrap();
+    let xorb_path = object_root.join(xorb_key.as_str());
+    if let Some(parent) = xorb_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&xorb_path, &serialized.serialized_data).unwrap();
+
+    // XorbCdcV1 record with a non-zero chunk_size: each chunk hash is the
+    // xorb container hash and the range addresses the chunk inside the
+    // container.
+    let total_bytes = chunk_lens.iter().sum::<u64>();
+    let chunk_size = 1024_u64;
+    let mut chunks = Vec::new();
+    let mut offset = 0_u64;
+    let mut packed_end = 0_u64;
+    for (index, len) in chunk_lens.iter().copied().enumerate() {
+        packed_end += len;
+        chunks.push(shardline_index::FileChunkRecord {
+            hash: xorb_hash_hex.clone(),
+            offset,
+            length: len,
+            range_start: index as u64,
+            range_end: index as u64 + 1,
+            packed_start: packed_end - len,
+            packed_end,
+        });
+        offset += len;
+    }
+    let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+
+    let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        file_id: "test-xorb-cdc-v1-clean".to_owned(),
+        content_hash,
+        total_bytes,
+        chunk_size,
+        repository_scope: None,
+        chunks,
+    };
+    record_store.write_latest_record(&record).await.unwrap();
+
+    let mut reachability = FsckReachability::default();
+    let mut report = FsckReport {
+        latest_records: 0,
+        version_records: 0,
+        inspected_chunk_references: 0,
+        inspected_dedupe_shard_mappings: 0,
+        inspected_reconstructions: 0,
+        inspected_webhook_deliveries: 0,
+        inspected_provider_repository_states: 0,
+        issues: Vec::new(),
+    };
+
+    let result = scan_record_tree(
+        &record_store,
+        RecordKind::Latest,
+        &object_root,
+        &object_store,
+        &mut reachability,
+        &mut report,
+    )
+    .await;
+    assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+    assert_eq!(report.latest_records, 1);
+    assert_eq!(report.inspected_chunk_references, 2);
+
+    // The container validates and the absent member object must not be
+    // reported for XorbCdcV1 records.
+    let has_chunk_issues = report.issues.iter().any(|i| {
+        matches!(
+            i.kind,
+            FsckIssueKind::MissingChunk
+                | FsckIssueKind::ChunkHashMismatch
+                | FsckIssueKind::ChunkLengthMismatch
+        )
+    });
+    assert!(
+        !has_chunk_issues,
+        "expected no chunk issues for clean XorbCdcV1 storage, got: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_record_tree_latest_xorb_cdc_v1_corrupted_container_reported() {
+    use shardline_index::RecordMutation;
+    use shardline_protocol::ShardlineHash;
+    use shardline_xet_adapter::xorb_object_key;
+    use shardline_xet_core::merklehash::compute_data_hash;
+    use shardline_xet_core::xorb_object::compression_scheme::CompressionScheme;
+    use shardline_xet_core::xorb_object::xorb_format_test_utils::serialized_xorb_object_from_components;
+
+    let storage = shardline_test_support::TempStorage::new();
+    let root = storage.path_buf();
+    let record_store = shardline_index::LocalRecordStore::open(root.clone());
+    let object_root = root.join("chunks");
+    let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+    // Two chunks: the ingestor rewrites record hashes to the xorb container
+    // hash only for multi-chunk files, and stores no descriptor-keyed member
+    // objects — the XorbCdcV1 layout this test exercises.
+    let chunk_data: [Vec<u8>; 2] = [
+        b"xorb-cdc-v1-corrupt-container-a".to_vec(),
+        b"xorb-cdc-v1-corrupt-container-b".to_vec(),
+    ];
+    let chunk_hashes: Vec<_> = chunk_data.iter().map(|data| compute_data_hash(data)).collect();
+    let chunk_lens: Vec<u64> = chunk_data.iter().map(|data| data.len() as u64).collect();
+
+    let xorb_pairs: Vec<_> = chunk_hashes.iter().copied().zip(chunk_lens.iter().copied()).collect();
+    let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
+
+    let mut all_data = Vec::new();
+    for data in &chunk_data {
+        all_data.extend_from_slice(data);
+    }
+    let boundaries: Vec<u64> = chunk_lens
+        .iter()
+        .scan(0_u64, |acc, &len| {
+            *acc += len;
+            Some(*acc)
+        })
+        .collect();
+    let chunk_and_boundaries: Vec<_> = chunk_hashes.iter().copied().zip(boundaries).collect();
+    let serialized = serialized_xorb_object_from_components(
+        &xorb_merkle_hash,
+        all_data,
+        chunk_and_boundaries,
+        CompressionScheme::None,
+    )
+    .unwrap();
+
+    let shardline_hash = {
+        let bytes: [u8; 32] = xorb_merkle_hash.into();
+        ShardlineHash::from_bytes(bytes)
+    };
+    let xorb_hash_hex = xet_hash_hex_string(shardline_hash);
+
+    // Write a corrupted container of the same length at the xorb key.
+    let xorb_key = xorb_object_key(&xorb_hash_hex).unwrap();
+    let xorb_path = object_root.join(xorb_key.as_str());
+    if let Some(parent) = xorb_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&xorb_path, vec![0x5e; serialized.serialized_data.len()]).unwrap();
+
+    // XorbCdcV1 record with a non-zero chunk_size: each chunk hash is the
+    // xorb container hash and the range addresses the chunk inside the
+    // container.
+    let total_bytes = chunk_lens.iter().sum::<u64>();
+    let chunk_size = 1024_u64;
+    let mut chunks = Vec::new();
+    let mut offset = 0_u64;
+    let mut packed_end = 0_u64;
+    for (index, len) in chunk_lens.iter().copied().enumerate() {
+        packed_end += len;
+        chunks.push(shardline_index::FileChunkRecord {
+            hash: xorb_hash_hex.clone(),
+            offset,
+            length: len,
+            range_start: index as u64,
+            range_end: index as u64 + 1,
+            packed_start: packed_end - len,
+            packed_end,
+        });
+        offset += len;
+    }
+    let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+
+    let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        file_id: "test-xorb-cdc-v1-corrupt".to_owned(),
+        content_hash,
+        total_bytes,
+        chunk_size,
+        repository_scope: None,
+        chunks,
+    };
+    record_store.write_latest_record(&record).await.unwrap();
+
+    let mut reachability = FsckReachability::default();
+    let mut report = FsckReport {
+        latest_records: 0,
+        version_records: 0,
+        inspected_chunk_references: 0,
+        inspected_dedupe_shard_mappings: 0,
+        inspected_reconstructions: 0,
+        inspected_webhook_deliveries: 0,
+        inspected_provider_repository_states: 0,
+        issues: Vec::new(),
+    };
+
+    let result = scan_record_tree(
+        &record_store,
+        RecordKind::Latest,
+        &object_root,
+        &object_store,
+        &mut reachability,
+        &mut report,
+    )
+    .await;
+    assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+    assert_eq!(report.latest_records, 1);
+
+    // The corrupted container must be reported as a chunk hash mismatch
+    // with the declared xorb hash, not as a hard fsck failure.
+    assert!(
+        report.issues.iter().any(|i| {
+            i.kind == FsckIssueKind::ChunkHashMismatch
+                && matches!(
+                    &i.detail,
+                    FsckIssueDetail::XorbHashMismatch { expected_hash }
+                        if expected_hash == &xorb_hash_hex
+                )
+        }),
+        "expected ChunkHashMismatch with XorbHashMismatch detail, got: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_record_tree_latest_xorb_cdc_v1_missing_container_reported() {
+    use shardline_index::RecordMutation;
+    use shardline_protocol::ShardlineHash;
+    use shardline_xet_core::merklehash::compute_data_hash;
+
+    let storage = shardline_test_support::TempStorage::new();
+    let root = storage.path_buf();
+    let record_store = shardline_index::LocalRecordStore::open(root.clone());
+    let object_root = root.join("chunks");
+    let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+    // Build a xorb from two chunks to derive the container hash, but store
+    // nothing — the container is missing from object storage.
+    let chunk_data: [Vec<u8>; 2] = [
+        b"xorb-cdc-v1-missing-container-a".to_vec(),
+        b"xorb-cdc-v1-missing-container-b".to_vec(),
+    ];
+    let chunk_hashes: Vec<_> = chunk_data.iter().map(|data| compute_data_hash(data)).collect();
+    let chunk_lens: Vec<u64> = chunk_data.iter().map(|data| data.len() as u64).collect();
+
+    let xorb_pairs: Vec<_> = chunk_hashes.iter().copied().zip(chunk_lens.iter().copied()).collect();
+    let xorb_merkle_hash = shardline_xet_core::merklehash::xorb_hash(&xorb_pairs);
+
+    let shardline_hash = {
+        let bytes: [u8; 32] = xorb_merkle_hash.into();
+        ShardlineHash::from_bytes(bytes)
+    };
+    let xorb_hash_hex = xet_hash_hex_string(shardline_hash);
+
+    // XorbCdcV1 record with a non-zero chunk_size: each chunk hash is the
+    // xorb container hash and the range addresses the chunk inside the
+    // container.
+    let total_bytes = chunk_lens.iter().sum::<u64>();
+    let chunk_size = 1024_u64;
+    let mut chunks = Vec::new();
+    let mut offset = 0_u64;
+    let mut packed_end = 0_u64;
+    for (index, len) in chunk_lens.iter().copied().enumerate() {
+        packed_end += len;
+        chunks.push(shardline_index::FileChunkRecord {
+            hash: xorb_hash_hex.clone(),
+            offset,
+            length: len,
+            range_start: index as u64,
+            range_end: index as u64 + 1,
+            packed_start: packed_end - len,
+            packed_end,
+        });
+        offset += len;
+    }
+    let content_hash = shardline_server_core::content_hash(total_bytes, chunk_size, &chunks);
+
+    let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        file_id: "test-xorb-cdc-v1-missing".to_owned(),
+        content_hash,
+        total_bytes,
+        chunk_size,
+        repository_scope: None,
+        chunks,
+    };
+    record_store.write_latest_record(&record).await.unwrap();
+
+    let mut reachability = FsckReachability::default();
+    let mut report = FsckReport {
+        latest_records: 0,
+        version_records: 0,
+        inspected_chunk_references: 0,
+        inspected_dedupe_shard_mappings: 0,
+        inspected_reconstructions: 0,
+        inspected_webhook_deliveries: 0,
+        inspected_provider_repository_states: 0,
+        issues: Vec::new(),
+    };
+
+    let result = scan_record_tree(
+        &record_store,
+        RecordKind::Latest,
+        &object_root,
+        &object_store,
+        &mut reachability,
+        &mut report,
+    )
+    .await;
+    assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+    assert_eq!(report.latest_records, 1);
+
+    // A missing container is reported as MissingChunk via the native-Xet
+    // record reference, same as for chunk_size == 0 records.
+    assert!(
+        report.issues.iter().any(|i| {
+            i.kind == FsckIssueKind::MissingChunk
+                && matches!(
+                    i.detail,
+                    FsckIssueDetail::ReferencedByNativeXetRecord { .. }
+                )
+        }),
+        "expected MissingChunk via ReferencedByNativeXetRecord, got: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_record_tree_latest_xorb_cdc_v1_single_chunk_compressed_clean() {
+    use shardline_index::RecordMutation;
+    use shardline_server_core::chunk_object_key;
+
+    let storage = shardline_test_support::TempStorage::new();
+    let root = storage.path_buf();
+    let record_store = shardline_index::LocalRecordStore::open(root.clone());
+    let object_root = root.join("chunks");
+    let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+    // Single-chunk XorbCdcV1: the ingestor keeps the individual chunk hash in
+    // the record (no xorb rewrite) and stores the chunk LZ4-compressed with a
+    // 4-byte size prefix — the same layout the download path expects.
+    let chunk_data = b"xorb-cdc-v1-single-chunk".to_vec();
+    // Standalone chunk hashes are blake3 of the raw content — the same
+    // function the download path verifies integrity with.
+    let chunk_hash_hex = xet_hash_hex_string(shardline_server_core::chunk_hash(&chunk_data));
+    let compressed = lz4_flex::compress_prepend_size(&chunk_data);
+
+    let chunk_key = chunk_object_key(&chunk_hash_hex).unwrap();
+    let chunk_path = object_root.join(chunk_key.as_str());
+    if let Some(parent) = chunk_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&chunk_path, &compressed).unwrap();
+
+    let chunk_len = chunk_data.len() as u64;
+    let chunks = vec![shardline_index::FileChunkRecord {
+        hash: chunk_hash_hex,
+        offset: 0,
+        length: chunk_len,
+        range_start: 0,
+        range_end: 1,
+        packed_start: 0,
+        packed_end: compressed.len() as u64,
+    }];
+    let chunk_size = 1024_u64;
+    let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
+
+    let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        file_id: "test-xorb-cdc-v1-single-chunk".to_owned(),
+        content_hash,
+        total_bytes: chunk_len,
+        chunk_size,
+        repository_scope: None,
+        chunks,
+    };
+    record_store.write_latest_record(&record).await.unwrap();
+
+    let mut reachability = FsckReachability::default();
+    let mut report = FsckReport {
+        latest_records: 0,
+        version_records: 0,
+        inspected_chunk_references: 0,
+        inspected_dedupe_shard_mappings: 0,
+        inspected_reconstructions: 0,
+        inspected_webhook_deliveries: 0,
+        inspected_provider_repository_states: 0,
+        issues: Vec::new(),
+    };
+
+    let result = scan_record_tree(
+        &record_store,
+        RecordKind::Latest,
+        &object_root,
+        &object_store,
+        &mut reachability,
+        &mut report,
+    )
+    .await;
+    assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+    assert_eq!(report.latest_records, 1);
+    assert_eq!(report.inspected_chunk_references, 1);
+
+    // The compressed standalone chunk must validate cleanly after
+    // decompression (hash and raw length match the record).
+    let has_chunk_issues = report.issues.iter().any(|i| {
+        matches!(
+            i.kind,
+            FsckIssueKind::MissingChunk
+                | FsckIssueKind::ChunkHashMismatch
+                | FsckIssueKind::ChunkLengthMismatch
+        )
+    });
+    assert!(
+        !has_chunk_issues,
+        "expected no chunk issues for compressed single-chunk storage, got: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_record_tree_latest_xorb_cdc_v1_single_chunk_corrupt_blob_reported() {
+    use shardline_index::RecordMutation;
+    use shardline_server_core::chunk_object_key;
+
+    let storage = shardline_test_support::TempStorage::new();
+    let root = storage.path_buf();
+    let record_store = shardline_index::LocalRecordStore::open(root.clone());
+    let object_root = root.join("chunks");
+    let object_store = ServerObjectStore::local(object_root.clone()).unwrap();
+
+    // Same single-chunk record, but the stored blob claims a huge
+    // uncompressed size and is not valid LZ4: fsck must report corruption
+    // instead of allocating or failing the whole run.
+    let chunk_data = b"xorb-cdc-v1-single-chunk".to_vec();
+    let chunk_hash_hex = xet_hash_hex_string(shardline_server_core::chunk_hash(&chunk_data));
+
+    let chunk_key = chunk_object_key(&chunk_hash_hex).unwrap();
+    let chunk_path = object_root.join(chunk_key.as_str());
+    if let Some(parent) = chunk_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    // 4-byte size prefix of 2 GiB (over the 2 MiB decompression bound),
+    // followed by garbage that is not LZ4 data.
+    std::fs::write(
+        &chunk_path,
+        [0xff, 0xff, 0xff, 0x7f, b'g', b'a', b'r', b'b', b'a', b'g', b'e'],
+    )
+    .unwrap();
+
+    let chunk_len = chunk_data.len() as u64;
+    let chunks = vec![shardline_index::FileChunkRecord {
+        hash: chunk_hash_hex.clone(),
+        offset: 0,
+        length: chunk_len,
+        range_start: 0,
+        range_end: 1,
+        packed_start: 0,
+        packed_end: 11, // claimed compressed storage length of the blob
+    }];
+    let chunk_size = 1024_u64;
+    let content_hash = shardline_server_core::content_hash(chunk_len, chunk_size, &chunks);
+
+    let record = shardline_index::FileRecord {
+        storage_repr: shardline_index::StorageRepresentation::XorbCdcV1,
+        file_id: "test-xorb-cdc-v1-single-chunk-corrupt".to_owned(),
+        content_hash,
+        total_bytes: chunk_len,
+        chunk_size,
+        repository_scope: None,
+        chunks,
+    };
+    record_store.write_latest_record(&record).await.unwrap();
+
+    let mut reachability = FsckReachability::default();
+    let mut report = FsckReport {
+        latest_records: 0,
+        version_records: 0,
+        inspected_chunk_references: 0,
+        inspected_dedupe_shard_mappings: 0,
+        inspected_reconstructions: 0,
+        inspected_webhook_deliveries: 0,
+        inspected_provider_repository_states: 0,
+        issues: Vec::new(),
+    };
+
+    let result = scan_record_tree(
+        &record_store,
+        RecordKind::Latest,
+        &object_root,
+        &object_store,
+        &mut reachability,
+        &mut report,
+    )
+    .await;
+    assert!(result.is_ok(), "scan_record_tree failed: {result:?}");
+    assert_eq!(report.latest_records, 1);
+    assert_eq!(report.inspected_chunk_references, 1);
+
+    // The garbage blob must be reported as hash and length mismatches, not as
+    // a hard fsck failure.
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.kind == FsckIssueKind::ChunkHashMismatch),
+        "expected ChunkHashMismatch, got: {report:?}"
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.kind == FsckIssueKind::ChunkLengthMismatch),
+        "expected ChunkLengthMismatch, got: {report:?}"
+    );
+}

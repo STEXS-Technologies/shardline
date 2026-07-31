@@ -68,11 +68,11 @@ async fn exercise_backup_manifest() -> Result<(), Box<dyn Error>> {
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+        .upload_file("asset.bin", Bytes::from(vec![b'a'; 8192]), None)
         .await?;
 
     let output_path = storage.path().join("backup-manifest.json");
@@ -153,11 +153,11 @@ async fn exercise_backup_manifest_from_current_directory() -> Result<(), Box<dyn
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+        .upload_file("asset.bin", Bytes::from(vec![b'a'; 8192]), None)
         .await?;
 
     let output_path = storage.path().join("backup-manifest-cwd.json");
@@ -204,12 +204,12 @@ async fn exercise_backup_manifest_from_project_directory() -> Result<(), Box<dyn
     let backend = LocalBackend::new(
         storage_root.clone(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     let resolved_storage_root = std::fs::canonicalize(&storage_root)?;
     backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+        .upload_file("asset.bin", Bytes::from(vec![b'a'; 8192]), None)
         .await?;
 
     let output_path = project.path().join("backup-manifest-project.json");
@@ -258,11 +258,11 @@ async fn exercise_backup_manifest_rejects_symlinked_output_path() -> Result<(), 
     let backend = LocalBackend::new(
         storage.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+        .upload_file("asset.bin", Bytes::from(vec![b'a'; 8192]), None)
         .await?;
 
     let target = storage.path().join("victim.json");
@@ -309,11 +309,11 @@ async fn exercise_backup_manifest_rejects_symlinked_root_override() -> Result<()
     let backend = LocalBackend::new(
         redirected.path().to_path_buf(),
         "http://127.0.0.1:8080".to_owned(),
-        NonZeroUsize::new(4).ok_or("chunk size")?,
+        NonZeroUsize::new(1024).ok_or("chunk size")?,
     )
     .await?;
     backend
-        .upload_file("asset.bin", Bytes::from_static(b"aaaabbbbcccc"), None)
+        .upload_file("asset.bin", Bytes::from(vec![b'a'; 8192]), None)
         .await?;
 
     let root_link = storage.path().join("root-link");

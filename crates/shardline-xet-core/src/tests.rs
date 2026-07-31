@@ -171,7 +171,7 @@ fn data_hash_rem() {
 #[test]
 fn data_hash_as_ref_and_into_vec() {
     let h = DataHash::from([1, 2, 3, 4]);
-    let bytes_ref: &[u8] = h.as_ref();
+    let bytes_ref: [u8; 32] = h.into();
     assert_eq!(bytes_ref.len(), 32);
     let vec: Vec<u8> = h.into();
     assert_eq!(vec.len(), 32);
@@ -3424,7 +3424,7 @@ fn file_hash_with_salt_non_empty_produces_different_hash_for_different_salts() {
 #[test]
 fn data_hash_as_bytes_returns_correct_slice() {
     let h = DataHash::from([0x0102030405060708u64, 0, 0, 0]);
-    let bytes = h.as_bytes();
+    let bytes: [u8; 32] = h.into();
     assert_eq!(bytes.len(), 32);
     // First 8 bytes should be little-endian of the first u64
     let first_u64 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());

@@ -5,7 +5,8 @@ use crate::merklehash::DataHash;
 
 #[inline]
 pub fn write_hash<W: Write>(writer: &mut W, m: &DataHash) -> Result<(), std::io::Error> {
-    writer.write_all(m.as_bytes())
+    let bytes: [u8; 32] = (*m).into();
+    writer.write_all(&bytes)
 }
 
 #[inline]

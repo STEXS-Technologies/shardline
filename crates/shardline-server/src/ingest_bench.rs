@@ -176,7 +176,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ingest_without_storage_with_parallelism_uses_custom_parallelism() {
         use super::ingest_without_storage_with_parallelism;
-        let chunk_size = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+        let chunk_size = NonZeroUsize::new(128).unwrap_or(NonZeroUsize::MIN);
         let max_in_flight = NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN);
         let result = ingest_without_storage_with_parallelism(
             chunk_size,

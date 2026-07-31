@@ -120,15 +120,17 @@ fn collect_record_object_references<Locator>(
                 // to its constituent chunk hashes so that the individual
                 // chunks inside the xorb are protected from GC even if
                 // the xorb container itself is missing or corrupted.
-                if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1 {
-                    if let Some(object_key) = optional_chunk_container_keys(frontends, &chunk.hash)?.into_iter().next() {
-                        collect_live_chunk_references_from_protocol_object(
-                            object_store,
-                            frontends,
-                            &object_key,
-                            reachability,
-                        )?;
-                    }
+                if record.storage_repr == shardline_index::StorageRepresentation::XorbCdcV1
+                    && let Some(object_key) = optional_chunk_container_keys(frontends, &chunk.hash)?
+                        .into_iter()
+                        .next()
+                {
+                    collect_live_chunk_references_from_protocol_object(
+                        object_store,
+                        frontends,
+                        &object_key,
+                        reachability,
+                    )?;
                 }
             }
         }

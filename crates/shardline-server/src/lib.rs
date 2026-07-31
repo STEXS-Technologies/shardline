@@ -113,7 +113,7 @@ pub use transfer_limiter::TransferLimiter;
 #[cfg(test)]
 mod gc_tests;
 mod transfer_limiter;
-mod upload_ingest;
+pub mod upload_ingest;
 mod validation;
 pub(crate) mod xet_adapter {
     pub use shardline_xet_adapter::{

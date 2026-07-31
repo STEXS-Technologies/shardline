@@ -383,7 +383,6 @@ impl LocalBackend {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use lz4_flex;
     use sha2::{Digest, Sha256};
     use shardline_index::{UploadIntentState, UploadIntentStore};
 

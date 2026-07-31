@@ -73,14 +73,16 @@ impl XorbObjectInfoV0 {
 
         write_bytes(&self.ident)?;
         write_bytes(&[self.version])?;
-        write_bytes(self.xorb_hash.as_bytes())?;
+        let xorb_hash_bytes: [u8; 32] = self.xorb_hash.into();
+        write_bytes(&xorb_hash_bytes)?;
         write_bytes(&self.num_chunks.to_le_bytes())?;
 
         for offset in &self.chunk_boundary_offsets {
             write_bytes(&offset.to_le_bytes())?;
         }
         for hash in &self.chunk_hashes {
-            write_bytes(hash.as_bytes())?;
+            let hash_bytes: [u8; 32] = (*hash).into();
+            write_bytes(&hash_bytes)?;
         }
 
         write_bytes(&self._buffer)?;
